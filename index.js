@@ -47,7 +47,9 @@ const cookieOpts = {
 };
 const traccarHeaders = { Authorization: `Bearer ${TRACCAR_TOKEN}`, Accept: 'application/json' };
 const issue = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
-const setSession = (res, user) => res.cookie(COOKIE, issue(user), cookieOpts);
+// set the cookie AND return the token so the client can also send it as a
+// header (needed when frontend + backend are on different domains).
+const setSession = (res, user) => { const t = issue(user); res.cookie(COOKIE, t, cookieOpts); return t; };
 
 // ---- password hashing ----
 function hashPassword(pw) {
@@ -104,8 +106,8 @@ app.post('/auth/login', async (req, res) => {
     if (!r.ok) return res.status(401).json({ error: 'Wrong email or password.' });
     const u = await r.json();
     const sess = { id: u.id, email: u.email, name: u.name, role: u.administrator ? 'admin' : 'owner', admin: !!u.administrator };
-    setSession(res, sess); // keep the cookie/JWT small
-    res.json({ ...u, ...sess }); // return the FULL Traccar user (attributes) for the client to cache
+    const token = setSession(res, sess);
+    res.json({ ...u, ...sess, token }); // full Traccar user + a token the client stores
   } catch { res.status(502).json({ error: 'Could not reach the tracking server.' }); }
 });
 
@@ -124,8 +126,8 @@ function makeAccountRoutes(kind, listKey) {
         return acc;
       });
       const user = { id: created.id, email: created.email, name: created.name, company: created.company, role: kind };
-      setSession(res, user);
-      res.json(user);
+      const token = setSession(res, user);
+      res.json({ ...user, token });
     } catch (err) {
       if (err.code === 'exists') return res.status(409).json({ error: 'An account with that email already exists.' });
       res.status(502).json({ error: 'Could not create the account.' });
@@ -140,8 +142,8 @@ function makeAccountRoutes(kind, listKey) {
       const rec = acc[listKey].find((x) => x.email === e);
       if (!rec || !verifyPassword(password, rec.pass)) return res.status(401).json({ error: 'Wrong email or password.' });
       const user = { id: rec.id, email: rec.email, name: rec.name, company: rec.company, role: kind };
-      setSession(res, user);
-      res.json(user);
+      const token = setSession(res, user);
+      res.json({ ...user, token });
     } catch { res.status(502).json({ error: 'Login failed, try again.' }); }
   });
 }
@@ -151,7 +153,8 @@ makeAccountRoutes('member', 'members');
 app.post('/auth/logout', (req, res) => { res.clearCookie(COOKIE, cookieOpts); res.json({ ok: true }); });
 
 function requireAuth(req, res, next) {
-  const token = req.cookies[COOKIE];
+  let token = req.cookies[COOKIE];
+  if (!token) { const h = req.headers.authorization || ''; if (h.startsWith('Bearer ')) token = h.slice(7); }
   if (!token) return res.status(401).json({ error: 'Not signed in.' });
   try { req.user = jwt.verify(token, JWT_SECRET); next(); }
   catch { return res.status(401).json({ error: 'Session expired.' }); }
