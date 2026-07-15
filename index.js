@@ -103,9 +103,9 @@ app.post('/auth/login', async (req, res) => {
     });
     if (!r.ok) return res.status(401).json({ error: 'Wrong email or password.' });
     const u = await r.json();
-    const user = { id: u.id, email: u.email, name: u.name, role: u.administrator ? 'admin' : 'owner', admin: !!u.administrator };
-    setSession(res, user);
-    res.json(user);
+    const sess = { id: u.id, email: u.email, name: u.name, role: u.administrator ? 'admin' : 'owner', admin: !!u.administrator };
+    setSession(res, sess); // keep the cookie/JWT small
+    res.json({ ...u, ...sess }); // return the FULL Traccar user (attributes) for the client to cache
   } catch { res.status(502).json({ error: 'Could not reach the tracking server.' }); }
 });
 
