@@ -17,6 +17,7 @@ import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
+import Stripe from 'stripe';
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto';
 import 'dotenv/config';
 
@@ -27,7 +28,12 @@ const {
   ALLOWED_ORIGINS = 'https://tagalong.app,https://www.tagalong.app,http://localhost:3000',
   PORT = 8080,
   COOKIE_SECURE = 'true',
+  STRIPE_SECRET_KEY = '',
+  PUBLIC_URL = 'https://mytagalong.app', // where customers return after paying
 } = process.env;
+
+// Payments are optional — the app falls back to "place an order" if this is unset.
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 if (!TRACCAR_TOKEN) { console.error('FATAL: set TRACCAR_TOKEN'); process.exit(1); }
 if (!JWT_SECRET) { console.error('FATAL: set JWT_SECRET'); process.exit(1); }
@@ -160,6 +166,50 @@ function requireAuth(req, res, next) {
   catch { return res.status(401).json({ error: 'Session expired.' }); }
 }
 app.get('/auth/me', requireAuth, (req, res) => res.json(req.user));
+
+// ---- Stripe Checkout (payments) ----
+// Prices come from the server-side catalog (host device's taShop.products), never
+// from the client, so a customer can't set their own price.
+async function shopProducts() {
+  const host = await hostDevice();
+  const shop = (host.attributes || {}).taShop || {};
+  return shop.products || [];
+}
+app.get('/stripe/config', (req, res) => res.json({ enabled: !!stripe }));
+
+app.post('/stripe/checkout', requireAuth, async (req, res) => {
+  if (!stripe) return res.status(400).json({ error: 'not-configured' });
+  const { items, orderId } = req.body || {};
+  if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'No items to pay for.' });
+  try {
+    const products = await shopProducts();
+    const line_items = items.map((it) => {
+      const p = products.find((x) => x.id === it.productId);
+      if (!p) throw new Error('Unknown product in cart.');
+      return {
+        quantity: Math.max(1, Number(it.qty) || 1),
+        price_data: { currency: 'usd', unit_amount: Math.round(Number(p.price) * 100), product_data: { name: p.name } },
+      };
+    });
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      line_items,
+      success_url: `${PUBLIC_URL}/shop?paid=1&session_id={CHECKOUT_SESSION_ID}&order=${encodeURIComponent(orderId || '')}`,
+      cancel_url: `${PUBLIC_URL}/shop?canceled=1`,
+      metadata: { orderId: orderId || '', userId: String(req.user.id || '') },
+    });
+    res.json({ url: session.url });
+  } catch (e) { res.status(502).json({ error: e.message || 'Could not start checkout.' }); }
+});
+
+// Confirm a completed checkout when the customer returns from Stripe.
+app.get('/stripe/verify', requireAuth, async (req, res) => {
+  if (!stripe) return res.status(400).json({ error: 'not-configured' });
+  try {
+    const session = await stripe.checkout.sessions.retrieve(req.query.session_id);
+    res.json({ paid: session.payment_status === 'paid', amount: (session.amount_total || 0) / 100, orderId: (session.metadata || {}).orderId || '' });
+  } catch (e) { res.status(400).json({ error: e.message || 'Could not verify payment.' }); }
+});
 
 // ---- customer self sign-up (token stays on the server) ----
 app.post('/auth/register', async (req, res) => {
