@@ -161,6 +161,58 @@ function requireAuth(req, res, next) {
 }
 app.get('/auth/me', requireAuth, (req, res) => res.json(req.user));
 
+// ---- customer self sign-up (token stays on the server) ----
+app.post('/auth/register', async (req, res) => {
+  const { name, email, password, phone } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'Email and password required.' });
+  try {
+    const r = await fetch(`${TRACCAR_URL}/api/users`, {
+      method: 'POST', headers: { ...traccarHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email, password, phone, attributes: phone ? { phone } : {} }),
+    });
+    if (!r.ok) {
+      const d = (await r.text().catch(() => '')).replace(/<[^>]+>/g, '').trim().slice(0, 160);
+      if (/duplicate|unique|already/i.test(d)) return res.status(409).json({ error: 'That email is already registered — try signing in, or use a different email.' });
+      return res.status(r.status).json({ error: `Sign-up failed${d ? ': ' + d : ''}` });
+    }
+    res.json(await r.json());
+  } catch { res.status(502).json({ error: 'Could not reach the server.' }); }
+});
+
+// ---- admin creates a login FOR a customer (admin session required) ----
+app.post('/auth/admin/create-user', requireAuth, async (req, res) => {
+  if (!(req.user && (req.user.admin || req.user.role === 'admin'))) return res.status(403).json({ error: 'Admins only.' });
+  const { name, email, phone } = req.body || {};
+  if (!email) return res.status(400).json({ error: 'Email required.' });
+  const tempPassword = 'TA' + Math.random().toString(36).slice(2, 8) + Math.floor(10 + Math.random() * 89);
+  try {
+    const r = await fetch(`${TRACCAR_URL}/api/users`, {
+      method: 'POST', headers: { ...traccarHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, email, password: tempPassword, phone, attributes: { phone, mustSetPassword: true } }),
+    });
+    if (!r.ok) {
+      const d = (await r.text().catch(() => '')).replace(/<[^>]+>/g, '').trim().slice(0, 160);
+      if (/duplicate|unique|already/i.test(d)) return res.status(409).json({ error: 'That email already has a login.' });
+      return res.status(r.status).json({ error: `Couldn't create the login${d ? ': ' + d : ''}` });
+    }
+    res.json({ user: await r.json(), tempPassword });
+  } catch { res.status(502).json({ error: 'Could not reach the server.' }); }
+});
+
+// ---- password-reset email (no token needed, kept server-side for CORS) ----
+app.post('/auth/password-reset', async (req, res) => {
+  const { email } = req.body || {};
+  if (!email) return res.status(400).json({ error: 'Email required.' });
+  try {
+    const r = await fetch(`${TRACCAR_URL}/api/password/reset`, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ email }),
+    });
+    if (!r.ok) return res.status(r.status).json({ error: 'Couldn’t send the reset email. Email may not be set up on the server yet.' });
+    res.json({ ok: true });
+  } catch { res.status(502).json({ error: 'Could not reach the server.' }); }
+});
+
 // ---- authenticated transparent proxy to Traccar (token added here) ----
 app.all('/api/traccar/*', requireAuth, async (req, res) => {
   const path = req.params[0] || '';
