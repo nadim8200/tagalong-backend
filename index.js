@@ -33,7 +33,11 @@ const {
 } = process.env;
 
 // Payments are optional — the app falls back to "place an order" if this is unset.
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+// Trim the key (stray spaces/newlines from copy-paste break the request), and give
+// the SDK extra network retries + a longer timeout to survive free-tier cold starts.
+const stripe = STRIPE_SECRET_KEY
+  ? new Stripe(String(STRIPE_SECRET_KEY).trim(), { maxNetworkRetries: 3, timeout: 30000 })
+  : null;
 
 if (!TRACCAR_TOKEN) { console.error('FATAL: set TRACCAR_TOKEN'); process.exit(1); }
 if (!JWT_SECRET) { console.error('FATAL: set JWT_SECRET'); process.exit(1); }
