@@ -157,6 +157,21 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // TEMP diagnostic: open this URL in a browser to fire a test push to EVERY
+  // registered device right now (no waiting on a car event). The detailed APNs
+  // result is printed to the logs. Remove once push is confirmed working.
+  app.get('/push/test', async (_req, res) => {
+    try {
+      const { store } = await readStore();
+      const tokens = [];
+      for (const rec of Object.values(store)) (rec.tokens || []).forEach((t) => tokens.push(t.token));
+      console.log(`[push] /push/test — firing to ${tokens.length} token(s), apns ${enabled}, host ${apnsHost}`);
+      if (!tokens.length) return res.json({ ok: false, reason: 'no registered tokens', enabled });
+      await sendToTokens(tokens, { title: '🔔 TagAlong test', body: 'Push is working! 🎉', data: {} });
+      res.json({ ok: true, sentTo: tokens.length, enabled, host: apnsHost });
+    } catch (e) { console.log('[push] /push/test error:', e.message); res.status(500).json({ error: e.message }); }
+  });
+
   // ---- helpers to read devices + latest positions ----
   async function allDevices() {
     const r = await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders });
