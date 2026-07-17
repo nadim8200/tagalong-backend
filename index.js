@@ -20,6 +20,7 @@ import jwt from 'jsonwebtoken';
 import Stripe from 'stripe';
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto';
 import 'dotenv/config';
+import { initPush } from './push.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -53,10 +54,10 @@ const cookieOpts = {
   httpOnly: true,
   secure: COOKIE_SECURE === 'true',
   sameSite: COOKIE_SECURE === 'true' ? 'none' : 'lax',
-  maxAge: 7 * 24 * 60 * 60 * 1000,
+  maxAge: 180 * 24 * 60 * 60 * 1000, // stay signed in ~6 months
 };
 const traccarHeaders = { Authorization: `Bearer ${TRACCAR_TOKEN}`, Accept: 'application/json' };
-const issue = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+const issue = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: '180d' }); // long-lived so users aren't re-entering creds
 // set the cookie AND return the token so the client can also send it as a
 // header (needed when frontend + backend are on different domains).
 const setSession = (res, user) => { const t = issue(user); res.cookie(COOKIE, t, cookieOpts); return t; };
@@ -287,6 +288,10 @@ app.all('/api/traccar/*', requireAuth, async (req, res) => {
     else res.send(await r.text());
   } catch { res.status(502).json({ error: 'Upstream tracking server error.' }); }
 });
+
+// Locked-phone push notifications (APNs). Registers /push/register + /push/unregister
+// and starts the server-side alert poller. No-ops safely until the APNS_* env vars are set.
+initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env: process.env });
 
 app.get('/', (_req, res) => res.send('TagAlong backend is running.'));
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));
