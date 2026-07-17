@@ -47,27 +47,35 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   // ---- send one push; resolves { ok, status } ----
   const sendOne = (token, payload) => new Promise((resolve) => {
     let client;
+    let jwtToken;
+    try {
+      jwtToken = providerJwt(); // throws if the .p8 key is malformed
+    } catch (e) {
+      console.log('[push] JWT sign FAILED — check APNS_KEY / KEY_ID / TEAM_ID:', e.message);
+      return resolve({ ok: false, status: 0 });
+    }
     try {
       client = http2.connect(`https://${apnsHost}`);
-      client.on('error', () => resolve({ ok: false, status: 0 }));
+      client.on('error', (e) => { console.log('[push] APNs connect error:', e.code || e.message); resolve({ ok: false, status: 0 }); });
       const body = JSON.stringify(payload);
       const req = client.request({
         ':method': 'POST',
         ':path': `/3/device/${token}`,
-        authorization: `bearer ${providerJwt()}`,
+        authorization: `bearer ${jwtToken}`,
         'apns-topic': APNS_BUNDLE_ID,
         'apns-push-type': 'alert',
         'apns-priority': '10',
         'content-type': 'application/json',
       });
-      let status = 0;
+      let status = 0; let respBody = '';
       req.on('response', (h) => { status = h[':status']; });
-      req.on('data', () => {});
-      req.on('end', () => { try { client.close(); } catch { /* */ } resolve({ ok: status === 200, status }); });
-      req.on('error', () => { try { client.close(); } catch { /* */ } resolve({ ok: false, status: 0 }); });
+      req.on('data', (d) => { respBody += d; });
+      req.on('end', () => { try { client.close(); } catch { /* */ } if (status !== 200) console.log(`[push] APNs response ${status}: ${respBody}`); resolve({ ok: status === 200, status }); });
+      req.on('error', (e) => { try { client.close(); } catch { /* */ } console.log('[push] APNs req error:', e.code || e.message); resolve({ ok: false, status: 0 }); });
       req.end(body);
-    } catch {
+    } catch (e) {
       try { client && client.close(); } catch { /* */ }
+      console.log('[push] sendOne threw:', e.message);
       resolve({ ok: false, status: 0 });
     }
   });
