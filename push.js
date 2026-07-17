@@ -158,6 +158,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   // a car belongs to this user if its account/customerId attribute matches the
   // scope the app sent at registration time.
   function scopeDevices(devices, rec) {
+    // an admin monitors the whole fleet (they see every car on the app too)
+    if (rec.role === 'admin') return devices.filter((d) => String((d.attributes || {}).account || '') !== 'TA');
     if (!rec.account && !rec.cid) return [];
     return devices.filter((d) => {
       const a = d.attributes || {};
