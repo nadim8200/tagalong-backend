@@ -170,20 +170,6 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // TEMP diagnostic: open this URL in a browser to fire a test push to EVERY
-  // registered device right now (no waiting on a car event). The detailed APNs
-  // result is printed to the logs. Remove once push is confirmed working.
-  app.get('/push/test', async (_req, res) => {
-    try {
-      const { store } = await readStore();
-      const tokens = [];
-      for (const rec of Object.values(store)) (rec.tokens || []).forEach((t) => tokens.push(t.token));
-      console.log(`[push] /push/test — firing to ${tokens.length} token(s), apns ${enabled}, host ${apnsHost}`);
-      if (!tokens.length) return res.json({ ok: false, reason: 'no registered tokens', enabled });
-      await sendToTokens(tokens, { title: '🔔 TagAlong test', body: 'Push is working! 🎉', data: {} });
-      res.json({ ok: true, sentTo: tokens.length, enabled, host: apnsHost });
-    } catch (e) { console.log('[push] /push/test error:', e.message); res.status(500).json({ error: e.message }); }
-  });
 
   // ---- helpers to read devices + latest positions ----
   async function allDevices() {
@@ -300,15 +286,12 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       const { store } = await readStore();
       const fleet = await allDevices();
       const positions = await allPositions();
-      const regCount = Object.values(store).filter((r) => (r.tokens || []).length).length;
-      console.log(`[push] poll tick — ${regCount} registered user(s), ${fleet.length} devices, window ${fromISO}..${toISO}`);
       let changed = false;
       for (const rec of Object.values(store)) {
         const tokens = (rec.tokens || []).map((t) => t.token);
         if (!tokens.length) continue;
         rec.sigs = rec.sigs || {};
         const devices = scopeDevices(fleet, rec);
-        console.log(`[push]   user ${rec.email || '?'} account=${rec.account || '-'} cid=${rec.cid || '-'} → ${devices.length} car(s) in scope`);
         if (!devices.length) continue;
 
         for (const d of devices) {
