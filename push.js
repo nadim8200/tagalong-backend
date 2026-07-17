@@ -29,7 +29,20 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     APNS_PRODUCTION,
   } = env;
 
-  const key = (APNS_KEY || '').replace(/\\n/g, '\n');
+  // Rebuild a valid PEM even if the .p8 got flattened/space-mangled when pasted
+  // into the env var (Render often strips the line breaks). We pull the base64
+  // body out from between the BEGIN/END markers and re-wrap it at 64 chars.
+  function normalizePem(raw) {
+    const k = String(raw || '').trim().replace(/\\n/g, '\n');
+    if (!k) return '';
+    const m = k.match(/-----BEGIN ([A-Z0-9 ]+?)-----([\s\S]*?)-----END [A-Z0-9 ]+?-----/);
+    if (!m) return k;
+    const label = m[1].trim();
+    const b64 = m[2].replace(/[^A-Za-z0-9+/=]/g, ''); // strip everything that isn't base64
+    const wrapped = (b64.match(/.{1,64}/g) || []).join('\n');
+    return `-----BEGIN ${label}-----\n${wrapped}\n-----END ${label}-----\n`;
+  }
+  const key = normalizePem(APNS_KEY);
   const enabled = !!(key && APNS_KEY_ID && APNS_TEAM_ID);
   const apnsHost = APNS_PRODUCTION === 'true' ? 'api.push.apple.com' : 'api.sandbox.push.apple.com';
 
