@@ -82,6 +82,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     const dead = [];
     for (const t of tokens) {
       const r = await sendOne(t, payload);
+      console.log(`[push]   APNs → ${r.ok ? 'OK 200' : `FAIL ${r.status}`} (${apnsHost})`);
       if (!r.ok && (r.status === 410 || r.status === 400)) dead.push(t);
     }
     return dead;
@@ -130,8 +131,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       if (cid) rec.cid = String(cid);
       store[uidKey] = rec;
       await writeStore(store);
+      console.log(`[push] REGISTERED device — user ${uidKey}, account ${rec.account || '(none)'}, cid ${rec.cid || '(none)'}, tokens now ${rec.tokens.length}, apns ${enabled}`);
       res.json({ ok: true, enabled });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { console.log('[push] register error:', e.message); res.status(500).json({ error: e.message }); }
   });
 
   app.post('/push/unregister', requireAuth, async (req, res) => {
@@ -260,12 +262,15 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       const { store } = await readStore();
       const fleet = await allDevices();
       const positions = await allPositions();
+      const regCount = Object.values(store).filter((r) => (r.tokens || []).length).length;
+      console.log(`[push] poll tick — ${regCount} registered user(s), ${fleet.length} devices, window ${fromISO}..${toISO}`);
       let changed = false;
       for (const rec of Object.values(store)) {
         const tokens = (rec.tokens || []).map((t) => t.token);
         if (!tokens.length) continue;
         rec.sigs = rec.sigs || {};
         const devices = scopeDevices(fleet, rec);
+        console.log(`[push]   user ${rec.email || '?'} account=${rec.account || '-'} cid=${rec.cid || '-'} → ${devices.length} car(s) in scope`);
         if (!devices.length) continue;
 
         for (const d of devices) {
@@ -292,8 +297,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
           for (const a of toSend) {
             changed = true;
+            console.log(`[push]   SENDING "${a.title}" → ${tokens.length} device token(s)`);
             const dead = await sendToTokens(tokens, { title: a.title, body: a.body, data: { deviceId: d.id, path: `/map?device=${d.id}` } });
-            if (dead.length) rec.tokens = (rec.tokens || []).filter((t) => !dead.includes(t.token));
+            if (dead.length) { console.log(`[push]   pruned ${dead.length} dead token(s)`); rec.tokens = (rec.tokens || []).filter((t) => !dead.includes(t.token)); }
           }
         }
         // keep the sigs map from growing forever
