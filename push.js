@@ -214,6 +214,17 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     if (!r.ok) return [];
     return r.json();
   }
+  // geofenceId → friendly name (strip our ⭐/⏱ prefixes)
+  async function geofenceNames() {
+    try {
+      const r = await fetch(`${TRACCAR_URL}/api/geofences`, { headers: traccarHeaders });
+      if (!r.ok) return {};
+      const arr = await r.json();
+      const map = {};
+      for (const g of arr) map[g.id] = String(g.name || '').replace(/^[⭐⏱]\s*/, '').trim();
+      return map;
+    } catch { return {}; }
+  }
   // a car belongs to this user if its account/customerId attribute matches the
   // scope the app sent at registration time.
   function scopeDevices(devices, rec) {
@@ -250,9 +261,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   // ---- turn a Traccar event into a friendly push (null = ignore) ----
   const NAMED = (d) => (d.attributes && d.attributes.displayName) || d.name || 'Your car';
-  function eventToPush(d, ev) {
+  function eventToPush(d, ev, geoNames = {}) {
     const car = NAMED(d);
     const a = ev.attributes || {};
+    const placeName = geoNames[ev.geofenceId] || '';
     switch (ev.type) {
       case 'alarm': {
         const al = a.alarm || '';
@@ -266,9 +278,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       case 'deviceOverspeed':
         return { key: 'overspeed', title: `⏩ ${car} — speeding`, body: `Going ${Math.round((a.speed || 0) * KNOTS_TO_MPH)} mph.` };
       case 'geofenceEnter':
-        return { key: `geo-in-${ev.geofenceId}`, title: `📍 ${car} arrived`, body: 'Your car arrived at a saved place.' };
+        return { key: `geo-in-${ev.geofenceId}`, title: `📍 ${car} arrived${placeName ? ` at ${placeName}` : ''}`, body: placeName ? `Your car arrived at ${placeName}.` : 'Your car arrived at a saved place.' };
       case 'geofenceExit':
-        return { key: `geo-out-${ev.geofenceId}`, title: `📍 ${car} left`, body: 'Your car left a saved place.' };
+        return { key: `geo-out-${ev.geofenceId}`, title: `📍 ${car} left${placeName ? ` ${placeName}` : ''}`, body: placeName ? `Your car left ${placeName}.` : 'Your car left a saved place.' };
       case 'deviceFuelDrop':
         return { key: 'fueldrop', title: `⛽ ${car} — fuel drop`, body: 'A sudden fuel drop was detected.' };
       case 'ignitionOn':
@@ -323,6 +335,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       const { store } = await readStore();
       const fleet = await allDevices();
       const positions = await allPositions();
+      const geoNames = await geofenceNames();
       let changed = false;
       for (const rec of Object.values(store)) {
         const tokenRecs = rec.tokens || [];
@@ -338,7 +351,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           // event-based (crash, geofence, overspeed, ignition, fuel drop…)
           const events = await recentEvents(d.id, fromISO, toISO);
           for (const ev of events) {
-            const p = eventToPush(d, ev);
+            const p = eventToPush(d, ev, geoNames);
             if (!p) continue;
             const sig = `ev:${ev.id}`;
             if (rec.sigs[sig]) continue;
