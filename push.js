@@ -172,6 +172,28 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     } catch (e) { console.log('[push] register error:', e.message); res.status(500).json({ error: e.message }); }
   });
 
+  // Fire a test notification to the caller's own registered devices — lets the
+  // user lock the phone and confirm push + sound end-to-end on demand.
+  app.post('/push/test', requireAuth, async (req, res) => {
+    try {
+      const { store } = await readStore();
+      const rec = store[String(req.user.id)];
+      const tokenRecs = (rec && rec.tokens) || [];
+      if (!enabled) return res.json({ ok: false, reason: 'apns-not-configured' });
+      if (!tokenRecs.length) return res.json({ ok: false, reason: 'no-tokens' });
+      const dead = await sendToTokens(tokenRecs, {
+        title: '🔔 TagAlong test alert',
+        body: 'Your alerts are working. You can lock your phone.',
+        data: { path: '/car?tagalong' },
+      });
+      if (dead.length && rec) {
+        rec.tokens = tokenRecs.filter((t) => !dead.includes(t.token));
+        await writeStore(store);
+      }
+      res.json({ ok: true, sent: tokenRecs.length - dead.length });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.post('/push/unregister', requireAuth, async (req, res) => {
     const { token } = req.body || {};
     try {
