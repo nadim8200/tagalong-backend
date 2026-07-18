@@ -44,7 +44,15 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   }
   const key = normalizePem(APNS_KEY);
   const enabled = !!(key && APNS_KEY_ID && APNS_TEAM_ID);
-  const apnsHost = APNS_PRODUCTION === 'true' ? 'api.push.apple.com' : 'api.sandbox.push.apple.com';
+  // Default host when a token doesn't declare its environment (older records).
+  const defaultHost = APNS_PRODUCTION === 'true' ? 'api.push.apple.com' : 'api.sandbox.push.apple.com';
+  // Pick the Apple host for a token based on the environment the app reported at
+  // registration: dev/cable builds → sandbox, TestFlight/App Store → production.
+  function apnsHostFor(envName) {
+    if (envName === 'sandbox') return 'api.sandbox.push.apple.com';
+    if (envName === 'production') return 'api.push.apple.com';
+    return defaultHost;
+  }
 
   if (!enabled) console.warn('[push] APNs not configured — set APNS_KEY / APNS_KEY_ID / APNS_TEAM_ID to enable locked-phone alerts.');
 
@@ -58,7 +66,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   };
 
   // ---- send one push; resolves { ok, status } ----
-  const sendOne = (token, payload) => new Promise((resolve) => {
+  const sendOne = (token, payload, host = defaultHost) => new Promise((resolve) => {
     let client;
     let jwtToken;
     try {
@@ -68,7 +76,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       return resolve({ ok: false, status: 0 });
     }
     try {
-      client = http2.connect(`https://${apnsHost}`);
+      client = http2.connect(`https://${host}`);
       client.on('error', (e) => { console.log('[push] APNs connect error:', e.code || e.message); resolve({ ok: false, status: 0 }); });
       const body = JSON.stringify(payload);
       const req = client.request({
@@ -93,18 +101,21 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     }
   });
 
-  // returns the list of tokens Apple says are dead (410/BadDeviceToken) to prune
-  async function sendToTokens(tokens, { title, body, data }) {
-    if (!enabled || !tokens || !tokens.length) return [];
+  // Accepts token records ({ token, env }) or plain token strings. Returns the
+  // list of tokens Apple says are dead (410/BadDeviceToken) so they get pruned.
+  async function sendToTokens(tokenRecs, { title, body, data }) {
+    if (!enabled || !tokenRecs || !tokenRecs.length) return [];
     const payload = {
       aps: { alert: { title, body }, sound: 'default', 'interruption-level': 'time-sensitive' },
       ...(data || {}),
     };
     const dead = [];
-    for (const t of tokens) {
-      const r = await sendOne(t, payload);
-      console.log(`[push]   APNs → ${r.ok ? 'OK 200' : `FAIL ${r.status}`} (${apnsHost})`);
-      if (!r.ok && (r.status === 410 || r.status === 400)) dead.push(t);
+    for (const tr of tokenRecs) {
+      const token = typeof tr === 'string' ? tr : tr.token;
+      const host = apnsHostFor(typeof tr === 'string' ? '' : tr.env);
+      const r = await sendOne(token, payload, host);
+      console.log(`[push]   APNs → ${r.ok ? 'OK 200' : `FAIL ${r.status}`} (${host})`);
+      if (!r.ok && (r.status === 410 || r.status === 400)) dead.push(token);
     }
     return dead;
   }
@@ -136,14 +147,18 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     // the client also sends its scope (account / customerId) so the poller can
     // find which cars belong to this user — they're linked by attribute, not by
     // Traccar user permissions.
-    const { token, platform = 'ios', account = '', cid = '' } = req.body || {};
+    const { token, platform = 'ios', account = '', cid = '', environment = '' } = req.body || {};
     if (!token) return res.status(400).json({ error: 'token required' });
     try {
       const { store } = await readStore();
       const uidKey = String(req.user.id);
       const rec = store[uidKey] || { role: req.user.role, email: req.user.email, tokens: [], sigs: {} };
+      const env = environment === 'sandbox' || environment === 'production' ? environment : '';
       if (!rec.tokens.some((t) => t.token === token)) {
-        rec.tokens.push({ token, platform, ts: Date.now() });
+        rec.tokens.push({ token, platform, env, ts: Date.now() });
+      } else if (env) {
+        // update the environment on the existing token (e.g. dev → TestFlight)
+        rec.tokens = rec.tokens.map((t) => (t.token === token ? { ...t, env, ts: Date.now() } : t));
       }
       // cap + drop tokens older than 60 days (stale installs)
       rec.tokens = rec.tokens.filter((t) => Date.now() - (t.ts || 0) < 60 * 24 * 3600 * 1000).slice(-10);
@@ -288,8 +303,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       const positions = await allPositions();
       let changed = false;
       for (const rec of Object.values(store)) {
-        const tokens = (rec.tokens || []).map((t) => t.token);
-        if (!tokens.length) continue;
+        const tokenRecs = rec.tokens || [];
+        if (!tokenRecs.length) continue;
         rec.sigs = rec.sigs || {};
         const devices = scopeDevices(fleet, rec);
         if (!devices.length) continue;
@@ -318,8 +333,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
           for (const a of toSend) {
             changed = true;
-            console.log(`[push]   SENDING "${a.title}" → ${tokens.length} device token(s)`);
-            const dead = await sendToTokens(tokens, { title: a.title, body: a.body, data: { deviceId: d.id, path: `/map?device=${d.id}` } });
+            console.log(`[push]   SENDING "${a.title}" → ${tokenRecs.length} device token(s)`);
+            const dead = await sendToTokens(tokenRecs, { title: a.title, body: a.body, data: { deviceId: d.id, path: `/map?device=${d.id}` } });
             if (dead.length) { console.log(`[push]   pruned ${dead.length} dead token(s)`); rec.tokens = (rec.tokens || []).filter((t) => !dead.includes(t.token)); }
           }
         }
