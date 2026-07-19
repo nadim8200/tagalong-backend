@@ -338,10 +338,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     if (bl != null && bl <= 15) {
       out.push({ key: 'lowbatt', val: '1', title: `🔋 ${car} — low battery`, body: `Tracker battery at ${Math.round(bl)}%.` });
     }
-    // movement while ignition off (tow)
-    if (a.motion === true && a.ignition === false) {
-      out.push({ key: 'towing', val: '1', title: `🪝 ${car} — moving while off`, body: 'Your parked car is moving — possible tow/theft.' });
-    }
+    // NOTE: tow/theft is handled in the poll loop, not here — it needs a debounce
+    // (the tracker reports motion a beat before the ignition flag flips on at
+    // startup, which fired a false "being towed" alert every time the car started).
     return out;
   }
 
@@ -483,9 +482,34 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           // again instead of being suppressed by the stale signature.
           {
             const active = new Set(derived.map((x) => x.key));
-            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowbatt', 'towing']) {
+            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowbatt']) {
               const sig = `dv:${d.id}:${key}`;
               if (!active.has(key) && rec.sigs[sig] !== undefined) { delete rec.sigs[sig]; changed = true; }
+            }
+          }
+
+          // tow / theft: moving with the ignition off. Debounced, because at
+          // startup the tracker briefly reports motion=true while ignition is
+          // still false — that transient was firing a false tow alert right
+          // before every legitimate "vehicle turned on". We now require real
+          // road speed AND the condition to hold for ~90s before alerting.
+          {
+            const pa = (pos && pos.attributes) || {};
+            const towMph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
+            const pendKey = `towpend:${d.id}`;
+            const towKey = `tow:${d.id}`;
+            const suspicious = pa.motion === true && pa.ignition === false && towMph >= 4;
+            if (suspicious) {
+              const since = Number(rec.sigs[pendKey] || 0);
+              if (!since) {
+                rec.sigs[pendKey] = String(Date.now()); changed = true;
+              } else if (Date.now() - since > 90 * 1000 && rec.sigs[towKey] !== 'on') {
+                rec.sigs[towKey] = 'on';
+                toSend.push({ title: `🪝 ${NAMED(d)} — moving while off`, body: `Your parked car is moving at ${towMph} mph with the engine off — possible tow or theft.` });
+              }
+            } else {
+              if (rec.sigs[pendKey]) { delete rec.sigs[pendKey]; changed = true; }
+              if (rec.sigs[towKey]) { delete rec.sigs[towKey]; changed = true; }
             }
           }
 
@@ -530,7 +554,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v4 (check-engine + engine-hot + charging, engine-off removed, re-arm on) — polling every 30s.');
+    console.log('[push] APNs enabled v5 (check-engine + engine-hot + charging, tow debounced, engine-off removed, re-arm on) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
