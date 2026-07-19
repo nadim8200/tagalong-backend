@@ -302,10 +302,31 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     if (last && Date.now() - last > 20 * 60 * 1000) {
       out.push({ key: 'disconnect', val: 'off', title: `🔌 ${car} — tracker disconnected`, body: 'The tracker went silent — it may be unplugged or lost power.' });
     }
-    // check-engine
-    const dtc = a.dtcs || (a.io30 != null ? a.io30 : 0);
-    if (dtc && (typeof dtc === 'string' ? dtc.length : dtc > 0)) {
-      out.push({ key: 'dtc', val: String(dtc), title: `🔧 ${car} — check engine`, body: typeof dtc === 'string' ? `Fault code ${dtc}.` : 'A check-engine code is active.' });
+    // check-engine — matches the app: io30 = count of active fault codes, with
+    // the code list from io281/dtcs/dtc/faultCodes when the decoder provides it.
+    const dtcCount = Number(a.io30 != null ? a.io30 : 0);
+    const codeList = [a.io281, a.dtcs, a.dtc, a.faultCodes, a.troubleCodes].find((v) => v != null && String(v).trim() !== '');
+    if (dtcCount > 0 || (codeList && String(codeList).trim())) {
+      const val = String(dtcCount || codeList);
+      out.push({
+        key: 'dtc', val,
+        title: `🔧 ${car} — check engine`,
+        body: codeList ? `Fault code${String(codeList).includes(',') ? 's' : ''} ${codeList}.` : `${dtcCount} active fault code${dtcCount === 1 ? '' : 's'}.`,
+      });
+    }
+    // engine running hot (coolant temp, °C)
+    const coolant = Number(a.io32 != null ? a.io32 : a.coolantTemp);
+    if (!isNaN(coolant) && coolant > 105) {
+      out.push({ key: 'enginehot', val: String(Math.round(coolant)), title: `🌡️ ${car} — engine running hot`, body: `Coolant is at ${Math.round(coolant)} °C (over the 105 °C safe range).` });
+    }
+    // charging / battery voltage trouble while the engine is running
+    const volts = Number(a.power);
+    if (!isNaN(volts) && volts > 0) {
+      if (a.ignition === true && volts < 12.2) {
+        out.push({ key: 'charging', val: volts.toFixed(1), title: `🔌 ${car} — not charging`, body: `System voltage is ${volts.toFixed(1)}V while running — the alternator may be failing.` });
+      } else if (volts > 15.2) {
+        out.push({ key: 'overcharge', val: volts.toFixed(1), title: `⚡ ${car} — overcharging`, body: `System voltage is ${volts.toFixed(1)}V — the regulator may be faulty.` });
+      }
     }
     // low fuel
     const fuel = a.fuel != null ? a.fuel : a.io48;
@@ -462,7 +483,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           // again instead of being suppressed by the stale signature.
           {
             const active = new Set(derived.map((x) => x.key));
-            for (const key of ['disconnect', 'dtc', 'lowfuel', 'lowbatt', 'towing']) {
+            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowbatt', 'towing']) {
               const sig = `dv:${d.id}:${key}`;
               if (!active.has(key) && rec.sigs[sig] !== undefined) { delete rec.sigs[sig]; changed = true; }
             }
@@ -509,7 +530,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled — polling every 30s for locked-phone alerts.');
+    console.log('[push] APNs enabled v4 (check-engine + engine-hot + charging, engine-off removed, re-arm on) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
