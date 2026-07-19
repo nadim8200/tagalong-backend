@@ -285,8 +285,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
         return { key: 'fueldrop', title: `⛽ ${car} — fuel drop`, body: 'A sudden fuel drop was detected.' };
       case 'ignitionOn':
         return { key: 'ign-on', title: `🚗 ${car} started`, body: 'The engine was turned on.' };
-      case 'ignitionOff':
-        return { key: 'ign-off', title: `🅿️ ${car} stopped`, body: 'The engine was turned off.' };
+      // engine-off is intentionally NOT pushed — it fires on every park and is
+      // too noisy; "Car turned on" stays as the meaningful ignition alert.
       default:
         return null;
     }
@@ -324,6 +324,96 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     return out;
   }
 
+  // ---- posted speed limit for a point (OpenStreetMap, cached) ----
+  const speedLimitCache = new Map(); // "lat,lng"(3dp) -> { mph, at }
+  function parseMaxspeed(s) {
+    if (!s) return null;
+    const str = String(s).toLowerCase();
+    const m = str.match(/(\d+)/);
+    if (!m) return null;
+    const n = parseInt(m[1], 10);
+    if (!n) return null;
+    return str.includes('mph') ? n : Math.round(n * 0.621371); // OSM default is km/h
+  }
+  async function roadSpeedLimit(lat, lng) {
+    const key = `${lat.toFixed(3)},${lng.toFixed(3)}`; // ~110 m grid
+    const c = speedLimitCache.get(key);
+    if (c && Date.now() - c.at < 24 * 3600 * 1000) return c.mph;
+    let mph = null;
+    try {
+      const q = `[out:json][timeout:8];way(around:35,${lat},${lng})[highway][maxspeed];out tags 3;`;
+      const r = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'data=' + encodeURIComponent(q),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        for (const el of (j.elements || [])) {
+          const v = parseMaxspeed((el.tags || {}).maxspeed);
+          if (v) { mph = v; break; }
+        }
+      }
+    } catch { /* leave null */ }
+    speedLimitCache.set(key, { mph, at: Date.now() });
+    if (speedLimitCache.size > 3000) speedLimitCache.clear();
+    return mph;
+  }
+
+  // ---- weekly digest (Sunday evening, once per week) ----
+  async function reportArray(kind, deviceId, fromISO, toISO) {
+    try {
+      const r = await fetch(`${TRACCAR_URL}/api/reports/${kind}?deviceId=${deviceId}&from=${fromISO}&to=${toISO}`, {
+        headers: { ...traccarHeaders, Accept: 'application/json' },
+      });
+      if (!r.ok) return [];
+      return r.json();
+    } catch { return []; }
+  }
+  async function runWeeklyDigest() {
+    const to = new Date();
+    const from = new Date(to.getTime() - 7 * 24 * 3600 * 1000);
+    const fromISO = from.toISOString(), toISO = to.toISOString();
+    const { store } = await readStore();
+    const fleet = await allDevices();
+    for (const rec of Object.values(store)) {
+      const tokenRecs = rec.tokens || [];
+      if (!tokenRecs.length) continue;
+      const devs = scopeDevices(fleet, rec);
+      if (!devs.length) continue;
+      let miles = 0, trips = 0, harsh = 0, alerts = 0;
+      for (const d of devs) {
+        const sum = await reportArray('summary', d.id, fromISO, toISO);
+        if (sum && sum[0] && sum[0].distance) miles += sum[0].distance * 0.000621371;
+        const tr = await reportArray('trips', d.id, fromISO, toISO);
+        trips += (tr || []).length;
+        const evs = await reportArray('events', d.id, fromISO, toISO);
+        for (const e of (evs || [])) {
+          if (/overspeed|hardBraking|hardAcceleration|alarm/i.test(e.type)) harsh++;
+          if (eventToPush(d, e, {})) alerts++;
+        }
+      }
+      miles = Math.round(miles);
+      // simple driver score: start at 100, penalize harsh events per mile driven
+      const score = Math.max(40, Math.min(100, Math.round(100 - (miles > 0 ? (harsh / miles) * 100 * 4 : harsh * 2))));
+      const title = `📊 Your week: ${miles} mi, ${trips} trip${trips === 1 ? '' : 's'}`;
+      const body = `Driver score ${score}/100 · ${alerts} alert${alerts === 1 ? '' : 's'} this week. Tap for the full breakdown.`;
+      console.log(`[push]   WEEKLY DIGEST → user ${rec.email || '?'}: ${miles}mi ${trips}trips score ${score}`);
+      await sendToTokens(tokenRecs, { title, body, data: { path: '/history' } });
+    }
+  }
+  // fire once when it's Sunday night (>= 23:00 UTC ≈ Sun evening US) and not yet
+  // sent this week.
+  let lastDigestWeek = '';
+  async function maybeWeeklyDigest() {
+    const now = new Date();
+    if (now.getUTCDay() !== 0 || now.getUTCHours() < 23) return;
+    const jan1 = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+    const wk = `${now.getUTCFullYear()}-${Math.floor((now - jan1) / (7 * 24 * 3600 * 1000))}`;
+    if (wk === lastDigestWeek) return;
+    lastDigestWeek = wk;
+    try { await runWeeklyDigest(); } catch (e) { console.error('[push] digest error:', e.message); }
+  }
+
   // ---- the poll loop ----
   let lastCheck = Date.now() - 5 * 60 * 1000;
   async function poll() {
@@ -359,11 +449,43 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
             toSend.push(p);
           }
           // derived (disconnect, dtc, low fuel/battery, tow)
-          for (const da of derivedAlerts(d, pos)) {
+          const derived = derivedAlerts(d, pos);
+          for (const da of derived) {
             const sig = `dv:${d.id}:${da.key}`;
             if (rec.sigs[sig] === da.val) continue; // same state already notified
             rec.sigs[sig] = da.val;
             toSend.push(da);
+          }
+          // RE-ARM: any derived condition that is no longer present gets its
+          // remembered state cleared, so if the SAME fault returns later (e.g. a
+          // check-engine code cleared at the shop that comes back) it alerts
+          // again instead of being suppressed by the stale signature.
+          {
+            const active = new Set(derived.map((x) => x.key));
+            for (const key of ['disconnect', 'dtc', 'lowfuel', 'lowbatt', 'towing']) {
+              const sig = `dv:${d.id}:${key}`;
+              if (!active.has(key) && rec.sigs[sig] !== undefined) { delete rec.sigs[sig]; changed = true; }
+            }
+          }
+
+          // speed-limit-aware alert (opt-in per car via taSpeedLimitAlert). Only
+          // when moving with real speed; alert once per over-limit episode.
+          if ((d.attributes || {}).taSpeedLimitAlert && pos && pos.latitude != null) {
+            const mph = Math.round((pos.speed || 0) * KNOTS_TO_MPH);
+            const sig = `spd:${d.id}`;
+            if (mph >= 25) {
+              const limit = await roadSpeedLimit(pos.latitude, pos.longitude);
+              if (limit && mph > limit + 8) {
+                if (rec.sigs[sig] !== 'over') {
+                  rec.sigs[sig] = 'over';
+                  toSend.push({ title: `🚧 ${NAMED(d)} — ${mph} in a ${limit}`, body: `Going ${mph} mph in a ${limit} mph zone.` });
+                }
+              } else if (limit && mph <= limit + 3 && rec.sigs[sig] === 'over') {
+                rec.sigs[sig] = 'ok'; changed = true; // back under → re-arm
+              }
+            } else if (rec.sigs[sig] === 'over') {
+              rec.sigs[sig] = 'ok'; changed = true; // slowed/stopped → re-arm
+            }
           }
 
           for (const a of toSend) {
@@ -382,6 +504,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       console.error('[push] poll error:', e.message);
     }
     lastCheck = now;
+    maybeWeeklyDigest().catch(() => {}); // Sunday-night summary, once per week
   }
 
   if (enabled) {
