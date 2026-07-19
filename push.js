@@ -540,7 +540,21 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           for (const a of toSend) {
             changed = true;
             console.log(`[push]   SENDING "${a.title}" → ${tokenRecs.length} device token(s)`);
-            const dead = await sendToTokens(tokenRecs, { title: a.title, body: a.body, data: { deviceId: d.id, path: `/map?device=${d.id}` } });
+            // carry where/when it happened so tapping the notification can open
+            // the full alert detail screen instead of just the map
+            const alertData = {
+              deviceId: d.id,
+              path: `/map?device=${d.id}`,
+              alert: 1,
+              car: NAMED(d),
+              atitle: a.title,
+              lat: pos && pos.latitude != null ? pos.latitude : null,
+              lng: pos && pos.longitude != null ? pos.longitude : null,
+              spd: pos ? Math.round((pos.speed || 0) * KNOTS_TO_MPH) : null,
+              ts: Date.now(),
+              imei: d.uniqueId || '',
+            };
+            const dead = await sendToTokens(tokenRecs, { title: a.title, body: a.body, data: alertData });
             if (dead.length) { console.log(`[push]   pruned ${dead.length} dead token(s)`); rec.tokens = (rec.tokens || []).filter((t) => !dead.includes(t.token)); }
           }
         }
@@ -558,7 +572,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v6 (temp thresholds fixed, check-engine + charging, tow debounced, re-arm on) — polling every 30s.');
+    console.log('[push] APNs enabled v7 (tappable alert detail, temp thresholds, tow debounced, re-arm on) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
