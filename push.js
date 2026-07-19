@@ -314,10 +314,14 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
         body: codeList ? `Fault code${String(codeList).includes(',') ? 's' : ''} ${codeList}.` : `${dtcCount} active fault code${dtcCount === 1 ? '' : 's'}.`,
       });
     }
-    // engine running hot (coolant temp, °C)
+    // Engine running hot. Engines don't all run the same: most sit 90–110 °C and
+    // many modern ones (VW/Audi) normally cruise at 100–110 °C, so a 105 °C limit
+    // false-alarms on healthy cars. Only push when it's genuinely high, and let a
+    // specific car override via its tempWarnC attribute.
     const coolant = Number(a.io32 != null ? a.io32 : a.coolantTemp);
-    if (!isNaN(coolant) && coolant > 105) {
-      out.push({ key: 'enginehot', val: String(Math.round(coolant)), title: `🌡️ ${car} — engine running hot`, body: `Coolant is at ${Math.round(coolant)} °C (over the 105 °C safe range).` });
+    const hotLimit = Number((d.attributes || {}).tempWarnC) > 0 ? Number((d.attributes || {}).tempWarnC) : 115;
+    if (!isNaN(coolant) && coolant > hotLimit) {
+      out.push({ key: 'enginehot', val: String(Math.round(coolant)), title: `🌡️ ${car} — engine running hot`, body: `Coolant is at ${Math.round(coolant)} °C (over this car's ${hotLimit} °C limit).` });
     }
     // charging / battery voltage trouble while the engine is running
     const volts = Number(a.power);
@@ -554,7 +558,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v5 (check-engine + engine-hot + charging, tow debounced, engine-off removed, re-arm on) — polling every 30s.');
+    console.log('[push] APNs enabled v6 (temp thresholds fixed, check-engine + charging, tow debounced, re-arm on) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
