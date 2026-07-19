@@ -194,6 +194,18 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // Alert history recorded server-side. The app only logs what it sees while it's
+  // OPEN, so anything that fired while the phone was locked never appeared in the
+  // Alerts tab. Every push we send is appended here with its location, so the
+  // history is complete regardless of whether the app was running.
+  app.get('/push/history', requireAuth, async (req, res) => {
+    try {
+      const { store } = await readStore();
+      const rec = store[String(req.user.id)];
+      res.json({ ok: true, alerts: (rec && rec.log) || [] });
+    } catch (e) { res.status(500).json({ error: e.message, alerts: [] }); }
+  });
+
   app.post('/push/unregister', requireAuth, async (req, res) => {
     const { token } = req.body || {};
     try {
@@ -683,6 +695,21 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
               ts: Date.now(),
               imei: d.uniqueId || '',
             };
+            // record it in the server-side history so the Alerts tab is complete
+            // even for alerts that fired while the app was closed
+            rec.log = Array.isArray(rec.log) ? rec.log : [];
+            rec.log.push({
+              t: new Date().toISOString(),
+              title: a.title,
+              body: a.body,
+              car: NAMED(d),
+              deviceId: d.id,
+              imei: d.uniqueId || '',
+              lat: alertData.lat, lng: alertData.lng, spd: alertData.spd,
+              sev: /crash|tow|theft|check engine|overheat|jam|VIN|highway|power cut/i.test(a.title) ? 'bad' : 'warn',
+            });
+            if (rec.log.length > 250) rec.log = rec.log.slice(-250);
+
             const dead = await sendToTokens(tokenRecs, { title: a.title, body: a.body, data: alertData });
             if (dead.length) { console.log(`[push]   pruned ${dead.length} dead token(s)`); rec.tokens = (rec.tokens || []).filter((t) => !dead.includes(t.token)); }
           }
@@ -701,7 +728,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v9 (complete alert set + highway-stop + VIN change; tappable detail) — polling every 30s.');
+    console.log('[push] APNs enabled v10 (server-side alert history + complete alert set; tappable detail) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
