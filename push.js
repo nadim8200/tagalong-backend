@@ -707,6 +707,25 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
               imei: d.uniqueId || '',
               lat: alertData.lat, lng: alertData.lng, spd: alertData.spd,
               sev: /crash|tow|theft|check engine|overheat|jam|VIN|highway|power cut/i.test(a.title) ? 'bad' : 'warn',
+              // frozen snapshot of the car's readings at the instant this fired,
+              // so the alert-detail screen shows what was true THEN, not now
+              vitals: (() => {
+                const at = (pos && pos.attributes) || {};
+                const num = (x) => (x == null || x === '' || Number.isNaN(Number(x)) ? null : Number(x));
+                return {
+                  speed: alertData.spd,
+                  ignition: at.ignition == null ? null : !!at.ignition,
+                  fuel: num(at.io48 != null ? at.io48 : at.fuel),
+                  coolant: num(at.io32),
+                  rpm: num(at.io36),
+                  battery: num(at.io113 != null ? at.io113 : (at.io67 != null ? at.io67 : at.power)),
+                  faults: num(at.io30),
+                  codes: at.dtcs || at.io281 || '',
+                  odometer: num(at.odometer != null ? at.odometer : at.totalDistance),
+                  sats: num(at.sat),
+                  fixTime: (pos && pos.fixTime) || null,
+                };
+              })(),
             });
             if (rec.log.length > 250) rec.log = rec.log.slice(-250);
 
@@ -728,7 +747,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v10 (server-side alert history + complete alert set; tappable detail) — polling every 30s.');
+    console.log('[push] APNs enabled v11 (alert history + frozen vitals snapshot per alert) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
