@@ -19,6 +19,9 @@
 // ---------------------------------------------------------------
 import http2 from 'node:http2';
 import jwt from 'jsonwebtoken';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 const KNOTS_TO_MPH = 1.15078;
 
@@ -135,11 +138,42 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   async function writeStore(store) {
     const host = await hostDevice();
     const attributes = { ...(host.attributes || {}), taPush: store };
-    await fetch(`${TRACCAR_URL}/api/devices/${host.id}`, {
+    const body = JSON.stringify({ ...host, attributes });
+    const r = await fetch(`${TRACCAR_URL}/api/devices/${host.id}`, {
       method: 'PUT',
       headers: { ...traccarHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...host, attributes }),
+      body,
     });
+    // Traccar caps the attributes column (~4000 chars). If we blow past it the
+    // PUT is rejected and EVERY change in this write is lost — tokens and
+    // de-dupe signatures included, which silently causes repeat pushes. Never
+    // let that fail quietly again.
+    if (!r.ok) {
+      console.error(`[push] writeStore FAILED ${r.status} — taPush is ${JSON.stringify(store).length} chars. `
+        + 'If this is a size error, state is being dropped.');
+    }
+    return r.ok;
+  }
+
+  // ---- alert history (file-backed) ----
+  // Deliberately NOT kept in the Traccar attribute above: the history grows
+  // without bound and would blow the column limit, taking tokens and sigs down
+  // with it. This lives on the server's own disk instead.
+  const LOG_PATH = path.join(process.env.PUSH_LOG_DIR || os.tmpdir(), 'tagalong-alert-log.json');
+  let logCache = null;
+  async function readLog() {
+    if (logCache) return logCache;
+    try { logCache = JSON.parse(await fsp.readFile(LOG_PATH, 'utf8')) || {}; } catch { logCache = {}; }
+    return logCache;
+  }
+  async function appendLog(uidKey, entry) {
+    const log = await readLog();
+    const arr = Array.isArray(log[uidKey]) ? log[uidKey] : [];
+    arr.push(entry);
+    log[uidKey] = arr.slice(-400);
+    try { await fsp.writeFile(LOG_PATH, JSON.stringify(log)); } catch (e) {
+      console.error('[push] alert-log write failed:', e.message);
+    }
   }
 
   // ---- register / unregister ----
@@ -200,9 +234,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   // history is complete regardless of whether the app was running.
   app.get('/push/history', requireAuth, async (req, res) => {
     try {
-      const { store } = await readStore();
-      const rec = store[String(req.user.id)];
-      res.json({ ok: true, alerts: (rec && rec.log) || [] });
+      const log = await readLog();
+      res.json({ ok: true, alerts: log[String(req.user.id)] || [] });
     } catch (e) { res.status(500).json({ error: e.message, alerts: [] }); }
   });
 
@@ -519,10 +552,16 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       const positions = await allPositions();
       const geoNames = await geofenceNames();
       let changed = false;
-      for (const rec of Object.values(store)) {
+      for (const [uid, rec] of Object.entries(store)) {
         const tokenRecs = rec.tokens || [];
         if (!tokenRecs.length) continue;
         rec.sigs = rec.sigs || {};
+        // legacy: older builds stored the history inline, which is what pushed
+        // the attribute over Traccar's size limit. Migrate it out and reclaim.
+        if (Array.isArray(rec.log)) {
+          for (const old of rec.log) await appendLog(uid, old);
+          delete rec.log; changed = true;
+        }
         const devices = scopeDevices(fleet, rec);
         if (!devices.length) continue;
 
@@ -697,8 +736,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
             };
             // record it in the server-side history so the Alerts tab is complete
             // even for alerts that fired while the app was closed
-            rec.log = Array.isArray(rec.log) ? rec.log : [];
-            rec.log.push({
+            await appendLog(uid, {
               t: new Date().toISOString(),
               title: a.title,
               body: a.body,
@@ -727,7 +765,6 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
                 };
               })(),
             });
-            if (rec.log.length > 250) rec.log = rec.log.slice(-250);
 
             const dead = await sendToTokens(tokenRecs, { title: a.title, body: a.body, data: alertData });
             if (dead.length) { console.log(`[push]   pruned ${dead.length} dead token(s)`); rec.tokens = (rec.tokens || []).filter((t) => !dead.includes(t.token)); }
@@ -747,7 +784,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v11 (alert history + frozen vitals snapshot per alert) — polling every 30s.');
+    console.log('[push] APNs enabled v12 (file-backed alert history — no longer capped by the Traccar attribute) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
