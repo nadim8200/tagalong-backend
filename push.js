@@ -413,6 +413,32 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     return mph;
   }
 
+  // ---- is this point on a highway? (OpenStreetMap, cached) ----
+  // Used for the "stopped on the highway" alert — a car stopped in a driveway is
+  // nothing, a car stopped on a motorway is an emergency. Only queried when a
+  // stop has already lasted a while, so it costs very few lookups.
+  const roadCache = new Map(); // "lat,lng"(3dp) -> { hw, at }
+  async function onHighway(lat, lng) {
+    const key = `${lat.toFixed(3)},${lng.toFixed(3)}`;
+    const c = roadCache.get(key);
+    if (c && Date.now() - c.at < 24 * 3600 * 1000) return c.hw;
+    let hw = false;
+    try {
+      const q = `[out:json][timeout:10];way(around:28,${lat},${lng})[highway~"^(motorway|trunk|primary|motorway_link|trunk_link)$"];out ids 1;`;
+      const r = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'data=' + encodeURIComponent(q),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        hw = Array.isArray(j.elements) && j.elements.length > 0;
+      }
+    } catch { /* unknown → treat as not a highway, don't cry wolf */ }
+    roadCache.set(key, { hw, at: Date.now() });
+    if (roadCache.size > 2000) roadCache.clear();
+    return hw;
+  }
+
   // ---- weekly digest (Sunday evening, once per week) ----
   async function reportArray(kind, deviceId, fromISO, toISO) {
     try {
@@ -547,6 +573,57 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
             }
           }
 
+          // VIN change: the tracker is reporting a different vehicle than before.
+          // Means it was moved to another car — or tampered with. The first VIN
+          // we ever see is learned silently, same as the app does.
+          {
+            const pa = (pos && pos.attributes) || {};
+            const vin = String(pa.vin || '').trim();
+            const vinKey = `vin:${d.id}`;
+            if (vin.length >= 8) {
+              const known = rec.sigs[vinKey];
+              if (!known) {
+                rec.sigs[vinKey] = vin; changed = true;   // learn quietly
+              } else if (known !== vin) {
+                rec.sigs[vinKey] = vin; changed = true;
+                toSend.push({
+                  title: `🆔 ${NAMED(d)} — VIN changed`,
+                  body: `This tracker now reports a different vehicle (${vin}). It may have been moved or tampered with.`,
+                });
+              }
+            }
+          }
+
+          // Stopped on the highway: stationary for a long stretch ON a motorway
+          // or trunk road. Genuine emergency signal (breakdown, crash, running
+          // out of fuel) as opposed to simply being parked somewhere.
+          {
+            const pa = (pos && pos.attributes) || {};
+            const stopMph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
+            const stopMin = Number((d.attributes || {}).highwayStopMin) > 0 ? Number((d.attributes || {}).highwayStopMin) : 17;
+            const pend = `hwpend:${d.id}`, fired = `hwstop:${d.id}`;
+            const stopped = stopMph < 2 && pos && pos.latitude != null;
+            if (stopped) {
+              const since = Number(rec.sigs[pend] || 0);
+              if (!since) {
+                rec.sigs[pend] = String(Date.now()); changed = true;
+              } else if (Date.now() - since > stopMin * 60 * 1000 && rec.sigs[fired] !== 'on') {
+                // only now do we pay for the road lookup
+                if (await onHighway(pos.latitude, pos.longitude)) {
+                  rec.sigs[fired] = 'on'; changed = true;
+                  toSend.push({
+                    title: `🛑 ${NAMED(d)} — stopped on the highway`,
+                    body: `Stationary for over ${stopMin} minutes on a highway. This could be a breakdown or a crash.`,
+                  });
+                } else {
+                  rec.sigs[fired] = 'off'; changed = true; // parked normally; stop re-checking
+                }
+              }
+            } else if (rec.sigs[pend] || rec.sigs[fired]) {
+              delete rec.sigs[pend]; delete rec.sigs[fired]; changed = true;
+            }
+          }
+
           // idling too long: engine running while parked. Needs a timer, so it
           // lives here rather than in derivedAlerts. Threshold per car via
           // idleAlertMin (default 15 minutes).
@@ -624,7 +701,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v8 (all alerts pushed: harsh driving, RPM, idling, speeding; tappable detail) — polling every 30s.');
+    console.log('[push] APNs enabled v9 (complete alert set + highway-stop + VIN change; tappable detail) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
