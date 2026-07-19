@@ -273,8 +273,20 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
         if (/overspeed/i.test(al)) return { key: 'alarm-overspeed', title: `⏩ ${car} — speeding`, body: 'Your car is over the speed limit.' };
         if (/lowBattery|battery/i.test(al)) return { key: 'alarm-battery', title: `🔋 ${car} — low battery`, body: 'The tracker battery is low.' };
         if (/jamming/i.test(al)) return { key: 'alarm-jam', title: `📡 ${car} — signal jammed`, body: 'A GPS/signal jammer may be in use.' };
+        if (/hardBrak|harshBrak|braking/i.test(al)) return { key: 'harsh-brake', title: `🛑 ${car} — hard braking`, body: 'A sudden hard brake was detected.' };
+        if (/hardAcc|harshAcc|acceleration/i.test(al)) return { key: 'harsh-accel', title: `🏎️ ${car} — hard acceleration`, body: 'A sudden hard acceleration was detected.' };
+        if (/hardCorner|harshCorner|cornering/i.test(al)) return { key: 'harsh-corner', title: `↩️ ${car} — hard cornering`, body: 'A sharp turn was taken at speed.' };
+        if (/powerCut|powerOff|unplug/i.test(al)) return { key: 'alarm-power', title: `🔌 ${car} — power cut`, body: 'The tracker lost power — it may have been unplugged.' };
+        if (/idle/i.test(al)) return { key: 'alarm-idle', title: `⏱️ ${car} — idling`, body: 'The engine is running while parked.' };
         return { key: `alarm-${al}`, title: `🔔 ${car} — alarm`, body: `Alarm: ${al}` };
       }
+      // some trackers report harsh driving as its own event type, not an alarm
+      case 'hardBraking':
+        return { key: 'harsh-brake', title: `🛑 ${car} — hard braking`, body: 'A sudden hard brake was detected.' };
+      case 'hardAcceleration':
+        return { key: 'harsh-accel', title: `🏎️ ${car} — hard acceleration`, body: 'A sudden hard acceleration was detected.' };
+      case 'hardCornering':
+        return { key: 'harsh-corner', title: `↩️ ${car} — hard cornering`, body: 'A sharp turn was taken at speed.' };
       case 'deviceOverspeed':
         return { key: 'overspeed', title: `⏩ ${car} — speeding`, body: `Going ${Math.round((a.speed || 0) * KNOTS_TO_MPH)} mph.` };
       case 'geofenceEnter':
@@ -342,6 +354,24 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     if (bl != null && bl <= 15) {
       out.push({ key: 'lowbatt', val: '1', title: `🔋 ${car} — low battery`, body: `Tracker battery at ${Math.round(bl)}%.` });
     }
+    // aggressive revving — threshold per car via rpmAlertRpm, default 4000
+    const rpm = Number(a.io36 != null ? a.io36 : a.rpm);
+    const rpmLimit = Number((d.attributes || {}).rpmAlertRpm) > 0 ? Number((d.attributes || {}).rpmAlertRpm) : 4000;
+    if (!isNaN(rpm) && rpm > rpmLimit) {
+      out.push({ key: 'rpm', val: 'on', title: `🏎️ ${car} — hard revving`, body: `Engine hit ${Math.round(rpm)} RPM (over the ${rpmLimit} limit).` });
+    }
+
+    // speeding — warning threshold and the hard over-speed limit, per car.
+    // val is 'on' so it fires once on crossing and re-arms when back under.
+    const mph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
+    const warnAt = Number((d.attributes || {}).speedWarnMph) > 0 ? Number((d.attributes || {}).speedWarnMph) : 70;
+    const maxAt = Number((d.attributes || {}).speedMaxMph) > 0 ? Number((d.attributes || {}).speedMaxMph) : 85;
+    if (mph >= maxAt) {
+      out.push({ key: 'overspeed-hard', val: 'on', title: `🚨 ${car} — over ${maxAt} mph`, body: `Travelling at ${mph} mph.` });
+    } else if (mph >= warnAt) {
+      out.push({ key: 'speedwarn', val: 'on', title: `⏩ ${car} — speeding`, body: `Travelling at ${mph} mph (over your ${warnAt} mph warning).` });
+    }
+
     // NOTE: tow/theft is handled in the poll loop, not here — it needs a debounce
     // (the tracker reports motion a beat before the ignition flag flips on at
     // startup, which fired a false "being towed" alert every time the car started).
@@ -486,7 +516,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           // again instead of being suppressed by the stale signature.
           {
             const active = new Set(derived.map((x) => x.key));
-            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowbatt']) {
+            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowbatt', 'rpm', 'speedwarn', 'overspeed-hard']) {
               const sig = `dv:${d.id}:${key}`;
               if (!active.has(key) && rec.sigs[sig] !== undefined) { delete rec.sigs[sig]; changed = true; }
             }
@@ -514,6 +544,28 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
             } else {
               if (rec.sigs[pendKey]) { delete rec.sigs[pendKey]; changed = true; }
               if (rec.sigs[towKey]) { delete rec.sigs[towKey]; changed = true; }
+            }
+          }
+
+          // idling too long: engine running while parked. Needs a timer, so it
+          // lives here rather than in derivedAlerts. Threshold per car via
+          // idleAlertMin (default 15 minutes).
+          {
+            const pa = (pos && pos.attributes) || {};
+            const idleMph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
+            const idleMin = Number((d.attributes || {}).idleAlertMin) > 0 ? Number((d.attributes || {}).idleAlertMin) : 15;
+            const pend = `idlepend:${d.id}`, fired = `idle:${d.id}`;
+            if (pa.ignition === true && idleMph < 2) {
+              const since = Number(rec.sigs[pend] || 0);
+              if (!since) {
+                rec.sigs[pend] = String(Date.now()); changed = true;
+              } else if (Date.now() - since > idleMin * 60 * 1000 && rec.sigs[fired] !== 'on') {
+                rec.sigs[fired] = 'on';
+                toSend.push({ title: `⏱️ ${NAMED(d)} — idling ${idleMin}+ min`, body: `The engine has been running parked for over ${idleMin} minutes.` });
+              }
+            } else {
+              if (rec.sigs[pend]) { delete rec.sigs[pend]; changed = true; }
+              if (rec.sigs[fired]) { delete rec.sigs[fired]; changed = true; }
             }
           }
 
@@ -572,7 +624,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v7 (tappable alert detail, temp thresholds, tow debounced, re-arm on) — polling every 30s.');
+    console.log('[push] APNs enabled v8 (all alerts pushed: harsh driving, RPM, idling, speeding; tappable detail) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
