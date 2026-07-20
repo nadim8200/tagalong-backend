@@ -24,6 +24,12 @@ import os from 'node:os';
 import path from 'node:path';
 
 const KNOTS_TO_MPH = 1.15078;
+// A fault condition must be absent this long before it's allowed to alert again
+// (a code cleared at the shop that genuinely returns still notifies) …
+const REARM_AFTER_MS = 6 * 60 * 60 * 1000;
+// … and no derived condition may repeat on the same car faster than this,
+// no matter how its underlying value flaps.
+const REPEAT_FLOOR_MS = 6 * 60 * 60 * 1000;
 
 export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env }) {
   const {
@@ -584,18 +590,40 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           for (const da of derived) {
             const sig = `dv:${d.id}:${da.key}`;
             if (rec.sigs[sig] === da.val) continue; // same state already notified
+            // Hard floor between repeats of the same condition on the same car,
+            // whatever the value did in between. A fault code that flaps 1→0→1
+            // is one problem, not six notifications.
+            const lastKey = `dvat:${d.id}:${da.key}`;
+            const last = Number(rec.sigs[lastKey] || 0);
+            if (last && Date.now() - last < REPEAT_FLOOR_MS) { rec.sigs[sig] = da.val; changed = true; continue; }
             rec.sigs[sig] = da.val;
+            rec.sigs[lastKey] = String(Date.now());
             toSend.push(da);
           }
           // RE-ARM: any derived condition that is no longer present gets its
           // remembered state cleared, so if the SAME fault returns later (e.g. a
           // check-engine code cleared at the shop that comes back) it alerts
           // again instead of being suppressed by the stale signature.
+          // The condition must stay gone for a sustained stretch, not just one
+          // poll — otherwise a flapping sensor re-arms itself every 30 seconds
+          // and notifies again each time it comes back.
           {
             const active = new Set(derived.map((x) => x.key));
             for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowbatt', 'rpm', 'speedwarn', 'overspeed-hard']) {
               const sig = `dv:${d.id}:${key}`;
-              if (!active.has(key) && rec.sigs[sig] !== undefined) { delete rec.sigs[sig]; changed = true; }
+              const goneKey = `dvgone:${d.id}:${key}`;
+              if (active.has(key)) {
+                // back (or never left) — cancel any pending re-arm
+                if (rec.sigs[goneKey]) { delete rec.sigs[goneKey]; changed = true; }
+              } else if (rec.sigs[sig] !== undefined) {
+                const since = Number(rec.sigs[goneKey] || 0);
+                if (!since) { rec.sigs[goneKey] = String(Date.now()); changed = true; }
+                else if (Date.now() - since > REARM_AFTER_MS) {
+                  delete rec.sigs[sig]; delete rec.sigs[goneKey];
+                  delete rec.sigs[`dvat:${d.id}:${key}`];
+                  changed = true;
+                }
+              }
             }
           }
 
@@ -784,7 +812,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v12 (file-backed alert history — no longer capped by the Traccar attribute) — polling every 30s.');
+    console.log('[push] APNs enabled v13 (file-backed history; flapping faults no longer re-alert — 6h floor) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
