@@ -27,6 +27,7 @@ import { initDb } from './db.js';
 import { initLoads } from './loads.js';
 import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
+import { initNotify } from './notify.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -478,6 +479,10 @@ initPod(app, { requireAuth, db, pool: db.pool });
 
 // The AI dispatcher's continuous review — what needs a human right now.
 initDispatcher(app, { requireAuth, db, pool: db.pool });
+
+// Customer call-ahead (call or text, contact's choice). DRY-RUN until
+// NOTIFY_ALLOW_SEND=true — see the compliance note at the top of notify.js.
+initNotify(app, { requireAuth, db, pool: db.pool, env: process.env });
 
 app.get('/', (_req, res) => res.send('TagAlong backend is running.'));
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));
