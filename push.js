@@ -544,7 +544,13 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
   async function roadSpeedLimit(lat, lng) {
     const key = `${lat.toFixed(3)},${lng.toFixed(3)}`; // ~110 m grid
     const c = speedLimitCache.get(key);
-    if (c && Date.now() - c.at < 24 * 3600 * 1000) return c.mph;
+    if (c) {
+      // A real answer is good for a day — speed limits don't move. A FAILURE
+      // must expire quickly: caching null for 24h meant one rate-limited moment
+      // blinded us to that whole stretch of road until tomorrow.
+      const ttl = c.mph != null ? 24 * 3600 * 1000 : 10 * 60 * 1000;
+      if (Date.now() - c.at < ttl) return c.mph;
+    }
     let mph = null;
     try {
       // Ask for ALL nearby roads, not just tagged ones. Requiring [maxspeed]
@@ -557,9 +563,16 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
         method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'data=' + encodeURIComponent(q),
       });
+      if (!r.ok) {
+        // The public Overpass endpoint rate-limits hard (429) and sheds load
+        // (504) — worth naming, because silent nulls look identical to "this
+        // street has no speed limit on record".
+        console.log(`[push] overpass ${r.status}${r.status === 429 ? ' (rate limited)' : ''} — no speed limit available`);
+      }
       if (r.ok) {
         const j = await r.json();
         const els = (j.elements || []).filter((e) => (e.tags || {}).highway);
+        if (!els.length) console.log(`[push] overpass returned ${(j.elements || []).length} element(s), none with a highway tag, at ${lat.toFixed(4)},${lng.toFixed(4)}`);
         // 1) a real posted limit always wins
         for (const el of els) {
           const v = parseMaxspeed((el.tags || {}).maxspeed);
@@ -584,7 +597,11 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           if (best) mph = BY_CLASS[best];
         }
       }
-    } catch { /* leave null */ }
+    } catch (e) {
+      // A timeout here is normal under load; log it so "limit unknown" is never
+      // mistaken for "we checked and the road has no limit".
+      console.log('[push] overpass lookup failed:', e.message);
+    }
     speedLimitCache.set(key, { mph, at: Date.now() });
     if (speedLimitCache.size > 3000) speedLimitCache.clear();
     return mph;
@@ -991,7 +1008,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log(`[push] APNs enabled v22 (${USE_DB ? 'Postgres-backed state — durable across deploys' : 'file/Traccar fallback — no DATABASE_URL'}) — polling every 30s.`);
+    console.log(`[push] APNs enabled v23 (${USE_DB ? 'Postgres-backed state' : 'file/Traccar fallback'}; speed-limit lookup now reports why it failed) — polling every 30s.`);
   }
 
   return { enabled, sendToTokens };
