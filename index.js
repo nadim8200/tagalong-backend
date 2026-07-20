@@ -336,9 +336,115 @@ app.all('/api/traccar/*', requireAuth, async (req, res) => {
     const r = await fetch(`${TRACCAR_URL}/api/${path}${qs}`, init);
     res.status(r.status);
     const ct = r.headers.get('content-type') || '';
-    if (ct.includes('application/json')) res.json(await r.json().catch(() => ({})));
-    else res.send(await r.text());
+    if (ct.includes('application/json')) {
+      let payload = await r.json().catch(() => ({}));
+      payload = await scopeForFleet(req.user, path, payload);
+      return res.json(payload);
+    }
+    res.send(await r.text());
   } catch { res.status(502).json({ error: 'Upstream tracking server error.' }); }
+});
+
+// ---- fleet vehicle scoping (ENFORCED HERE, not in the browser) ----
+// A vehicle belongs to a fleet company when its Traccar device carries
+// attributes.taFleetId === that company's account id. Filtering in the client
+// would be decoration — anyone can call the API directly — so every response
+// that could carry vehicle data is filtered on the way out.
+async function fleetDeviceIds(fleetId) {
+  const r = await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders });
+  if (!r.ok) throw new Error('devices fetch failed');
+  const all = await r.json();
+  return new Set(all
+    .filter((d) => String(((d.attributes || {}).taFleetId) || '') === String(fleetId))
+    .map((d) => d.id));
+}
+
+async function scopeForFleet(user, path, payload) {
+  if (!user || user.role !== 'fleet') return payload;
+  const ids = await fleetDeviceIds(user.id);
+
+  if (/^devices\b/.test(path) && Array.isArray(payload)) {
+    return payload.filter((d) => ids.has(d.id));
+  }
+  if (/^positions\b/.test(path) && Array.isArray(payload)) {
+    return payload.filter((p) => ids.has(p.deviceId));
+  }
+  if (/^reports\//.test(path) && Array.isArray(payload)) {
+    return payload.filter((row) => row.deviceId == null || ids.has(row.deviceId));
+  }
+  // Anything not explicitly understood returns EMPTY rather than everything —
+  // a new Traccar endpoint should fail closed, not leak another company's data.
+  if (Array.isArray(payload)) return [];
+  return payload;
+}
+
+// ---- claiming a vehicle into a fleet ----
+// The owner (or admin) gives the company a per-vehicle claim code; the company
+// enters it once and the vehicle joins their fleet. Same shape as the broker
+// share-code flow already in the app.
+app.post('/fleet/claim', requireAuth, requireFleet, async (req, res) => {
+  const code = String((req.body || {}).code || '').trim().toUpperCase();
+  if (!code) return res.status(400).json({ error: 'Enter the vehicle code.' });
+  try {
+    const r = await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders });
+    if (!r.ok) throw new Error('devices fetch failed');
+    const all = await r.json();
+    const dev = all.find((d) => String(((d.attributes || {}).shareCode) || '').toUpperCase() === code);
+    if (!dev) return res.status(404).json({ error: 'No vehicle found with that code.' });
+
+    const owner = String(((dev.attributes || {}).taFleetId) || '');
+    if (owner && owner !== String(req.user.id)) {
+      return res.status(409).json({ error: 'That vehicle already belongs to another fleet.' });
+    }
+
+    const attributes = { ...(dev.attributes || {}), taFleetId: String(req.user.id) };
+    const put = await fetch(`${TRACCAR_URL}/api/devices/${dev.id}`, {
+      method: 'PUT',
+      headers: { ...traccarHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: dev.id, name: dev.name, uniqueId: dev.uniqueId, groupId: dev.groupId || 0,
+        phone: dev.phone || '', model: dev.model || '', contact: dev.contact || '',
+        category: dev.category || null, disabled: !!dev.disabled, attributes,
+      }),
+    });
+    if (!put.ok) {
+      let detail = ''; try { detail = (await put.text()).slice(0, 200); } catch { /* ignore */ }
+      console.error('[fleet] claim write failed:', put.status, detail);
+      return res.status(502).json({ error: 'Could not add the vehicle.' });
+    }
+    res.json({ ok: true, id: dev.id, name: (dev.attributes || {}).displayName || dev.name });
+  } catch (e) {
+    console.error('[fleet] claim failed:', e.message);
+    res.status(502).json({ error: 'Could not add the vehicle.' });
+  }
+});
+
+// Release a vehicle back out of the fleet.
+app.post('/fleet/release', requireAuth, requireFleet, async (req, res) => {
+  const id = Number((req.body || {}).deviceId);
+  if (!id) return res.status(400).json({ error: 'deviceId required.' });
+  try {
+    const r = await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders });
+    const all = await r.json();
+    const dev = all.find((d) => d.id === id);
+    if (!dev) return res.status(404).json({ error: 'Vehicle not found.' });
+    if (String(((dev.attributes || {}).taFleetId) || '') !== String(req.user.id)) {
+      return res.status(403).json({ error: 'That vehicle is not on your fleet.' });
+    }
+    const attributes = { ...(dev.attributes || {}) };
+    delete attributes.taFleetId;
+    const put = await fetch(`${TRACCAR_URL}/api/devices/${dev.id}`, {
+      method: 'PUT',
+      headers: { ...traccarHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: dev.id, name: dev.name, uniqueId: dev.uniqueId, groupId: dev.groupId || 0,
+        phone: dev.phone || '', model: dev.model || '', contact: dev.contact || '',
+        category: dev.category || null, disabled: !!dev.disabled, attributes,
+      }),
+    });
+    if (!put.ok) return res.status(502).json({ error: 'Could not remove the vehicle.' });
+    res.json({ ok: true });
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 // Locked-phone push notifications (APNs). Registers /push/register + /push/unregister
