@@ -513,16 +513,41 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     if (c && Date.now() - c.at < 24 * 3600 * 1000) return c.mph;
     let mph = null;
     try {
-      const q = `[out:json][timeout:8];way(around:35,${lat},${lng})[highway][maxspeed];out tags 3;`;
+      // Ask for ALL nearby roads, not just tagged ones. Requiring [maxspeed]
+      // meant most US residential and city streets returned nothing at all, so
+      // the alert silently never fired. When there's no posted tag we fall back
+      // to the typical limit for that road class, which is what a driver would
+      // reasonably expect the street to be.
+      const q = `[out:json][timeout:8];way(around:60,${lat},${lng})[highway];out tags 8;`;
       const r = await fetch('https://overpass-api.de/api/interpreter', {
         method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'data=' + encodeURIComponent(q),
       });
       if (r.ok) {
         const j = await r.json();
-        for (const el of (j.elements || [])) {
+        const els = (j.elements || []).filter((e) => (e.tags || {}).highway);
+        // 1) a real posted limit always wins
+        for (const el of els) {
           const v = parseMaxspeed((el.tags || {}).maxspeed);
           if (v) { mph = v; break; }
+        }
+        // 2) otherwise infer from the road classification
+        if (!mph) {
+          const BY_CLASS = {
+            motorway: 65, motorway_link: 45, trunk: 55, trunk_link: 40,
+            primary: 45, primary_link: 35, secondary: 40, secondary_link: 30,
+            tertiary: 35, tertiary_link: 25, unclassified: 30,
+            residential: 25, living_street: 15, service: 15,
+          };
+          // prefer the biggest road nearby — that's the one you're driving on
+          const ORDER = Object.keys(BY_CLASS);
+          let best = null;
+          for (const el of els) {
+            const cls = (el.tags || {}).highway;
+            if (BY_CLASS[cls] == null) continue;
+            if (best === null || ORDER.indexOf(cls) < ORDER.indexOf(best)) best = cls;
+          }
+          if (best) mph = BY_CLASS[best];
         }
       }
     } catch { /* leave null */ }
@@ -826,9 +851,13 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           if ((d.attributes || {}).taSpeedLimitAlert && pos && pos.latitude != null) {
             const mph = Math.round((pos.speed || 0) * KNOTS_TO_MPH);
             const sig = `spd:${d.id}`;
-            if (mph >= 25) {
+            // per-car tolerance; default 7 mph over the posted limit
+            const over = Number((d.attributes || {}).taSpeedLimitOver) > 0
+              ? Number((d.attributes || {}).taSpeedLimitOver) : 7;
+            if (mph >= 20) {
               const limit = await roadSpeedLimit(pos.latitude, pos.longitude);
-              if (limit && mph > limit + 8) {
+              console.log(`[push] speed-limit check ${NAMED(d)}: ${mph} mph, limit ${limit == null ? 'unknown' : limit} (needs > ${limit == null ? '—' : limit + over})`);
+              if (limit && mph > limit + over) {
                 if (rec.sigs[sig] !== 'over') {
                   rec.sigs[sig] = 'over';
                   toSend.push({ title: `🚧 ${NAMED(d)} — ${mph} in a ${limit}`, body: `Going ${mph} mph in a ${limit} mph zone.` });
@@ -918,7 +947,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v17 (de-dupe state off Traccar — fixes varchar(4000) overflow; parked-sleep offline fix) — polling every 30s.');
+    console.log('[push] APNs enabled v18 (speed-limit alerts work on untagged streets; de-dupe state off Traccar) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
