@@ -198,6 +198,67 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
     }
   });
 
-  console.log('[fleet] live fleet state ready — GET /fleet/live, PUT /fleet/telematics');
+  // ---- Hours of Service ----
+  // The single most actionable number in a fleet: how much legal driving time
+  // each driver has left. A driver at 0:15 remaining is a load that's about to
+  // stop moving, and that's a dispatch decision, not a compliance report.
+  app.get('/fleet/hos', requireAuth, async (req, res) => {
+    try {
+      const owner = String(req.user.company || req.user.id);
+      const token = await tokenFor(owner);
+      if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
+      const r = await fetch('https://api.samsara.com/fleet/hos/clocks?limit=200', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!r.ok) {
+        const detail = await r.text().catch(() => '');
+        return res.status(502).json({ error: `Samsara ${r.status}`, detail: detail.slice(0, 200) });
+      }
+      const j = await r.json();
+      const MIN = 60 * 1000;
+      const rows = (j.data || []).map((c) => {
+        const clocks = c.clocks || {};
+        const drive = clocks.drive || {};
+        const shift = clocks.shift || {};
+        const cycle = clocks.cycle || {};
+        const driveMs = drive.driveRemainingDurationMs != null ? drive.driveRemainingDurationMs : null;
+        const shiftMs = shift.shiftRemainingDurationMs != null ? shift.shiftRemainingDurationMs : null;
+        const cycleMs = cycle.cycleRemainingDurationMs != null ? cycle.cycleRemainingDurationMs : null;
+        const status = (c.currentDutyStatus && c.currentDutyStatus.hosStatusType) || null;
+        // Ranked the way a dispatcher would: who stops soonest?
+        const worstMs = [driveMs, shiftMs].filter((x) => x != null).sort((a, b) => a - b)[0];
+        return {
+          driverId: (c.driver && c.driver.id) || null,
+          driverName: (c.driver && c.driver.name) || '',
+          vehicle: (c.currentVehicle && c.currentVehicle.name) || null,
+          status,
+          driving: status === 'driving',
+          driveRemainingMin: driveMs != null ? Math.round(driveMs / MIN) : null,
+          shiftRemainingMin: shiftMs != null ? Math.round(shiftMs / MIN) : null,
+          cycleRemainingMin: cycleMs != null ? Math.round(cycleMs / MIN) : null,
+          timeUntilBreakMin: drive.timeUntilBreakDurationMs != null
+            ? Math.round(drive.timeUntilBreakDurationMs / MIN) : null,
+          worstRemainingMin: worstMs != null ? Math.round(worstMs / MIN) : null,
+        };
+      });
+      const driving = rows.filter((r2) => r2.driving);
+      res.json({
+        rows: rows.sort((a, b) => (a.worstRemainingMin ?? 1e9) - (b.worstRemainingMin ?? 1e9)),
+        counts: {
+          total: rows.length,
+          driving: driving.length,
+          // Bands that mean something operationally, not just "in violation".
+          outOfHours: rows.filter((r2) => r2.worstRemainingMin != null && r2.worstRemainingMin <= 0).length,
+          under1h: driving.filter((r2) => r2.worstRemainingMin != null && r2.worstRemainingMin > 0 && r2.worstRemainingMin <= 60).length,
+          under2h: driving.filter((r2) => r2.worstRemainingMin != null && r2.worstRemainingMin > 60 && r2.worstRemainingMin <= 120).length,
+        },
+      });
+    } catch (e) {
+      console.error('[fleet] hos failed:', e.message);
+      res.status(502).json({ error: e.message });
+    }
+  });
+
+  console.log('[fleet] live fleet state ready — GET /fleet/live, /fleet/hos, PUT /fleet/telematics');
   return { classify, summarise, STATE };
 }
