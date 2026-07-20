@@ -144,19 +144,33 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   async function writeStore(store) {
     const host = await hostDevice();
     const attributes = { ...(host.attributes || {}), taPush: store };
-    const body = JSON.stringify({ ...host, attributes });
+    // Send ONLY the writable fields. Echoing the whole device object back —
+    // including server-computed fields like status, lastUpdate and positionId —
+    // is what Traccar was rejecting with a 400, and because every write failed,
+    // no de-dupe signature was ever saved. That's the repeat-alert spam.
+    const body = JSON.stringify({
+      id: host.id,
+      name: host.name,
+      uniqueId: host.uniqueId,
+      groupId: host.groupId || 0,
+      phone: host.phone || '',
+      model: host.model || '',
+      contact: host.contact || '',
+      category: host.category || null,
+      disabled: !!host.disabled,
+      attributes,
+    });
     const r = await fetch(`${TRACCAR_URL}/api/devices/${host.id}`, {
       method: 'PUT',
       headers: { ...traccarHeaders, 'Content-Type': 'application/json' },
       body,
     });
-    // Traccar caps the attributes column (~4000 chars). If we blow past it the
-    // PUT is rejected and EVERY change in this write is lost — tokens and
-    // de-dupe signatures included, which silently causes repeat pushes. Never
-    // let that fail quietly again.
     if (!r.ok) {
-      console.error(`[push] writeStore FAILED ${r.status} — taPush is ${JSON.stringify(store).length} chars. `
-        + 'If this is a size error, state is being dropped.');
+      // Print what Traccar actually objected to — guessing at this has cost
+      // far more time than one line of error text.
+      let detail = '';
+      try { detail = (await r.text()).slice(0, 300); } catch { /* ignore */ }
+      console.error(`[push] writeStore FAILED ${r.status} — taPush ${JSON.stringify(store).length} chars — ${detail}`);
     }
     return r.ok;
   }
@@ -840,7 +854,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v14 (persistent poll window across restarts; safe sig trim; event logging) — polling every 30s.');
+    console.log('[push] APNs enabled v15 (fixes the 400 that was discarding all de-dupe state; persistent poll window; event logging) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
