@@ -96,15 +96,24 @@ async function hostDevice() {
 // can't overwrite one another.
 const db = initDb({ TRACCAR_URL, traccarHeaders, DATABASE_URL: process.env.DATABASE_URL });
 
+// Every account list the app knows about. Adding a product means adding its key
+// HERE as well as calling makeAccountRoutes — otherwise the route reads an
+// undefined list and every signup fails with a generic 502.
+const ACCOUNT_LISTS = ['brokers', 'members', 'fleets'];
+const blankAccounts = () => Object.fromEntries(ACCOUNT_LISTS.map((k) => [k, []]));
+
 async function readAccounts() {
   const a = await db.get('taAccounts', {});
-  return { brokers: a.brokers || [], members: a.members || [] };
+  const out = {};
+  for (const k of ACCOUNT_LISTS) out[k] = a[k] || [];
+  return out;
 }
 async function writeAccounts(mutator) {
-  return db.update('taAccounts', (cur) => mutator({
-    brokers: [...(cur.brokers || [])],
-    members: [...(cur.members || [])],
-  }), { brokers: [], members: [] });
+  return db.update('taAccounts', (cur) => {
+    const copy = {};
+    for (const k of ACCOUNT_LISTS) copy[k] = [...(cur[k] || [])];
+    return { ...cur, ...mutator(copy) };
+  }, blankAccounts());
 }
 const uid = (p) => `${p}${Date.now()}${Math.floor(Math.random() * 1e4)}`;
 const norm = (e) => String(e || '').toLowerCase().trim();
@@ -145,6 +154,9 @@ function makeAccountRoutes(kind, listKey) {
       res.json({ ...user, token });
     } catch (err) {
       if (err.code === 'exists') return res.status(409).json({ error: 'An account with that email already exists.' });
+      // Log the real cause — a bare "Could not create the account" gives the
+      // user nothing and gives us nothing either.
+      console.error(`[auth] ${kind} signup failed:`, err.message);
       res.status(502).json({ error: 'Could not create the account.' });
     }
   });
