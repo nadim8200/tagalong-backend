@@ -259,6 +259,91 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
     }
   });
 
-  console.log('[fleet] live fleet state ready — GET /fleet/live, /fleet/hos, PUT /fleet/telematics');
+  // ---- drivers, and which truck they're in ----
+  //
+  // Samsara already holds the roster and the current driver-vehicle assignment.
+  // Asking a company to re-enter 193 drivers they've already got is exactly the
+  // sort of duplicate data entry that makes people abandon a tool — and the two
+  // copies would immediately drift apart.
+  //
+  // Assignment comes from the HOS clocks, which carry `currentVehicle`. That's
+  // the live, authoritative answer to "who is in truck 2606 right now",
+  // and it needs no extra permissions beyond what we already use.
+  app.get('/fleet/drivers', requireAuth, async (req, res) => {
+    try {
+      const owner = String(req.user.company || req.user.id);
+      const token = await tokenFor(owner);
+      if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
+      const headers = { Authorization: `Bearer ${token}` };
+
+      // Roster (paginated — a 193-driver fleet needs more than one page).
+      const drivers = [];
+      let cursor = null, pages = 0;
+      do {
+        const qs = new URLSearchParams({ limit: '100' });
+        if (cursor) qs.set('after', cursor);
+        const r = await fetch(`https://api.samsara.com/fleet/drivers?${qs}`, { headers });
+        if (!r.ok) {
+          const detail = await r.text().catch(() => '');
+          return res.status(502).json({ error: `Samsara ${r.status}`, detail: detail.slice(0, 200) });
+        }
+        const j = await r.json();
+        for (const d of (j.data || [])) {
+          drivers.push({
+            id: String(d.id),
+            name: d.name || '',
+            username: d.username || '',
+            phone: d.phone || '',
+            license: d.licenseNumber || '',
+            licenseState: d.licenseState || '',
+            status: d.driverActivationStatus || '',
+            timezone: d.timezone || null,
+          });
+        }
+        const pg = j.pagination || {};
+        cursor = pg.hasNextPage ? pg.endCursor : null;
+        pages += 1;
+      } while (cursor && pages < 10);
+
+      // Live assignment + duty status from the HOS clocks.
+      const byId = new Map(drivers.map((d) => [d.id, d]));
+      try {
+        const hr = await fetch('https://api.samsara.com/fleet/hos/clocks?limit=200', { headers });
+        if (hr.ok) {
+          const hj = await hr.json();
+          for (const c of (hj.data || [])) {
+            const id = c.driver && String(c.driver.id);
+            if (!id) continue;
+            const d = byId.get(id) || { id, name: (c.driver && c.driver.name) || '' };
+            d.vehicle = (c.currentVehicle && c.currentVehicle.name) || null;
+            d.vehicleId = (c.currentVehicle && String(c.currentVehicle.id)) || null;
+            d.dutyStatus = (c.currentDutyStatus && c.currentDutyStatus.hosStatusType) || null;
+            if (!byId.has(id)) { drivers.push(d); byId.set(id, d); }
+          }
+        }
+      } catch { /* roster still useful without live assignment */ }
+
+      const assigned = drivers.filter((d) => d.vehicleId);
+      // Vehicle id → driver, so the vehicle list can label itself.
+      const byVehicle = {};
+      for (const d of assigned) byVehicle[d.vehicleId] = { id: d.id, name: d.name, phone: d.phone, dutyStatus: d.dutyStatus };
+
+      res.json({
+        drivers: drivers.sort((a, b) => String(a.name).localeCompare(String(b.name))),
+        byVehicle,
+        counts: {
+          total: drivers.length,
+          active: drivers.filter((d) => d.status === 'active').length,
+          assigned: assigned.length,
+          driving: drivers.filter((d) => d.dutyStatus === 'driving').length,
+        },
+      });
+    } catch (e) {
+      console.error('[fleet] drivers failed:', e.message);
+      res.status(502).json({ error: e.message });
+    }
+  });
+
+  console.log('[fleet] live fleet state ready — GET /fleet/live, /fleet/hos, /fleet/drivers, PUT /fleet/telematics');
   return { classify, summarise, STATE };
 }
