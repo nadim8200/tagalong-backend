@@ -507,6 +507,173 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
     }
   });
 
-  console.log('[fleet] ready — /fleet/live, /fleet/hos, /fleet/drivers, /fleet/vehicles/full, /fleet/discover');
+  // ---- outbound LTL runs in progress ----
+  //
+  // The screen a dispatcher actually watches: which trucks are out on a
+  // delivery run, how far through they are, what's next, and what's gone wrong.
+  //
+  // Mapping is duplicated from tms/samsara.js rather than imported, because the
+  // backend repo is flat and the adapters aren't deployed there. Both were
+  // VERIFIED against a live route payload — routes carry no `state` and no
+  // `vehicle`, stop states are departed/skipped/en_route, `externalIds` is an
+  // object keyed "0","1",…, and only `singleUseLocation` has coordinates.
+  // If one changes, change both.
+  const R_MI = 3958.8;
+  const rad = (d) => (d * Math.PI) / 180;
+  function miles(aLat, aLng, bLat, bLng) {
+    const dLat = rad(bLat - aLat), dLng = rad(bLng - aLng);
+    const s = Math.sin(dLat / 2) ** 2 + Math.cos(rad(aLat)) * Math.cos(rad(bLat)) * Math.sin(dLng / 2) ** 2;
+    return 2 * R_MI * Math.asin(Math.sqrt(s));
+  }
+  const billsFrom = (ext) => {
+    if (!ext) return [];
+    const vals = Array.isArray(ext) ? ext : Object.values(ext);
+    return vals.map((v) => String(v).split('-')[0].trim()).filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i);
+  };
+  const DONE_STATES = new Set(['departed', 'completed', 'skipped']);
+
+  app.get('/fleet/runs', requireAuth, async (req, res) => {
+    try {
+      const owner = String(req.user.company || req.user.id);
+      const token = await tokenFor(owner);
+      if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
+      const headers = { Authorization: `Bearer ${token}` };
+      const now = Date.now();
+
+      // Routes, live positions and HOS together — a run without the truck's
+      // current position can't answer "where is it and will it make the next
+      // appointment", which is the whole point of the screen.
+      const start = new Date(now - 3 * 86400000).toISOString();
+      const end = new Date(now + 7 * 86400000).toISOString();
+      const [rr, vr, hr] = await Promise.all([
+        fetch(`https://api.samsara.com/fleet/routes?startTime=${start}&endTime=${end}&limit=100`, { headers }),
+        fetch('https://api.samsara.com/fleet/vehicles/stats?types=gps,engineStates', { headers }),
+        fetch('https://api.samsara.com/fleet/hos/clocks?limit=200', { headers }),
+      ]);
+      if (!rr.ok) {
+        const detail = await rr.text().catch(() => '');
+        return res.status(502).json({ error: `Samsara routes ${rr.status}`, detail: detail.slice(0, 250) });
+      }
+      const routes = (await rr.json()).data || [];
+      const vehicles = vr.ok ? ((await vr.json()).data || []) : [];
+      const clocks = hr.ok ? ((await hr.json()).data || []) : [];
+
+      // driver id → { vehicle, hours left }
+      const hosByDriver = new Map();
+      for (const c of clocks) {
+        const id = c.driver && String(c.driver.id);
+        if (!id) continue;
+        const drive = (c.clocks && c.clocks.drive) || {};
+        const shift = (c.clocks && c.clocks.shift) || {};
+        const ms = [drive.driveRemainingDurationMs, shift.shiftRemainingDurationMs]
+          .filter((x) => x != null).sort((a, b) => a - b)[0];
+        hosByDriver.set(id, {
+          vehicleName: (c.currentVehicle && c.currentVehicle.name) || null,
+          vehicleId: (c.currentVehicle && String(c.currentVehicle.id)) || null,
+          remainingMin: ms != null ? Math.round(ms / 60000) : null,
+          dutyStatus: (c.currentDutyStatus && c.currentDutyStatus.hosStatusType) || null,
+        });
+      }
+      const vehById = new Map(vehicles.map((v) => [String(v.id), v]));
+
+      const runs = routes.map((route) => {
+        const stops = (route.stops || []).map((s) => {
+          const sul = s.singleUseLocation || null;
+          return {
+            id: s.id,
+            name: s.name || (s.address && s.address.name) || '',
+            addressId: (s.address && s.address.id) || null,
+            lat: sul ? sul.latitude : null,
+            lng: sul ? sul.longitude : null,
+            appointmentAt: s.scheduledArrivalTime || null,
+            arrivedAt: s.actualArrivalTime || null,
+            departedAt: s.actualDepartureTime || null,
+            enRouteAt: s.enRouteTime || null,
+            skippedAt: s.skippedTime || null,
+            state: s.state || null,
+            sequence: s.sequenceNumber || null,
+            bills: billsFrom(s.externalIds),
+            proofCount: (s.documents || []).length,
+            notes: s.notes || '',
+          };
+        });
+
+        const done = stops.filter((s) => DONE_STATES.has(s.state)).length;
+        const skipped = stops.filter((s) => s.state === 'skipped');
+        const next = stops.find((s) => !DONE_STATES.has(s.state)) || null;
+        const driverId = (route.driver && String(route.driver.id)) || null;
+        const hos = driverId ? hosByDriver.get(driverId) : null;
+        const veh = hos && hos.vehicleId ? vehById.get(hos.vehicleId) : null;
+        const gps = (veh && veh.gps) || null;
+
+        // Distance and ETA to the next stop, when we have both ends.
+        let milesToNext = null, etaAt = null, lateByMin = null;
+        if (gps && next && next.lat != null) {
+          milesToNext = Math.round(miles(gps.latitude, gps.longitude, next.lat, next.lng));
+          const hrs = milesToNext / 48;
+          etaAt = new Date(now + hrs * 3600000).toISOString();
+          if (next.appointmentAt) {
+            lateByMin = Math.round((Date.parse(etaAt) - Date.parse(next.appointmentAt)) / 60000);
+          }
+        }
+
+        const complete = stops.length > 0 && done === stops.length;
+        return {
+          id: String(route.id),
+          reference: route.name || String(route.id),
+          driverId,
+          driverName: (route.driver && route.driver.name) || '',
+          truck: hos ? hos.vehicleName : null,
+          dutyStatus: hos ? hos.dutyStatus : null,
+          hoursLeftMin: hos ? hos.remainingMin : null,
+          lat: gps ? gps.latitude : null,
+          lng: gps ? gps.longitude : null,
+          speedMph: gps ? Math.round(gps.speedMilesPerHour || 0) : null,
+          place: (gps && gps.reverseGeo && gps.reverseGeo.formattedLocation) || null,
+          gpsAt: gps ? gps.time : null,
+          stopCount: stops.length,
+          stopsDone: done,
+          skippedCount: skipped.length,
+          skippedStops: skipped.map((s) => ({ name: s.name, bills: s.bills })),
+          totalBills: stops.reduce((n, s) => n + s.bills.length, 0),
+          complete,
+          nextStop: next ? {
+            name: next.name, appointmentAt: next.appointmentAt, bills: next.bills,
+            notes: next.notes, sequence: next.sequence,
+          } : null,
+          milesToNext, etaAt, lateByMin,
+          scheduledStartAt: route.scheduledRouteStartTime || null,
+          actualStartAt: route.actualRouteStartTime || null,
+          timezone: route.orgLocalTimezone || null,
+          stops,
+        };
+      });
+
+      // In progress = started, not finished. That's what "on the road" means.
+      const active = runs.filter((r) => !r.complete && (r.stopsDone > 0 || r.actualStartAt));
+      const upcoming = runs.filter((r) => !r.complete && r.stopsDone === 0 && !r.actualStartAt);
+
+      active.sort((a, b) => (b.lateByMin ?? -1e9) - (a.lateByMin ?? -1e9));
+
+      res.json({
+        active, upcoming,
+        counts: {
+          active: active.length,
+          upcoming: upcoming.length,
+          completed: runs.filter((r) => r.complete).length,
+          stopsRemaining: active.reduce((n, r) => n + (r.stopCount - r.stopsDone), 0),
+          skipped: active.reduce((n, r) => n + r.skippedCount, 0),
+          late: active.filter((r) => r.lateByMin != null && r.lateByMin > 15).length,
+          lowHours: active.filter((r) => r.hoursLeftMin != null && r.hoursLeftMin <= 60).length,
+        },
+      });
+    } catch (e) {
+      console.error('[fleet] runs failed:', e.message);
+      res.status(502).json({ error: e.message });
+    }
+  });
+
+  console.log('[fleet] ready — /fleet/live, /fleet/hos, /fleet/drivers, /fleet/vehicles/full, /fleet/runs, /fleet/discover');
   return { classify, summarise, STATE };
 }
