@@ -344,6 +344,169 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
     }
   });
 
-  console.log('[fleet] live fleet state ready — GET /fleet/live, /fleet/hos, /fleet/drivers, PUT /fleet/telematics');
+  // ---- what does this Samsara account actually expose? ----
+  //
+  // Written after guessing route field names from documentation and getting
+  // them wrong. Rather than assume, probe: call each endpoint once, record the
+  // HTTP status and the field names that come back, and report it. That tells
+  // us what this specific account is licensed for and permitted to read —
+  // which varies enormously between Samsara customers depending on their plan
+  // and the token's scopes.
+  //
+  // Costs one small request per endpoint, run on demand only.
+  const PROBES = [
+    { key: 'vehicles', label: 'Vehicles', url: '/fleet/vehicles?limit=1' },
+    { key: 'vehicleStats', label: 'Vehicle stats (live)', url: '/fleet/vehicles/stats?types=gps,engineStates,fuelPercents,obdOdometerMeters,engineRpm,engineCoolantTemperatureMilliC,batteryMilliVolts,ambientAirTemperature,defLevelMilliPercent,faultCodes,engineSeconds&limit=1' },
+    { key: 'drivers', label: 'Drivers', url: '/fleet/drivers?limit=1' },
+    { key: 'hosClocks', label: 'HOS clocks', url: '/fleet/hos/clocks?limit=1' },
+    { key: 'hosLogs', label: 'HOS logs', url: '/fleet/hos/logs?limit=1' },
+    { key: 'assets', label: 'Assets (trailers/equipment)', url: '/assets?limit=1' },
+    { key: 'addresses', label: 'Addresses / geofences', url: '/addresses?limit=1' },
+    { key: 'safetyEvents', label: 'Safety events', url: '/fleet/safety-events?limit=1' },
+    { key: 'trailers', label: 'Trailers', url: '/fleet/trailers?limit=1' },
+    { key: 'documents', label: 'Documents', url: '/fleet/documents?limit=1' },
+    { key: 'forms', label: 'Forms', url: '/form-submissions?limit=1' },
+    { key: 'maintenance', label: 'DVIRs', url: '/fleet/maintenance/dvirs?limit=1' },
+    { key: 'tags', label: 'Tags', url: '/tags?limit=1' },
+    { key: 'webhooks', label: 'Webhooks', url: '/webhooks' },
+  ];
+
+  // Field names, one level deep, so we can see the shape without dumping data.
+  function shapeOf(v, depth = 0) {
+    if (v == null) return null;
+    if (Array.isArray(v)) return v.length ? [shapeOf(v[0], depth + 1)] : [];
+    if (typeof v === 'object') {
+      if (depth >= 2) return '{…}';
+      const out = {};
+      for (const k of Object.keys(v).slice(0, 40)) out[k] = shapeOf(v[k], depth + 1);
+      return out;
+    }
+    return typeof v;
+  }
+
+  app.get('/fleet/discover', requireAuth, async (req, res) => {
+    try {
+      const owner = String(req.user.company || req.user.id);
+      const token = await tokenFor(owner);
+      if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
+      const headers = { Authorization: `Bearer ${token}` };
+
+      const out = [];
+      for (const p of PROBES) {
+        try {
+          const r = await fetch(`https://api.samsara.com${p.url}`, { headers });
+          const body = await r.json().catch(() => null);
+          const sample = body && (Array.isArray(body.data) ? body.data[0] : body.data) ;
+          out.push({
+            key: p.key,
+            label: p.label,
+            status: r.status,
+            available: r.ok,
+            // 403 usually means "not licensed / token lacks scope" rather than
+            // "doesn't exist" — worth distinguishing for the customer.
+            note: r.status === 403 ? 'Not permitted — check plan or token scopes.'
+              : r.status === 404 ? 'Endpoint not available on this account.'
+                : r.ok && !sample ? 'Reachable but returned no records.' : null,
+            fields: sample ? Object.keys(sample) : [],
+            shape: sample ? shapeOf(sample) : null,
+          });
+        } catch (e) {
+          out.push({ key: p.key, label: p.label, status: 0, available: false, note: e.message, fields: [] });
+        }
+      }
+      res.json({
+        probes: out,
+        summary: {
+          available: out.filter((o) => o.available).length,
+          total: out.length,
+          blocked: out.filter((o) => o.status === 403).map((o) => o.label),
+        },
+      });
+    } catch (e) {
+      console.error('[fleet] discover failed:', e.message);
+      res.status(502).json({ error: e.message });
+    }
+  });
+
+  // ---- full vehicle detail ----
+  // Everything Samsara will give us per truck, in one call. Values are
+  // normalised out of Samsara's units (milli-anything) into what a human reads.
+  app.get('/fleet/vehicles/full', requireAuth, async (req, res) => {
+    try {
+      const owner = String(req.user.company || req.user.id);
+      const token = await tokenFor(owner);
+      if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
+      const types = [
+        'gps', 'engineStates', 'fuelPercents', 'obdOdometerMeters', 'engineRpm',
+        'engineCoolantTemperatureMilliC', 'batteryMilliVolts', 'ambientAirTemperature',
+        'defLevelMilliPercent', 'faultCodes', 'engineSeconds',
+      ].join(',');
+      const r = await fetch(`https://api.samsara.com/fleet/vehicles/stats?types=${types}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!r.ok) {
+        const detail = await r.text().catch(() => '');
+        return res.status(502).json({ error: `Samsara ${r.status}`, detail: detail.slice(0, 300) });
+      }
+      const j = await r.json();
+      const val = (x) => (x && x.value != null ? x.value : null);
+      const rows = (j.data || []).map((v) => {
+        const gps = v.gps || {};
+        const faults = v.faultCodes || {};
+        const obd = faults.obdii || {};
+        const j1939 = faults.j1939 || {};
+        const codes = [
+          ...((obd.diagnosticTroubleCodes || []).map((c) => c.dtcShortCode || c.fmiDescription).filter(Boolean)),
+          ...((j1939.diagnosticTroubleCodes || []).map((c) => c.spnDescription || c.fmiDescription).filter(Boolean)),
+        ];
+        const odoM = val(v.obdOdometerMeters);
+        const coolantMilliC = val(v.engineCoolantTemperatureMilliC);
+        const battMv = val(v.batteryMilliVolts);
+        const defMilli = val(v.defLevelMilliPercent);
+        const ambient = v.ambientAirTemperature || {};
+        return {
+          id: v.id,
+          name: v.name,
+          vin: (v.externalIds && v.externalIds['samsara.vin']) || null,
+          serial: (v.externalIds && v.externalIds['samsara.serial']) || null,
+          engine: val(v.engineStates),
+          lat: gps.latitude ?? null,
+          lng: gps.longitude ?? null,
+          speedMph: gps.speedMilesPerHour ?? null,
+          heading: gps.headingDegrees ?? null,
+          place: (gps.reverseGeo && gps.reverseGeo.formattedLocation) || null,
+          addressName: (gps.address && gps.address.name) || null,
+          addressId: (gps.address && gps.address.id) || null,
+          gpsAt: gps.time || null,
+          fuelPct: val(v.fuelPercents),
+          odometerMi: odoM != null ? Math.round(odoM / 1609.34) : null,
+          rpm: val(v.engineRpm),
+          coolantF: coolantMilliC != null ? Math.round((coolantMilliC / 1000) * 9 / 5 + 32) : null,
+          batteryV: battMv != null ? Number((battMv / 1000).toFixed(1)) : null,
+          defPct: defMilli != null ? Math.round(defMilli / 1000) : null,
+          ambientF: ambient.ambientAirTemperatureMilliC != null
+            ? Math.round((ambient.ambientAirTemperatureMilliC / 1000) * 9 / 5 + 32) : null,
+          engineHours: val(v.engineSeconds) != null ? Math.round(val(v.engineSeconds) / 3600) : null,
+          faultCodes: codes,
+          faultCount: codes.length,
+        };
+      });
+      res.json({
+        vehicles: rows,
+        counts: {
+          total: rows.length,
+          withFaults: rows.filter((x) => x.faultCount > 0).length,
+          lowFuel: rows.filter((x) => x.fuelPct != null && x.fuelPct < 20).length,
+          lowDef: rows.filter((x) => x.defPct != null && x.defPct < 20).length,
+          lowBattery: rows.filter((x) => x.batteryV != null && x.batteryV < 12.2).length,
+        },
+      });
+    } catch (e) {
+      console.error('[fleet] full vehicles failed:', e.message);
+      res.status(502).json({ error: e.message });
+    }
+  });
+
+  console.log('[fleet] ready — /fleet/live, /fleet/hos, /fleet/drivers, /fleet/vehicles/full, /fleet/discover');
   return { classify, summarise, STATE };
 }
