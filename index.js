@@ -25,6 +25,8 @@ import 'dotenv/config';
 import { initPush } from './push.js';
 import { initDb } from './db.js';
 import { initLoads } from './loads.js';
+import { initPod } from './pod.js';
+import { initDispatcher } from './dispatcher.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -470,6 +472,12 @@ initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env: process.env, db }
 // Dispatch loads + the API a partner TMS integrates against. Safely no-ops
 // (503 with a clear message) until DATABASE_URL is configured.
 initLoads(app, { requireAuth, db, pool: db.pool });
+
+// Driver proof-of-delivery capture (counts as DATA, plus the photo evidence).
+initPod(app, { requireAuth, db, pool: db.pool });
+
+// The AI dispatcher's continuous review — what needs a human right now.
+initDispatcher(app, { requireAuth, db, pool: db.pool });
 
 app.get('/', (_req, res) => res.send('TagAlong backend is running.'));
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));
