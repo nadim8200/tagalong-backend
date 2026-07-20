@@ -414,7 +414,12 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     //   • went quiet after being parked       → almost certainly just asleep
     const last = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : (d.lastUpdate ? new Date(d.lastUpdate).getTime() : 0);
     const silentMs = last ? Date.now() - last : 0;
-    const wasRunning = a.ignition === true;
+    // Not just "ignition was on" — a tracker very often sends its LAST report
+    // with ignition still true and then sleeps the moment you park, so that
+    // alone makes every normal park look like an unplug. A tracker pulled
+    // mid-drive was actually MOVING when it went quiet.
+    const lastMph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
+    const wasRunning = a.ignition === true && lastMph >= 5;
     // per-car override, in hours, for the parked case
     const parkedHrs = Number((d.attributes || {}).taOfflineHours) > 0
       ? Number((d.attributes || {}).taOfflineHours) : 24;
@@ -422,7 +427,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       out.push({
         key: 'disconnect', val: 'running',
         title: `🔌 ${car} — tracker stopped reporting`,
-        body: 'It went silent while the engine was running. It may have been unplugged or lost power.',
+        body: `It stopped reporting while the car was moving at ${lastMph} mph. It may have been unplugged or lost power.`,
       });
     } else if (last && !wasRunning && silentMs > parkedHrs * 60 * 60 * 1000) {
       const hrs = Math.round(silentMs / 3600000);
@@ -947,7 +952,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v18 (speed-limit alerts work on untagged streets; de-dupe state off Traccar) — polling every 30s.');
+    console.log('[push] APNs enabled v19 (unplug alert needs the car to have been MOVING; speed-limit on untagged streets) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
