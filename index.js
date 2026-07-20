@@ -7,6 +7,8 @@
 //   Owners / Admin : POST /auth/login          (verified against Traccar)
 //   Brokers        : POST /auth/broker/signup | /auth/broker/login
 //   Family         : POST /auth/member/signup | /auth/member/login
+//   Fleet (B2B)    : POST /auth/fleet/signup  | /auth/fleet/login
+//                    GET/PUT /fleet/data      (drivers, assignments, staff)
 //   Everyone       : GET  /auth/me   POST /auth/logout
 //   Proxy          : ALL  /api/traccar/*        (authenticated; token added here)
 //
@@ -162,6 +164,43 @@ function makeAccountRoutes(kind, listKey) {
 }
 makeAccountRoutes('broker', 'brokers');
 makeAccountRoutes('member', 'members');
+// TagAlong Fleet — the commercial product. A company account owns drivers,
+// vehicle assignments and staff logins. Same signup/login shape as the others.
+makeAccountRoutes('fleet', 'fleets');
+
+// ---- fleet data (drivers, vehicle assignments, staff) ----
+// One document per company, keyed by the fleet account id. Kept as a document
+// because it's read whole on every dashboard load and is small per company;
+// drivers become their own table if/when a company has hundreds of them.
+const FLEET_BLANK = { drivers: [], assignments: {}, staff: [], updatedAt: null };
+
+function requireFleet(req, res, next) {
+  if (!req.user || req.user.role !== 'fleet') return res.status(403).json({ error: 'Fleet account required.' });
+  next();
+}
+
+app.get('/fleet/data', requireAuth, requireFleet, async (req, res) => {
+  try {
+    const all = await db.get('taFleet', {});
+    res.json(all[String(req.user.id)] || FLEET_BLANK);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+app.put('/fleet/data', requireAuth, requireFleet, async (req, res) => {
+  const body = req.body || {};
+  try {
+    const next = await db.update('taFleet', (cur) => ({
+      ...cur,
+      [String(req.user.id)]: {
+        drivers: Array.isArray(body.drivers) ? body.drivers : [],
+        assignments: body.assignments && typeof body.assignments === 'object' ? body.assignments : {},
+        staff: Array.isArray(body.staff) ? body.staff : [],
+        updatedAt: new Date().toISOString(),
+      },
+    }), {});
+    res.json(next[String(req.user.id)]);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
 
 app.post('/auth/logout', (req, res) => { res.clearCookie(COOKIE, cookieOpts); res.json({ ok: true }); });
 
