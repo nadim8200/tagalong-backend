@@ -24,6 +24,7 @@ import { scryptSync, randomBytes, timingSafeEqual } from 'crypto';
 import 'dotenv/config';
 import { initPush } from './push.js';
 import { initDb } from './db.js';
+import { initLoads } from './loads.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -465,6 +466,10 @@ app.post('/fleet/release', requireAuth, requireFleet, async (req, res) => {
 // Locked-phone push notifications (APNs). Registers /push/register + /push/unregister
 // and starts the server-side alert poller. No-ops safely until the APNS_* env vars are set.
 initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env: process.env, db });
+
+// Dispatch loads + the API a partner TMS integrates against. Safely no-ops
+// (503 with a clear message) until DATABASE_URL is configured.
+initLoads(app, { requireAuth, db, pool: db.pool });
 
 app.get('/', (_req, res) => res.send('TagAlong backend is running.'));
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));

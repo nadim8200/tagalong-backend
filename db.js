@@ -231,5 +231,7 @@ export function initDb({ TRACCAR_URL, traccarHeaders, DATABASE_URL }) {
     return rows.map((r) => r.entry);
   }
 
-  return { enabled, get, set, update, appendAlert, readAlerts, ensureReady };
+  // Exposed so modules that need real tables (loads, events) can use the same
+  // pool rather than opening a second one.
+  return { enabled, get, set, update, appendAlert, readAlerts, ensureReady, pool };
 }
