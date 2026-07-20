@@ -546,9 +546,26 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   }
 
   // ---- the poll loop ----
-  let lastCheck = Date.now() - 5 * 60 * 1000;
+  // Persisted across restarts: this used to be memory-only, so every deploy or
+  // sleep/wake reset the window to "now minus 5 minutes" and silently dropped
+  // every event in the gap. That's what made ignition alerts miss at random.
+  const MAX_CATCHUP_MS = 45 * 60 * 1000;
+  let lastCheck = 0;
+  async function loadLastCheck() {
+    const log = await readLog();
+    const saved = Number(log.__lastCheck || 0);
+    const floor = Date.now() - MAX_CATCHUP_MS;
+    lastCheck = saved && saved > floor ? saved : Date.now() - 5 * 60 * 1000;
+  }
+  async function saveLastCheck(t) {
+    const log = await readLog();
+    log.__lastCheck = t;
+    try { await fsp.writeFile(LOG_PATH, JSON.stringify(log)); } catch { /* best effort */ }
+  }
+
   async function poll() {
     if (!enabled) return;
+    if (!lastCheck) await loadLastCheck();
     const now = Date.now();
     const fromISO = new Date(lastCheck).toISOString();
     const toISO = new Date(now).toISOString();
@@ -577,6 +594,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
           // event-based (crash, geofence, overspeed, ignition, fuel drop…)
           const events = await recentEvents(d.id, fromISO, toISO);
+          if (events.length) {
+            console.log(`[push] ${NAMED(d)}: ${events.length} event(s) — ${events.map((e) => e.type).join(', ')}`);
+          }
           for (const ev of events) {
             const p = eventToPush(d, ev, geoNames);
             if (!p) continue;
@@ -798,21 +818,29 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
             if (dead.length) { console.log(`[push]   pruned ${dead.length} dead token(s)`); rec.tokens = (rec.tokens || []).filter((t) => !dead.includes(t.token)); }
           }
         }
-        // keep the sigs map from growing forever
-        const keys = Object.keys(rec.sigs);
-        if (keys.length > 400) { rec.sigs = Object.fromEntries(keys.slice(-200).map((k) => [k, rec.sigs[k]])); changed = true; }
+        // Keep the sigs map from growing forever — but ONLY evict one-shot
+        // `ev:<id>` keys. The old trim dropped the oldest keys wholesale, which
+        // meant long-lived state (fault flags, tow timers, re-arm clocks) got
+        // wiped once enough events had streamed through, resetting conditions
+        // and re-alerting things the owner had already been told about.
+        const evKeys = Object.keys(rec.sigs).filter((k) => k.startsWith('ev:'));
+        if (evKeys.length > 300) {
+          for (const k of evKeys.slice(0, evKeys.length - 150)) delete rec.sigs[k];
+          changed = true;
+        }
       }
       if (changed) await writeStore(store);
     } catch (e) {
       console.error('[push] poll error:', e.message);
     }
     lastCheck = now;
+    await saveLastCheck(now);
     maybeWeeklyDigest().catch(() => {}); // Sunday-night summary, once per week
   }
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v13 (file-backed history; flapping faults no longer re-alert — 6h floor) — polling every 30s.');
+    console.log('[push] APNs enabled v14 (persistent poll window across restarts; safe sig trim; event logging) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
