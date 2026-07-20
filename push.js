@@ -143,7 +143,16 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   }
   async function writeStore(store) {
     const host = await hostDevice();
-    const attributes = { ...(host.attributes || {}), taPush: store };
+    // Strip the bulky, file-backed parts before this ever touches Traccar. The
+    // attributes column is capped at 4000 chars for the whole blob (shared with
+    // the community store, shop and orders), so only small durable state —
+    // tokens and scope — belongs here.
+    const lean = {};
+    for (const [uid, rec] of Object.entries(store)) {
+      const { sigs, log, ...keep } = rec; // eslint-disable-line no-unused-vars
+      lean[uid] = keep;
+    }
+    const attributes = { ...(host.attributes || {}), taPush: lean };
     // Send ONLY the writable fields. Echoing the whole device object back —
     // including server-computed fields like status, lastUpdate and positionId —
     // is what Traccar was rejecting with a 400, and because every write failed,
@@ -170,7 +179,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       // far more time than one line of error text.
       let detail = '';
       try { detail = (await r.text()).slice(0, 300); } catch { /* ignore */ }
-      console.error(`[push] writeStore FAILED ${r.status} — taPush ${JSON.stringify(store).length} chars — ${detail}`);
+      console.error(`[push] writeStore FAILED ${r.status} — taPush ${JSON.stringify(lean).length} chars, `
+        + `whole attributes blob ${JSON.stringify(attributes).length} chars (Traccar cap 4000) — ${detail}`);
     }
     return r.ok;
   }
@@ -180,6 +190,28 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   // without bound and would blow the column limit, taking tokens and sigs down
   // with it. This lives on the server's own disk instead.
   const LOG_PATH = path.join(process.env.PUSH_LOG_DIR || os.tmpdir(), 'tagalong-alert-log.json');
+
+  // ---- de-dupe signatures (file-backed) ----
+  // These used to live in the Traccar device attribute alongside the push
+  // tokens. That column is capped at 4000 chars for the WHOLE attributes blob —
+  // shared with the community store, shop products and orders — so as the sig
+  // map grew, every write was rejected with "value too long for type character
+  // varying(4000)". Nothing was ever remembered, so every poll re-alerted
+  // conditions it had already notified. Tokens stay in Traccar (small and worth
+  // persisting); the churn lives here.
+  const SIG_PATH = path.join(process.env.PUSH_LOG_DIR || os.tmpdir(), 'tagalong-sigs.json');
+  let sigCache = null;
+  async function readSigs() {
+    if (sigCache) return sigCache;
+    try { sigCache = JSON.parse(await fsp.readFile(SIG_PATH, 'utf8')) || {}; } catch { sigCache = {}; }
+    return sigCache;
+  }
+  async function writeSigs() {
+    if (!sigCache) return;
+    try { await fsp.writeFile(SIG_PATH, JSON.stringify(sigCache)); } catch (e) {
+      console.error('[push] sig write failed:', e.message);
+    }
+  }
   let logCache = null;
   async function readLog() {
     if (logCache) return logCache;
@@ -374,10 +406,31 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     const car = NAMED(d);
     const out = [];
     const a = (pos && pos.attributes) || {};
-    // tracker disconnected — no report for a while
+    // Tracker gone quiet. An OBD tracker SLEEPS when the car is parked so it
+    // doesn't flatten the battery, so silence on its own means nothing — the
+    // old 20-minute threshold cried wolf on every normal park. What matters is
+    // the state it was in when it stopped reporting:
+    //   • went quiet with the engine RUNNING  → suspicious, could be unplugged
+    //   • went quiet after being parked       → almost certainly just asleep
     const last = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : (d.lastUpdate ? new Date(d.lastUpdate).getTime() : 0);
-    if (last && Date.now() - last > 20 * 60 * 1000) {
-      out.push({ key: 'disconnect', val: 'off', title: `🔌 ${car} — tracker disconnected`, body: 'The tracker went silent — it may be unplugged or lost power.' });
+    const silentMs = last ? Date.now() - last : 0;
+    const wasRunning = a.ignition === true;
+    // per-car override, in hours, for the parked case
+    const parkedHrs = Number((d.attributes || {}).taOfflineHours) > 0
+      ? Number((d.attributes || {}).taOfflineHours) : 24;
+    if (last && wasRunning && silentMs > 30 * 60 * 1000) {
+      out.push({
+        key: 'disconnect', val: 'running',
+        title: `🔌 ${car} — tracker stopped reporting`,
+        body: 'It went silent while the engine was running. It may have been unplugged or lost power.',
+      });
+    } else if (last && !wasRunning && silentMs > parkedHrs * 60 * 60 * 1000) {
+      const hrs = Math.round(silentMs / 3600000);
+      out.push({
+        key: 'disconnect', val: 'parked',
+        title: `🔌 ${car} — no signal for ${hrs}h`,
+        body: `The car has been parked and the tracker hasn't checked in for ${hrs} hours. This is usually normal sleep, but worth a look if you expected it to move.`,
+      });
     }
     // check-engine — matches the app: io30 = count of active fault codes, with
     // the code list from io281/dtcs/dtc/faultCodes when the decoder provides it.
@@ -588,16 +641,25 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
       const fleet = await allDevices();
       const positions = await allPositions();
       const geoNames = await geofenceNames();
-      let changed = false;
+      let changed = false;      // sig state → file
+      let devChanged = false;   // token state → Traccar
+      const sigs = await readSigs();
       for (const [uid, rec] of Object.entries(store)) {
         const tokenRecs = rec.tokens || [];
         if (!tokenRecs.length) continue;
-        rec.sigs = rec.sigs || {};
+        // signatures now come from (and go back to) the file store
+        if (!sigs[uid]) sigs[uid] = {};
+        // one-time migration of anything still sitting in the Traccar attribute
+        if (rec.sigs && typeof rec.sigs === 'object') {
+          Object.assign(sigs[uid], rec.sigs);
+          delete rec.sigs; devChanged = true; changed = true;
+        }
+        rec.sigs = sigs[uid];
         // legacy: older builds stored the history inline, which is what pushed
         // the attribute over Traccar's size limit. Migrate it out and reclaim.
         if (Array.isArray(rec.log)) {
           for (const old of rec.log) await appendLog(uid, old);
-          delete rec.log; changed = true;
+          delete rec.log; devChanged = true;
         }
         const devices = scopeDevices(fleet, rec);
         if (!devices.length) continue;
@@ -829,7 +891,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
             });
 
             const dead = await sendToTokens(tokenRecs, { title: a.title, body: a.body, data: alertData });
-            if (dead.length) { console.log(`[push]   pruned ${dead.length} dead token(s)`); rec.tokens = (rec.tokens || []).filter((t) => !dead.includes(t.token)); }
+            if (dead.length) { console.log(`[push]   pruned ${dead.length} dead token(s)`); rec.tokens = (rec.tokens || []).filter((t) => !dead.includes(t.token)); devChanged = true; }
           }
         }
         // Keep the sigs map from growing forever — but ONLY evict one-shot
@@ -843,7 +905,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           changed = true;
         }
       }
-      if (changed) await writeStore(store);
+      // sigs → local file (cheap, churns constantly); tokens → Traccar (rare)
+      if (changed) await writeSigs();
+      if (devChanged) await writeStore(store);
     } catch (e) {
       console.error('[push] poll error:', e.message);
     }
@@ -854,7 +918,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v15 (fixes the 400 that was discarding all de-dupe state; persistent poll window; event logging) — polling every 30s.');
+    console.log('[push] APNs enabled v17 (de-dupe state off Traccar — fixes varchar(4000) overflow; parked-sleep offline fix) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
