@@ -24,6 +24,19 @@ import os from 'node:os';
 import path from 'node:path';
 
 const KNOTS_TO_MPH = 1.15078;
+// A sleeping tracker keeps re-reporting the last speed it saw, so a parked car
+// reads as still doing 9 mph. Treat the car as stopped unless the report is
+// recent AND the tracker says it's actually in motion — otherwise a stale
+// reading can trigger speeding, tow and idling alerts on a car in a driveway.
+const FRESH_FIX_MS = 7 * 60 * 1000;
+function liveMph(pos) {
+  if (!pos) return 0;
+  const at = pos.attributes || {};
+  const fix = pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+  if (!fix || Date.now() - fix > FRESH_FIX_MS) return 0;
+  if (at.motion === false || at.ignition === false) return 0;
+  return Math.round((pos.speed || 0) * KNOTS_TO_MPH);
+}
 // A fault condition must be absent this long before it's allowed to alert again
 // (a code cleared at the shop that genuinely returns still notifies) …
 const REARM_AFTER_MS = 6 * 60 * 60 * 1000;
@@ -486,7 +499,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
     // speeding — warning threshold and the hard over-speed limit, per car.
     // val is 'on' so it fires once on crossing and re-arms when back under.
-    const mph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
+    const mph = liveMph(pos);
     const warnAt = Number((d.attributes || {}).speedWarnMph) > 0 ? Number((d.attributes || {}).speedWarnMph) : 70;
     const maxAt = Number((d.attributes || {}).speedMaxMph) > 0 ? Number((d.attributes || {}).speedMaxMph) : 85;
     if (mph >= maxAt) {
@@ -760,7 +773,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           // road speed AND the condition to hold for ~90s before alerting.
           {
             const pa = (pos && pos.attributes) || {};
-            const towMph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
+            const towMph = liveMph(pos);
             const pendKey = `towpend:${d.id}`;
             const towKey = `tow:${d.id}`;
             const suspicious = pa.motion === true && pa.ignition === false && towMph >= 4;
@@ -804,7 +817,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           // out of fuel) as opposed to simply being parked somewhere.
           {
             const pa = (pos && pos.attributes) || {};
-            const stopMph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
+            const stopMph = liveMph(pos);
             const stopMin = Number((d.attributes || {}).highwayStopMin) > 0 ? Number((d.attributes || {}).highwayStopMin) : 17;
             const pend = `hwpend:${d.id}`, fired = `hwstop:${d.id}`;
             const stopped = stopMph < 2 && pos && pos.latitude != null;
@@ -834,7 +847,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           // idleAlertMin (default 15 minutes).
           {
             const pa = (pos && pos.attributes) || {};
-            const idleMph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
+            const idleMph = liveMph(pos);
             const idleMin = Number((d.attributes || {}).idleAlertMin) > 0 ? Number((d.attributes || {}).idleAlertMin) : 15;
             const pend = `idlepend:${d.id}`, fired = `idle:${d.id}`;
             if (pa.ignition === true && idleMph < 2) {
@@ -854,7 +867,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
           // speed-limit-aware alert (opt-in per car via taSpeedLimitAlert). Only
           // when moving with real speed; alert once per over-limit episode.
           if ((d.attributes || {}).taSpeedLimitAlert && pos && pos.latitude != null) {
-            const mph = Math.round((pos.speed || 0) * KNOTS_TO_MPH);
+            const mph = liveMph(pos);
             const sig = `spd:${d.id}`;
             // per-car tolerance; default 7 mph over the posted limit
             const over = Number((d.attributes || {}).taSpeedLimitOver) > 0
@@ -952,7 +965,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v19 (unplug alert needs the car to have been MOVING; speed-limit on untagged streets) — polling every 30s.');
+    console.log('[push] APNs enabled v20 (stale speed no longer counts as movement; unplug alert needs real motion) — polling every 30s.');
   }
 
   return { enabled, sendToTokens };
