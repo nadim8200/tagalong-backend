@@ -382,14 +382,29 @@ async function scopeForFleet(user, path, payload) {
 // The owner (or admin) gives the company a per-vehicle claim code; the company
 // enters it once and the vehicle joins their fleet. Same shape as the broker
 // share-code flow already in the app.
+// Share codes are DERIVED from the device (id + hardware id) and only written
+// onto it the first time the owner views them. So we must compute the code the
+// same way the app does — matching only on the stored attribute would reject
+// perfectly valid codes for any vehicle whose code was never displayed.
+// Mirrors genCode() in src/carCode.js — keep the two in step.
+function deviceShareCode(d) {
+  const stored = ((d.attributes || {}).shareCode) || '';
+  if (stored) return String(stored).toUpperCase();
+  const base = `${d.id}-${d.uniqueId || ''}`;
+  let h = 2166136261;
+  for (let i = 0; i < base.length; i++) { h ^= base.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  return 'TA-' + h.toString(36).toUpperCase().padStart(7, '0').slice(0, 7);
+}
+const normCode = (c) => String(c || '').trim().toUpperCase().replace(/\s+/g, '');
+
 app.post('/fleet/claim', requireAuth, requireFleet, async (req, res) => {
-  const code = String((req.body || {}).code || '').trim().toUpperCase();
+  const code = normCode((req.body || {}).code);
   if (!code) return res.status(400).json({ error: 'Enter the vehicle code.' });
   try {
     const r = await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders });
     if (!r.ok) throw new Error('devices fetch failed');
     const all = await r.json();
-    const dev = all.find((d) => String(((d.attributes || {}).shareCode) || '').toUpperCase() === code);
+    const dev = all.find((d) => normCode(deviceShareCode(d)) === code);
     if (!dev) return res.status(404).json({ error: 'No vehicle found with that code.' });
 
     const owner = String(((dev.attributes || {}).taFleetId) || '');
