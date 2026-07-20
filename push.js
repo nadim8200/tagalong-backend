@@ -978,7 +978,11 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
       if (changed) await writeSigs();
       if (devChanged) await writeStore(store);
     } catch (e) {
-      console.error('[push] poll error:', e.message);
+      // Name the subsystem, so a database problem doesn't read like a Traccar
+      // problem (or vice versa) and send us hunting in the wrong place.
+      const where = /ENOTFOUND|ECONNREFUSED|password|role .* does not exist|database .* does not exist|timeout expired/i.test(e.message)
+        ? 'DATABASE' : 'TRACCAR/logic';
+      console.error(`[push] poll error [${where}]:`, e.message);
     }
     lastCheck = now;
     await saveLastCheck(now);
@@ -987,7 +991,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log(`[push] APNs enabled v21 (${USE_DB ? 'Postgres-backed state — durable across deploys' : 'file/Traccar fallback — no DATABASE_URL'}) — polling every 30s.`);
+    console.log(`[push] APNs enabled v22 (${USE_DB ? 'Postgres-backed state — durable across deploys' : 'file/Traccar fallback — no DATABASE_URL'}) — polling every 30s.`);
   }
 
   return { enabled, sendToTokens };

@@ -36,6 +36,21 @@ export function initDb({ TRACCAR_URL, traccarHeaders, DATABASE_URL }) {
   let ready = null;
 
   if (enabled) {
+    // Say out loud which host we're about to talk to (never the password). A
+    // truncated or mis-pasted connection string otherwise shows up only as a
+    // cryptic "getaddrinfo ENOTFOUND <fragment>" from deep inside the driver.
+    try {
+      const u = new URL(DATABASE_URL);
+      console.log(`[db] connecting to host=${u.hostname} port=${u.port || 5432} db=${u.pathname.slice(1) || '(none)'} user=${u.username || '(none)'}`);
+      if (!/\./.test(u.hostname) && !/^localhost$/i.test(u.hostname) && !/^dpg-/.test(u.hostname)) {
+        console.warn(`[db] WARNING: "${u.hostname}" does not look like a real host. `
+          + 'Check DATABASE_URL was pasted whole — Render\'s internal URL looks like '
+          + 'postgresql://user:pass@dpg-xxxxxxxx-a/dbname');
+      }
+    } catch {
+      console.error('[db] DATABASE_URL is not a valid connection string. Expected '
+        + 'postgresql://user:password@host/dbname — got something unparseable.');
+    }
     pool = new Pool({
       connectionString: DATABASE_URL,
       // Render's managed Postgres requires TLS but uses a cert chain Node
