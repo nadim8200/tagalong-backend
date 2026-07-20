@@ -58,6 +58,31 @@ export const AVG_MPH = 50;
 // Miles a truck can cover in a day, by crew type.
 export const dailyMiles = (crew = 'solo') => (DRIVE_HOURS_PER_DAY[crew] || 11) * AVG_MPH;
 
+// MIAMI IS THE HUB, and the only one that counts for repositioning.
+//
+// Memphis and Ventura exist, but they receive trucks and turn them straight
+// back out to Miami — a truck sitting in Memphis is not home, it still has to
+// get to Miami. Scoring against "nearest terminal" therefore OVERSTATES a load
+// that ends at a satellite: it looks like the truck is in position when it
+// isn't. Distance to Miami is the honest measure.
+export const HUB = { code: 'MIA', name: 'Miami FL', lat: 25.8206, lng: -80.3186 }; // 3400 NW 74th Ave
+
+// Kept for reference (they matter for transfers and driver changes), but
+// deliberately NOT used to score repositioning — trucks often never reach them.
+// Addresses confirmed by the operator; coordinates from the street address.
+export const SATELLITE_TERMINALS = [
+  {
+    code: 'MEM', name: 'Memphis FBF Terminal',
+    address: '11153 Hwy 178, Olive Branch, MS 38654',
+    lat: 34.9607, lng: -89.8290,
+  },
+  {
+    code: 'VTA', name: 'Florida Beauty Produce California',
+    address: '6205 Ventura Boulevard, Ventura, CA 93003',
+    lat: 34.2783, lng: -119.2264,
+  },
+];
+
 export function initLoads(app, { requireAuth, db, pool }) {
   // ---- schema ----
   let ready = null;
@@ -314,9 +339,10 @@ export function initLoads(app, { requireAuth, db, pool }) {
   const COST_PER_MILE = 1.8; // fuel, wear, driver — override per carrier later
 
   function scoreBackhaul(load, {
-    lat, lng, homeLat, homeLng, hoursAvailable,
+    lat, lng, hoursAvailable,
+    hub = HUB, // Miami. Satellites don't count — trucks often never reach them.
     costPerMile = COST_PER_MILE,
-    crew = 'solo', // 'team' nearly doubles daily miles — see DOMAIN notes
+    crew = 'solo', // read this off the trip — crew size varies, see DOMAIN notes
   }) {
     const s = (load.data && load.data.stops) || [];
     const pick = s[0] || {};
@@ -329,9 +355,11 @@ export function initLoads(app, { requireAuth, db, pool }) {
     const totalMiles = deadhead + loaded;
     if (!totalMiles) return null;
 
-    const homeBefore = haversineMiles(lat, lng, homeLat, homeLng);
-    const homeAfter = haversineMiles(drop.lat, drop.lng, homeLat, homeLng);
-    const progressHome = homeBefore - homeAfter; // positive = closer to home
+    // Distance to Miami, before and after. Every truck is ultimately heading
+    // back to the hub, so this is the only repositioning measure that's honest.
+    const hubBefore = haversineMiles(lat, lng, hub.lat, hub.lng);
+    const hubAfter = haversineMiles(drop.lat, drop.lng, hub.lat, hub.lng);
+    const progressHome = hubBefore - hubAfter; // positive = closer to Miami
 
     const cost = totalMiles * costPerMile;
     const margin = rate - cost;
@@ -362,13 +390,14 @@ export function initLoads(app, { requireAuth, db, pool }) {
       netValue: Math.round(netValue),
       crew,
       tripDays: Number((totalMiles / dailyMiles(crew)).toFixed(1)),
+      milesFromHubAfter: Math.round(hubAfter),
       reachablePickupToday,
       score: Math.round(netValue), // dollars — sortable and explainable
       why: [
         `$${rate.toFixed(0)} − $${Math.round(cost)} cost over ${Math.round(totalMiles)} mi = $${Math.round(margin)} margin`,
         progressHome > 0
-          ? `saves ~$${Math.round(repositionValue)} of empty miles home (${Math.round(progressHome)} mi closer)`
-          : `costs ~$${Math.abs(Math.round(repositionValue))} — ends ${Math.abs(Math.round(progressHome))} mi FURTHER from home`,
+          ? `saves ~$${Math.round(repositionValue)} of empty miles — ends ${Math.round(hubAfter)} mi from Miami`
+          : `costs ~$${Math.abs(Math.round(repositionValue))} — ends ${Math.round(hubAfter)} mi from Miami, further out than now`,
         deadhead > 50 ? `${Math.round(deadhead)} mi deadhead to reach the pickup` : null,
         reachablePickupToday === false
           ? `can't reach the pickup today (${deadheadHours.toFixed(1)}h drive, ${hoursAvailable}h left)`
@@ -379,7 +408,7 @@ export function initLoads(app, { requireAuth, db, pool }) {
 
   app.post('/loads/backhaul', requireAuth, async (req, res) => {
     if (!guard(res)) return;
-    const { lat, lng, homeLat, homeLng, hoursAvailable, radiusMiles = 250 } = req.body || {};
+    const { lat, lng, hoursAvailable, radiusMiles = 250, costPerMile, crew } = req.body || {};
     if (lat == null || lng == null) return res.status(400).json({ error: 'lat and lng (where the truck comes free) are required.' });
     try {
       await ensureReady();
@@ -390,10 +419,11 @@ export function initLoads(app, { requireAuth, db, pool }) {
 
       const scored = rows
         .map((r) => scoreBackhaul(r, {
-          lat, lng,
-          homeLat: homeLat != null ? homeLat : lat,
-          homeLng: homeLng != null ? homeLng : lng,
-          hoursAvailable,
+          lat, lng, hoursAvailable, crew,
+          // Operating cost is per-carrier and changes with fuel — always
+          // overridable rather than a constant baked into the ranking.
+          ...(costPerMile ? { costPerMile: Number(costPerMile) } : {}),
+          ...(req.body && req.body.hub ? { hub: req.body.hub } : {}),
         }))
         .filter(Boolean)
         .filter((c) => c.deadheadMiles <= radiusMiles)

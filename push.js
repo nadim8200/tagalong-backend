@@ -903,6 +903,61 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             }
           }
 
+          // ---- refuelled: report the level it filled to ----
+          //
+          // Fuel readings are noisy. A float sender swings with slope, braking
+          // and a sloshing tank, so a naive "level went up" fires constantly on
+          // a hilly road. Two guards make it trustworthy:
+          //   1. the jump must exceed a real threshold (default 8 points), and
+          //   2. the level must SETTLE — we wait for a second reading that
+          //      confirms it, so we report the finished fill, not a reading
+          //      taken mid-pump.
+          // That second guard is also why the alert says the final level: it
+          // has one, whereas an alert fired the instant the level moved would
+          // be quoting a number still climbing.
+          {
+            const pa = (pos && pos.attributes) || {};
+            const fuelNow = pa.io48 != null ? Number(pa.io48) : (pa.fuel != null ? Number(pa.fuel) : null);
+            if (fuelNow != null && Number.isFinite(fuelNow) && fuelNow >= 0) {
+              const minJump = Number((d.attributes || {}).refuelMinPct) > 0
+                ? Number((d.attributes || {}).refuelMinPct) : 8;
+              const lastKey = `fuel:${d.id}`;
+              const pendKey = `fuelpend:${d.id}`;
+              const prev = rec.sigs[lastKey] != null ? Number(rec.sigs[lastKey]) : null;
+              const pending = rec.sigs[pendKey] != null ? Number(rec.sigs[pendKey]) : null;
+
+              if (pending != null) {
+                // We saw a jump last poll — is it real, or was it a swing?
+                if (fuelNow >= pending - 3) {
+                  const from = rec.sigs[`fuelfrom:${d.id}`];
+                  toSend.push({
+                    title: `⛽ ${NAMED(d)} — refuelled`,
+                    body: from != null
+                      ? `Filled from ${Math.round(Number(from))}% to ${Math.round(fuelNow)}%.`
+                      : `Fuel now at ${Math.round(fuelNow)}%.`,
+                  });
+                }
+                delete rec.sigs[pendKey];
+                delete rec.sigs[`fuelfrom:${d.id}`];
+                changed = true;
+              } else if (prev != null && fuelNow - prev >= minJump) {
+                // Candidate fill — hold it for one more reading before telling
+                // anyone, so the number we report is the level it settled at.
+                rec.sigs[pendKey] = String(fuelNow);
+                rec.sigs[`fuelfrom:${d.id}`] = String(prev);
+                changed = true;
+              }
+
+              // Track the level, but only move the baseline DOWN or on a
+              // confirmed rise — otherwise a slow drift upward from noise would
+              // quietly raise the bar and mask a real fill.
+              if (prev == null || fuelNow < prev || pending != null) {
+                rec.sigs[lastKey] = String(fuelNow);
+                changed = true;
+              }
+            }
+          }
+
           // speed-limit-aware alert (opt-in per car via taSpeedLimitAlert). Only
           // when moving with real speed; alert once per over-limit episode.
           if ((d.attributes || {}).taSpeedLimitAlert && pos && pos.latitude != null) {
@@ -1008,7 +1063,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log(`[push] APNs enabled v23 (${USE_DB ? 'Postgres-backed state' : 'file/Traccar fallback'}; speed-limit lookup now reports why it failed) — polling every 30s.`);
+    console.log(`[push] APNs enabled v24 (${USE_DB ? 'Postgres-backed state' : 'file/Traccar fallback'}; refuel alerts with settled level) — polling every 30s.`);
   }
 
   return { enabled, sendToTokens };
