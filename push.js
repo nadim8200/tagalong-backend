@@ -44,7 +44,7 @@ const REARM_AFTER_MS = 6 * 60 * 60 * 1000;
 // no matter how its underlying value flaps.
 const REPEAT_FLOOR_MS = 6 * 60 * 60 * 1000;
 
-export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env }) {
+export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, db }) {
   const {
     APNS_KEY, APNS_KEY_ID, APNS_TEAM_ID,
     APNS_BUNDLE_ID = 'com.dynamicsbpo.tagalong',
@@ -150,11 +150,18 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     if (!all.length) throw new Error('no devices');
     return all.reduce((min, d) => (!min || d.id < min.id ? d : min), null);
   }
+  const USE_DB = !!(db && db.enabled);
+
   async function readStore() {
+    if (USE_DB) return { host: null, store: await db.get('taPush', {}) };
     const host = await hostDevice();
     return { host, store: (host.attributes || {}).taPush || {} };
   }
   async function writeStore(store) {
+    // With a database there's no size ceiling, so the whole store — tokens AND
+    // signatures — can simply be saved. The stripping below only matters for
+    // the Traccar fallback path.
+    if (USE_DB) { await db.set('taPush', store); return true; }
     const host = await hostDevice();
     // Strip the bulky, file-backed parts before this ever touches Traccar. The
     // attributes column is capped at 4000 chars for the whole blob (shared with
@@ -216,11 +223,13 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   let sigCache = null;
   async function readSigs() {
     if (sigCache) return sigCache;
+    if (USE_DB) { try { sigCache = await db.get('taSigs', {}); return sigCache; } catch (e) { console.error('[push] sig read failed:', e.message); } }
     try { sigCache = JSON.parse(await fsp.readFile(SIG_PATH, 'utf8')) || {}; } catch { sigCache = {}; }
     return sigCache;
   }
   async function writeSigs() {
     if (!sigCache) return;
+    if (USE_DB) { try { await db.set('taSigs', sigCache); return; } catch (e) { console.error('[push] sig db write failed:', e.message); } }
     try { await fsp.writeFile(SIG_PATH, JSON.stringify(sigCache)); } catch (e) {
       console.error('[push] sig write failed:', e.message);
     }
@@ -232,6 +241,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
     return logCache;
   }
   async function appendLog(uidKey, entry) {
+    // Database first: survives redeploys and instance replacement, which the
+    // /tmp file does not.
+    if (USE_DB) { try { await db.appendAlert(uidKey, entry); return; } catch (e) { console.error('[push] alert-log db write failed:', e.message); } }
     const log = await readLog();
     const arr = Array.isArray(log[uidKey]) ? log[uidKey] : [];
     arr.push(entry);
@@ -299,6 +311,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   // history is complete regardless of whether the app was running.
   app.get('/push/history', requireAuth, async (req, res) => {
     try {
+      if (USE_DB) {
+        const rows = await db.readAlerts(req.user.id);
+        if (rows) return res.json({ ok: true, alerts: rows });
+      }
       const log = await readLog();
       res.json({ ok: true, alerts: log[String(req.user.id)] || [] });
     } catch (e) { res.status(500).json({ error: e.message, alerts: [] }); }
@@ -662,12 +678,18 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
   const MAX_CATCHUP_MS = 45 * 60 * 1000;
   let lastCheck = 0;
   async function loadLastCheck() {
-    const log = await readLog();
-    const saved = Number(log.__lastCheck || 0);
+    let saved = 0;
+    if (USE_DB) {
+      try { saved = Number((await db.get('taPushMeta', {})).lastCheck || 0); } catch { /* fall through */ }
+    } else {
+      const log = await readLog();
+      saved = Number(log.__lastCheck || 0);
+    }
     const floor = Date.now() - MAX_CATCHUP_MS;
     lastCheck = saved && saved > floor ? saved : Date.now() - 5 * 60 * 1000;
   }
   async function saveLastCheck(t) {
+    if (USE_DB) { try { await db.set('taPushMeta', { lastCheck: t }); return; } catch { /* fall through */ } }
     const log = await readLog();
     log.__lastCheck = t;
     try { await fsp.writeFile(LOG_PATH, JSON.stringify(log)); } catch { /* best effort */ }
@@ -965,7 +987,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env })
 
   if (enabled) {
     setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log('[push] APNs enabled v20 (stale speed no longer counts as movement; unplug alert needs real motion) — polling every 30s.');
+    console.log(`[push] APNs enabled v21 (${USE_DB ? 'Postgres-backed state — durable across deploys' : 'file/Traccar fallback — no DATABASE_URL'}) — polling every 30s.`);
   }
 
   return { enabled, sendToTokens };

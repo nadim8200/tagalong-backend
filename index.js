@@ -21,6 +21,7 @@ import Stripe from 'stripe';
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto';
 import 'dotenv/config';
 import { initPush } from './push.js';
+import { initDb } from './db.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -85,22 +86,23 @@ async function hostDevice() {
   if (!all.length) throw new Error('no devices');
   return all.reduce((min, d) => (!min || d.id < min.id ? d : min), null);
 }
+// Accounts now live in Postgres (see db.js). They previously shared a single
+// 4000-character Traccar attribute with push state, the shop and orders — which
+// meant that once that blob filled, every new broker/family signup would fail
+// with "account save failed". Same JSON shape, no size ceiling, and the
+// read-modify-write is now inside a transaction so two simultaneous signups
+// can't overwrite one another.
+const db = initDb({ TRACCAR_URL, traccarHeaders, DATABASE_URL: process.env.DATABASE_URL });
+
 async function readAccounts() {
-  const host = await hostDevice();
-  const a = (host.attributes || {}).taAccounts || {};
-  return { host, brokers: a.brokers || [], members: a.members || [] };
+  const a = await db.get('taAccounts', {});
+  return { brokers: a.brokers || [], members: a.members || [] };
 }
 async function writeAccounts(mutator) {
-  const { host, brokers, members } = await readAccounts();
-  const next = mutator({ brokers: [...brokers], members: [...members] });
-  const attributes = { ...(host.attributes || {}), taAccounts: next };
-  const r = await fetch(`${TRACCAR_URL}/api/devices/${host.id}`, {
-    method: 'PUT',
-    headers: { ...traccarHeaders, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...host, attributes }),
-  });
-  if (!r.ok) throw new Error('account save failed');
-  return next;
+  return db.update('taAccounts', (cur) => mutator({
+    brokers: [...(cur.brokers || [])],
+    members: [...(cur.members || [])],
+  }), { brokers: [], members: [] });
 }
 const uid = (p) => `${p}${Date.now()}${Math.floor(Math.random() * 1e4)}`;
 const norm = (e) => String(e || '').toLowerCase().trim();
@@ -176,8 +178,7 @@ app.get('/auth/me', requireAuth, (req, res) => res.json(req.user));
 // Prices come from the server-side catalog (host device's taShop.products), never
 // from the client, so a customer can't set their own price.
 async function shopProducts() {
-  const host = await hostDevice();
-  const shop = (host.attributes || {}).taShop || {};
+  const shop = await db.get('taShop', {});
   return shop.products || [];
 }
 app.get('/stripe/config', (req, res) => res.json({ enabled: !!stripe }));
@@ -291,7 +292,7 @@ app.all('/api/traccar/*', requireAuth, async (req, res) => {
 
 // Locked-phone push notifications (APNs). Registers /push/register + /push/unregister
 // and starts the server-side alert poller. No-ops safely until the APNS_* env vars are set.
-initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env: process.env });
+initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env: process.env, db });
 
 app.get('/', (_req, res) => res.send('TagAlong backend is running.'));
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));
