@@ -29,6 +29,7 @@ import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
 import { initNotify } from './notify.js';
 import { initFleet } from './fleet.js';
+import { initRingCentral } from './ringcentral.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -483,11 +484,19 @@ initDispatcher(app, { requireAuth, db, pool: db.pool });
 
 // Customer call-ahead (call or text, contact's choice). DRY-RUN until
 // NOTIFY_ALLOW_SEND=true — see the compliance note at the top of notify.js.
-initNotify(app, { requireAuth, db, pool: db.pool, env: process.env });
+
 
 // Live fleet state from the company's own telematics (Samsara), classified so
 // dormant units and trucks parked at a terminal don't drown the review.
 initFleet(app, { requireAuth, db, env: process.env });
+
+// RingCentral: SMS from the company's own business numbers, plus the call log
+// so "was this customer actually called?" comes from records, not memory.
+const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.env });
+
+// Customer call-ahead. SMS prefers RingCentral (the company's own number) and
+// falls back to Twilio. DRY-RUN until NOTIFY_ALLOW_SEND=true — see notify.js.
+initNotify(app, { requireAuth, db, pool: db.pool, env: process.env, ringcentral: rc });
 
 app.get('/', (_req, res) => res.send('TagAlong backend is running.'));
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));

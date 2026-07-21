@@ -33,7 +33,7 @@ export const CHANNELS = ['call', 'sms', 'both', 'none'];
 // does not justify a 3am phone call to a receiver's mobile.
 const DEFAULT_WINDOW = { startHour: 7, endHour: 21 };
 
-export function initNotify(app, { requireAuth, db, pool, env = process.env }) {
+export function initNotify(app, { requireAuth, db, pool, env = process.env, ringcentral = null }) {
   const allowSend = env.NOTIFY_ALLOW_SEND === 'true';
   const twilio = {
     sid: env.TWILIO_ACCOUNT_SID,
@@ -63,6 +63,7 @@ export function initNotify(app, { requireAuth, db, pool, env = process.env }) {
           timezone    text DEFAULT 'America/New_York',
           quiet_start smallint DEFAULT 7,
           quiet_end   smallint DEFAULT 21,
+          samsara_address_id text,
           consent_at  timestamptz,
           consent_by  text,
           opted_out   boolean NOT NULL DEFAULT false,
@@ -70,7 +71,9 @@ export function initNotify(app, { requireAuth, db, pool, env = process.env }) {
           updated_at  timestamptz NOT NULL DEFAULT now()
         )
       `);
+      await pool.query('ALTER TABLE ta_contacts ADD COLUMN IF NOT EXISTS samsara_address_id text');
       await pool.query('CREATE INDEX IF NOT EXISTS ta_contacts_owner ON ta_contacts (owner_key)');
+      await pool.query('CREATE INDEX IF NOT EXISTS ta_contacts_sam ON ta_contacts (owner_key, samsara_address_id)');
       // Every attempt is logged, sent or not. Without this you cannot answer
       // "did anyone actually tell the customer?" — which is the question that
       // matters when a delivery goes wrong.
@@ -146,8 +149,20 @@ export function initNotify(app, { requireAuth, db, pool, env = process.env }) {
   }
 
   // ---- provider ----
-  async function sendSms({ to, body }) {
-    if (!configured) return { ok: false, reason: 'Twilio not configured' };
+  // SMS goes out through RingCentral when the company has it connected —
+  // texts then arrive from the number the customer already knows, which is the
+  // difference between being read and being ignored. Twilio is the fallback.
+  async function sendSms({ to, body, owner }) {
+    if (ringcentral && owner) {
+      try {
+        const out = await ringcentral.sendSms(owner, { to, text: body });
+        return { ok: true, ref: out.id, via: 'ringcentral', from: out.from };
+      } catch (e) {
+        // Fall through to Twilio rather than dropping the message, but say so.
+        console.warn('[notify] RingCentral SMS failed, trying Twilio:', e.message);
+      }
+    }
+    if (!configured) return { ok: false, reason: 'No SMS provider configured (RingCentral or Twilio).' };
     const url = `https://api.twilio.com/2010-04-01/Accounts/${twilio.sid}/Messages.json`;
     const auth = Buffer.from(`${twilio.sid}:${twilio.token}`).toString('base64');
     const r = await fetch(url, {
@@ -157,7 +172,7 @@ export function initNotify(app, { requireAuth, db, pool, env = process.env }) {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) return { ok: false, reason: j.message || `Twilio ${r.status}` };
-    return { ok: true, ref: j.sid };
+    return { ok: true, ref: j.sid, via: 'twilio' };
   }
 
   async function placeCall({ to, say }) {
@@ -173,7 +188,7 @@ export function initNotify(app, { requireAuth, db, pool, env = process.env }) {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) return { ok: false, reason: j.message || `Twilio ${r.status}` };
-    return { ok: true, ref: j.sid };
+    return { ok: true, ref: j.sid, via: 'twilio' };
   }
 
   async function log(entry) {
@@ -185,6 +200,89 @@ export function initNotify(app, { requireAuth, db, pool, env = process.env }) {
           entry.channel, entry.to || null, entry.body, entry.status, entry.reason || null, entry.ref || null]);
     } catch (e) { console.error('[notify] log failed:', e.message); }
   }
+
+  // ---- matching a Samsara stop to a contact ----
+  //
+  // Samsara gives us WHEN and WHERE (route stops, GPS, ETA). It does NOT give
+  // us WHO to call — the real stop payload's `notes` field holds
+  // "Deliver Freight / Bill #P044795", while the call-ahead instruction
+  // ("CALL ISRAEL 413-883-7695 1HR BEFORE ARRIVING") lives on the printed trip
+  // sheet and in TruckMate.
+  //
+  // Rather than wait on TruckMate access, we keep our own contact directory and
+  // match it to Samsara stops. Entered once per customer, reused on every load.
+  //
+  // Matching order is deliberate: the Samsara address id is exact and stable,
+  // so it wins. Name matching is a fallback, and it has to survive the way these
+  // names actually appear — "BLOSSOMS AND BLOOMS WHOLESALE INC * (45744)".
+  const normName = (s) => String(s || '')
+    .toUpperCase()
+    .replace(/\([^)]*\)/g, ' ')      // drop the trailing customer code
+    .replace(/[*.,]/g, ' ')          // drop punctuation and the * marker
+    .replace(/\b(INC|LLC|CORP|CO|THE|WHOLESALE|FLORIST|FLOWERS)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  async function findContactForStop(owner, stop) {
+    if (!stop) return null;
+    // 1. exact Samsara address id
+    if (stop.addressId) {
+      const { rows } = await pool.query(
+        'SELECT * FROM ta_contacts WHERE owner_key = $1 AND samsara_address_id = $2 LIMIT 1',
+        [owner, String(stop.addressId)]);
+      if (rows.length) return { ...rows[0], matchedBy: 'samsara-address-id' };
+    }
+    // 2. normalised name
+    const want = normName(stop.name);
+    if (!want) return null;
+    const { rows } = await pool.query('SELECT * FROM ta_contacts WHERE owner_key = $1', [owner]);
+    const hit = rows.find((c) => normName(c.company || c.name) === want);
+    return hit ? { ...hit, matchedBy: 'name' } : null;
+  }
+
+  // Which stops on this route need a call-ahead, and do we know who to call?
+  // Unmatched stops are RETURNED, not hidden — a stop we can't contact is
+  // exactly the thing a dispatcher needs to know about.
+  app.post('/notify/plan', requireAuth, async (req, res) => {
+    if (!db || !db.enabled) return res.status(503).json({ error: 'Needs DATABASE_URL.' });
+    const { stops = [], truck = {} } = req.body || {};
+    try {
+      await ensureReady();
+      const owner = String(req.user.company || req.user.id);
+      const out = [];
+      for (const s of stops) {
+        if (s.arrivedAt || s.skippedAt) continue;
+        const contact = await findContactForStop(owner, s);
+        const item = {
+          stop: s.name,
+          addressId: s.addressId || null,
+          bills: s.bills || [],
+          appointmentAt: s.appointmentAt || null,
+          contact: contact ? {
+            id: contact.id, name: contact.name, channel: contact.channel,
+            leadHours: Number(contact.lead_hours), matchedBy: contact.matchedBy,
+            optedOut: contact.opted_out,
+          } : null,
+        };
+        if (!contact) {
+          item.gap = 'No contact on file — add one so this stop can be called ahead.';
+        } else {
+          const gate = canContact(contact);
+          if (!gate.ok) item.gap = gate.reason;
+        }
+        out.push(item);
+      }
+      res.json({
+        ok: true,
+        stops: out,
+        coverage: {
+          total: out.length,
+          contactable: out.filter((s) => s.contact && !s.gap).length,
+          missing: out.filter((s) => !s.contact).length,
+        },
+      });
+    } catch (e) { res.status(502).json({ error: e.message }); }
+  });
 
   // ---- the endpoint the dispatcher review calls ----
   app.post('/notify/call-ahead', requireAuth, async (req, res) => {
@@ -220,12 +318,13 @@ export function initNotify(app, { requireAuth, db, pool, env = process.env }) {
         }
 
         const out = ch === 'sms'
-          ? await sendSms({ to, body: rendered.sms })
+          ? await sendSms({ to, body: rendered.sms, owner })
           : await placeCall({ to, say: rendered.voice });
         await log({ owner, loadId, stopId, contactId, channel: ch, to,
           body: ch === 'sms' ? rendered.sms : rendered.voice,
-          status: out.ok ? 'sent' : 'failed', reason: out.reason, ref: out.ref });
-        results.push({ channel: ch, to, status: out.ok ? 'sent' : 'failed', reason: out.reason, ref: out.ref });
+          status: out.ok ? 'sent' : 'failed',
+          reason: out.reason || (out.via ? `via ${out.via}` : null), ref: out.ref });
+        results.push({ channel: ch, to, status: out.ok ? 'sent' : 'failed', reason: out.reason, ref: out.ref, via: out.via });
       }
 
       res.json({ ok: true, dryRun: !allowSend, results, preview: rendered });
@@ -248,18 +347,21 @@ export function initNotify(app, { requireAuth, db, pool, env = process.env }) {
       const id = b.id || `C${Date.now()}${Math.floor(Math.random() * 1000)}`;
       await pool.query(
         `INSERT INTO ta_contacts (id, owner_key, name, company, phone, sms_phone, email, channel,
-           lead_hours, timezone, quiet_start, quiet_end, consent_at, consent_by, opted_out, notes, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
+           lead_hours, timezone, quiet_start, quiet_end, consent_at, consent_by, opted_out, notes,
+           samsara_address_id, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,now())
          ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, company=EXCLUDED.company,
            phone=EXCLUDED.phone, sms_phone=EXCLUDED.sms_phone, email=EXCLUDED.email,
            channel=EXCLUDED.channel, lead_hours=EXCLUDED.lead_hours, timezone=EXCLUDED.timezone,
            quiet_start=EXCLUDED.quiet_start, quiet_end=EXCLUDED.quiet_end,
            consent_at=EXCLUDED.consent_at, consent_by=EXCLUDED.consent_by,
-           opted_out=EXCLUDED.opted_out, notes=EXCLUDED.notes, updated_at=now()`,
+           opted_out=EXCLUDED.opted_out, notes=EXCLUDED.notes,
+           samsara_address_id=EXCLUDED.samsara_address_id, updated_at=now()`,
         [id, owner, b.name || null, b.company || null, b.phone || null, b.smsPhone || null,
           b.email || null, b.channel || 'sms', b.leadHours || 1, b.timezone || 'America/New_York',
           b.quietStart != null ? b.quietStart : 7, b.quietEnd != null ? b.quietEnd : 21,
-          b.consentAt || null, b.consentBy || null, !!b.optedOut, b.notes || null]);
+          b.consentAt || null, b.consentBy || null, !!b.optedOut, b.notes || null,
+          b.samsaraAddressId ? String(b.samsaraAddressId) : null]);
       res.json({ ok: true, id });
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
@@ -278,6 +380,6 @@ export function initNotify(app, { requireAuth, db, pool, env = process.env }) {
   });
 
   console.log(`[notify] contact API ready — sends ${allowSend ? 'ENABLED' : 'DRY-RUN'}, `
-    + `Twilio ${configured ? 'configured' : 'NOT configured'}`);
+    + `SMS via ${ringcentral ? 'RingCentral (Twilio fallback)' : (configured ? 'Twilio' : 'NOTHING configured')}`);
   return { canContact, channelsFor, renderCallAhead, ensureReady };
 }
