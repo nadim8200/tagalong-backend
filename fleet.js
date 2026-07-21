@@ -421,6 +421,39 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
     return s && s.value != null ? s.value : null;
   };
 
+  // Identity comes from /fleet/vehicles — the authoritative source for VIN,
+  // serial and the customer's own unitId. The stats endpoint echoes these but
+  // inconsistently between chunks, which is not a thing to work around.
+  async function vehicleIdentities(token) {
+    const headers = { Authorization: `Bearer ${token}` };
+    const byId = new Map();
+    let cursor = null;
+    // Samsara paginates. Follow it — stopping at page one silently loses
+    // trucks, and a missing truck looks identical to a parked one.
+    for (let page = 0; page < 20; page += 1) {
+      const url = `https://api.samsara.com/fleet/vehicles?limit=512${cursor ? `&after=${encodeURIComponent(cursor)}` : ''}`;
+      const r = await fetch(url, { headers });
+      if (!r.ok) break;
+      const j = await r.json().catch(() => null);
+      for (const v of (j && j.data) || []) {
+        const ext = v.externalIds || {};
+        byId.set(String(v.id), {
+          name: v.name || null,
+          vin: v.vin || ext['samsara.vin'] || null,
+          serial: ext['samsara.serial'] || v.serial || null,
+          unitId: ext.unitId || null,
+          make: v.make || null,
+          model: v.model || null,
+          year: v.year || null,
+        });
+      }
+      const p = j && j.pagination;
+      if (!p || !p.hasNextPage) break;
+      cursor = p.endCursor;
+    }
+    return byId;
+  }
+
   async function fetchVehicleStats(token, types = STAT_TYPES) {
     const headers = { Authorization: `Bearer ${token}` };
     const groups = chunk(types, STATS_MAX_TYPES);
@@ -439,15 +472,27 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
 
     // Merge by vehicle id. Each chunk returns the same vehicles with a
     // different subset of stat keys, so assembling them gives one full row.
+    //
+    // CAREFUL: every chunk also echoes identity fields (name, externalIds),
+    // and they are NOT identical between chunks. A blind Object.assign let a
+    // later chunk's thinner externalIds overwrite an earlier complete one,
+    // which is why unitId came back populated for the first ~30 trucks and
+    // null for the rest. Merge only the stat keys; identity is resolved
+    // separately from /fleet/vehicles, which is authoritative for it.
+    const IDENTITY_KEYS = new Set(['id', 'name', 'externalIds']);
     const byId = new Map();
     const failures = [];
     for (const res of results) {
       if (res.failed) { failures.push(res.failed); continue; }
       for (const v of res.data) {
         const key = String(v.id);
-        const existing = byId.get(key);
-        if (existing) Object.assign(existing, v);
-        else byId.set(key, { ...v });
+        let row = byId.get(key);
+        if (!row) { row = { id: v.id, name: v.name }; byId.set(key, row); }
+        for (const [k, val2] of Object.entries(v)) {
+          if (IDENTITY_KEYS.has(k)) continue;
+          // Never let a later chunk blank a value an earlier chunk supplied.
+          if (val2 !== undefined && val2 !== null) row[k] = val2;
+        }
       }
     }
     return { data: [...byId.values()], failures };
@@ -582,7 +627,10 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       // endpoint previously asked for eleven types in one call, two of them
       // invalid, so EVERY call here 502'd. A second copy of a fact is a second
       // thing to get wrong; there is now one list and one fetcher.
-      const { data, failures } = await fetchVehicleStats(token);
+      const [{ data, failures }, identities] = await Promise.all([
+        fetchVehicleStats(token),
+        vehicleIdentities(token),
+      ]);
       const j = { data };
       const val = (x) => (x && x.value != null ? x.value : null);
 
@@ -632,15 +680,22 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         const rawAmbientF = ambientMilliC != null
           ? Math.round((ambientMilliC / 1000) * 9 / 5 + 32) : null;
 
+        const ident = identities.get(String(v.id)) || {};
+
         return {
           id: v.id,
-          name: v.name,
-          vin: (v.externalIds && v.externalIds['samsara.vin']) || null,
-          serial: (v.externalIds && v.externalIds['samsara.serial']) || null,
-          // The company's OWN unit number, when Samsara carries it. This is
-          // the likely join key to TruckMate — more trustworthy than VIN,
-          // which the live data showed is NOT unique in this account.
-          unitId: (v.externalIds && v.externalIds.unitId) || null,
+          name: ident.name || v.name,
+          vin: ident.vin || null,
+          serial: ident.serial || null,
+          // The company's OWN unit number. This is the likely join key to
+          // TruckMate — more trustworthy than VIN, which the live data showed
+          // is NOT unique in this account. Note it does not always match the
+          // Samsara display name (e.g. name 4552 carries unitId 409), so the
+          // two are not interchangeable.
+          unitId: ident.unitId || null,
+          make: ident.make || null,
+          model: ident.model || null,
+          year: ident.year || null,
           // How old the position is, and whether to trust any of this row.
           ageHours,
           stale,
