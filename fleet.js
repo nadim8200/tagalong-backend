@@ -360,12 +360,21 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   const WINDOW_START = () => new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const WINDOW_END = () => new Date().toISOString();
 
+  // Every stat type we'd like. Whether this account can serve all of them is
+  // an empirical question, answered by the bisect in /fleet/discover — not by
+  // reading the docs, which is how the last two guesses went wrong.
+  const STAT_TYPES = [
+    'gps', 'engineStates', 'fuelPercents', 'obdOdometerMeters', 'engineRpm',
+    'engineCoolantTemperatureMilliC', 'batteryMilliVolts', 'ambientAirTemperature',
+    'defLevelMilliPercent', 'faultCodes', 'engineSeconds',
+  ];
+
   const PROBES = [
     { key: 'vehicles', label: 'Vehicles', url: '/fleet/vehicles?limit=1' },
     // NO `limit` param. This endpoint 400s on it — the working call at
     // /fleet/vehicles/full omits it, and the probe copying it in was the
     // reason this reported "unavailable" while live data worked fine.
-    { key: 'vehicleStats', label: 'Vehicle stats (live)', url: '/fleet/vehicles/stats?types=gps,engineStates,fuelPercents,obdOdometerMeters,engineRpm,engineCoolantTemperatureMilliC,batteryMilliVolts,ambientAirTemperature,defLevelMilliPercent,faultCodes,engineSeconds' },
+    { key: 'vehicleStats', label: 'Vehicle stats (live)', url: `/fleet/vehicles/stats?types=${STAT_TYPES.join(',')}` },
     { key: 'drivers', label: 'Drivers', url: '/fleet/drivers?limit=1' },
     { key: 'hosClocks', label: 'HOS clocks', url: '/fleet/hos/clocks?limit=1' },
     { key: 'hosLogs', label: 'HOS logs', url: '/fleet/hos/logs?limit=1' },
@@ -413,6 +422,10 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
             label: p.label,
             status: r.status,
             available: r.ok,
+            // Samsara says WHY it rejected a request. Discarding that message
+            // is what turned this into three rounds of guessing — it almost
+            // certainly names the offending parameter.
+            detail: r.ok ? null : (body && (body.message || body.error || JSON.stringify(body).slice(0, 300))) || null,
             // 403 usually means "not licensed / token lacks scope" rather than
             // "doesn't exist" — worth distinguishing for the customer.
             // These mean different things and get fixed by different people.
@@ -430,12 +443,37 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           out.push({ key: p.key, label: p.label, status: 0, available: false, note: e.message, fields: [] });
         }
       }
+      // If the stats call is still failing, stop theorising and BISECT: ask
+      // for each stat type on its own and see which ones Samsara rejects.
+      // One request per type, only when something is actually broken.
+      let statTypes = null;
+      const statsProbe = out.find((o) => o.key === 'vehicleStats');
+      if (statsProbe && !statsProbe.available) {
+        statTypes = { ok: [], rejected: [] };
+        for (const t of STAT_TYPES) {
+          try {
+            const r = await fetch(`https://api.samsara.com/fleet/vehicles/stats?types=${t}`, { headers });
+            if (r.ok) statTypes.ok.push(t);
+            else {
+              const b = await r.json().catch(() => null);
+              statTypes.rejected.push({ type: t, status: r.status, detail: b && (b.message || b.error) });
+            }
+          } catch (e) {
+            statTypes.rejected.push({ type: t, status: 0, detail: e.message });
+          }
+        }
+        // The working set, ready to paste back into the code.
+        statTypes.usable = statTypes.ok.join(',');
+      }
+
       res.json({
         probes: out,
+        statTypes,
         summary: {
           available: out.filter((o) => o.available).length,
           total: out.length,
-          blocked: out.filter((o) => o.status === 403).map((o) => o.label),
+          blocked: out.filter((o) => o.status === 403 || o.status === 401).map((o) => o.label),
+          ourBugs: out.filter((o) => o.status === 400).map((o) => o.label),
         },
       });
     } catch (e) {
