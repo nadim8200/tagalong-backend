@@ -354,17 +354,28 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   // and the token's scopes.
   //
   // Costs one small request per endpoint, run on demand only.
+  // Several Samsara endpoints are time-windowed and 400 without an explicit
+  // range. A 400 looks like a permission problem in a results table when it
+  // isn't one, so give them a real window: the last 24 hours.
+  const WINDOW_START = () => new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const WINDOW_END = () => new Date().toISOString();
+
   const PROBES = [
     { key: 'vehicles', label: 'Vehicles', url: '/fleet/vehicles?limit=1' },
-    { key: 'vehicleStats', label: 'Vehicle stats (live)', url: '/fleet/vehicles/stats?types=gps,engineStates,fuelPercents,obdOdometerMeters,engineRpm,engineCoolantTemperatureMilliC,batteryMilliVolts,ambientAirTemperature,defLevelMilliPercent,faultCodes,engineSeconds&limit=1' },
+    // NO `limit` param. This endpoint 400s on it — the working call at
+    // /fleet/vehicles/full omits it, and the probe copying it in was the
+    // reason this reported "unavailable" while live data worked fine.
+    { key: 'vehicleStats', label: 'Vehicle stats (live)', url: '/fleet/vehicles/stats?types=gps,engineStates,fuelPercents,obdOdometerMeters,engineRpm,engineCoolantTemperatureMilliC,batteryMilliVolts,ambientAirTemperature,defLevelMilliPercent,faultCodes,engineSeconds' },
     { key: 'drivers', label: 'Drivers', url: '/fleet/drivers?limit=1' },
     { key: 'hosClocks', label: 'HOS clocks', url: '/fleet/hos/clocks?limit=1' },
     { key: 'hosLogs', label: 'HOS logs', url: '/fleet/hos/logs?limit=1' },
     { key: 'assets', label: 'Assets (trailers/equipment)', url: '/assets?limit=1' },
     { key: 'addresses', label: 'Addresses / geofences', url: '/addresses?limit=1' },
-    { key: 'safetyEvents', label: 'Safety events', url: '/fleet/safety-events?limit=1' },
+    // Time-windowed, like /fleet/routes. Without startTime AND endTime this
+    // 400s, which reads as "not permitted" and isn't.
+    { key: 'safetyEvents', label: 'Safety events', url: `/fleet/safety-events?startTime=${WINDOW_START()}&endTime=${WINDOW_END()}` },
     { key: 'trailers', label: 'Trailers', url: '/fleet/trailers?limit=1' },
-    { key: 'documents', label: 'Documents', url: '/fleet/documents?limit=1' },
+    { key: 'documents', label: 'Documents', url: `/fleet/documents?startTime=${WINDOW_START()}&endTime=${WINDOW_END()}` },
     { key: 'forms', label: 'Forms', url: '/form-submissions?limit=1' },
     { key: 'maintenance', label: 'DVIRs', url: '/fleet/maintenance/dvirs?limit=1' },
     { key: 'tags', label: 'Tags', url: '/tags?limit=1' },
@@ -404,9 +415,14 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
             available: r.ok,
             // 403 usually means "not licensed / token lacks scope" rather than
             // "doesn't exist" — worth distinguishing for the customer.
-            note: r.status === 403 ? 'Not permitted — check plan or token scopes.'
-              : r.status === 404 ? 'Endpoint not available on this account.'
-                : r.ok && !sample ? 'Reachable but returned no records.' : null,
+            // These mean different things and get fixed by different people.
+            // Conflating them sent us to the customer to ask for scopes we
+            // already had, when the request itself was malformed.
+            note: r.status === 400 ? 'OUR REQUEST is malformed — missing a required parameter. Not a permissions problem.'
+              : r.status === 401 ? 'Token lacks this scope — needs adding in the Samsara console.'
+                : r.status === 403 ? 'Not permitted — check plan or token scopes.'
+                  : r.status === 404 ? 'Endpoint not available on this account.'
+                    : r.ok && !sample ? 'Reachable but returned no records.' : null,
             fields: sample ? Object.keys(sample) : [],
             shape: sample ? shapeOf(sample) : null,
           });
