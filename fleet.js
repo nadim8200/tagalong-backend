@@ -363,10 +363,22 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   // Every stat type we'd like. Whether this account can serve all of them is
   // an empirical question, answered by the bisect in /fleet/discover — not by
   // reading the docs, which is how the last two guesses went wrong.
+  // VERIFIED by bisect against the live account, not copied from docs.
+  // 'ambientAirTemperature' and 'engineSeconds' were both rejected as invalid
+  // type names and are gone. They were also duplicated into
+  // /fleet/vehicles/full, which meant that endpoint 502'd on every call.
   const STAT_TYPES = [
     'gps', 'engineStates', 'fuelPercents', 'obdOdometerMeters', 'engineRpm',
-    'engineCoolantTemperatureMilliC', 'batteryMilliVolts', 'ambientAirTemperature',
-    'defLevelMilliPercent', 'faultCodes', 'engineSeconds',
+    'engineCoolantTemperatureMilliC', 'batteryMilliVolts',
+    'defLevelMilliPercent', 'faultCodes',
+  ];
+
+  // Plausible correct spellings for the two that were rejected. The bisect
+  // tests these alongside the working set and reports which (if any) exist,
+  // so the right name is discovered rather than guessed at a third time.
+  const STAT_TYPE_CANDIDATES = [
+    'ambientAirTemperatureMilliC', 'engineHours', 'engineIdleSeconds',
+    'engineTotalHours', 'ambientAirTemperatureCelsiusMilli',
   ];
 
   const PROBES = [
@@ -448,9 +460,11 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       // One request per type, only when something is actually broken.
       let statTypes = null;
       const statsProbe = out.find((o) => o.key === 'vehicleStats');
-      if (statsProbe && !statsProbe.available) {
+      // Run on failure, or on demand via ?bisect=1 — the candidate list needs
+      // testing even once the main set is healthy.
+      if ((statsProbe && !statsProbe.available) || req.query.bisect) {
         statTypes = { ok: [], rejected: [] };
-        for (const t of STAT_TYPES) {
+        for (const t of [...STAT_TYPES, ...STAT_TYPE_CANDIDATES]) {
           try {
             const r = await fetch(`https://api.samsara.com/fleet/vehicles/stats?types=${t}`, { headers });
             if (r.ok) statTypes.ok.push(t);
@@ -490,11 +504,11 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       const owner = String(req.user.company || req.user.id);
       const token = await tokenFor(owner);
       if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
-      const types = [
-        'gps', 'engineStates', 'fuelPercents', 'obdOdometerMeters', 'engineRpm',
-        'engineCoolantTemperatureMilliC', 'batteryMilliVolts', 'ambientAirTemperature',
-        'defLevelMilliPercent', 'faultCodes', 'engineSeconds',
-      ].join(',');
+      // One shared list, verified by the bisect in /fleet/discover. This
+      // endpoint previously duplicated the probe's list including two invalid
+      // type names, so EVERY call here 502'd. A second copy of a fact is a
+      // second thing to get wrong.
+      const types = STAT_TYPES.join(',');
       const r = await fetch(`https://api.samsara.com/fleet/vehicles/stats?types=${types}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
