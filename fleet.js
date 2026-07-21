@@ -519,6 +519,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   // object keyed "0","1",…, and only `singleUseLocation` has coordinates.
   // If one changes, change both.
   const R_MI = 3958.8;
+  const HUB_LAT = 25.8206, HUB_LNG = -80.3186; // Miami hub — see loads.js HUB
   const rad = (d) => (d * Math.PI) / 180;
   function miles(aLat, aLng, bLat, bLng) {
     const dLat = rad(bLat - aLat), dLng = rad(bLng - aLng);
@@ -841,13 +842,68 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       const active = runs.filter((r) => !r.complete && (r.stopsDone > 0 || r.actualStartAt));
       const upcoming = runs.filter((r) => !r.complete && r.stopsDone === 0 && !r.actualStartAt);
 
+      // ---- trucks working with NO route in Samsara ----
+      //
+      // Outbound LTL runs are entered in Samsara as routes. Brokered backhauls
+      // are NOT — that freight is booked by phone and lives on a rate
+      // confirmation, so those trucks appear nowhere in the routes API.
+      //
+      // The result is that the busiest half of the fleet can be invisible to
+      // dispatch. A truck driving across Texas on a $550 backhaul looks exactly
+      // like a truck driving nowhere. These are surfaced deliberately: they're
+      // either brokered loads that should be recorded, or movement nobody
+      // authorised. Both are worth a dispatcher's attention.
+      const routedVehicleIds = new Set(
+        active.map((r) => {
+          const h = r.driverId ? hosByDriver.get(r.driverId) : null;
+          return h && h.vehicleId;
+        }).filter(Boolean),
+      );
+
+      const unrouted = vehicles
+        .filter((v) => {
+          const gps = v.gps || {};
+          const moving = (gps.speedMilesPerHour || 0) > 1;
+          const engineOn = v.engineState && (v.engineState.value === 'On' || v.engineState.value === 'Idle');
+          const fresh = gps.time && (now - Date.parse(gps.time)) < 2 * 3600000;
+          return fresh && (moving || engineOn) && !routedVehicleIds.has(String(v.id));
+        })
+        .map((v) => {
+          const gps = v.gps || {};
+          const crew = crewByVehicle.get(String(v.id)) || [];
+          const atWheel = crew.find((c) => c.driving) || crew[0] || null;
+          const hubMiles = miles(gps.latitude, gps.longitude, HUB_LAT, HUB_LNG);
+          return {
+            vehicleId: String(v.id),
+            truck: v.name,
+            speedMph: Math.round(gps.speedMilesPerHour || 0),
+            moving: (gps.speedMilesPerHour || 0) > 1,
+            place: (gps.reverseGeo && gps.reverseGeo.formattedLocation) || null,
+            addressName: (gps.address && gps.address.name) || null,
+            lat: gps.latitude, lng: gps.longitude, at: gps.time,
+            crewType: crew.length > 1 ? 'team' : (crew.length === 1 ? 'solo' : null),
+            drivingNow: atWheel ? { name: atWheel.driverName, hoursLeftMin: atWheel.remainingMin } : null,
+            crew: crew.map((c) => ({ name: c.driverName, dutyStatus: c.dutyStatus, driving: c.driving, hoursLeftMin: c.remainingMin })),
+            hoursLeftMin: atWheel ? atWheel.remainingMin : null,
+            milesFromHub: Math.round(hubMiles),
+            // A truck a long way out with nothing booked is the backhaul
+            // opportunity the whole model is built around.
+            likelyBackhaulCandidate: hubMiles > 300 && (gps.speedMilesPerHour || 0) <= 1,
+          };
+        })
+        .sort((a, b) => (b.speedMph || 0) - (a.speedMph || 0));
+
       active.sort((a, b) => (b.lateByMin ?? -1e9) - (a.lateByMin ?? -1e9));
 
       res.json({
-        active, upcoming,
+        active, upcoming, unrouted,
         counts: {
           active: active.length,
           upcoming: upcoming.length,
+          // Working trucks with no route in Samsara — brokered loads live here.
+          unrouted: unrouted.length,
+          unroutedMoving: unrouted.filter((u) => u.moving).length,
+          backhaulCandidates: unrouted.filter((u) => u.likelyBackhaulCandidate).length,
           completed: runs.filter((r) => r.complete).length,
           stopsRemaining: active.reduce((n, r) => n + (r.stopCount - r.stopsDone), 0),
           skipped: active.reduce((n, r) => n + r.skippedCount, 0),
