@@ -553,6 +553,33 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
     return { city: parts[parts.length - 2] || null, state: tail || null, zip };
   }
 
+  // Every customer address in Samsara carries a geofence, and that geofence is
+  // where the customer actually IS — which is what distance and ETA need.
+  //
+  // Samsara stores geofences two ways: a circle (centre + radius) or a polygon
+  // of vertices. Reading only `circle` silently loses every polygon customer,
+  // and a stop with no coordinates gets no ETA at all. Polygons get their
+  // centroid, which is close enough for "how far out is the truck".
+  function geofencePoint(geofence) {
+    const g = geofence || {};
+    if (g.circle && g.circle.latitude != null) {
+      return {
+        lat: g.circle.latitude, lng: g.circle.longitude,
+        radiusMeters: g.circle.radiusMeters || null, kind: 'circle',
+      };
+    }
+    const verts = (g.polygon && g.polygon.vertices) || [];
+    if (verts.length) {
+      let lat = 0, lng = 0, n = 0;
+      for (const v of verts) {
+        if (v.latitude == null || v.longitude == null) continue;
+        lat += v.latitude; lng += v.longitude; n += 1;
+      }
+      if (n) return { lat: lat / n, lng: lng / n, radiusMeters: null, kind: 'polygon' };
+    }
+    return { lat: null, lng: null, radiusMeters: null, kind: null };
+  }
+
   // ---- address book, cached ----
   // City and state come from here, not from the route stop.
   let addrCache = { at: 0, map: new Map() };
@@ -575,14 +602,17 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           // Parsed from the end so a street address containing commas doesn't
           // throw it off.
           const { city, state, zip } = parseCityState(formatted);
+          const pt = geofencePoint(a.geofence);
           map.set(String(a.id), {
             name: a.name || '',
             formatted,
             city: city || null,
             state: state || null,
             zip,
-            lat: (a.geofence && a.geofence.circle && a.geofence.circle.latitude) || null,
-            lng: (a.geofence && a.geofence.circle && a.geofence.circle.longitude) || null,
+            lat: pt.lat,
+            lng: pt.lng,
+            radiusMeters: pt.radiusMeters,
+            geofenceKind: pt.kind,
           });
         }
         const pg = j.pagination || {};
@@ -750,6 +780,12 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         };
       });
 
+      // How many stops could we actually locate? A missing ETA should be
+      // explainable — "we don't have coordinates for that customer" — rather
+      // than an unexplained dash.
+      const allStops = runs.flatMap((r) => r.stops || []);
+      const located = allStops.filter((s2) => s2.lat != null).length;
+
       // In progress = started, not finished. That's what "on the road" means.
       const active = runs.filter((r) => !r.complete && (r.stopsDone > 0 || r.actualStartAt));
       const upcoming = runs.filter((r) => !r.complete && r.stopsDone === 0 && !r.actualStartAt);
@@ -766,6 +802,9 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           skipped: active.reduce((n, r) => n + r.skippedCount, 0),
           late: active.filter((r) => r.lateByMin != null && r.lateByMin > 15).length,
           lowHours: active.filter((r) => r.hoursLeftMin != null && r.hoursLeftMin <= 60).length,
+          stopsLocated: located,
+          stopsTotal: allStops.length,
+          addressBookSize: addrById.size,
         },
       });
     } catch (e) {
