@@ -11,6 +11,10 @@
 // exactly how the tracker-offline alert became worthless earlier today.
 // ---------------------------------------------------------------
 
+// Owner-operator vs company truck. Decides WHO gets told about a problem,
+// which is a different question from what the problem is.
+import { ownershipFor, ownersByFleetSize, OWNER_OPS_MISSING_FROM_TELEMATICS } from './fleetOwnership.js';
+
 const DAY = 86400000;
 
 // Samsara names its known locations, and those names tell you what a stop MEANS.
@@ -693,6 +697,9 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           // Samsara display name (e.g. name 4552 carries unitId 409), so the
           // two are not interchangeable.
           unitId: ident.unitId || null,
+          // Company truck or owner-operator, plus who owns it and how many
+          // other trucks that owner has running right now.
+          ownership: ownershipFor(ident.name || v.name),
           make: ident.make || null,
           model: ident.model || null,
           year: ident.year || null,
@@ -749,6 +756,26 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         // Partial degradation is reported, not swallowed. If the fuel chunk
         // failed, "no low-fuel trucks" would otherwise look like good news.
         partial: failures.length ? failures : null,
+
+        // ---- who actually owns what we're watching ----
+        //
+        // Owner-op trucks escalate to a small business owner, not the shop.
+        // The blind-spot list matters most: those trucks run under Florida
+        // Beauty's authority with no telematics at all, so they are invisible
+        // here no matter how good the rest of this gets.
+        ownership: (() => {
+          const live = rows.filter((r) => !r.stale);
+          const ownerOps = rows.filter((r) => r.ownership.class === 'owner-op');
+          return {
+            companyTrucks: rows.length - ownerOps.length,
+            ownerOpTrucks: ownerOps.length,
+            ownerOpsReporting: ownerOps.filter((r) => !r.stale).length,
+            reportingTotal: live.length,
+            topOwners: ownersByFleetSize().filter((o) => o.trucks > 1),
+            // Known to exist, not visible to us. Not a bug — a gap to raise.
+            invisibleOwnerOps: OWNER_OPS_MISSING_FROM_TELEMATICS,
+          };
+        })(),
 
         // ---- can we join this fleet to a TMS? ----
         //
