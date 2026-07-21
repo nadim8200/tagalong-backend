@@ -582,10 +582,11 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
 
   // ---- address book, cached ----
   // City and state come from here, not from the route stop.
-  let addrCache = { at: 0, map: new Map() };
+  let addrCache = { at: 0, map: new Map(), status: null };
   async function addressBook(token) {
     if (Date.now() - addrCache.at < 60 * 60 * 1000 && addrCache.map.size) return addrCache.map;
     const map = new Map();
+    let status = null;
     try {
       let cursor = null, pages = 0;
       do {
@@ -594,7 +595,14 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         const r = await fetch(`https://api.samsara.com/addresses?${qs}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        if (!r.ok) break;
+        status = r.status;
+        if (!r.ok) {
+          // 403 here means the token can't read the address book — which is
+          // exactly why most stops would show no city. Worth naming rather
+          // than silently degrading.
+          console.warn(`[fleet] address book ${r.status} — city/state will be missing for saved addresses`);
+          break;
+        }
         const j = await r.json();
         for (const a of (j.data || [])) {
           const formatted = a.formattedAddress || '';
@@ -622,7 +630,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
     } catch (e) {
       console.warn('[fleet] address book unavailable:', e.message);
     }
-    if (map.size) addrCache = { at: Date.now(), map };
+    addrCache = { at: Date.now(), map, status };
     return map;
   }
 
@@ -805,6 +813,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           stopsLocated: located,
           stopsTotal: allStops.length,
           addressBookSize: addrById.size,
+          addressBookStatus: addrCache.status,
         },
       });
     } catch (e) {
