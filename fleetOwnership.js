@@ -108,13 +108,42 @@ export const OWNER_CONTACT = {
 //
 //   977, 1087, 3512, 3520, 3521, 4533
 //
-// That is a real blind spot, not a data-entry gap: those trucks run under
-// Florida Beauty's authority with no telematics we can see. If they are
-// still active, the dispatcher is blind to them — no position, no HOS, no
-// temperature. Worth asking whether they were sold, or whether they run on
-// the owner's own ELD.
+// PER FLORIDA BEAUTY: every truck carrying an FBE load has an active Samsara.
+// So absence from telematics means the truck is NO LONGER IN THE FLEET, not
+// that we are blind to it. Read these as a stale roster, not a coverage gap.
+//
+// That inverts what the data is for. Rather than "we cannot see these trucks",
+// the useful signal is:
+//
+//   1. This list, and the stale units in general, are RETIREMENT CANDIDATES.
+//      Worth confirming and removing so counts describe the real fleet.
+//
+//   2. It gives us a VALIDATION RULE. If a TMS load is ever assigned to a
+//      truck with no active Samsara, something is wrong — either the load is
+//      misassigned or a retired truck came back. That is worth flagging,
+//      because it is the kind of error that otherwise surfaces as a load
+//      nobody was watching.
 // ---------------------------------------------------------------
 export const OWNER_OPS_MISSING_FROM_TELEMATICS = [977, 1087, 3512, 3520, 3521, 4533];
+
+// A truck with no live telematics cannot be carrying an FBE load. If a TMS
+// load says otherwise, the load data is wrong — surface it rather than
+// silently dispatching against a truck nobody can see.
+export function loadAssignmentIsSuspect({ truckNumber, vehicleRow }) {
+  if (OWNER_OPS_MISSING_FROM_TELEMATICS.includes(Number(truckNumber))) {
+    return { suspect: true, reason: 'Truck has no Samsara device — believed out of fleet.' };
+  }
+  if (!vehicleRow) {
+    return { suspect: true, reason: 'Truck is not in the telematics fleet at all.' };
+  }
+  if (vehicleRow.stale) {
+    return {
+      suspect: true,
+      reason: `Truck last reported ${vehicleRow.ageHours}h ago — likely retired, not running this load.`,
+    };
+  }
+  return { suspect: false, reason: null };
+}
 
 const key = (truck) => String(truck == null ? '' : truck).trim();
 
