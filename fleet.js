@@ -676,8 +676,15 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       const vehicles = vr.ok ? ((await vr.json()).data || []) : [];
       const clocks = hr.ok ? ((await hr.json()).data || []) : [];
 
-      // driver id → { vehicle, hours left }
+      // driver id → { vehicle, hours left } AND vehicle id → [crew]
+      //
+      // Team detection comes from here: when two drivers report the SAME
+      // currentVehicle, that truck is running as a team. The trip sheet has two
+      // driver slots for exactly this, and it matters — a team covers roughly
+      // 20 hours a day against a solo driver's 11, so ETAs and "can they make
+      // it" are wrong if we assume the wrong one.
       const hosByDriver = new Map();
+      const crewByVehicle = new Map();
       for (const c of clocks) {
         const id = c.driver && String(c.driver.id);
         if (!id) continue;
@@ -685,12 +692,24 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         const shift = (c.clocks && c.clocks.shift) || {};
         const ms = [drive.driveRemainingDurationMs, shift.shiftRemainingDurationMs]
           .filter((x) => x != null).sort((a, b) => a - b)[0];
-        hosByDriver.set(id, {
+        const vehicleId = (c.currentVehicle && String(c.currentVehicle.id)) || null;
+        const status = (c.currentDutyStatus && c.currentDutyStatus.hosStatusType) || null;
+        const entry = {
+          driverId: id,
+          driverName: (c.driver && c.driver.name) || '',
           vehicleName: (c.currentVehicle && c.currentVehicle.name) || null,
-          vehicleId: (c.currentVehicle && String(c.currentVehicle.id)) || null,
+          vehicleId,
           remainingMin: ms != null ? Math.round(ms / 60000) : null,
-          dutyStatus: (c.currentDutyStatus && c.currentDutyStatus.hosStatusType) || null,
-        });
+          dutyStatus: status,
+          driving: status === 'driving',
+          // Sleeper berth is the tell for the resting half of a team.
+          resting: status === 'sleeperBerth' || status === 'offDuty',
+        };
+        hosByDriver.set(id, entry);
+        if (vehicleId) {
+          if (!crewByVehicle.has(vehicleId)) crewByVehicle.set(vehicleId, []);
+          crewByVehicle.get(vehicleId).push(entry);
+        }
       }
       const vehById = new Map(vehicles.map((v) => [String(v.id), v]));
 
@@ -742,6 +761,17 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         const veh = hos && hos.vehicleId ? vehById.get(hos.vehicleId) : null;
         const gps = (veh && veh.gps) || null;
 
+        // Everyone currently signed into this truck. The route names one
+        // driver; the second half of a team is only visible here.
+        const crew = (hos && hos.vehicleId && crewByVehicle.get(hos.vehicleId)) || (hos ? [hos] : []);
+        const crewType = crew.length > 1 ? 'team' : 'solo';
+        const atWheel = crew.find((c) => c.driving) || null;
+        const resting = crew.filter((c) => !c.driving);
+
+        // Hours that matter are the DRIVING driver's, not whoever the route
+        // happens to be filed under. On a team the route driver may be asleep.
+        const activeHos = atWheel || hos || crew[0] || null;
+
         // Distance and ETA to the next stop, when we have both ends.
         let milesToNext = null, etaAt = null, lateByMin = null;
         if (gps && next && next.lat != null) {
@@ -760,8 +790,21 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           driverId,
           driverName: (route.driver && route.driver.name) || '',
           truck: hos ? hos.vehicleName : null,
-          dutyStatus: hos ? hos.dutyStatus : null,
-          hoursLeftMin: hos ? hos.remainingMin : null,
+          dutyStatus: activeHos ? activeHos.dutyStatus : (hos ? hos.dutyStatus : null),
+          // Hours belong to whoever is actually driving.
+          hoursLeftMin: activeHos ? activeHos.remainingMin : (hos ? hos.remainingMin : null),
+          crewType,
+          crewSize: crew.length,
+          drivingNow: atWheel ? { id: atWheel.driverId, name: atWheel.driverName, hoursLeftMin: atWheel.remainingMin } : null,
+          crew: crew.map((c) => ({
+            id: c.driverId,
+            name: c.driverName,
+            dutyStatus: c.dutyStatus,
+            driving: c.driving,
+            resting: c.resting,
+            hoursLeftMin: c.remainingMin,
+          })),
+          restingCrew: resting.map((c) => c.driverName).filter(Boolean),
           lat: gps ? gps.latitude : null,
           lng: gps ? gps.longitude : null,
           speedMph: gps ? Math.round(gps.speedMilesPerHour || 0) : null,
@@ -810,6 +853,8 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           skipped: active.reduce((n, r) => n + r.skippedCount, 0),
           late: active.filter((r) => r.lateByMin != null && r.lateByMin > 15).length,
           lowHours: active.filter((r) => r.hoursLeftMin != null && r.hoursLeftMin <= 60).length,
+          teams: active.filter((r) => r.crewType === 'team').length,
+          solo: active.filter((r) => r.crewType === 'solo').length,
           stopsLocated: located,
           stopsTotal: allStops.length,
           addressBookSize: addrById.size,
