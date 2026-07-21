@@ -749,6 +749,38 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         // Partial degradation is reported, not swallowed. If the fuel chunk
         // failed, "no low-fuel trucks" would otherwise look like good news.
         partial: failures.length ? failures : null,
+
+        // ---- can we join this fleet to a TMS? ----
+        //
+        // The whole TruckMate integration depends on matching a trip to a
+        // truck. Three candidate keys, each with a known flaw:
+        //   unitId — the company's own number, but not populated on every truck
+        //   name   — always present, but is NOT always the same as unitId
+        //   vin    — looks authoritative, but is NOT unique in this account
+        // Measure the coverage rather than assuming, because picking the wrong
+        // key attaches a load to the wrong truck silently.
+        joinReadiness: (() => {
+          const withUnit = rows.filter((r) => r.unitId);
+          const mismatch = withUnit
+            .filter((r) => String(r.unitId) !== String(r.name))
+            .map((r) => ({ name: r.name, unitId: r.unitId }));
+          const vins = new Map();
+          for (const r of rows) {
+            if (!r.vin) continue;
+            vins.set(r.vin, (vins.get(r.vin) || []).concat(r.name));
+          }
+          const dupVins = [...vins.entries()]
+            .filter(([, names]) => names.length > 1)
+            .map(([vin, names]) => ({ vin, names }));
+          return {
+            total: rows.length,
+            withUnitId: withUnit.length,
+            missingUnitId: rows.length - withUnit.length,
+            unitIdDiffersFromName: mismatch,
+            duplicateVins: dupVins,
+            missingVin: rows.filter((r) => !r.vin).length,
+          };
+        })(),
       });
     } catch (e) {
       console.error('[fleet] full vehicles failed:', e.message);
