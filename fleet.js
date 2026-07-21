@@ -585,6 +585,30 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       const { data, failures } = await fetchVehicleStats(token);
       const j = { data };
       const val = (x) => (x && x.value != null ? x.value : null);
+
+      // ---- believability filters ----
+      //
+      // Live data taught us three things the raw feed gets wrong. All three
+      // produce FALSE ALARMS, which are worse than no alarm: a dispatcher who
+      // learns the battery warning is usually wrong stops reading it, and then
+      // misses the real one.
+      //
+      // 1. A reporting truck never has a 0V battery. Zero means the gateway
+      //    isn't reading the battery, not that the battery is flat. Live data
+      //    showed 53 of 170 "low battery" — nearly all of them parked units
+      //    last heard from months ago.
+      const MIN_BELIEVABLE_VOLTS = 6;
+      const believableVolts = (v) => (v != null && v >= MIN_BELIEVABLE_VOLTS ? v : null);
+
+      // 2. Ambient air temperature above ~130°F is an engine-bay sensor, not
+      //    outside air. Live data had 144°F and 122°F readings.
+      const AMBIENT_MAX_F = 130, AMBIENT_MIN_F = -60;
+      const believableAmbient = (f) => (f != null && f <= AMBIENT_MAX_F && f >= AMBIENT_MIN_F ? f : null);
+
+      // 3. A reading from months ago is not a reading. Age it explicitly so
+      //    the UI can separate "truck is fine" from "we have no idea".
+      const STALE_HOURS = 6;
+      const now = Date.now();
       const rows = (j.data || []).map((v) => {
         const gps = stat(v, 'gps') || {};
         const faults = stat(v, 'faultCodes') || {};
@@ -601,11 +625,25 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         const battMv = statValue(v, 'batteryMilliVolts');
         const defMilli = statValue(v, 'defLevelMilliPercent');
         const ambientMilliC = statValue(v, 'ambientAirTemperatureMilliC');
+        const ageMs = gps.time ? now - Date.parse(gps.time) : null;
+        const ageHours = ageMs != null ? Math.round(ageMs / 3600000) : null;
+        const stale = ageHours == null || ageHours >= STALE_HOURS;
+        const rawVolts = battMv != null ? Number((battMv / 1000).toFixed(1)) : null;
+        const rawAmbientF = ambientMilliC != null
+          ? Math.round((ambientMilliC / 1000) * 9 / 5 + 32) : null;
+
         return {
           id: v.id,
           name: v.name,
           vin: (v.externalIds && v.externalIds['samsara.vin']) || null,
           serial: (v.externalIds && v.externalIds['samsara.serial']) || null,
+          // The company's OWN unit number, when Samsara carries it. This is
+          // the likely join key to TruckMate — more trustworthy than VIN,
+          // which the live data showed is NOT unique in this account.
+          unitId: (v.externalIds && v.externalIds.unitId) || null,
+          // How old the position is, and whether to trust any of this row.
+          ageHours,
+          stale,
           engine: statValue(v, 'engineStates'),
           lat: gps.latitude ?? null,
           lng: gps.longitude ?? null,
@@ -619,10 +657,13 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           odometerMi: odoM != null ? Math.round(odoM / 1609.34) : null,
           rpm: statValue(v, 'engineRpm'),
           coolantF: coolantMilliC != null ? Math.round((coolantMilliC / 1000) * 9 / 5 + 32) : null,
-          batteryV: battMv != null ? Number((battMv / 1000).toFixed(1)) : null,
+          batteryV: believableVolts(rawVolts),
+          // Kept so a real electrical fault isn't hidden by the filter — the
+          // UI can show it as "no reading" rather than silently dropping it.
+          batteryRaw: rawVolts,
           defPct: defMilli != null ? Math.round(defMilli / 1000) : null,
-          ambientF: ambientMilliC != null
-            ? Math.round((ambientMilliC / 1000) * 9 / 5 + 32) : null,
+          ambientF: believableAmbient(rawAmbientF),
+          ambientRaw: rawAmbientF,
           // Engine hours is NOT available from this API — engineSeconds,
           // engineHours, engineIdleSeconds and engineTotalHours were all
           // rejected as invalid stat types. Returning null rather than
@@ -634,13 +675,22 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       });
       res.json({
         vehicles: rows,
-        counts: {
-          total: rows.length,
-          withFaults: rows.filter((x) => x.faultCount > 0).length,
-          lowFuel: rows.filter((x) => x.fuelPct != null && x.fuelPct < 20).length,
-          lowDef: rows.filter((x) => x.defPct != null && x.defPct < 20).length,
-          lowBattery: rows.filter((x) => x.batteryV != null && x.batteryV < 12.2).length,
-        },
+        // Counts describe REPORTING trucks only. A unit last heard from in
+        // April isn't low on fuel — we simply don't know, and folding it into
+        // an alert count invents a problem that isn't there.
+        counts: (() => {
+          const live = rows.filter((x) => !x.stale);
+          return {
+            total: rows.length,
+            reporting: live.length,
+            stale: rows.length - live.length,
+            withFaults: live.filter((x) => x.faultCount > 0).length,
+            lowFuel: live.filter((x) => x.fuelPct != null && x.fuelPct < 20).length,
+            lowDef: live.filter((x) => x.defPct != null && x.defPct < 20).length,
+            lowBattery: live.filter((x) => x.batteryV != null && x.batteryV < 12.2).length,
+            noBatteryReading: live.filter((x) => x.batteryV == null && x.batteryRaw != null).length,
+          };
+        })(),
         // Partial degradation is reported, not swallowed. If the fuel chunk
         // failed, "no low-fuel trucks" would otherwise look like good news.
         partial: failures.length ? failures : null,
