@@ -367,26 +367,78 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   // 'ambientAirTemperature' and 'engineSeconds' were both rejected as invalid
   // type names and are gone. They were also duplicated into
   // /fleet/vehicles/full, which meant that endpoint 502'd on every call.
+  // ORDER MATTERS. These go out in chunks of four; if a later chunk fails the
+  // earlier ones still land, so the most operationally important readings sit
+  // first. gps and engineStates are what the dispatcher cannot work without.
   const STAT_TYPES = [
-    'gps', 'engineStates', 'fuelPercents', 'obdOdometerMeters', 'engineRpm',
-    'engineCoolantTemperatureMilliC', 'batteryMilliVolts',
-    'defLevelMilliPercent', 'faultCodes',
+    'gps', 'engineStates', 'fuelPercents', 'faultCodes',
+    'obdOdometerMeters', 'engineRpm', 'engineCoolantTemperatureMilliC', 'batteryMilliVolts',
+    'defLevelMilliPercent', 'ambientAirTemperatureMilliC',
   ];
 
-  // Plausible correct spellings for the two that were rejected. The bisect
-  // tests these alongside the working set and reports which (if any) exist,
-  // so the right name is discovered rather than guessed at a third time.
-  const STAT_TYPE_CANDIDATES = [
-    'ambientAirTemperatureMilliC', 'engineHours', 'engineIdleSeconds',
-    'engineTotalHours', 'ambientAirTemperatureCelsiusMilli',
-  ];
+  // Candidates already resolved by bisect: ambientAirTemperatureMilliC is the
+  // correct spelling and is now in STAT_TYPES above. Engine hours does not
+  // exist under any name tried — engineHours, engineIdleSeconds and
+  // engineTotalHours were all rejected — so that reading is simply not
+  // available from this API and the UI should not promise it.
+  const STAT_TYPE_CANDIDATES = [];
+
+  // Samsara caps a stats request at FOUR types. Discovered from a live 400
+  // ("Vehicle stats are currently restricted to 4 types"), which only became
+  // visible after the invalid type names were removed — one error was masking
+  // the other.
+  //
+  // So: split the wanted types into chunks of four, fire them in parallel, and
+  // merge the responses by vehicle id. Order matters — if a later chunk fails,
+  // the earlier ones still give the dispatcher what it most needs.
+  const STATS_MAX_TYPES = 4;
+
+  function chunk(arr, n) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+    return out;
+  }
+
+  async function fetchVehicleStats(token, types = STAT_TYPES) {
+    const headers = { Authorization: `Bearer ${token}` };
+    const groups = chunk(types, STATS_MAX_TYPES);
+
+    const results = await Promise.all(groups.map(async (g) => {
+      const r = await fetch(`https://api.samsara.com/fleet/vehicles/stats?types=${g.join(',')}`, { headers });
+      if (!r.ok) {
+        let detail = ''; try { detail = (await r.text()).slice(0, 200); } catch { /* ignore */ }
+        // Report which group failed rather than failing the whole call — a
+        // missing fuel reading shouldn't cost us GPS.
+        return { failed: { types: g, status: r.status, detail } };
+      }
+      const j = await r.json().catch(() => null);
+      return { data: (j && j.data) || [] };
+    }));
+
+    // Merge by vehicle id. Each chunk returns the same vehicles with a
+    // different subset of stat keys, so assembling them gives one full row.
+    const byId = new Map();
+    const failures = [];
+    for (const res of results) {
+      if (res.failed) { failures.push(res.failed); continue; }
+      for (const v of res.data) {
+        const key = String(v.id);
+        const existing = byId.get(key);
+        if (existing) Object.assign(existing, v);
+        else byId.set(key, { ...v });
+      }
+    }
+    return { data: [...byId.values()], failures };
+  }
 
   const PROBES = [
     { key: 'vehicles', label: 'Vehicles', url: '/fleet/vehicles?limit=1' },
     // NO `limit` param. This endpoint 400s on it — the working call at
     // /fleet/vehicles/full omits it, and the probe copying it in was the
     // reason this reported "unavailable" while live data worked fine.
-    { key: 'vehicleStats', label: 'Vehicle stats (live)', url: `/fleet/vehicles/stats?types=${STAT_TYPES.join(',')}` },
+    // Max four types per request — a hard Samsara limit. The real endpoint
+    // chunks and merges; the probe just checks the first group is reachable.
+    { key: 'vehicleStats', label: 'Vehicle stats (live)', url: `/fleet/vehicles/stats?types=${STAT_TYPES.slice(0, STATS_MAX_TYPES).join(',')}` },
     { key: 'drivers', label: 'Drivers', url: '/fleet/drivers?limit=1' },
     { key: 'hosClocks', label: 'HOS clocks', url: '/fleet/hos/clocks?limit=1' },
     { key: 'hosLogs', label: 'HOS logs', url: '/fleet/hos/logs?limit=1' },
@@ -504,19 +556,12 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       const owner = String(req.user.company || req.user.id);
       const token = await tokenFor(owner);
       if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
-      // One shared list, verified by the bisect in /fleet/discover. This
-      // endpoint previously duplicated the probe's list including two invalid
-      // type names, so EVERY call here 502'd. A second copy of a fact is a
-      // second thing to get wrong.
-      const types = STAT_TYPES.join(',');
-      const r = await fetch(`https://api.samsara.com/fleet/vehicles/stats?types=${types}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!r.ok) {
-        const detail = await r.text().catch(() => '');
-        return res.status(502).json({ error: `Samsara ${r.status}`, detail: detail.slice(0, 300) });
-      }
-      const j = await r.json();
+      // Chunked into groups of four and merged — see fetchVehicleStats. This
+      // endpoint previously asked for eleven types in one call, two of them
+      // invalid, so EVERY call here 502'd. A second copy of a fact is a second
+      // thing to get wrong; there is now one list and one fetcher.
+      const { data, failures } = await fetchVehicleStats(token);
+      const j = { data };
       const val = (x) => (x && x.value != null ? x.value : null);
       const rows = (j.data || []).map((v) => {
         const gps = v.gps || {};
@@ -531,7 +576,11 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         const coolantMilliC = val(v.engineCoolantTemperatureMilliC);
         const battMv = val(v.batteryMilliVolts);
         const defMilli = val(v.defLevelMilliPercent);
-        const ambient = v.ambientAirTemperature || {};
+        // The stat type is `ambientAirTemperatureMilliC`, so that is also the
+        // response key — there is no `ambientAirTemperature` wrapper object.
+        // The old code read a nested field that never existed, which would
+        // have silently returned null forever.
+        const ambientMilliC = val(v.ambientAirTemperatureMilliC);
         return {
           id: v.id,
           name: v.name,
@@ -552,9 +601,13 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           coolantF: coolantMilliC != null ? Math.round((coolantMilliC / 1000) * 9 / 5 + 32) : null,
           batteryV: battMv != null ? Number((battMv / 1000).toFixed(1)) : null,
           defPct: defMilli != null ? Math.round(defMilli / 1000) : null,
-          ambientF: ambient.ambientAirTemperatureMilliC != null
-            ? Math.round((ambient.ambientAirTemperatureMilliC / 1000) * 9 / 5 + 32) : null,
-          engineHours: val(v.engineSeconds) != null ? Math.round(val(v.engineSeconds) / 3600) : null,
+          ambientF: ambientMilliC != null
+            ? Math.round((ambientMilliC / 1000) * 9 / 5 + 32) : null,
+          // Engine hours is NOT available from this API — engineSeconds,
+          // engineHours, engineIdleSeconds and engineTotalHours were all
+          // rejected as invalid stat types. Returning null rather than
+          // pretending, so the UI can hide the field instead of showing a lie.
+          engineHours: null,
           faultCodes: codes,
           faultCount: codes.length,
         };
@@ -568,6 +621,9 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           lowDef: rows.filter((x) => x.defPct != null && x.defPct < 20).length,
           lowBattery: rows.filter((x) => x.batteryV != null && x.batteryV < 12.2).length,
         },
+        // Partial degradation is reported, not swallowed. If the fuel chunk
+        // failed, "no low-fuel trucks" would otherwise look like good news.
+        partial: failures.length ? failures : null,
       });
     } catch (e) {
       console.error('[fleet] full vehicles failed:', e.message);
