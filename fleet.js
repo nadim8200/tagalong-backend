@@ -399,6 +399,28 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
     return out;
   }
 
+  // Samsara asks for a stat type in the PLURAL and answers in the SINGULAR:
+  // request `fuelPercents`, receive `fuelPercent`; request `engineStates`,
+  // receive `engineState`. Reading back the name you asked for yields
+  // undefined — silently, forever, with no error. That bug shipped twice here
+  // already (ambient temperature, then fuel and engine state).
+  //
+  // So never index a stat by a hardcoded key. Ask for it by the type name and
+  // let this try the plausible forms.
+  function stat(v, type) {
+    if (!v) return null;
+    const candidates = [type];
+    if (type.endsWith('s')) candidates.push(type.slice(0, -1));
+    else candidates.push(`${type}s`);
+    for (const k of candidates) if (v[k] !== undefined) return v[k];
+    return null;
+  }
+  // Scalar reading out of Samsara's { time, value } wrapper.
+  const statValue = (v, type) => {
+    const s = stat(v, type);
+    return s && s.value != null ? s.value : null;
+  };
+
   async function fetchVehicleStats(token, types = STAT_TYPES) {
     const headers = { Authorization: `Bearer ${token}` };
     const groups = chunk(types, STATS_MAX_TYPES);
@@ -564,29 +586,27 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       const j = { data };
       const val = (x) => (x && x.value != null ? x.value : null);
       const rows = (j.data || []).map((v) => {
-        const gps = v.gps || {};
-        const faults = v.faultCodes || {};
+        const gps = stat(v, 'gps') || {};
+        const faults = stat(v, 'faultCodes') || {};
         const obd = faults.obdii || {};
         const j1939 = faults.j1939 || {};
         const codes = [
           ...((obd.diagnosticTroubleCodes || []).map((c) => c.dtcShortCode || c.fmiDescription).filter(Boolean)),
           ...((j1939.diagnosticTroubleCodes || []).map((c) => c.spnDescription || c.fmiDescription).filter(Boolean)),
         ];
-        const odoM = val(v.obdOdometerMeters);
-        const coolantMilliC = val(v.engineCoolantTemperatureMilliC);
-        const battMv = val(v.batteryMilliVolts);
-        const defMilli = val(v.defLevelMilliPercent);
-        // The stat type is `ambientAirTemperatureMilliC`, so that is also the
-        // response key — there is no `ambientAirTemperature` wrapper object.
-        // The old code read a nested field that never existed, which would
-        // have silently returned null forever.
-        const ambientMilliC = val(v.ambientAirTemperatureMilliC);
+        // All readings go through statValue() — see the note on stat(). Never
+        // hardcode a response key here.
+        const odoM = statValue(v, 'obdOdometerMeters');
+        const coolantMilliC = statValue(v, 'engineCoolantTemperatureMilliC');
+        const battMv = statValue(v, 'batteryMilliVolts');
+        const defMilli = statValue(v, 'defLevelMilliPercent');
+        const ambientMilliC = statValue(v, 'ambientAirTemperatureMilliC');
         return {
           id: v.id,
           name: v.name,
           vin: (v.externalIds && v.externalIds['samsara.vin']) || null,
           serial: (v.externalIds && v.externalIds['samsara.serial']) || null,
-          engine: val(v.engineStates),
+          engine: statValue(v, 'engineStates'),
           lat: gps.latitude ?? null,
           lng: gps.longitude ?? null,
           speedMph: gps.speedMilesPerHour ?? null,
@@ -595,9 +615,9 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           addressName: (gps.address && gps.address.name) || null,
           addressId: (gps.address && gps.address.id) || null,
           gpsAt: gps.time || null,
-          fuelPct: val(v.fuelPercents),
+          fuelPct: statValue(v, 'fuelPercents'),
           odometerMi: odoM != null ? Math.round(odoM / 1609.34) : null,
-          rpm: val(v.engineRpm),
+          rpm: statValue(v, 'engineRpm'),
           coolantF: coolantMilliC != null ? Math.round((coolantMilliC / 1000) * 9 / 5 + 32) : null,
           batteryV: battMv != null ? Number((battMv / 1000).toFixed(1)) : null,
           defPct: defMilli != null ? Math.round(defMilli / 1000) : null,
