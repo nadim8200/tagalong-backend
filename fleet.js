@@ -533,6 +533,79 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   };
   const DONE_STATES = new Set(['departed', 'completed', 'skipped']);
 
+  // Samsara returns addresses in at least two shapes:
+  //   "2306 Perimeter Park Dr., ATLANTA, GA 30341"       ← state+zip together
+  //   "3315 NW 70th Ave, Miami-Dade County, FL, 33122"   ← zip its own part
+  // A naive "last part is state" reads the second as city=FL, state=33122.
+  // So: drop a trailing bare zip first, then read state off the new tail.
+  function parseCityState(formatted) {
+    const parts = String(formatted || '').split(',').map((s) => s.trim()).filter(Boolean);
+    let zip = null;
+    if (parts.length && /^\d{5}(-\d{4})?$/.test(parts[parts.length - 1])) {
+      zip = parts.pop();
+    }
+    if (parts.length < 2) return { city: null, state: null, zip };
+    const tail = parts[parts.length - 1];
+    const m = tail.match(/^([A-Za-z]{2})\s*(\d{5})?$/);
+    if (m) {
+      return { city: parts[parts.length - 2] || null, state: m[1].toUpperCase(), zip: zip || m[2] || null };
+    }
+    return { city: parts[parts.length - 2] || null, state: tail || null, zip };
+  }
+
+  // ---- address book, cached ----
+  // City and state come from here, not from the route stop.
+  let addrCache = { at: 0, map: new Map() };
+  async function addressBook(token) {
+    if (Date.now() - addrCache.at < 60 * 60 * 1000 && addrCache.map.size) return addrCache.map;
+    const map = new Map();
+    try {
+      let cursor = null, pages = 0;
+      do {
+        const qs = new URLSearchParams({ limit: '512' });
+        if (cursor) qs.set('after', cursor);
+        const r = await fetch(`https://api.samsara.com/addresses?${qs}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!r.ok) break;
+        const j = await r.json();
+        for (const a of (j.data || [])) {
+          const formatted = a.formattedAddress || '';
+          // "2306 Perimeter Park Dr., ATLANTA, GA 30341" → city + state.
+          // Parsed from the end so a street address containing commas doesn't
+          // throw it off.
+          const { city, state, zip } = parseCityState(formatted);
+          map.set(String(a.id), {
+            name: a.name || '',
+            formatted,
+            city: city || null,
+            state: state || null,
+            zip,
+            lat: (a.geofence && a.geofence.circle && a.geofence.circle.latitude) || null,
+            lng: (a.geofence && a.geofence.circle && a.geofence.circle.longitude) || null,
+          });
+        }
+        const pg = j.pagination || {};
+        cursor = pg.hasNextPage ? pg.endCursor : null;
+        pages += 1;
+      } while (cursor && pages < 12);
+    } catch (e) {
+      console.warn('[fleet] address book unavailable:', e.message);
+    }
+    if (map.size) addrCache = { at: Date.now(), map };
+    return map;
+  }
+
+  // Customer names arrive as "FLORA GREENS LLC (44903)" — the trailing code is
+  // their account number. Kept separately so the name reads cleanly but the
+  // code is still searchable.
+  function splitCustomer(raw) {
+    const s = String(raw || '').trim();
+    const m = s.match(/^(.*?)\s*\((\d+)\)\s*$/);
+    if (m) return { name: m[1].replace(/\*+$/, '').trim(), code: m[2] };
+    return { name: s.replace(/\*+$/, '').trim(), code: null };
+  }
+
   app.get('/fleet/runs', requireAuth, async (req, res) => {
     try {
       const owner = String(req.user.company || req.user.id);
@@ -551,6 +624,12 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         fetch('https://api.samsara.com/fleet/vehicles/stats?types=gps,engineStates', { headers }),
         fetch('https://api.samsara.com/fleet/hos/clocks?limit=200', { headers }),
       ]);
+
+      // Route stops only carry { id, name } for saved locations — no city, no
+      // state, no coordinates. The full address lives in Samsara's address book,
+      // so resolve it once and reuse. Cached for an hour: an address book barely
+      // changes, and re-pulling it on every load would be wasteful.
+      const addrById = await addressBook(token);
       if (!rr.ok) {
         const detail = await rr.text().catch(() => '');
         return res.status(502).json({ error: `Samsara routes ${rr.status}`, detail: detail.slice(0, 250) });
@@ -580,12 +659,30 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       const runs = routes.map((route) => {
         const stops = (route.stops || []).map((s) => {
           const sul = s.singleUseLocation || null;
+          const addrId = (s.address && s.address.id) || null;
+          const book = addrId ? addrById.get(String(addrId)) : null;
+          const raw = s.name || (s.address && s.address.name) || '';
+          const { name: customer, code: customerCode } = splitCustomer(raw);
+          // Single-use locations carry their own address string; saved ones are
+          // resolved from the address book above.
+          let city = book ? book.city : null;
+          let state = book ? book.state : null;
+          if (!city && sul && sul.address) {
+            const p = parseCityState(sul.address);
+            city = p.city; state = p.state;
+          }
           return {
             id: s.id,
-            name: s.name || (s.address && s.address.name) || '',
-            addressId: (s.address && s.address.id) || null,
-            lat: sul ? sul.latitude : null,
-            lng: sul ? sul.longitude : null,
+            name: raw,
+            customer,
+            customerCode,
+            city,
+            state,
+            where: [city, state].filter(Boolean).join(', ') || null,
+            fullAddress: (book && book.formatted) || (sul && sul.address) || null,
+            addressId: addrId,
+            lat: sul ? sul.latitude : (book ? book.lat : null),
+            lng: sul ? sul.longitude : (book ? book.lng : null),
             appointmentAt: s.scheduledArrivalTime || null,
             arrivedAt: s.actualArrivalTime || null,
             departedAt: s.actualDepartureTime || null,
@@ -639,7 +736,10 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           totalBills: stops.reduce((n, s) => n + s.bills.length, 0),
           complete,
           nextStop: next ? {
-            name: next.name, appointmentAt: next.appointmentAt, bills: next.bills,
+            name: next.name, customer: next.customer, customerCode: next.customerCode,
+            city: next.city, state: next.state, where: next.where,
+            fullAddress: next.fullAddress,
+            appointmentAt: next.appointmentAt, bills: next.bills,
             notes: next.notes, sequence: next.sequence,
           } : null,
           milesToNext, etaAt, lateByMin,
