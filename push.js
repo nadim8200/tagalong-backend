@@ -29,13 +29,32 @@ const KNOTS_TO_MPH = 1.15078;
 // recent AND the tracker says it's actually in motion — otherwise a stale
 // reading can trigger speeding, tow and idling alerts on a car in a driveway.
 const FRESH_FIX_MS = 7 * 60 * 1000;
+// A stale re-read from a sleeping tracker sits around this speed, and GPS noise
+// on a stationary car rarely exceeds it. Above it, a FRESH fix is real motion
+// no matter what the ignition/motion flags say — you can't do 30 mph parked.
+const TRUST_SPEED_MPH = 20;
 function liveMph(pos) {
   if (!pos) return 0;
   const at = pos.attributes || {};
   const fix = pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+  // Freshness is non-negotiable: a stale fix, even at 80 mph, means the tracker
+  // stopped reporting mid-drive (that's the disconnect alert's job, not this).
   if (!fix || Date.now() - fix > FRESH_FIX_MS) return 0;
+
+  const mph = Math.round((pos.speed || 0) * KNOTS_TO_MPH);
+
+  // A fresh fix showing real highway speed is trusted on its own. This is the
+  // fix for "did a whole highway trip over the limit, got no alert": many
+  // GPS/OBD trackers don't report ignition, or report it false when they can't
+  // detect it, and the old `ignition === false → 0` swallowed every speeding
+  // alert on those devices.
+  if (mph >= TRUST_SPEED_MPH) return mph;
+
+  // Only for LOW, ambiguous speeds do the motion/ignition flags get a vote —
+  // this is what keeps a parked car's stale 9-mph re-read from reading as
+  // motion. That was the gate's original and only real purpose.
   if (at.motion === false || at.ignition === false) return 0;
-  return Math.round((pos.speed || 0) * KNOTS_TO_MPH);
+  return mph;
 }
 // A fault condition must be absent this long before it's allowed to alert again
 // (a code cleared at the shop that genuinely returns still notifies) …
@@ -518,6 +537,27 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     const mph = liveMph(pos);
     const warnAt = Number((d.attributes || {}).speedWarnMph) > 0 ? Number((d.attributes || {}).speedWarnMph) : 70;
     const maxAt = Number((d.attributes || {}).speedMaxMph) > 0 ? Number((d.attributes || {}).speedMaxMph) : 85;
+
+    // DIAGNOSTIC — why did / didn't speeding fire? liveMph() has three gates
+    // (fresh fix, motion≠false, ignition≠false) and returning 0 on any of them
+    // silently swallows a speeding alert. Raw speed comes straight from the
+    // position so we can see whether the tracker reported motion at all versus
+    // a gate closing. Only logs when the tracker's OWN raw speed suggests
+    // movement, so a parked fleet doesn't fill the log.
+    {
+      const at = (pos && pos.attributes) || {};
+      const rawMph = pos ? Math.round((pos.speed || 0) * KNOTS_TO_MPH) : 0;
+      const fixMs = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+      const ageSec = fixMs ? Math.round((Date.now() - fixMs) / 1000) : null;
+      if (rawMph >= 15 || mph >= 15) {
+        console.log(`[push] speed ${car}: raw ${rawMph} mph → live ${mph} mph `
+          + `| warn ${warnAt} max ${maxAt} `
+          + `| fixAge ${ageSec == null ? 'no-fix' : ageSec + 's'}${fixMs && Date.now() - fixMs > FRESH_FIX_MS ? ' STALE' : ''} `
+          + `| motion=${at.motion} ignition=${at.ignition}`
+          + `${mph === 0 && rawMph >= 15 ? '  <-- live=0 while raw moving: a gate is swallowing it' : ''}`);
+      }
+    }
+
     if (mph >= maxAt) {
       out.push({ key: 'overspeed-hard', val: 'on', title: `🚨 ${car} — over ${maxAt} mph`, body: `Travelling at ${mph} mph.` });
     } else if (mph >= warnAt) {
@@ -910,6 +950,61 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             } else {
               if (rec.sigs[pend]) { delete rec.sigs[pend]; changed = true; }
               if (rec.sigs[fired]) { delete rec.sigs[fired]; changed = true; }
+            }
+          }
+
+          // ---- jumpy / aggressive acceleration ----
+          //
+          // The tracker's own hardAcceleration event is handled in the event
+          // path, but these OBD units don't emit it reliably (same reason they
+          // don't report ignition). So compute it from how fast speed CLIMBED
+          // between two consecutive fresh fixes.
+          //
+          // Rate is what matters, not raw speed: gaining 25 mph over 30 seconds
+          // is normal on a highway on-ramp; gaining it in 3 seconds is someone
+          // flooring it. Default threshold ~8 mph/s (about 0.36 g) — a spirited
+          // launch, not everyday traffic. Per car via accelMphPerSec.
+          {
+            const nowMs = Date.now();
+            const curMph = liveMph(pos); // fresh-gated and unit-correct
+            const curFix = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+            const prevKey = `accelprev:${d.id}`;
+            const firedKey = `accel:${d.id}`;
+            const rateLimit = Number((d.attributes || {}).accelMphPerSec) > 0
+              ? Number((d.attributes || {}).accelMphPerSec) : 8;
+
+            // Only compare real, fresh, distinct fixes.
+            if (curFix && nowMs - curFix <= FRESH_FIX_MS) {
+              const prev = rec.sigs[prevKey] ? String(rec.sigs[prevKey]).split('|') : null;
+              const prevMph = prev ? Number(prev[0]) : null;
+              const prevFix = prev ? Number(prev[1]) : null;
+
+              if (prevMph != null && prevFix && curFix > prevFix) {
+                const dSec = (curFix - prevFix) / 1000;
+                const dMph = curMph - prevMph;
+                // Meaningful window only: ignore gaps so long the "rate" is
+                // meaningless, and require a real gain so GPS jitter at low
+                // speed can't trip it.
+                if (dSec >= 1 && dSec <= 20 && dMph >= 12 && curMph >= 25) {
+                  const rate = dMph / dSec;
+                  if (rate >= rateLimit) {
+                    // One alert per burst: don't re-fire until the car has
+                    // settled (stopped gaining) at least once in between.
+                    if (rec.sigs[firedKey] !== 'on') {
+                      rec.sigs[firedKey] = 'on';
+                      toSend.push({
+                        title: `🏎️ ${NAMED(d)} — hard acceleration`,
+                        body: `Sped up ${Math.round(dMph)} mph in ${dSec < 1.5 ? '~1' : Math.round(dSec)} seconds (now ${curMph} mph).`,
+                      });
+                    }
+                  } else if (rate < rateLimit * 0.4 && rec.sigs[firedKey] === 'on') {
+                    rec.sigs[firedKey] = 'off'; changed = true; // settled → re-arm
+                  }
+                }
+              }
+              // Remember this sample for the next poll.
+              rec.sigs[prevKey] = `${curMph}|${curFix}`;
+              changed = true;
             }
           }
 
