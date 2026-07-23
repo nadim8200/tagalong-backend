@@ -801,6 +801,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const sig = `ev:${ev.id}`;
             if (rec.sigs[sig]) continue;
             rec.sigs[sig] = 1;
+            // If the tracker DID report ignition, mark the shared guard so the
+            // motion-derived "car started" below doesn't fire a second time.
+            if (ev.type === 'ignitionOn' || p.key === 'ign-on') rec.sigs[`startedat:${d.id}`] = String(Date.now());
             toSend.push(p);
           }
           // derived (disconnect, dtc, low fuel/battery, tow)
@@ -950,6 +953,58 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             } else {
               if (rec.sigs[pend]) { delete rec.sigs[pend]; changed = true; }
               if (rec.sigs[fired]) { delete rec.sigs[fired]; changed = true; }
+            }
+          }
+
+          // ---- car started / ignition-on, derived from motion ----
+          //
+          // Traccar's ignitionOn event only fires when the tracker reports the
+          // ignition flag — and these OBD units don't report it reliably (the
+          // same gap that broke speeding). So derive "the car started" from the
+          // car beginning to move after a real park.
+          //
+          // The trick is not firing at every stoplight. A trip has "started"
+          // only when the car moves after being stationary for a while, so a
+          // 30-second wait at a red light isn't a new trip but a 10-minute stop
+          // at the store is. Default gap 5 min, per car via tripGapMin.
+          //
+          // If the tracker DOES report ignition, the event path above still
+          // fires; the shared guard below stops the two from double-notifying.
+          {
+            const nowMs = Date.now();
+            const curFix = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+            const fresh = curFix && (nowMs - curFix) <= FRESH_FIX_MS;
+            const moving = fresh && liveMph(pos) >= 6;
+            const gapMs = (Number((d.attributes || {}).tripGapMin) > 0
+              ? Number((d.attributes || {}).tripGapMin) : 5) * 60 * 1000;
+
+            const lastMoveKey = `lastmove:${d.id}`;
+            const tripKey = `tripon:${d.id}`;
+            const startGuard = `startedat:${d.id}`; // shared with the ignitionOn event
+
+            if (fresh) {
+              const lastMove = Number(rec.sigs[lastMoveKey] || 0);
+              if (moving) {
+                const gap = lastMove ? nowMs - lastMove : Infinity;
+                if (rec.sigs[tripKey] !== 'on' && gap >= gapMs) {
+                  // A real trip start. Suppress if a start was already announced
+                  // very recently (e.g. the ignitionOn event beat us to it).
+                  const lastStart = Number(rec.sigs[startGuard] || 0);
+                  if (nowMs - lastStart > gapMs) {
+                    rec.sigs[startGuard] = String(nowMs);
+                    toSend.push({ title: `🚗 ${NAMED(d)} started`, body: 'The car started moving.' });
+                  }
+                  rec.sigs[tripKey] = 'on';
+                }
+                rec.sigs[lastMoveKey] = String(nowMs);
+                changed = true;
+              } else if (rec.sigs[tripKey] === 'on') {
+                // Stationary long enough → the trip has ended, so the next move
+                // counts as a fresh start.
+                if (lastMove && nowMs - lastMove >= gapMs) {
+                  rec.sigs[tripKey] = 'off'; changed = true;
+                }
+              }
             }
           }
 
