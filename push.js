@@ -889,7 +889,17 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const idleMph = liveMph(pos);
             const idleMin = Number((d.attributes || {}).idleAlertMin) > 0 ? Number((d.attributes || {}).idleAlertMin) : 15;
             const pend = `idlepend:${d.id}`, fired = `idle:${d.id}`;
-            if (pa.ignition === true && idleMph < 2) {
+
+            // The fix must be FRESH. A parked car that goes quiet keeps its last
+            // reported ignition=true forever, and without this the timer counted
+            // that stale value as "still running" — firing "idling 15 min" on a
+            // car that had been off the whole time. Same 7-minute freshness gate
+            // liveMph() already uses everywhere else. A genuinely idling car
+            // reports fresh fixes; a silent one is parked, not idling.
+            const fixMs = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+            const fixFresh = fixMs && (Date.now() - fixMs) <= FRESH_FIX_MS;
+
+            if (fixFresh && pa.ignition === true && idleMph < 2) {
               const since = Number(rec.sigs[pend] || 0);
               if (!since) {
                 rec.sigs[pend] = String(Date.now()); changed = true;

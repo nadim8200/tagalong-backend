@@ -1022,6 +1022,23 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       }
       const vehById = new Map(vehicles.map((v) => [String(v.id), v]));
 
+      // FALLBACK: driver → truck, from Samsara's STATIC assignment.
+      //
+      // HOS only knows which truck a driver is in while they are logged into
+      // the ELD. Most routes in the live data have no HOS record at all, which
+      // is why most rows showed "Trip #618837" instead of a truck number — we
+      // simply had no way to name the truck.
+      //
+      // `staticAssignedDriver` on the vehicle is the persistent assignment and
+      // does not depend on anyone being logged in. Weaker evidence than HOS
+      // (it can be stale), so it is only used when HOS has nothing, and the
+      // row records which source it came from.
+      const truckByStaticDriver = new Map();
+      for (const v of vehicles) {
+        const d = v.staticAssignedDriver;
+        if (d && d.id) truckByStaticDriver.set(String(d.id), { id: String(v.id), name: v.name });
+      }
+
       const runs = routes.map((route) => {
         const stops = (route.stops || []).map((s) => {
           const sul = s.singleUseLocation || null;
@@ -1067,13 +1084,33 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
         const next = stops.find((s) => !DONE_STATES.has(s.state)) || null;
         const driverId = (route.driver && String(route.driver.id)) || null;
         const hos = driverId ? hosByDriver.get(driverId) : null;
-        const veh = hos && hos.vehicleId ? vehById.get(hos.vehicleId) : null;
+
+        // Truck identity: HOS first (the driver is logged in, so this is
+        // certain), then the static assignment (persistent, but can be stale).
+        const staticTruck = driverId ? truckByStaticDriver.get(driverId) : null;
+        const truckId = (hos && hos.vehicleId) || (staticTruck && staticTruck.id) || null;
+        const truckName = (hos && hos.vehicleName) || (staticTruck && staticTruck.name) || null;
+        const truckSource = hos && hos.vehicleId ? 'hos' : (staticTruck ? 'static-assignment' : null);
+
+        const veh = truckId ? vehById.get(truckId) : null;
         const gps = (veh && veh.gps) || null;
 
         // Everyone currently signed into this truck. The route names one
         // driver; the second half of a team is only visible here.
-        const crew = (hos && hos.vehicleId && crewByVehicle.get(hos.vehicleId)) || (hos ? [hos] : []);
-        const crewType = crew.length > 1 ? 'team' : 'solo';
+        const crew = (truckId && crewByVehicle.get(truckId)) || (hos ? [hos] : []);
+
+        // CREW TYPE IS AN ASSERTION, SO ONLY MAKE IT WITH EVIDENCE.
+        //
+        // Team detection works by seeing two drivers logged into the same
+        // truck. When nobody is logged in we learn nothing — and the old code
+        // called that "solo", which is a claim, not an absence. Live data had
+        // most runs with no HOS at all, so genuine teams were being labelled
+        // SOLO on screen. A team covers roughly twice the miles of a solo, so
+        // that mislabel makes every ETA on those runs wrong.
+        //
+        // null means "we don't know" and the UI shows nothing rather than a
+        // confident wrong answer.
+        const crewType = crew.length > 1 ? 'team' : (crew.length === 1 ? 'solo' : null);
         const atWheel = crew.find((c) => c.driving) || null;
         const resting = crew.filter((c) => !c.driving);
 
@@ -1098,7 +1135,10 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           reference: route.name || String(route.id),
           driverId,
           driverName: (route.driver && route.driver.name) || '',
-          truck: hos ? hos.vehicleName : null,
+          truck: truckName,
+          // Where the truck number came from, so the UI can mark a static
+          // assignment as less certain than a live ELD login.
+          truckSource,
           dutyStatus: activeHos ? activeHos.dutyStatus : (hos ? hos.dutyStatus : null),
           // Hours belong to whoever is actually driving.
           hoursLeftMin: activeHos ? activeHos.remainingMin : (hos ? hos.remainingMin : null),
