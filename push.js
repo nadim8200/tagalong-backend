@@ -1011,7 +1011,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                   const lastStart = Number(rec.sigs[startGuard] || 0);
                   if (nowMs - lastStart > gapMs) {
                     rec.sigs[startGuard] = String(nowMs);
-                    toSend.push({ title: `🚗 ${NAMED(d)} started`, body: 'The car started moving.' });
+                    // Same wording as the real ignitionOn event, so both paths
+                    // read identically and the customer can't tell which fired.
+                    toSend.push({ title: `🚗 ${NAMED(d)} started`, body: 'The engine was turned on.' });
                   }
                   rec.sigs[tripKey] = 'on';
                 }
