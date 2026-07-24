@@ -790,6 +790,25 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           const pos = positions[d.id];
           const toSend = [];
 
+          // DIAGNOSTIC — which raw field is this tracker's ignition?
+          //
+          // Different tracker models report the ACC/ignition wire under
+          // different names. When a device reports a fresh fix but has NO clean
+          // `ignition` attribute, dump every attribute key so we can see what
+          // it DOES send (in1 / di1 / acc / input / power / charge…) and map
+          // that field to ignition. This is why the VW alerts and the C300
+          // doesn't — same app, different tracker, different field name.
+          {
+            const at = (pos && pos.attributes) || {};
+            const fixMs = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+            const fresh = fixMs && (Date.now() - fixMs) <= FRESH_FIX_MS;
+            if (fresh && at.ignition == null) {
+              console.log(`[push] IGN-DIAG ${NAMED(d)}: no 'ignition' attr. keys=[${Object.keys(at).join(', ')}] `
+                + `| candidates: ${['in1', 'di1', 'acc', 'input', 'power', 'charge', 'ignition']
+                  .filter((k) => at[k] !== undefined).map((k) => `${k}=${at[k]}`).join(' ') || 'none of the usual'}`);
+            }
+          }
+
           // event-based (crash, geofence, overspeed, ignition, fuel drop…)
           const events = await recentEvents(d.id, fromISO, toISO);
           if (events.length) {
