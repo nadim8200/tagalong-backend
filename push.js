@@ -419,7 +419,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
         if (/lowBattery|battery/i.test(al)) return { key: 'alarm-battery', title: `🔋 ${car} — low battery`, body: 'The tracker battery is low.' };
         if (/jamming/i.test(al)) return { key: 'alarm-jam', title: `📡 ${car} — signal jammed`, body: 'A GPS/signal jammer may be in use.' };
         if (/hardBrak|harshBrak|braking/i.test(al)) return { key: 'harsh-brake', title: `🛑 ${car} — hard braking`, body: 'A sudden hard brake was detected.' };
-        if (/hardAcc|harshAcc|acceleration/i.test(al)) return { key: 'harsh-accel', title: `🏎️ ${car} — hard acceleration`, body: 'A sudden hard acceleration was detected.' };
+        if (/hardAcc|harshAcc|accel|rapidAccel/i.test(al)) return { key: 'harsh-accel', title: `🏎️ ${car} — hard acceleration`, body: 'A sudden hard acceleration was detected.' };
         if (/hardCorner|harshCorner|cornering/i.test(al)) return { key: 'harsh-corner', title: `↩️ ${car} — hard cornering`, body: 'A sharp turn was taken at speed.' };
         if (/powerCut|powerOff|unplug/i.test(al)) return { key: 'alarm-power', title: `🔌 ${car} — power cut`, body: 'The tracker lost power — it may have been unplugged.' };
         if (/idle/i.test(al)) return { key: 'alarm-idle', title: `⏱️ ${car} — idling`, body: 'The engine is running while parked.' };
@@ -815,7 +815,16 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           }
           for (const ev of events) {
             const p = eventToPush(d, ev, geoNames);
-            if (!p) continue;
+            if (!p) {
+              // DIAGNOSTIC — the tracker sent an event we don't turn into an
+              // alert. This is how we find the native hard-acceleration event
+              // (the other platform reads the tracker's G-sensor). If one shows
+              // up here — type or alarm containing accel/harsh/shock/impact —
+              // send the line back and we map it, same as we did for ignition.
+              const alarm = (ev.attributes || {}).alarm;
+              console.log(`[push] EVT-DIAG ${NAMED(d)}: unhandled event type="${ev.type}"${alarm ? ` alarm="${alarm}"` : ''}`);
+              continue;
+            }
             const sig = `ev:${ev.id}`;
             if (rec.sigs[sig]) continue;
             rec.sigs[sig] = 1;
@@ -1070,25 +1079,31 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
 
           // ---- jumpy / aggressive acceleration ----
           //
-          // The tracker's own hardAcceleration event is handled in the event
-          // path, but these OBD units don't emit it reliably (same reason they
-          // don't report ignition). So compute it from how fast speed CLIMBED
-          // between two consecutive fresh fixes.
+          // Works on ANY tracker that reports speed — no accelerometer needed.
           //
-          // Rate is what matters, not raw speed: gaining 25 mph over 30 seconds
-          // is normal on a highway on-ramp; gaining it in 3 seconds is someone
-          // flooring it. Default threshold ~8 mph/s (about 0.36 g) — a spirited
-          // launch, not everyday traffic. Per car via accelMphPerSec.
+          // We can't measure instantaneous g-force from GPS that only updates
+          // every 15-30s: a violent 4-second launch gets averaged over the whole
+          // reporting gap and looks gentle. So instead of a per-second RATE (the
+          // old approach, which never fired because the math is diluted at coarse
+          // sampling), we watch the SPEED JUMP between two consecutive reports.
+          // Gaining a lot of speed since the last check IS hard acceleration,
+          // however the tracker happened to sample it.
+          //
+          // Default: +18 mph gained between two fixes no more than 30s apart.
+          // Tunable per car via accelJumpMph and accelWindowSec. A fine-sampling
+          // device that reports every few seconds will still trip it on a real
+          // launch; a coarse one catches the whole burst in one interval.
           {
             const nowMs = Date.now();
             const curMph = liveMph(pos); // fresh-gated and unit-correct
             const curFix = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
             const prevKey = `accelprev:${d.id}`;
             const firedKey = `accel:${d.id}`;
-            const rateLimit = Number((d.attributes || {}).accelMphPerSec) > 0
-              ? Number((d.attributes || {}).accelMphPerSec) : 8;
+            const jumpMph = Number((d.attributes || {}).accelJumpMph) > 0
+              ? Number((d.attributes || {}).accelJumpMph) : 18;
+            const windowSec = Number((d.attributes || {}).accelWindowSec) > 0
+              ? Number((d.attributes || {}).accelWindowSec) : 30;
 
-            // Only compare real, fresh, distinct fixes.
             if (curFix && nowMs - curFix <= FRESH_FIX_MS) {
               const prev = rec.sigs[prevKey] ? String(rec.sigs[prevKey]).split('|') : null;
               const prevMph = prev ? Number(prev[0]) : null;
@@ -1097,24 +1112,26 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
               if (prevMph != null && prevFix && curFix > prevFix) {
                 const dSec = (curFix - prevFix) / 1000;
                 const dMph = curMph - prevMph;
-                // Meaningful window only: ignore gaps so long the "rate" is
-                // meaningless, and require a real gain so GPS jitter at low
-                // speed can't trip it.
-                if (dSec >= 1 && dSec <= 20 && dMph >= 12 && curMph >= 25) {
-                  const rate = dMph / dSec;
-                  if (rate >= rateLimit) {
-                    // One alert per burst: don't re-fire until the car has
-                    // settled (stopped gaining) at least once in between.
-                    if (rec.sigs[firedKey] !== 'on') {
-                      rec.sigs[firedKey] = 'on';
-                      toSend.push({
-                        title: `🏎️ ${NAMED(d)} — hard acceleration`,
-                        body: `Sped up ${Math.round(dMph)} mph in ${dSec < 1.5 ? '~1' : Math.round(dSec)} seconds (now ${curMph} mph).`,
-                      });
-                    }
-                  } else if (rate < rateLimit * 0.4 && rec.sigs[firedKey] === 'on') {
-                    rec.sigs[firedKey] = 'off'; changed = true; // settled → re-arm
+
+                // DIAGNOSTIC — every speed-increasing sample, so the thresholds
+                // can be tuned to what these trackers actually report.
+                if (dMph >= 6) {
+                  console.log(`[push] ACCEL-DIAG ${NAMED(d)}: +${Math.round(dMph)} mph in ${dSec.toFixed(0)}s `
+                    + `(${prevMph}→${curMph}) | needs +${jumpMph} within ${windowSec}s`);
+                }
+
+                if (dSec <= windowSec && dMph >= jumpMph && curMph >= 20) {
+                  // One alert per burst: hold until the car stops gaining, then
+                  // re-arm so the next launch fires fresh.
+                  if (rec.sigs[firedKey] !== 'on') {
+                    rec.sigs[firedKey] = 'on';
+                    toSend.push({
+                      title: `🏎️ ${NAMED(d)} — hard acceleration`,
+                      body: `Sped up ${Math.round(dMph)} mph to ${curMph} mph.`,
+                    });
                   }
+                } else if (dMph <= 2 && rec.sigs[firedKey] === 'on') {
+                  rec.sigs[firedKey] = 'off'; changed = true; // no longer gaining → re-arm
                 }
               }
               // Remember this sample for the next poll.
