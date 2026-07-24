@@ -30,6 +30,7 @@ import { initDispatcher } from './dispatcher.js';
 import { initNotify } from './notify.js';
 import { initFleet } from './fleet.js';
 import { initRingCentral } from './ringcentral.js';
+import { initTruckMate } from './truckmate.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -344,7 +345,7 @@ app.all('/api/traccar/*', requireAuth, async (req, res) => {
     const ct = r.headers.get('content-type') || '';
     if (ct.includes('application/json')) {
       let payload = await r.json().catch(() => ({}));
-      payload = await scopeForFleet(req.user, path, payload);
+      payload = await scopeResponse(req.user, path, payload);
       return res.json(payload);
     }
     res.send(await r.text());
@@ -381,6 +382,78 @@ async function scopeForFleet(user, path, payload) {
   // Anything not explicitly understood returns EMPTY rather than everything —
   // a new Traccar endpoint should fail closed, not leak another company's data.
   if (Array.isArray(payload)) return [];
+  return payload;
+}
+
+// ---- per-customer scoping (ENFORCED HERE, not in the browser) -----------
+// A regular TagAlong customer (role 'owner' — consumer or Pro) must only ever
+// receive THEIR OWN vehicles from the server. Previously the browser fetched
+// every device and filtered locally, which meant a signed-in user could read
+// the raw response and see everyone's cars. Now the server filters on the way
+// out, mirroring the client's ownership rules (src/traccar.js inScope):
+//   device belongs to the user if attributes.ownerUserId === their id, OR the
+//   device's account/customerId matches theirs, OR they were approved to view
+//   it as a family member (attributes.memberLinks).
+// admin sees all; fleet keeps its own scoping; broker/family keep their flows.
+const _ownerScopeCache = new Map(); // uid -> { scope, exp }
+async function ownerScope(uid) {
+  const hit = _ownerScopeCache.get(String(uid));
+  if (hit && hit.exp > Date.now()) return hit.scope;
+  let account = '', customerId = '';
+  try {
+    const r = await fetch(`${TRACCAR_URL}/api/users`, { headers: traccarHeaders });
+    if (r.ok) {
+      const users = await r.json();
+      const u = users.find((x) => String(x.id) === String(uid));
+      const a = (u && u.attributes) || {};
+      account = a.account || ''; customerId = a.customerId || '';
+    }
+  } catch { /* fall back to id-only scope */ }
+  const scope = { uid: String(uid), account: String(account), customerId: String(customerId) };
+  _ownerScopeCache.set(String(uid), { scope, exp: Date.now() + 60000 });
+  return scope;
+}
+function ownerOwns(d, s) {
+  const a = (d && d.attributes) || {};
+  if (a.ownerUserId != null && String(a.ownerUserId) === s.uid) return true;
+  if (s.account && String(a.account || '') === s.account) return true;
+  if (s.customerId && String(a.customerId || '') === s.customerId) return true;
+  const links = a.memberLinks || [];
+  if (Array.isArray(links) && links.some((x) => x && x.memberId === `u${s.uid}` && x.status === 'approved')) return true;
+  return false;
+}
+const _ownerDevCache = new Map(); // uid -> { ids:Set, exp }
+async function ownerDeviceIds(s) {
+  const hit = _ownerDevCache.get(s.uid);
+  if (hit && hit.exp > Date.now()) return hit.ids;
+  const ids = new Set();
+  try {
+    const r = await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders });
+    if (r.ok) { const all = await r.json(); all.forEach((d) => { if (ownerOwns(d, s)) ids.add(d.id); }); }
+  } catch { /* empty set → sees nothing, fail closed */ }
+  _ownerDevCache.set(s.uid, { ids, exp: Date.now() + 30000 });
+  return ids;
+}
+async function scopeForOwner(user, path, payload) {
+  const s = await ownerScope(user.id);
+  if (/^devices\b/.test(path) && Array.isArray(payload)) return payload.filter((d) => ownerOwns(d, s));
+  if (/^positions\b/.test(path) && Array.isArray(payload)) {
+    const ids = await ownerDeviceIds(s);
+    return payload.filter((p) => ids.has(p.deviceId));
+  }
+  if (/^(reports|events)\b/.test(path) && Array.isArray(payload)) {
+    const ids = await ownerDeviceIds(s);
+    return payload.filter((row) => row && (row.deviceId == null || ids.has(row.deviceId)));
+  }
+  return payload; // non-device endpoints (session, server attrs, geofences…) pass through
+}
+
+// Dispatch: admins see everything; fleet + owner are scoped; other roles keep
+// their existing flows (broker share-code lookup, family approvals).
+async function scopeResponse(user, path, payload) {
+  if (!user || user.admin || user.role === 'admin') return payload;
+  if (user.role === 'fleet') return scopeForFleet(user, path, payload);
+  if (user.role === 'owner') return scopeForOwner(user, path, payload);
   return payload;
 }
 
@@ -493,6 +566,7 @@ initFleet(app, { requireAuth, db, env: process.env });
 // RingCentral: SMS from the company's own business numbers, plus the call log
 // so "was this customer actually called?" comes from records, not memory.
 const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.env });
+initTruckMate(app, { requireAuth, db });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
 // falls back to Twilio. DRY-RUN until NOTIFY_ALLOW_SEND=true — see notify.js.
