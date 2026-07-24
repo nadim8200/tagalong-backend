@@ -558,11 +558,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
       }
     }
 
-    if (mph >= maxAt) {
-      out.push({ key: 'overspeed-hard', val: 'on', title: `🚨 ${car} — over ${maxAt} mph`, body: `Travelling at ${mph} mph.` });
-    } else if (mph >= warnAt) {
-      out.push({ key: 'speedwarn', val: 'on', title: `⏩ ${car} — speeding`, body: `Travelling at ${mph} mph (over your ${warnAt} mph warning).` });
-    }
+    // Speeding is NOT emitted here any more. It moved to a dedicated block in
+    // the poll loop so it can REPEAT while you stay over the limit and stop the
+    // moment you drop under — behaviour the once-and-done derived machinery
+    // (with its 6-hour repeat floor) actively fought.
 
     // NOTE: tow/theft is handled in the poll loop, not here — it needs a debounce
     // (the tracker reports motion a beat before the ignition flag flips on at
@@ -849,7 +848,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           // and notifies again each time it comes back.
           {
             const active = new Set(derived.map((x) => x.key));
-            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowbatt', 'rpm', 'speedwarn', 'overspeed-hard']) {
+            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowbatt', 'rpm']) {
               const sig = `dv:${d.id}:${key}`;
               const goneKey = `dvgone:${d.id}:${key}`;
               if (active.has(key)) {
@@ -972,6 +971,46 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             } else {
               if (rec.sigs[pend]) { delete rec.sigs[pend]; changed = true; }
               if (rec.sigs[fired]) { delete rec.sigs[fired]; changed = true; }
+            }
+          }
+
+          // ---- speeding: fires immediately and REPEATS while over ----
+          //
+          // Unlike a fault alert, this is meant to nag: the moment live speed
+          // crosses the set limit it notifies, and it keeps re-notifying on
+          // every poll while the car stays over, then goes quiet the instant it
+          // drops back under. Interval is per car via speedRepeatSec.
+          //
+          // Honest ceiling: the alert can't repeat faster than the poll runs
+          // (15s) or than the tracker reports a new position. Asking for 4s
+          // won't produce 4s alerts if the device only sends a fix every 20s —
+          // there's no new data to alert on. So the effective cadence is
+          // max(speedRepeatSec, pollInterval, trackerReportInterval).
+          {
+            const spMph = liveMph(pos); // fresh-gated, unit-correct
+            const warn = Number((d.attributes || {}).speedWarnMph) > 0 ? Number((d.attributes || {}).speedWarnMph) : 70;
+            const hard = Number((d.attributes || {}).speedMaxMph) > 0 ? Number((d.attributes || {}).speedMaxMph) : 85;
+            const repeatMs = Math.max(4, Number((d.attributes || {}).speedRepeatSec) > 0
+              ? Number((d.attributes || {}).speedRepeatSec) : 30) * 1000;
+            const lastKey = `spdlast:${d.id}`;   // when we last notified
+            const overKey = `spdover:${d.id}`;    // which band we're in: 'hard' | 'warn' | absent
+
+            const band = spMph >= hard ? 'hard' : (spMph >= warn ? 'warn' : null);
+            if (band) {
+              const lastNotify = Number(rec.sigs[lastKey] || 0);
+              const bandChanged = rec.sigs[overKey] !== band; // warn→hard escalation fires at once
+              if (bandChanged || Date.now() - lastNotify >= repeatMs) {
+                rec.sigs[lastKey] = String(Date.now());
+                rec.sigs[overKey] = band;
+                changed = true;
+                toSend.push(band === 'hard'
+                  ? { title: `🚨 ${NAMED(d)} — over ${hard} mph`, body: `Travelling at ${spMph} mph.` }
+                  : { title: `⏩ ${NAMED(d)} — speeding`, body: `Travelling at ${spMph} mph (over your ${warn} mph limit).` });
+              }
+            } else if (rec.sigs[overKey]) {
+              // Dropped back under — go quiet and reset so the next episode
+              // fires immediately rather than waiting out the interval.
+              delete rec.sigs[overKey]; delete rec.sigs[lastKey]; changed = true;
             }
           }
 
@@ -1243,8 +1282,13 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
   }
 
   if (enabled) {
-    setInterval(() => { poll().catch(() => {}); }, 30 * 1000);
-    console.log(`[push] APNs enabled v24 (${USE_DB ? 'Postgres-backed state' : 'file/Traccar fallback'}; refuel alerts with settled level) — polling every 30s.`);
+    // 15s so the repeating speeding alert can keep reasonable pace. Overridable
+    // via PUSH_POLL_SEC if load ever becomes a concern. Going much lower mostly
+    // adds Traccar/APNs load without more alerts — the tracker's own report
+    // rate is the real floor.
+    const pollSec = Number(env.PUSH_POLL_SEC) > 0 ? Number(env.PUSH_POLL_SEC) : 15;
+    setInterval(() => { poll().catch(() => {}); }, pollSec * 1000);
+    console.log(`[push] APNs enabled v25 (${USE_DB ? 'Postgres-backed state' : 'file/Traccar fallback'}; repeating speeding alert) — polling every ${pollSec}s.`);
   }
 
   return { enabled, sendToTokens };
