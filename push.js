@@ -1222,6 +1222,42 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             }
           }
 
+          // ---- native accelerometer events (Teltonika "Green Driving" + crash) ----
+          //
+          // Devices with a real accelerometer (FMM00A and family) detect harsh
+          // accel/brake/cornering and crashes far more precisely than GPS speed
+          // deltas. When the "Green Driving" and "Crash" scenarios are enabled on
+          // the device, Traccar usually decodes them as an `alarm`/event (already
+          // handled in eventToPush). But some firmware/decoder combos surface them
+          // as raw AVL IDs on the position instead:
+          //   io253 = green-driving type (1=accel, 2=brake, 3=cornering)
+          //   io247 = crash detection
+          // We map those here too, so the accelerometer is used no matter how the
+          // event arrives. Each distinct reading fires once (keyed to its fix).
+          {
+            const ga = (pos && pos.attributes) || {};
+            const fixSig = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+            const gType = Number(ga.greenDrivingType != null ? ga.greenDrivingType : ga.io253);
+            const crash = ga.crash != null ? ga.crash : ga.io247;
+            const eco = { 1: { key: 'harsh-accel', title: `🏎️ ${NAMED(d)} — hard acceleration`, body: 'The accelerometer detected a hard acceleration.' },
+                          2: { key: 'harsh-brake', title: `🛑 ${NAMED(d)} — hard braking`, body: 'The accelerometer detected a hard brake.' },
+                          3: { key: 'harsh-corner', title: `↩️ ${NAMED(d)} — hard cornering`, body: 'The accelerometer detected a sharp turn at speed.' } };
+            if (!isNaN(gType) && eco[gType] && fixSig) {
+              const sig = `green:${d.id}:${gType}:${fixSig}`;
+              if (!rec.sigs[sig]) { rec.sigs[sig] = 1; toSend.push(eco[gType]); }
+            }
+            if (crash && Number(crash) > 0 && fixSig) {
+              const sig = `crash:${d.id}:${fixSig}`;
+              if (!rec.sigs[sig]) { rec.sigs[sig] = 1; toSend.push({ key: 'crash', title: `🚨 ${NAMED(d)} — possible crash`, body: 'The accelerometer reported a crash/impact. Tap to see where.' }); }
+            }
+            // DIAGNOSTIC — if this device carries any accelerometer-ish field we do
+            // NOT recognise, dump the keys once so we can map its exact format.
+            const accelKeys = Object.keys(ga).filter((k) => /green|accel|brak|corner|gforce|g_force|axis|shock|impact|crash|io2(4[0-9]|5[0-9])/i.test(k));
+            if (accelKeys.length && isNaN(gType) && !crash) {
+              console.log(`[push] ACCEL-FIELD-DIAG ${NAMED(d)}: possible accelerometer fields = ${accelKeys.map((k) => `${k}=${ga[k]}`).join(', ')}`);
+            }
+          }
+
           // ---- refuelled: report the level it filled to ----
           //
           // Fuel readings are noisy. A float sender swings with slope, braking
