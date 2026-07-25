@@ -1049,6 +1049,33 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const tripKey = `tripon:${d.id}`;
             const startGuard = `startedat:${d.id}`; // shared with the ignitionOn event
 
+            // ---- RPM says the engine is running — the most DIRECT "car is on"
+            // signal, and it works on cars the motion path misses (the C300 idles
+            // before it rolls, and GPS speed lags). The instant an OBD reports RPM
+            // after reading none/zero, the engine just cranked. Fires once per
+            // start via the same shared guard, so it never doubles up with the
+            // motion- or event-derived start.
+            if (fresh) {
+              const ra = (pos && pos.attributes) || {};
+              const rpmVal = Number(ra.io36 != null ? ra.io36 : ra.rpm);
+              const rpmKey = `rpmon:${d.id}`;
+              if (!isNaN(rpmVal)) {
+                if (rpmVal > 200) { // running (idle is ~600+); >200 = cranked
+                  if (rec.sigs[rpmKey] === 'off') { // real off→on transition = a start
+                    const lastStart = Number(rec.sigs[startGuard] || 0);
+                    if (nowMs - lastStart > gapMs) {
+                      rec.sigs[startGuard] = String(nowMs);
+                      rec.sigs[tripKey] = 'on'; // keep the motion path in sync
+                      toSend.push({ title: `🚗 ${NAMED(d)} started`, body: 'The engine was turned on.' });
+                    }
+                  }
+                  rec.sigs[rpmKey] = 'on'; changed = true;
+                } else if (rpmVal <= 100 && rec.sigs[rpmKey] !== 'off') { // clearly off (hysteresis)
+                  rec.sigs[rpmKey] = 'off'; changed = true;
+                }
+              }
+            }
+
             if (fresh) {
               const lastMove = Number(rec.sigs[lastMoveKey] || 0);
               if (moving) {
