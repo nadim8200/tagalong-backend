@@ -1167,6 +1167,61 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             }
           }
 
+          // ---- hard / sudden braking ----
+          //
+          // The mirror of hard acceleration: a big DROP in speed between two
+          // consecutive fixes is a hard brake, on any tracker that reports speed
+          // (no accelerometer needed). Same coarse-sampling reasoning — we watch
+          // the speed CHANGE between reports, not an instantaneous g-force GPS
+          // can't measure.
+          //
+          // Default: 18 mph shed between two fixes ≤30s apart, and the car must
+          // have been moving to begin with (prev ≥ 20 mph) so easing to a normal
+          // stop doesn't count. Tunable per car via brakeDropMph / brakeWindowSec.
+          {
+            const nowMs = Date.now();
+            const curMph = liveMph(pos);
+            const curFix = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+            const prevKey = `brakeprev:${d.id}`;
+            const firedKey = `brake:${d.id}`;
+            const dropMph = Number((d.attributes || {}).brakeDropMph) > 0
+              ? Number((d.attributes || {}).brakeDropMph) : 18;
+            const windowSec = Number((d.attributes || {}).brakeWindowSec) > 0
+              ? Number((d.attributes || {}).brakeWindowSec) : 30;
+
+            if (curFix && nowMs - curFix <= FRESH_FIX_MS) {
+              const prev = rec.sigs[prevKey] ? String(rec.sigs[prevKey]).split('|') : null;
+              const prevMph = prev ? Number(prev[0]) : null;
+              const prevFix = prev ? Number(prev[1]) : null;
+
+              if (prevMph != null && prevFix && curFix > prevFix) {
+                const dSec = (curFix - prevFix) / 1000;
+                const drop = prevMph - curMph; // positive = slowing down
+
+                if (drop >= 6) {
+                  console.log(`[push] BRAKE-DIAG ${NAMED(d)}: -${Math.round(drop)} mph in ${dSec.toFixed(0)}s `
+                    + `(${prevMph}→${curMph}) | needs -${dropMph} within ${windowSec}s from ≥20mph`);
+                }
+
+                if (dSec <= windowSec && drop >= dropMph && prevMph >= 20) {
+                  // One alert per brake event: hold until speed steadies, then
+                  // re-arm so the next hard brake fires fresh.
+                  if (rec.sigs[firedKey] !== 'on') {
+                    rec.sigs[firedKey] = 'on';
+                    toSend.push({
+                      title: `🛑 ${NAMED(d)} — hard braking`,
+                      body: `Slowed ${Math.round(drop)} mph, from ${prevMph} to ${curMph} mph.`,
+                    });
+                  }
+                } else if (drop <= 2 && rec.sigs[firedKey] === 'on') {
+                  rec.sigs[firedKey] = 'off'; changed = true; // no longer dropping → re-arm
+                }
+              }
+              rec.sigs[prevKey] = `${curMph}|${curFix}`;
+              changed = true;
+            }
+          }
+
           // ---- refuelled: report the level it filled to ----
           //
           // Fuel readings are noisy. A float sender swings with slope, braking
