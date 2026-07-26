@@ -969,7 +969,16 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const fixMs = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
             const fixFresh = fixMs && (Date.now() - fixMs) <= FRESH_FIX_MS;
 
-            if (fixFresh && pa.ignition === true && idleMph < 2) {
+            // "Idling" means the ENGINE IS ACTUALLY RUNNING while parked. Many OBD
+            // units report ignition=true whenever the port has power (accessory /
+            // just plugged in), which fired "idling" on cars that were simply OFF.
+            // So when the device reports RPM, trust that: RPM>200 = running, RPM≈0
+            // = engine off (no idle). Only fall back to the ignition flag when the
+            // device sends no RPM at all.
+            const idleRpm = Number(pa.io36 != null ? pa.io36 : pa.rpm);
+            const engineRunning = !isNaN(idleRpm) ? idleRpm > 200 : (pa.ignition === true);
+
+            if (fixFresh && engineRunning && idleMph < 2) {
               const since = Number(rec.sigs[pend] || 0);
               if (!since) {
                 rec.sigs[pend] = String(Date.now()); changed = true;
