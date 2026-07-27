@@ -1085,6 +1085,53 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
               }
             }
 
+            // ---- ACCELEROMETER engine-on: works on any unit that streams the
+            // 3-axis accelerometer (FMM00A and family, fields axisX/Y/Z or the
+            // raw Teltonika IDs io17/18/19). Parked, the reading is constant; the
+            // moment the engine cranks, vibration makes the vector jitter. A
+            // change bigger than accelVibMg (default 12 mG) after being still =
+            // engine started — caught before the car even rolls, so it beats the
+            // GPS-motion path. Same shared guard, so no double "started".
+            if (fresh) {
+              const aa = (pos && pos.attributes) || {};
+              const ax = Number(aa.axisX != null ? aa.axisX : aa.io17);
+              const ay = Number(aa.axisY != null ? aa.axisY : aa.io18);
+              const az = Number(aa.axisZ != null ? aa.axisZ : aa.io19);
+              if (!isNaN(ax) && !isNaN(ay) && !isNaN(az)) {
+                const accPrevKey = `accvibprev:${d.id}`, accOnKey = `accvibon:${d.id}`, accCntKey = `accvibcnt:${d.id}`;
+                const prev = rec.sigs[accPrevKey] ? String(rec.sigs[accPrevKey]).split('|').map(Number) : null;
+                if (prev && prev.length === 3) {
+                  const dMag = Math.sqrt((ax - prev[0]) ** 2 + (ay - prev[1]) ** 2 + (az - prev[2]) ** 2);
+                  const vibMg = Number((d.attributes || {}).accelVibMg) > 0 ? Number((d.attributes || {}).accelVibMg) : 12;
+                  // Sustained vibration required: an engine shakes continuously, so
+                  // it trips on consecutive reads; a bump / someone rocking the car
+                  // is a single spike that never reaches the streak. Tunable via
+                  // accelVibStreak (default 2 consecutive reads ≈ 30-60s).
+                  const streakNeed = Number((d.attributes || {}).accelVibStreak) > 0 ? Number((d.attributes || {}).accelVibStreak) : 2;
+                  if (dMag >= 6) console.log(`[push] ACCEL-VIB ${NAMED(d)}: Δ${Math.round(dMag)} mG (${prev.join(',')} → ${ax},${ay},${az}) | on≥${vibMg} streak≥${streakNeed}`);
+                  if (dMag >= vibMg) {
+                    const cnt = Number(rec.sigs[accCntKey] || 0) + 1;
+                    rec.sigs[accCntKey] = String(cnt);
+                    if (cnt >= streakNeed && rec.sigs[accOnKey] !== 'on') { // sustained = a real start
+                      const lastStart = Number(rec.sigs[startGuard] || 0);
+                      if (nowMs - lastStart > gapMs) {
+                        rec.sigs[startGuard] = String(nowMs);
+                        rec.sigs[tripKey] = 'on';
+                        toSend.push({ title: `🚗 ${NAMED(d)} started`, body: 'The engine was turned on.' });
+                      }
+                      rec.sigs[accOnKey] = 'on';
+                    }
+                    changed = true;
+                  } else if (dMag <= 2) { // steady → reset the streak; engine considered off
+                    if (rec.sigs[accCntKey] && rec.sigs[accCntKey] !== '0') { rec.sigs[accCntKey] = '0'; changed = true; }
+                    if (rec.sigs[accOnKey] !== 'off') { rec.sigs[accOnKey] = 'off'; changed = true; }
+                  }
+                }
+                rec.sigs[accPrevKey] = `${ax}|${ay}|${az}`;
+                changed = true;
+              }
+            }
+
             if (fresh) {
               const lastMove = Number(rec.sigs[lastMoveKey] || 0);
               if (moving) {
