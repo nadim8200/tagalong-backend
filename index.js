@@ -448,12 +448,16 @@ async function scopeForOwner(user, path, payload) {
   return payload; // non-device endpoints (session, server attrs, geofences…) pass through
 }
 
-// Dispatch: admins see everything; fleet + owner are scoped; other roles keep
-// their existing flows (broker share-code lookup, family approvals).
+// Dispatch: admins see everything; fleet is always scoped; owner scoping is
+// gated behind SCOPE_OWNERS because it matches on device attributes
+// (ownerUserId/account) that older cars aren't stamped with — turning it on
+// before those are assigned would blank out a real account. Assign each
+// customer's devices in the admin Customers page (that stamps ownership), then
+// set SCOPE_OWNERS=1 on the server to enforce per-customer isolation.
 async function scopeResponse(user, path, payload) {
   if (!user || user.admin || user.role === 'admin') return payload;
   if (user.role === 'fleet') return scopeForFleet(user, path, payload);
-  if (user.role === 'owner') return scopeForOwner(user, path, payload);
+  if (user.role === 'owner' && process.env.SCOPE_OWNERS === '1') return scopeForOwner(user, path, payload);
   return payload;
 }
 
