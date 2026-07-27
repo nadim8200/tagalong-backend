@@ -1162,11 +1162,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
 
           // ---- jumpy / aggressive acceleration (GPS-derived) ----
           //
-          // TURNED OFF by default: harsh acceleration now comes from the device
-          // accelerometer (Green Driving), which is far more accurate than this
-          // GPS speed-jump estimate. This block still logs ACCEL-DIAG for tuning,
-          // but only sends an alert if a car opts back in with accelFromGps=true
-          // (e.g. a tracker with no accelerometer).
+          // ON by default (opt out per car with accelFromGps=false). This is the
+          // same speed-delta method that cleanly separates acceleration from
+          // braking and reliably delivered the hard-braking alert in testing.
+          // Threshold lowered to +15 mph after a real launch logged +17.
           //
           // Works on ANY tracker that reports speed — no accelerometer needed.
           //
@@ -1189,7 +1188,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const prevKey = `accelprev:${d.id}`;
             const firedKey = `accel:${d.id}`;
             const jumpMph = Number((d.attributes || {}).accelJumpMph) > 0
-              ? Number((d.attributes || {}).accelJumpMph) : 18;
+              ? Number((d.attributes || {}).accelJumpMph) : 15;
             const windowSec = Number((d.attributes || {}).accelWindowSec) > 0
               ? Number((d.attributes || {}).accelWindowSec) : 30;
 
@@ -1209,7 +1208,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                     + `(${prevMph}→${curMph}) | needs +${jumpMph} within ${windowSec}s`);
                 }
 
-                const gpsAccelOn = ((d.attributes || {}).accelFromGps === true);
+                const gpsAccelOn = ((d.attributes || {}).accelFromGps !== false); // on by default
                 if (gpsAccelOn && dSec <= windowSec && dMph >= jumpMph && curMph >= 20) {
                   // One alert per burst: hold until the car stops gaining, then
                   // re-arm so the next launch fires fresh.
