@@ -1113,7 +1113,13 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             }
           }
 
-          // ---- jumpy / aggressive acceleration ----
+          // ---- jumpy / aggressive acceleration (GPS-derived) ----
+          //
+          // TURNED OFF by default: harsh acceleration now comes from the device
+          // accelerometer (Green Driving), which is far more accurate than this
+          // GPS speed-jump estimate. This block still logs ACCEL-DIAG for tuning,
+          // but only sends an alert if a car opts back in with accelFromGps=true
+          // (e.g. a tracker with no accelerometer).
           //
           // Works on ANY tracker that reports speed — no accelerometer needed.
           //
@@ -1156,7 +1162,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                     + `(${prevMph}→${curMph}) | needs +${jumpMph} within ${windowSec}s`);
                 }
 
-                if (dSec <= windowSec && dMph >= jumpMph && curMph >= 20) {
+                const gpsAccelOn = ((d.attributes || {}).accelFromGps === true);
+                if (gpsAccelOn && dSec <= windowSec && dMph >= jumpMph && curMph >= 20) {
                   // One alert per burst: hold until the car stops gaining, then
                   // re-arm so the next launch fires fresh.
                   if (rec.sigs[firedKey] !== 'on') {
