@@ -1335,6 +1335,12 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           {
             const pa = (pos && pos.attributes) || {};
             const fuelNow = pa.io48 != null ? Number(pa.io48) : (pa.fuel != null ? Number(pa.fuel) : null);
+            // You only refuel while PARKED. A hard brake sloshes fuel forward and
+            // the sender spikes for a moment — but that happens in motion / at the
+            // instant of stopping, so requiring the car to be stopped for both the
+            // jump AND the confirmation rejects the slosh while still catching a
+            // real fill (car sits at the pump for a minute).
+            const stopped = liveMph(pos) < 3;
             if (fuelNow != null && Number.isFinite(fuelNow) && fuelNow >= 0) {
               const minJump = Number((d.attributes || {}).refuelMinPct) > 0
                 ? Number((d.attributes || {}).refuelMinPct) : 8;
@@ -1344,8 +1350,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
               const pending = rec.sigs[pendKey] != null ? Number(rec.sigs[pendKey]) : null;
 
               if (pending != null) {
-                // We saw a jump last poll — is it real, or was it a swing?
-                if (fuelNow >= pending - 3) {
+                // We saw a jump last poll — is it real, or was it a swing? Confirm
+                // only if the car is STILL parked and the level held.
+                if (stopped && fuelNow >= pending - 3) {
                   const from = rec.sigs[`fuelfrom:${d.id}`];
                   toSend.push({
                     title: `⛽ ${NAMED(d)} — refuelled`,
@@ -1357,9 +1364,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                 delete rec.sigs[pendKey];
                 delete rec.sigs[`fuelfrom:${d.id}`];
                 changed = true;
-              } else if (prev != null && fuelNow - prev >= minJump) {
-                // Candidate fill — hold it for one more reading before telling
-                // anyone, so the number we report is the level it settled at.
+              } else if (stopped && prev != null && fuelNow - prev >= minJump) {
+                // Candidate fill — only while parked. Hold it for one more reading
+                // before telling anyone, so the number we report is where it settled.
                 rec.sigs[pendKey] = String(fuelNow);
                 rec.sigs[`fuelfrom:${d.id}`] = String(prev);
                 changed = true;
