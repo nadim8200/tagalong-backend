@@ -370,13 +370,26 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
       return map;
     } catch { return {}; }
   }
+  // Membership gate (mirrors the frontend traccar.js): a device whose paid
+  // membership has lapsed (expiration date reached) or was manually stopped by an
+  // admin goes FULLY dark — no push alerts fire for it to anyone, including the
+  // admin monitor — until it's renewed on the Devices page.
+  const ymdToday = () => { const x = new Date(); const p = (n) => String(n).padStart(2, '0'); return `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`; };
+  function membershipLive(d) {
+    const m = (d.attributes || {}).membership || {};
+    if (m.suspended) return false;                       // manually stopped
+    if (m.expiresAt && ymdToday() >= String(m.expiresAt)) return false; // expired
+    return true;                                         // active / no membership set
+  }
+
   // a car belongs to this user if its account/customerId attribute matches the
   // scope the app sent at registration time.
   function scopeDevices(devices, rec) {
+    const live = devices.filter(membershipLive); // silence lapsed/stopped devices
     // an admin monitors the whole fleet (they see every car on the app too)
-    if (rec.role === 'admin') return devices.filter((d) => String((d.attributes || {}).account || '') !== 'TA');
+    if (rec.role === 'admin') return live.filter((d) => String((d.attributes || {}).account || '') !== 'TA');
     if (!rec.account && !rec.cid) return [];
-    return devices.filter((d) => {
+    return live.filter((d) => {
       const a = d.attributes || {};
       if (rec.cid && String(a.customerId) === String(rec.cid)) return true;
       if (rec.account && String(a.account) === String(rec.account)) return true;
