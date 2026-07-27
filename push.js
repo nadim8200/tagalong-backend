@@ -1092,7 +1092,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                     }
                   }
                   rec.sigs[rpmKey] = 'on'; changed = true;
-                } else if (rpmVal <= 100 && rec.sigs[rpmKey] !== 'off') { // clearly off (hysteresis)
+                } else if (rpmVal <= 100 && !moving && rec.sigs[rpmKey] !== 'off') { // clearly off (hysteresis) — but a MOVING car is never off, so a dropped/garbled OBD frame (RPM 0) mid-drive can't re-arm a phantom "started"
                   rec.sigs[rpmKey] = 'off'; changed = true;
                 }
               }
@@ -1135,7 +1135,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                       rec.sigs[accOnKey] = 'on';
                     }
                     changed = true;
-                  } else if (dMag <= 2) { // steady → reset the streak; engine considered off
+                  } else if (dMag <= 2 && !moving) { // steady AND stopped → engine considered off. A moving car is never off (even a smooth-road lull), so cruising can't re-arm a phantom "started".
                     if (rec.sigs[accCntKey] && rec.sigs[accCntKey] !== '0') { rec.sigs[accCntKey] = '0'; changed = true; }
                     if (rec.sigs[accOnKey] !== 'off') { rec.sigs[accOnKey] = 'off'; changed = true; }
                   }
