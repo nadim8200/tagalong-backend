@@ -382,15 +382,28 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     return true;                                         // active / no membership set
   }
 
-  // a car belongs to this user if its account/customerId attribute matches the
-  // scope the app sent at registration time.
-  function scopeDevices(devices, rec) {
+  // Which cars belong to this registered user. `uid` is the Traccar user id (the
+  // push store is keyed by it). We match the SAME ownership signals the app's
+  // getDevices() uses, so any account a device is assigned to on the Devices tab
+  // gets alerts — whether it's the primary owner, one of several owners, or a
+  // shared/family link, and even when the account/customer NUMBER isn't set.
+  function scopeDevices(devices, rec, uid) {
     const live = devices.filter(membershipLive); // silence lapsed/stopped devices
     // an admin monitors the whole fleet (they see every car on the app too)
     if (rec.role === 'admin') return live.filter((d) => String((d.attributes || {}).account || '') !== 'TA');
-    if (!rec.account && !rec.cid) return [];
+    const uidStr = uid != null ? String(uid) : '';
+    const memberId = uidStr ? `u${uidStr}` : '';
     return live.filter((d) => {
       const a = d.attributes || {};
+      // 1) assigned by USER ID — primary owner, any entry in owners[], or an
+      //    approved memberLink. This is how the Devices tab links a device to one
+      //    or more accounts, and it works even with no account/customer number.
+      if (uidStr) {
+        if (a.ownerUserId != null && String(a.ownerUserId) === uidStr) return true;
+        if (Array.isArray(a.owners) && a.owners.some((o) => o && String(o.userId) === uidStr)) return true;
+        if (Array.isArray(a.memberLinks) && a.memberLinks.some((m) => m && m.memberId === memberId && m.status === 'approved')) return true;
+      }
+      // 2) legacy attribute match by customer id / account number
       if (rec.cid && String(a.customerId) === String(rec.cid)) return true;
       if (rec.account && String(a.account) === String(rec.account)) return true;
       return false;
@@ -701,10 +714,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     const fromISO = from.toISOString(), toISO = to.toISOString();
     const { store } = await readStore();
     const fleet = await allDevices();
-    for (const rec of Object.values(store)) {
+    for (const [uid, rec] of Object.entries(store)) {
       const tokenRecs = rec.tokens || [];
       if (!tokenRecs.length) continue;
-      const devs = scopeDevices(fleet, rec);
+      const devs = scopeDevices(fleet, rec, uid);
       if (!devs.length) continue;
       let miles = 0, trips = 0, harsh = 0, alerts = 0;
       for (const d of devs) {
@@ -795,7 +808,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           for (const old of rec.log) await appendLog(uid, old);
           delete rec.log; devChanged = true;
         }
-        const devices = scopeDevices(fleet, rec);
+        const devices = scopeDevices(fleet, rec, uid);
         if (!devices.length) continue;
 
         for (const d of devices) {
