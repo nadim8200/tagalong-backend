@@ -1234,7 +1234,14 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                     + `(${prevMph}→${curMph}) | needs +${jumpMph} within ${windowSec}s`);
                 }
 
-                const gpsAccelOn = ((d.attributes || {}).accelFromGps !== false); // on by default
+                // OFF by default now. GPS sampled every 15-30s can't tell a hard
+                // launch from a normal one — a green-light pull-away (0→30) fits
+                // this rule and spammed false "hard acceleration" alerts in city
+                // driving. Hard acceleration now comes from the ACCELEROMETER
+                // (green-driving block below), which measures real g-force. Opt
+                // back in per car with accelFromGps:true only for trackers with no
+                // accelerometer.
+                const gpsAccelOn = ((d.attributes || {}).accelFromGps === true);
                 if (gpsAccelOn && dSec <= windowSec && dMph >= jumpMph && curMph >= 20) {
                   // One alert per burst: hold until the car stops gaining, then
                   // re-arm so the next launch fires fresh.
@@ -1291,7 +1298,13 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                     + `(${prevMph}→${curMph}) | needs -${dropMph} within ${windowSec}s from ≥20mph`);
                 }
 
-                if (dSec <= windowSec && drop >= dropMph && prevMph >= 20) {
+                // OFF by default, same reasoning as acceleration: a normal stop
+                // at a light (30→0 over a coarse GPS interval) matched this and
+                // spammed false "hard braking". Hard braking now comes from the
+                // ACCELEROMETER below. Opt back in per car with brakeFromGps:true
+                // only for trackers with no accelerometer.
+                const gpsBrakeOn = ((d.attributes || {}).brakeFromGps === true);
+                if (gpsBrakeOn && dSec <= windowSec && drop >= dropMph && prevMph >= 20) {
                   // One alert per brake event: hold until speed steadies, then
                   // re-arm so the next hard brake fires fresh.
                   if (rec.sigs[firedKey] !== 'on') {
