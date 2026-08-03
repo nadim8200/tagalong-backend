@@ -412,6 +412,13 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
         if (Array.isArray(a.owners) && a.owners.some((o) => o && String(o.userId) === uidStr)) return true;
         if (Array.isArray(a.memberLinks) && a.memberLinks.some((m) => m && m.memberId === memberId && m.status === 'approved')) return true;
       }
+      // 1b) a SECONDARY owner may have been recorded with only a customer id /
+      //     account number (no user id) — match those too, exactly like the
+      //     Customers page does. This is what was dropping a car assigned as a
+      //     second owner from a person's alerts.
+      if (Array.isArray(a.owners) && a.owners.some((o) => o
+        && ((rec.cid && String(o.customerId) === String(rec.cid))
+          || (rec.account && o.account && String(o.account) === String(rec.account))))) return true;
       // 2) legacy attribute match by customer id / account number
       if (rec.cid && String(a.customerId) === String(rec.cid)) return true;
       if (rec.account && String(a.account) === String(rec.account)) return true;
