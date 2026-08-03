@@ -309,8 +309,17 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
       const { store } = await readStore();
       const rec = store[String(req.user.id)];
       const tokenRecs = (rec && rec.tokens) || [];
-      if (!enabled) return res.json({ ok: false, reason: 'apns-not-configured' });
-      if (!tokenRecs.length) return res.json({ ok: false, reason: 'no-tokens' });
+      // Which cars does the SERVER think belong to this signed-in account? If the
+      // car you expect alerts from isn't in this list, it's assigned to a
+      // different account (or not assigned) — that's why its alerts never arrive.
+      let scopedCars = [];
+      try {
+        const fleet = await allDevices();
+        scopedCars = scopeDevices(fleet, rec || {}, String(req.user.id))
+          .map((d) => ((d.attributes || {}).displayName || d.name));
+      } catch { /* ignore */ }
+      if (!enabled) return res.json({ ok: false, reason: 'apns-not-configured', scopedCars });
+      if (!tokenRecs.length) return res.json({ ok: false, reason: 'no-tokens', scopedCars });
       const dead = await sendToTokens(tokenRecs, {
         title: '🔔 TagAlong test alert',
         body: 'Your alerts are working. You can lock your phone.',
@@ -320,7 +329,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
         rec.tokens = tokenRecs.filter((t) => !dead.includes(t.token));
         await writeStore(store);
       }
-      res.json({ ok: true, sent: tokenRecs.length - dead.length });
+      res.json({ ok: true, sent: tokenRecs.length - dead.length, scopedCars });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
