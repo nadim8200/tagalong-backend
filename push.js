@@ -509,7 +509,16 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     // alone makes every normal park look like an unplug. A tracker pulled
     // mid-drive was actually MOVING when it went quiet.
     const lastMph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
-    const wasRunning = a.ignition === true && lastMph >= 5;
+    // "Unplugged mid-drive" only if it went dark at a REAL driving speed AND the
+    // device still reported it was in MOTION. A car that just slowed, parked and
+    // let the tracker sleep often sends a last record with a residual speed
+    // (e.g. 16 mph) and ignition still latched on — that was firing this alert on
+    // every normal park and reading like a disconnect. Requiring motion≠false and
+    // a genuine speed (default 25 mph, per-car taDisconnectMinMph) fixes that; a
+    // real unplug/power-cut is also caught directly by the device's power alarm.
+    const minRunMph = Number((d.attributes || {}).taDisconnectMinMph) > 0
+      ? Number((d.attributes || {}).taDisconnectMinMph) : 25;
+    const wasRunning = a.ignition === true && a.motion !== false && lastMph >= minRunMph;
     // per-car override, in hours, for the parked case
     const parkedHrs = Number((d.attributes || {}).taOfflineHours) > 0
       ? Number((d.attributes || {}).taOfflineHours) : 24;
@@ -517,7 +526,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
       out.push({
         key: 'disconnect', val: 'running',
         title: `🔌 ${car} — tracker stopped reporting`,
-        body: `It stopped reporting while the car was moving at ${lastMph} mph. It may have been unplugged or lost power.`,
+        body: `It went silent while driving at ${lastMph} mph and hasn't checked in since. It may have been unplugged or lost power.`,
       });
     } else if (last && !wasRunning && silentMs > parkedHrs * 60 * 60 * 1000) {
       const hrs = Math.round(silentMs / 3600000);
@@ -1230,9 +1239,12 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const prevKey = `accelprev:${d.id}`;
             const firedKey = `accel:${d.id}`;
             const jumpMph = Number((d.attributes || {}).accelJumpMph) > 0
-              ? Number((d.attributes || {}).accelJumpMph) : 15;
+              ? Number((d.attributes || {}).accelJumpMph) : 18;
+            // SHORT window on purpose: only two fixes close in time count, so a
+            // real hard launch (big speed jump in a few seconds) fires but a
+            // gentle green-light pull-away spread over many seconds does not.
             const windowSec = Number((d.attributes || {}).accelWindowSec) > 0
-              ? Number((d.attributes || {}).accelWindowSec) : 30;
+              ? Number((d.attributes || {}).accelWindowSec) : 8;
 
             if (curFix && nowMs - curFix <= FRESH_FIX_MS) {
               const prev = rec.sigs[prevKey] ? String(rec.sigs[prevKey]).split('|') : null;
@@ -1250,14 +1262,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                     + `(${prevMph}→${curMph}) | needs +${jumpMph} within ${windowSec}s`);
                 }
 
-                // OFF by default now. GPS sampled every 15-30s can't tell a hard
-                // launch from a normal one — a green-light pull-away (0→30) fits
-                // this rule and spammed false "hard acceleration" alerts in city
-                // driving. Hard acceleration now comes from the ACCELEROMETER
-                // (green-driving block below), which measures real g-force. Opt
-                // back in per car with accelFromGps:true only for trackers with no
-                // accelerometer.
-                const gpsAccelOn = ((d.attributes || {}).accelFromGps === true);
+                // ON by default with a SHORT window (see above) so it catches
+                // genuinely hard launches without the city-driving false alarms.
+                // Turn off per car with accelFromGps:false.
+                const gpsAccelOn = ((d.attributes || {}).accelFromGps !== false);
                 if (gpsAccelOn && dSec <= windowSec && dMph >= jumpMph && curMph >= 20) {
                   // One alert per burst: hold until the car stops gaining, then
                   // re-arm so the next launch fires fresh.
@@ -1296,9 +1304,12 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const prevKey = `brakeprev:${d.id}`;
             const firedKey = `brake:${d.id}`;
             const dropMph = Number((d.attributes || {}).brakeDropMph) > 0
-              ? Number((d.attributes || {}).brakeDropMph) : 18;
+              ? Number((d.attributes || {}).brakeDropMph) : 20;
+            // SHORT window (like acceleration): only a fast drop over a couple of
+            // seconds counts, so slamming the brakes fires but easing to a normal
+            // stop over several seconds does not.
             const windowSec = Number((d.attributes || {}).brakeWindowSec) > 0
-              ? Number((d.attributes || {}).brakeWindowSec) : 30;
+              ? Number((d.attributes || {}).brakeWindowSec) : 8;
 
             if (curFix && nowMs - curFix <= FRESH_FIX_MS) {
               const prev = rec.sigs[prevKey] ? String(rec.sigs[prevKey]).split('|') : null;
@@ -1314,12 +1325,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                     + `(${prevMph}→${curMph}) | needs -${dropMph} within ${windowSec}s from ≥20mph`);
                 }
 
-                // OFF by default, same reasoning as acceleration: a normal stop
-                // at a light (30→0 over a coarse GPS interval) matched this and
-                // spammed false "hard braking". Hard braking now comes from the
-                // ACCELEROMETER below. Opt back in per car with brakeFromGps:true
-                // only for trackers with no accelerometer.
-                const gpsBrakeOn = ((d.attributes || {}).brakeFromGps === true);
+                // ON by default with a SHORT window so a genuine hard brake fires
+                // but easing to a normal stop does not. Turn off per car with
+                // brakeFromGps:false.
+                const gpsBrakeOn = ((d.attributes || {}).brakeFromGps !== false);
                 if (gpsBrakeOn && dSec <= windowSec && drop >= dropMph && prevMph >= 20) {
                   // One alert per brake event: hold until speed steadies, then
                   // re-arm so the next hard brake fires fresh.
