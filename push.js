@@ -580,7 +580,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     const rpm = Number(a.io36 != null ? a.io36 : a.rpm);
     const rpmLimit = Number((d.attributes || {}).rpmAlertRpm) > 0 ? Number((d.attributes || {}).rpmAlertRpm) : 4000;
     if (!isNaN(rpm) && rpm > rpmLimit) {
-      out.push({ key: 'rpm', val: 'on', title: `🏎️ ${car} — hard revving`, body: `Engine hit ${Math.round(rpm)} RPM (over the ${rpmLimit} limit).` });
+      const revMph = liveMph(pos); // current speed, as a reference for the rev
+      out.push({ key: 'rpm', val: 'on', title: `🏎️ ${car} — hard revving`, body: `Engine hit ${Math.round(rpm)} RPM (over the ${rpmLimit} limit) at ${revMph} mph.` });
     }
 
     // speeding — warning threshold and the hard over-speed limit, per car.
