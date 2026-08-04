@@ -312,14 +312,18 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
       // Which cars does the SERVER think belong to this signed-in account? If the
       // car you expect alerts from isn't in this list, it's assigned to a
       // different account (or not assigned) — that's why its alerts never arrive.
-      let scopedCars = [];
+      let scopedCars = []; let blockedCars = [];
       try {
         const fleet = await allDevices();
-        scopedCars = scopeDevices(fleet, rec || {}, String(req.user.id))
-          .map((d) => ((d.attributes || {}).displayName || d.name));
+        const uid = String(req.user.id);
+        const nameOf = (d) => ((d.attributes || {}).displayName || d.name);
+        const assigned = fleet.filter((d) => deviceOwnedBy(d, rec || {}, uid));
+        scopedCars = assigned.filter((d) => membershipLive(d)).map(nameOf);
+        // assigned to you but SILENCED because membership is expired/stopped
+        blockedCars = assigned.filter((d) => !membershipLive(d)).map(nameOf);
       } catch { /* ignore */ }
-      if (!enabled) return res.json({ ok: false, reason: 'apns-not-configured', scopedCars });
-      if (!tokenRecs.length) return res.json({ ok: false, reason: 'no-tokens', scopedCars });
+      if (!enabled) return res.json({ ok: false, reason: 'apns-not-configured', scopedCars, blockedCars });
+      if (!tokenRecs.length) return res.json({ ok: false, reason: 'no-tokens', scopedCars, blockedCars });
       const dead = await sendToTokens(tokenRecs, {
         title: '🔔 TagAlong test alert',
         body: 'Your alerts are working. You can lock your phone.',
@@ -329,7 +333,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
         rec.tokens = tokenRecs.filter((t) => !dead.includes(t.token));
         await writeStore(store);
       }
-      res.json({ ok: true, sent: tokenRecs.length - dead.length, scopedCars });
+      res.json({ ok: true, sent: tokenRecs.length - dead.length, scopedCars, blockedCars });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -396,34 +400,30 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
   // getDevices() uses, so any account a device is assigned to on the Devices tab
   // gets alerts — whether it's the primary owner, one of several owners, or a
   // shared/family link, and even when the account/customer NUMBER isn't set.
-  function scopeDevices(devices, rec, uid) {
-    const live = devices.filter(membershipLive); // silence lapsed/stopped devices
-    // an admin monitors the whole fleet (they see every car on the app too)
-    if (rec.role === 'admin') return live.filter((d) => String((d.attributes || {}).account || '') !== 'TA');
+  // Is this device ASSIGNED to this user? (Ownership only — ignores membership.)
+  function deviceOwnedBy(d, rec, uid) {
+    const a = d.attributes || {};
+    if (rec.role === 'admin') return String(a.account || '') !== 'TA';
     const uidStr = uid != null ? String(uid) : '';
     const memberId = uidStr ? `u${uidStr}` : '';
-    return live.filter((d) => {
-      const a = d.attributes || {};
-      // 1) assigned by USER ID — primary owner, any entry in owners[], or an
-      //    approved memberLink. This is how the Devices tab links a device to one
-      //    or more accounts, and it works even with no account/customer number.
-      if (uidStr) {
-        if (a.ownerUserId != null && String(a.ownerUserId) === uidStr) return true;
-        if (Array.isArray(a.owners) && a.owners.some((o) => o && String(o.userId) === uidStr)) return true;
-        if (Array.isArray(a.memberLinks) && a.memberLinks.some((m) => m && m.memberId === memberId && m.status === 'approved')) return true;
-      }
-      // 1b) a SECONDARY owner may have been recorded with only a customer id /
-      //     account number (no user id) — match those too, exactly like the
-      //     Customers page does. This is what was dropping a car assigned as a
-      //     second owner from a person's alerts.
-      if (Array.isArray(a.owners) && a.owners.some((o) => o
-        && ((rec.cid && String(o.customerId) === String(rec.cid))
-          || (rec.account && o.account && String(o.account) === String(rec.account))))) return true;
-      // 2) legacy attribute match by customer id / account number
-      if (rec.cid && String(a.customerId) === String(rec.cid)) return true;
-      if (rec.account && String(a.account) === String(rec.account)) return true;
-      return false;
-    });
+    // 1) assigned by USER ID — primary owner, any entry in owners[], or an approved memberLink.
+    if (uidStr) {
+      if (a.ownerUserId != null && String(a.ownerUserId) === uidStr) return true;
+      if (Array.isArray(a.owners) && a.owners.some((o) => o && String(o.userId) === uidStr)) return true;
+      if (Array.isArray(a.memberLinks) && a.memberLinks.some((m) => m && m.memberId === memberId && m.status === 'approved')) return true;
+    }
+    // 1b) a SECONDARY owner may be recorded with only a customer id / account number (no user id).
+    if (Array.isArray(a.owners) && a.owners.some((o) => o
+      && ((rec.cid && String(o.customerId) === String(rec.cid))
+        || (rec.account && o.account && String(o.account) === String(rec.account))))) return true;
+    // 2) legacy attribute match by customer id / account number
+    if (rec.cid && String(a.customerId) === String(rec.cid)) return true;
+    if (rec.account && String(a.account) === String(rec.account)) return true;
+    return false;
+  }
+  // Cars this user actually gets alerts for = assigned AND membership live.
+  function scopeDevices(devices, rec, uid) {
+    return devices.filter((d) => deviceOwnedBy(d, rec, uid) && membershipLive(d));
   }
   // latest position for every device, keyed by deviceId
   async function allPositions() {
