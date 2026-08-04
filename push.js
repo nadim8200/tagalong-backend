@@ -1366,10 +1366,16 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const fixSig = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
             const gType = Number(ga.greenDrivingType != null ? ga.greenDrivingType : ga.io253);
             const crash = ga.crash != null ? ga.crash : ga.io247;
-            const eco = { 1: { key: 'harsh-accel', title: `🏎️ ${NAMED(d)} — hard acceleration`, body: 'The accelerometer detected a hard acceleration.' },
-                          2: { key: 'harsh-brake', title: `🛑 ${NAMED(d)} — hard braking`, body: 'The accelerometer detected a hard brake.' },
-                          3: { key: 'harsh-corner', title: `↩️ ${NAMED(d)} — hard cornering`, body: 'The accelerometer detected a sharp turn at speed.' } };
+            // Green Driving VALUE (io254) is the intensity ×100 (m/s²). Show it as
+            // g when present, plus the current speed, as a reference.
+            const gVal = Number(ga.greenDrivingValue != null ? ga.greenDrivingValue : ga.io254);
+            const gForce = !isNaN(gVal) && gVal > 0 ? ` (${(gVal / 100 / 9.81).toFixed(1)}g)` : '';
+            const gMph = liveMph(pos);
+            const eco = { 1: { key: 'harsh-accel', title: `🏎️ ${NAMED(d)} — hard acceleration`, body: `The accelerometer detected a hard acceleration${gForce} at ${gMph} mph.` },
+                          2: { key: 'harsh-brake', title: `🛑 ${NAMED(d)} — hard braking`, body: `The accelerometer detected a hard brake${gForce} at ${gMph} mph.` },
+                          3: { key: 'harsh-corner', title: `↩️ ${NAMED(d)} — hard cornering`, body: `The accelerometer detected a sharp turn${gForce} at ${gMph} mph.` } };
             if (!isNaN(gType) && eco[gType] && fixSig) {
+              console.log(`[push] GREEN-DRIVING ${NAMED(d)}: type ${gType} (${gType === 1 ? 'accel' : gType === 2 ? 'brake' : 'corner'})${gForce} @ ${gMph}mph`);
               const sig = `green:${d.id}:${gType}:${fixSig}`;
               if (!rec.sigs[sig]) { rec.sigs[sig] = 1; toSend.push(eco[gType]); }
             }
