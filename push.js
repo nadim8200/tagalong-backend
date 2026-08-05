@@ -1051,17 +1051,43 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const idleRpm = Number(pa.io36 != null ? pa.io36 : pa.rpm);
             const engineRunning = !isNaN(idleRpm) ? idleRpm > 200 : (pa.ignition === true);
 
+            // After the first heads-up, the alert REPEATS every hour and carries a
+            // running total so you know how long it's been sitting there running.
+            // Repeat interval is per car via idleRepeatMin (default 60 minutes).
+            const lastKey = `idlelast:${d.id}`;  // when we last notified
+            const repeatMs = (Number((d.attributes || {}).idleRepeatMin) > 0
+              ? Number((d.attributes || {}).idleRepeatMin) : 60) * 60 * 1000;
+            const fmtDur = (ms) => {
+              const m = Math.round(ms / 60000);
+              const h = Math.floor(m / 60);
+              return h > 0 ? `${h}h ${m % 60}m` : `${m}m`;
+            };
+
             if (fixFresh && engineRunning && idleMph < 2) {
               const since = Number(rec.sigs[pend] || 0);
               if (!since) {
                 rec.sigs[pend] = String(Date.now()); changed = true;
-              } else if (Date.now() - since > idleMin * 60 * 1000 && rec.sigs[fired] !== 'on') {
-                rec.sigs[fired] = 'on';
-                toSend.push({ title: `⏱️ ${NAMED(d)} — idling ${idleMin}+ min`, body: `The engine has been running parked for over ${idleMin} minutes.` });
+              } else {
+                const elapsed = Date.now() - since;
+                const lastNotify = Number(rec.sigs[lastKey] || 0);
+                if (rec.sigs[fired] !== 'on' && elapsed > idleMin * 60 * 1000) {
+                  // first heads-up at idleMin
+                  rec.sigs[fired] = 'on';
+                  rec.sigs[lastKey] = String(Date.now());
+                  changed = true;
+                  toSend.push({ title: `⏱️ ${NAMED(d)} — idling ${idleMin}+ min`, body: `The engine has been running parked for over ${idleMin} minutes.` });
+                } else if (rec.sigs[fired] === 'on' && Date.now() - lastNotify >= repeatMs) {
+                  // hourly repeat with the running total
+                  rec.sigs[lastKey] = String(Date.now());
+                  changed = true;
+                  const dur = fmtDur(elapsed);
+                  toSend.push({ title: `⏱️ ${NAMED(d)} — still idling (${dur})`, body: `The engine has been running parked and not moving for ${dur}.` });
+                }
               }
             } else {
               if (rec.sigs[pend]) { delete rec.sigs[pend]; changed = true; }
               if (rec.sigs[fired]) { delete rec.sigs[fired]; changed = true; }
+              if (rec.sigs[lastKey]) { delete rec.sigs[lastKey]; changed = true; }
             }
           }
 
