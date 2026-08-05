@@ -803,6 +803,23 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     try { await fsp.writeFile(LOG_PATH, JSON.stringify(log)); } catch { /* best effort */ }
   }
 
+  // Make Traccar evaluate speeding on EVERY GPS record (not just our ~30s poll
+  // snapshot, which misses brief bursts). We set the device's speedLimit (knots)
+  // from its speedMaxMph; Traccar then emits a deviceOverspeed event on any
+  // over-limit position, which the event loop already turns into an alert.
+  const MPH_TO_KNOTS = 1 / 1.15078;
+  async function ensureSpeedLimit(dev) {
+    const a = dev.attributes || {};
+    const hardMph = Number(a.speedMaxMph) > 0 ? Number(a.speedMaxMph) : 85;
+    const wantKnots = Math.round((hardMph * MPH_TO_KNOTS) * 100) / 100;
+    if (Math.abs(Number(a.speedLimit || 0) - wantKnots) <= 0.5) return; // already set
+    const body = JSON.stringify({ ...dev, attributes: { ...a, speedLimit: wantKnots } });
+    const r = await fetch(`${TRACCAR_URL}/api/devices/${dev.id}`, {
+      method: 'PUT', headers: { ...traccarHeaders, 'Content-Type': 'application/json' }, body,
+    });
+    if (r.ok) { dev.attributes = { ...a, speedLimit: wantKnots }; console.log(`[push] speedLimit set on ${(a.displayName || dev.name)}: ${hardMph} mph`); }
+  }
+
   async function poll() {
     if (!enabled) return;
     if (!lastCheck) await loadLastCheck();
@@ -812,6 +829,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     try {
       const { store } = await readStore();
       const fleet = await allDevices();
+      // Ensure each car's Traccar speed limit is set so overspeed events fire on
+      // every record (catches bursts our 30s snapshot would miss). Runs once per
+      // car (skips when already set).
+      for (const dev of fleet) { try { await ensureSpeedLimit(dev); } catch { /* best effort */ } }
       const positions = await allPositions();
       const geoNames = await geofenceNames();
       let changed = false;      // sig state → file
