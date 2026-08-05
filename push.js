@@ -1310,10 +1310,13 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                     + `(${prevMph}→${curMph}) | needs +${jumpMph} within ${windowSec}s`);
                 }
 
-                // ON by default with a SHORT window (see above) so it catches
-                // genuinely hard launches without the city-driving false alarms.
-                // Turn off per car with accelFromGps:false.
-                const gpsAccelOn = ((d.attributes || {}).accelFromGps !== false);
+                // OFF by default: the accelerometer's Green Driving event
+                // (io253/io254) is the accurate source and the app reads it
+                // directly, so this GPS-math estimate is only a fallback for
+                // trackers WITHOUT Green Driving. It was the cause of the
+                // city-driving false alarms, so it stays off unless a car opts
+                // in with accelFromGps:true.
+                const gpsAccelOn = ((d.attributes || {}).accelFromGps === true);
                 if (gpsAccelOn && dSec <= windowSec && dMph >= jumpMph && curMph >= 20) {
                   // One alert per burst: hold until the car stops gaining, then
                   // re-arm so the next launch fires fresh.
@@ -1373,10 +1376,12 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                     + `(${prevMph}→${curMph}) | needs -${dropMph} within ${windowSec}s from ≥20mph`);
                 }
 
-                // ON by default with a SHORT window so a genuine hard brake fires
-                // but easing to a normal stop does not. Turn off per car with
-                // brakeFromGps:false.
-                const gpsBrakeOn = ((d.attributes || {}).brakeFromGps !== false);
+                // OFF by default: the accelerometer's Green Driving brake event
+                // (io253=2) is the accurate source the app reads directly. This
+                // GPS-math estimate is only a fallback for trackers without
+                // Green Driving, and was the source of the false city brakes, so
+                // it stays off unless a car opts in with brakeFromGps:true.
+                const gpsBrakeOn = ((d.attributes || {}).brakeFromGps === true);
                 if (gpsBrakeOn && dSec <= windowSec && drop >= dropMph && prevMph >= 20) {
                   // One alert per brake event: hold until speed steadies, then
                   // re-arm so the next hard brake fires fresh.
