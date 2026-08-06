@@ -566,10 +566,28 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
         out.push({ key: 'overcharge', val: volts.toFixed(1), title: `⚡ ${car} — overcharging`, body: `System voltage is ${volts.toFixed(1)}V — the regulator may be faulty.` });
       }
     }
-    // low fuel
-    const fuel = a.fuel != null ? a.fuel : a.io48;
-    if (fuel != null && fuel > 0 && fuel < 15) {
-      out.push({ key: 'lowfuel', val: '1', title: `⛽ ${car} — low fuel`, body: `Fuel is at ${Math.round(fuel)}%.` });
+    // low fuel — PARITY WITH THE APP so the phone gets what the web shows.
+    // The app warns two ways: by RANGE (estimated miles of fuel left) and by
+    // LEVEL (%), each with per-car thresholds. We mirror both here.
+    //
+    // The old version used a fixed val:'1', so after the FIRST low-fuel push it
+    // deduped itself into permanent silence while the tank stayed low — which is
+    // why the web (whose state resets each session) kept firing but the phone
+    // never did. val now carries the severity BUCKET, so a worsening tank
+    // (e.g. 14% → 9% → 4%) notifies again as it drops, while a steady level only
+    // pings once (with the 6-hour repeat floor still guarding against spam).
+    const fuelPct = a.io48 != null ? Number(a.io48) : (a.fuel != null ? Number(a.fuel) : null);
+    if (fuelPct != null && fuelPct > 0) {
+      const tankRange = Number((d.attributes || {}).tankRangeMiles) > 0 ? Number((d.attributes || {}).tankRangeMiles) : 300;
+      const lowRangeMi = Number((d.attributes || {}).lowRangeMiles) > 0 ? Number((d.attributes || {}).lowRangeMiles) : 50;
+      const lowFuelPct = Number((d.attributes || {}).lowFuelPct) > 0 ? Number((d.attributes || {}).lowFuelPct) : 15;
+      const rangeMi = Math.round((fuelPct / 100) * tankRange);
+      if (rangeMi < lowRangeMi) {
+        out.push({ key: 'lowrange', val: String(Math.floor(rangeMi / 10) * 10), title: `⛽ ${car} — low fuel`, body: `About ${rangeMi} miles of range left (under ${lowRangeMi}).` });
+      }
+      if (fuelPct <= lowFuelPct) {
+        out.push({ key: 'lowfuel', val: String(Math.floor(fuelPct / 5) * 5), title: `⛽ ${car} — low fuel`, body: `Fuel is at ${Math.round(fuelPct)}%.` });
+      }
     }
     // low tracker battery
     const bl = a.batteryLevel;
@@ -930,7 +948,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           // and notifies again each time it comes back.
           {
             const active = new Set(derived.map((x) => x.key));
-            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowbatt', 'rpm']) {
+            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowrange', 'lowbatt', 'rpm']) {
               const sig = `dv:${d.id}:${key}`;
               const goneKey = `dvgone:${d.id}:${key}`;
               if (active.has(key)) {
