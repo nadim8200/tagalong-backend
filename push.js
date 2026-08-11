@@ -317,7 +317,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
         const fleet = await allDevices();
         const uid = String(req.user.id);
         const nameOf = (d) => ((d.attributes || {}).displayName || d.name);
-        const assigned = fleet.filter((d) => deviceOwnedBy(d, rec || {}, uid));
+        const permitted = await permittedDeviceIds(uid, rec || {});
+        const assigned = fleet.filter((d) => deviceOwnedBy(d, rec || {}, uid) || (permitted && permitted.has(String(d.id))));
         scopedCars = assigned.filter((d) => membershipLive(d)).map(nameOf);
         // assigned to you but SILENCED because membership is expired/stopped
         blockedCars = assigned.filter((d) => !membershipLive(d)).map(nameOf);
@@ -421,9 +422,30 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     if (rec.account && String(a.account) === String(rec.account)) return true;
     return false;
   }
-  // Cars this user actually gets alerts for = assigned AND membership live.
-  function scopeDevices(devices, rec, uid) {
-    return devices.filter((d) => deviceOwnedBy(d, rec, uid) && membershipLive(d));
+  // The APP shows a customer their cars using Traccar's user↔device PERMISSIONS.
+  // The attribute matching above is a second, independent source of truth — so a
+  // newly-added car the app shows can be missed by push if its attributes don't
+  // also carry the owner's id/account. To guarantee parity ("if it's in my app,
+  // I get its alerts"), for a real owner login we ALSO pull the exact device list
+  // Traccar grants that user and treat those as owned. Admin/broker/family keep
+  // the attribute / member-link path (their uid isn't a Traccar user id).
+  const OWNER_ROLES = new Set(['owner', 'customer', 'user', '']);
+  async function permittedDeviceIds(uid, rec) {
+    if (rec && rec.role && !OWNER_ROLES.has(rec.role)) return null;
+    if (!/^\d+$/.test(String(uid))) return null; // Traccar user ids are numeric
+    try {
+      const r = await fetch(`${TRACCAR_URL}/api/devices?userId=${encodeURIComponent(uid)}`, { headers: traccarHeaders });
+      if (!r.ok) return null;
+      const arr = await r.json();
+      return Array.isArray(arr) ? new Set(arr.map((d) => String(d.id))) : null;
+    } catch { return null; }
+  }
+  // Cars this user actually gets alerts for = (assigned by attribute OR granted by
+  // Traccar permission) AND membership live.
+  function scopeDevices(devices, rec, uid, permittedIds) {
+    return devices.filter((d) =>
+      (deviceOwnedBy(d, rec, uid) || (permittedIds && permittedIds.has(String(d.id))))
+      && membershipLive(d));
   }
   // latest position for every device, keyed by deviceId
   async function allPositions() {
@@ -489,6 +511,31 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
       default:
         return null;
     }
+  }
+
+  // Read a paired Teltonika EYE Sensor (BLE) from a position's attributes. The
+  // exact field names vary by firmware/preset, so we try the common named keys
+  // first (temp1.., humidity1.., bleTemp1..) then raw AVL ids. Mirrors the app's
+  // src/eyeSensor.js so phone alerts and the on-screen readings agree.
+  function readEyeAttrs(a = {}) {
+    const numFrom = (keys) => {
+      for (const k of keys) {
+        const v = a[k];
+        if (v != null && v !== '' && Number.isFinite(Number(v))) return Number(v);
+      }
+      return null;
+    };
+    for (const s of [1, 2, 3, 4]) {
+      const temperature = numFrom([`temp${s}`, `bleTemp${s}`, `temperature${s}`, `bleTemperature${s}`, `io${24 + s}`]);
+      const humRaw = { 1: 'io86', 2: 'io104', 3: 'io106', 4: 'io108' }[s];
+      const humidity = numFrom([`humidity${s}`, `bleHumidity${s}`, `hum${s}`, humRaw]);
+      const battery = numFrom([`bleBattery${s}`, `bleBatt${s}`, `bleVoltage${s}`, `sensorBattery${s}`]);
+      const mv = [`bleMovement${s}`, `movement${s}`, `bleMotion${s}`, `bleTilt${s}`].map((k) => a[k]).find((v) => v != null);
+      if (temperature == null && humidity == null && battery == null && mv == null) continue;
+      const moved = mv === true || mv === 1 || mv === '1' || (Number.isFinite(Number(mv)) && Math.abs(Number(mv)) > 0);
+      return { slot: s, temperature, humidity, battery, moved };
+    }
+    return null;
   }
 
   // ---- derived alerts from the latest position (not event-based) ----
@@ -593,6 +640,32 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     const bl = a.batteryLevel;
     if (bl != null && bl <= 15) {
       out.push({ key: 'lowbatt', val: '1', title: `🔋 ${car} — low battery`, body: `Tracker battery at ${Math.round(bl)}%.` });
+    }
+    // ---- Teltonika EYE Sensor (BLE): cargo temperature / humidity / movement ----
+    // The paired tag's readings arrive on the vehicle's own attributes. Thresholds
+    // are per-vehicle (eyeTempMinC / eyeTempMaxC / eyeHumidityMax / eyeAlertMovement).
+    {
+      const eye = readEyeAttrs(a);
+      const da = d.attributes || {};
+      if (eye) {
+        const tMin = Number(da.eyeTempMinC);
+        const tMax = Number(da.eyeTempMaxC);
+        if (eye.temperature != null) {
+          const t = eye.temperature;
+          if (Number.isFinite(tMax) && t > tMax) {
+            out.push({ key: 'eyetemp', val: `hi${Math.round(t)}`, title: `🌡️ ${car} — cargo too warm`, body: `Sensor reads ${t.toFixed(1)}°C (above the ${tMax}°C limit).` });
+          } else if (Number.isFinite(tMin) && t < tMin) {
+            out.push({ key: 'eyetemp', val: `lo${Math.round(t)}`, title: `🥶 ${car} — cargo too cold`, body: `Sensor reads ${t.toFixed(1)}°C (below the ${tMin}°C limit).` });
+          }
+        }
+        const hMax = Number(da.eyeHumidityMax);
+        if (eye.humidity != null && Number.isFinite(hMax) && eye.humidity > hMax) {
+          out.push({ key: 'eyehumidity', val: String(Math.round(eye.humidity / 5) * 5), title: `💧 ${car} — high humidity`, body: `Cargo humidity is ${Math.round(eye.humidity)}% (above ${hMax}%).` });
+        }
+        if (da.eyeAlertMovement === true && eye.moved) {
+          out.push({ key: 'eyemove', val: '1', title: `📦 ${car} — sensor moved`, body: 'The EYE-tagged item was moved or tilted.' });
+        }
+      }
     }
     // aggressive revving — threshold per car via rpmAlertRpm, default 4000
     const rpm = Number(a.io36 != null ? a.io36 : a.rpm);
@@ -761,7 +834,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     for (const [uid, rec] of Object.entries(store)) {
       const tokenRecs = rec.tokens || [];
       if (!tokenRecs.length) continue;
-      const devs = scopeDevices(fleet, rec, uid);
+      const permitted = await permittedDeviceIds(uid, rec);
+      const devs = scopeDevices(fleet, rec, uid, permitted);
       if (!devs.length) continue;
       let miles = 0, trips = 0, harsh = 0, alerts = 0;
       for (const d of devs) {
@@ -873,7 +947,8 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           for (const old of rec.log) await appendLog(uid, old);
           delete rec.log; devChanged = true;
         }
-        const devices = scopeDevices(fleet, rec, uid);
+        const permitted = await permittedDeviceIds(uid, rec);
+        const devices = scopeDevices(fleet, rec, uid, permitted);
         if (!devices.length) continue;
 
         for (const d of devices) {
@@ -948,7 +1023,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           // and notifies again each time it comes back.
           {
             const active = new Set(derived.map((x) => x.key));
-            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowrange', 'lowbatt', 'rpm']) {
+            for (const key of ['disconnect', 'dtc', 'enginehot', 'charging', 'overcharge', 'lowfuel', 'lowrange', 'lowbatt', 'rpm', 'eyetemp', 'eyehumidity', 'eyemove']) {
               const sig = `dv:${d.id}:${key}`;
               const goneKey = `dvgone:${d.id}:${key}`;
               if (active.has(key)) {
