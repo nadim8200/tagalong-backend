@@ -1375,8 +1375,17 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                 changed = true;
               } else if (rec.sigs[tripKey] === 'on') {
                 // Stationary long enough → the trip has ended, so the next move
-                // counts as a fresh start.
-                if (lastMove && nowMs - lastMove >= gapMs) {
+                // counts as a fresh start — BUT only if the engine is actually
+                // OFF. A car idling in place (sitting with the engine running for
+                // a while) has NOT ended its trip; ending it here made the next
+                // roll fire a false "car turned on" even though it never shut off.
+                const ra2 = (pos && pos.attributes) || {};
+                const rpm2 = Number(ra2.io36 != null ? ra2.io36 : ra2.rpm);
+                const engineRunning = (!isNaN(rpm2) && rpm2 > 200)
+                  || ra2.ignition === true
+                  || rec.sigs[`rpmon:${d.id}`] === 'on'
+                  || rec.sigs[`accvibon:${d.id}`] === 'on';
+                if (lastMove && nowMs - lastMove >= gapMs && !engineRunning) {
                   rec.sigs[tripKey] = 'off'; changed = true;
                 }
               }
