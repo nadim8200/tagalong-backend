@@ -263,7 +263,93 @@ export function initTruckMate(app, { requireAuth, db }) {
       ];
       if (db && db.enabled) await db.set(key2, { deliveries });
 
-      res.json({ ok: true, receivedTrips: Array.isArray(body.trips) ? body.trips.length : 0, hasRosters: Boolean(body.rosters) });
+      // ---- delivered-trip transitions ----
+      // The connector flags a trip _event:'delivered' the one time it flips from
+      // live to DELIVERED, then drops it. We capture those here: record each into
+      // a delivered queue (deduped), so the dispatcher / AI can act on it and send
+      // the customer/dispatcher communication.
+      const deliveredNow = await recordDelivered(site, Array.isArray(payload.trips) ? payload.trips : []);
+
+      res.json({
+        ok: true,
+        receivedTrips: Array.isArray(body.trips) ? body.trips.length : 0,
+        hasRosters: Boolean(body.rosters),
+        delivered: deliveredNow.length,
+      });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // Pull the freight-bill (B) numbers off an enriched trip, whatever shape it is.
+  function billNumbersOf(trip) {
+    const fb = (trip && (trip.freightBills || trip.orders)) || [];
+    const arr = Array.isArray(fb) ? fb : (fb && Array.isArray(fb.orders) ? fb.orders : []);
+    return arr.map((o) => o && (o.billNumber || o.billNo || o.bill)).filter(Boolean);
+  }
+  // Persist the trips that just flipped to delivered into a queue the dispatcher/
+  // AI reads. Deduped by trip number so a resend can't double-post. NOTE: the
+  // actual notification CHANNEL (SMS / call / dispatcher ping) is intentionally a
+  // hook below — wire it to notify.js / RingCentral when you decide the channel.
+  async function recordDelivered(site, trips) {
+    const delivered = (trips || []).filter((t) => t && t._event === 'delivered');
+    if (!delivered.length || !(db && db.enabled)) return delivered;
+    const qKey = `taTruckMateDelivered:${site}`;
+    const store = await db.get(qKey, { items: [], seen: {} });
+    store.items = store.items || []; store.seen = store.seen || {};
+    const added = [];
+    for (const t of delivered) {
+      const trip = t.trip || t;
+      const id = String(t._id || trip.tripNumber || '');
+      if (!id || store.seen[id]) continue; // already recorded this delivery
+      const item = {
+        tripNumber: trip.tripNumber || id,
+        status: trip.status || 'DELVD',
+        billNumbers: billNumbersOf(t),
+        destinationZone: trip.destZoneDesc || trip.destinationZone || '',
+        driver: trip.driver || '',
+        deliveredAt: new Date().toISOString(),
+        acknowledged: false,
+      };
+      store.items.unshift(item);
+      store.seen[id] = Date.now();
+      added.push(item);
+      console.log(`[truckmate] DELIVERED trip ${item.tripNumber} — bills [${item.billNumbers.join(', ')}] → queued for dispatcher notify`);
+      // HOOK: send the delivery communication here once the channel is decided,
+      // e.g. await notifyDelivered(item);  (SMS/call via notify.js / RingCentral)
+    }
+    // keep the queue and the dedup map from growing forever
+    store.items = store.items.slice(0, 500);
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    for (const k of Object.keys(store.seen)) { if (store.seen[k] < cutoff) delete store.seen[k]; }
+    await db.set(qKey, store);
+    return added;
+  }
+
+  // Dispatcher / AI reads the delivered queue (newest first). ?unacked=1 for only
+  // the ones not yet handled.
+  app.get('/truckmate/delivered', requireAuth, async (req, res) => {
+    try {
+      const site = String(req.query.site || 'florida-beauty');
+      const store = (db && db.enabled) ? await db.get(`taTruckMateDelivered:${site}`, { items: [] }) : { items: [] };
+      let items = store.items || [];
+      if (String(req.query.unacked || '') === '1') items = items.filter((x) => !x.acknowledged);
+      res.json({ site, count: items.length, items });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // Mark a delivered trip handled (so it drops out of the unacked list) once the
+  // dispatcher/AI has sent the communication and closed it.
+  app.post('/truckmate/delivered/ack', requireAuth, async (req, res) => {
+    try {
+      const site = String((req.body && req.body.site) || 'florida-beauty');
+      const tripNumber = String((req.body && req.body.tripNumber) || '');
+      if (!tripNumber) return res.status(400).json({ error: 'tripNumber required' });
+      if (!(db && db.enabled)) return res.status(503).json({ error: 'db not enabled' });
+      const qKey = `taTruckMateDelivered:${site}`;
+      const store = await db.get(qKey, { items: [], seen: {} });
+      let hit = false;
+      (store.items || []).forEach((x) => { if (String(x.tripNumber) === tripNumber) { x.acknowledged = true; hit = true; } });
+      if (hit) await db.set(qKey, store);
+      res.json({ ok: hit });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
 
