@@ -317,8 +317,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
         const fleet = await allDevices();
         const uid = String(req.user.id);
         const nameOf = (d) => ((d.attributes || {}).displayName || d.name);
-        const permitted = await permittedDeviceIds(uid, rec || {});
-        const assigned = fleet.filter((d) => deviceOwnedBy(d, rec || {}, uid) || (permitted && permitted.has(String(d.id))));
+        const users = await allUsers();
+        const rec2 = withUserIdentity(rec || {}, uid, users);
+        const permitted = await permittedDeviceIds(uid, rec2);
+        const assigned = fleet.filter((d) => deviceOwnedBy(d, rec2, uid) || (permitted && permitted.has(String(d.id))));
         scopedCars = assigned.filter((d) => membershipLive(d)).map(nameOf);
         // assigned to you but SILENCED because membership is expired/stopped
         blockedCars = assigned.filter((d) => !membershipLive(d)).map(nameOf);
@@ -372,6 +374,31 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     const r = await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders });
     if (!r.ok) return [];
     return r.json();
+  }
+  // Every Traccar user (admin token). Used to resolve a registered phone's REAL
+  // account number / customer id from the SERVER, instead of trusting whatever
+  // the phone sent at registration — the phone's local customer list can be
+  // empty or stale, which left cars linked only by account/customerId (like a
+  // freshly-added one) unmatched and silent. The Traccar user's own attributes
+  // are the same on every device, so this makes scoping reliable for everyone.
+  async function allUsers() {
+    try {
+      const r = await fetch(`${TRACCAR_URL}/api/users`, { headers: traccarHeaders });
+      if (!r.ok) return [];
+      const a = await r.json();
+      return Array.isArray(a) ? a : [];
+    } catch { return []; }
+  }
+  // Fill in a registration record's account / customer id from the authoritative
+  // Traccar user, so scoping doesn't depend on what the phone happened to send.
+  function withUserIdentity(rec, uid, users) {
+    const u = (users || []).find((x) => String(x.id) === String(uid));
+    const ua = (u && u.attributes) || {};
+    return {
+      ...rec,
+      account: ua.account || rec.account || '',
+      cid: rec.cid || ua.customerId || '',
+    };
   }
   // geofenceId → friendly name (strip our ⭐/⏱ prefixes)
   async function geofenceNames() {
@@ -831,11 +858,13 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     const fromISO = from.toISOString(), toISO = to.toISOString();
     const { store } = await readStore();
     const fleet = await allDevices();
+    const users = await allUsers();
     for (const [uid, rec] of Object.entries(store)) {
       const tokenRecs = rec.tokens || [];
       if (!tokenRecs.length) continue;
-      const permitted = await permittedDeviceIds(uid, rec);
-      const devs = scopeDevices(fleet, rec, uid, permitted);
+      const rec2 = withUserIdentity(rec, uid, users);
+      const permitted = await permittedDeviceIds(uid, rec2);
+      const devs = scopeDevices(fleet, rec2, uid, permitted);
       if (!devs.length) continue;
       let miles = 0, trips = 0, harsh = 0, alerts = 0;
       for (const d of devs) {
@@ -921,6 +950,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     try {
       const { store } = await readStore();
       const fleet = await allDevices();
+      const users = await allUsers(); // resolve each phone's real account server-side
       // Ensure each car's Traccar speed limit is set so overspeed events fire on
       // every record (catches bursts our 30s snapshot would miss). Runs once per
       // car (skips when already set).
@@ -947,8 +977,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           for (const old of rec.log) await appendLog(uid, old);
           delete rec.log; devChanged = true;
         }
-        const permitted = await permittedDeviceIds(uid, rec);
-        const devices = scopeDevices(fleet, rec, uid, permitted);
+        const rec2 = withUserIdentity(rec, uid, users);
+        const permitted = await permittedDeviceIds(uid, rec2);
+        const devices = scopeDevices(fleet, rec2, uid, permitted);
         if (!devices.length) continue;
 
         for (const d of devices) {
