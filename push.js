@@ -1590,25 +1590,42 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           // be quoting a number still climbing.
           {
             const pa = (pos && pos.attributes) || {};
-            const fuelNow = pa.io48 != null ? Number(pa.io48) : (pa.fuel != null ? Number(pa.fuel) : null);
-            // You only refuel while PARKED. A hard brake sloshes fuel forward and
-            // the sender spikes for a moment — but that happens in motion / at the
-            // instant of stopping, so requiring the car to be stopped for both the
-            // jump AND the confirmation rejects the slosh while still catching a
-            // real fill (car sits at the pump for a minute).
-            const stopped = liveMph(pos) < 3;
-            if (fuelNow != null && Number.isFinite(fuelNow) && fuelNow >= 0) {
+            const rawFuel = pa.io48 != null ? Number(pa.io48) : (pa.fuel != null ? Number(pa.fuel) : null);
+
+            // A fuel sender only reports a trustworthy level while the ECU is
+            // powered and settled. A reading taken with the engine OFF — or on the
+            // first beat as the tracker wakes — is garbage: it comes back low or
+            // zero, becomes the baseline, and then the next NORMAL reading looks
+            // like a big "fill". That's exactly the fake refuel we kept seeing
+            // (Matt especially). So we ONLY sample fuel while the engine is running,
+            // using the same engine-on signals the rest of the poller uses. That
+            // keeps baselines solid (last real driving level) and the post-fill
+            // reading solid (engine on as you pull away), while dropping the
+            // off/at-wake garbage that caused the false alerts.
+            const fRpm = Number(pa.io36 != null ? pa.io36 : pa.rpm);
+            const engineOnNow = (!isNaN(fRpm) && fRpm > 200) || pa.ignition === true
+              || rec.sigs[`rpmon:${d.id}`] === 'on' || rec.sigs[`accvibon:${d.id}`] === 'on'
+              || rec.sigs[`tripon:${d.id}`] === 'on';
+
+            // Only a plausible reading counts (0/negative/over-100 = sensor junk).
+            const fuelNow = (rawFuel != null && Number.isFinite(rawFuel) && rawFuel > 0 && rawFuel <= 100)
+              ? rawFuel : null;
+
+            if (fuelNow != null && engineOnNow) {
+              // Real fills are big (a quarter tank or more). Small moves are noise,
+              // so the bar is 20 points by default — lower it per car if needed.
               const minJump = Number((d.attributes || {}).refuelMinPct) > 0
-                ? Number((d.attributes || {}).refuelMinPct) : 8;
+                ? Number((d.attributes || {}).refuelMinPct) : 20;
               const lastKey = `fuel:${d.id}`;
               const pendKey = `fuelpend:${d.id}`;
               const prev = rec.sigs[lastKey] != null ? Number(rec.sigs[lastKey]) : null;
               const pending = rec.sigs[pendKey] != null ? Number(rec.sigs[pendKey]) : null;
 
               if (pending != null) {
-                // We saw a jump last poll — is it real, or was it a swing? Confirm
-                // only if the car is STILL parked and the level held.
-                if (stopped && fuelNow >= pending - 3) {
+                // We saw a jump last poll — confirm only if it HELD (engine still
+                // on, level stayed up). A one-poll spike at wake never confirms,
+                // so it's silently discarded.
+                if (fuelNow >= pending - 5) {
                   const from = rec.sigs[`fuelfrom:${d.id}`];
                   toSend.push({
                     title: `⛽ ${NAMED(d)} — refuelled`,
@@ -1616,22 +1633,24 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                       ? `Filled from ${Math.round(Number(from))}% to ${Math.round(fuelNow)}%.`
                       : `Fuel now at ${Math.round(fuelNow)}%.`,
                   });
+                  rec.sigs[lastKey] = String(fuelNow); // fill confirmed → raise the baseline
                 }
                 delete rec.sigs[pendKey];
                 delete rec.sigs[`fuelfrom:${d.id}`];
                 changed = true;
-              } else if (stopped && prev != null && fuelNow - prev >= minJump) {
-                // Candidate fill — only while parked. Hold it for one more reading
-                // before telling anyone, so the number we report is where it settled.
+              } else if (prev != null && fuelNow - prev >= minJump) {
+                // Candidate fill — hold it for one more reading before telling
+                // anyone, so a single bad sample can't fire and the number we
+                // report is where it actually settled.
                 rec.sigs[pendKey] = String(fuelNow);
                 rec.sigs[`fuelfrom:${d.id}`] = String(prev);
                 changed = true;
               }
 
-              // Track the level, but only move the baseline DOWN or on a
-              // confirmed rise — otherwise a slow drift upward from noise would
-              // quietly raise the bar and mask a real fill.
-              if (prev == null || fuelNow < prev || pending != null) {
+              // Track the baseline: move it DOWN freely (burning fuel), never up
+              // except on a confirmed fill above — otherwise slow upward noise
+              // would quietly raise the bar and mask a real fill.
+              if (prev == null || fuelNow < prev) {
                 rec.sigs[lastKey] = String(fuelNow);
                 changed = true;
               }
