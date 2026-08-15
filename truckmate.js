@@ -7,7 +7,7 @@
 // browser, and is verified against the live endpoint before it replaces a
 // working config.
 // ---------------------------------------------------------------
-import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers } from './samsara.js';
+import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings } from './samsara.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -427,6 +427,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env }) {
         assignments: summarize(snap.assignments),
         reefer: reeferShape(snap.reefer),
         reeferAudit: analyzeReefers(snap.reefer),
+        reeferReadingsAudit: analyzeReeferReadings(snap.reeferRead),
       });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
