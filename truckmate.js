@@ -7,7 +7,7 @@
 // browser, and is verified against the live endpoint before it replaces a
 // working config.
 // ---------------------------------------------------------------
-import { samsaraTokenFrom, snapshot } from './samsara.js';
+import { samsaraTokenFrom, snapshot, getLiveIndex, correlate } from './samsara.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -369,6 +369,16 @@ export function initTruckMate(app, { requireAuth, db, env = process.env }) {
       const store = (db && db.enabled) ? await db.get(`taTruckMateActive:${site}`, { trips: {} }) : { trips: {} };
       const recs = Object.values(store.trips || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
       const trips = recs.map((r) => r.item);
+      // Overlay LIVE Samsara data (driver names, GPS/fuel/engine, reefer temp) on
+      // each trip so the dispatcher can cross-check it against TruckMate. Cached
+      // ~60s; if Samsara is down or unconfigured we just skip the overlay.
+      try {
+        const token = samsaraTokenFrom(env);
+        if (token) {
+          const idx = await getLiveIndex(token);
+          trips.forEach((item) => { try { const live = correlate(item, idx); if (live) item._samsara = live; } catch { /* per-trip skip */ } });
+        }
+      } catch { /* no live overlay this cycle */ }
       // heartbeat from the raw ingest log
       const ing = (db && db.enabled) ? await db.get(`taTruckMateIngest:${site}`, { deliveries: [] }) : { deliveries: [] };
       const latest = (ing.deliveries || [])[0] || null;
@@ -397,13 +407,25 @@ export function initTruckMate(app, { requireAuth, db, env = process.env }) {
         const arr = Array.isArray(v) ? v : [];
         return { count: arr.length, sampleKeys: arr[0] ? Object.keys(arr[0]) : [], samples: arr.slice(0, 3) };
       };
+      // reefer may be a raw object (legacy endpoint) rather than an array — expose
+      // its shape + first record whatever it's called, so we can wire parsing.
+      const reeferShape = (v) => {
+        if (v && v.error) return { error: v.error };
+        if (Array.isArray(v)) return summarize(v);
+        if (v && typeof v === 'object') {
+          const listKey = Object.keys(v).find((k) => Array.isArray(v[k]));
+          const arr = listKey ? v[listKey] : [];
+          return { rawKeys: Object.keys(v), listKey, count: arr.length, sampleKeys: arr[0] ? Object.keys(arr[0]) : [], samples: arr.slice(0, 2) };
+        }
+        return { value: v };
+      };
       res.json({
         drivers: summarize(snap.drivers),
         vehicles: summarize(snap.vehicles),
         trailers: summarize(snap.trailers),
         stats: summarize(snap.stats),
         assignments: summarize(snap.assignments),
-        reefer: summarize(snap.reefer),
+        reefer: reeferShape(snap.reefer),
       });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
