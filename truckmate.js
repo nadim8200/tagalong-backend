@@ -270,11 +270,20 @@ export function initTruckMate(app, { requireAuth, db }) {
       // the customer/dispatcher communication.
       const deliveredNow = await recordDelivered(site, Array.isArray(payload.trips) ? payload.trips : []);
 
+      // ---- running active-trips board ----
+      // The connector is forward-only: after its first backfill each cycle only
+      // carries the trips that CHANGED. So a single delivery is a delta, not the
+      // whole fleet. We fold every delta into a persistent board (upsert by trip
+      // number, drop on delivered) so the dispatcher sees ALL active trips, not
+      // just the handful that pinged this minute.
+      const boardCount = await updateActiveBoard(site, Array.isArray(payload.trips) ? payload.trips : []);
+
       res.json({
         ok: true,
         receivedTrips: Array.isArray(body.trips) ? body.trips.length : 0,
         hasRosters: Boolean(body.rosters),
         delivered: deliveredNow.length,
+        activeBoard: boardCount,
       });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
@@ -323,6 +332,54 @@ export function initTruckMate(app, { requireAuth, db }) {
     await db.set(qKey, store);
     return added;
   }
+
+  // Fold this cycle's delta into the persistent active board. Live trips are
+  // upserted by id (freshest wins); a trip flagged delivered is removed; trips we
+  // haven't heard about in ACTIVE_TTL are aged out (covers a trip that closes
+  // without us catching its delivered event). Returns the resulting board size.
+  const ACTIVE_TTL_MS = 36 * 60 * 60 * 1000;
+  async function updateActiveBoard(site, trips) {
+    if (!(db && db.enabled)) return 0;
+    const key = `taTruckMateActive:${site}`;
+    const store = await db.get(key, { trips: {} });
+    store.trips = store.trips || {};
+    const now = Date.now();
+    for (const t of (trips || [])) {
+      const inner = (t && t.trip) || t || {};
+      const id = String((t && t._id) || inner.tripNumber || '');
+      if (!id) continue;
+      if (t && t._event === 'delivered') { delete store.trips[id]; continue; }
+      store.trips[id] = { item: t, updatedAt: now };
+    }
+    for (const [id, rec] of Object.entries(store.trips)) {
+      if (!rec || (now - (rec.updatedAt || 0)) > ACTIVE_TTL_MS) delete store.trips[id];
+    }
+    await db.set(key, store);
+    return Object.keys(store.trips).length;
+  }
+
+  // Dispatcher / AI reads the whole active board (all live trips, newest update
+  // first), plus a heartbeat (when the connector last delivered) so the UI can
+  // show live/stale. This is the endpoint the dispatcher panel should read — NOT
+  // ingest/latest, which is only the most recent delta.
+  app.get('/truckmate/active', requireAuth, async (req, res) => {
+    try {
+      const site = String(req.query.site || 'florida-beauty');
+      const store = (db && db.enabled) ? await db.get(`taTruckMateActive:${site}`, { trips: {} }) : { trips: {} };
+      const recs = Object.values(store.trips || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      const trips = recs.map((r) => r.item);
+      // heartbeat from the raw ingest log
+      const ing = (db && db.enabled) ? await db.get(`taTruckMateIngest:${site}`, { deliveries: [] }) : { deliveries: [] };
+      const latest = (ing.deliveries || [])[0] || null;
+      res.json({
+        site,
+        count: trips.length,
+        trips,
+        receivedAt: latest ? latest.receivedAt : null,
+        ageMinutes: latest ? Math.round((Date.now() - Date.parse(latest.receivedAt)) / 60000) : null,
+      });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
 
   // Dispatcher / AI reads the delivered queue (newest first). ?unacked=1 for only
   // the ones not yet handled.
