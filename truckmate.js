@@ -7,6 +7,7 @@
 // browser, and is verified against the live endpoint before it replaces a
 // working config.
 // ---------------------------------------------------------------
+import { samsaraTokenFrom, snapshot } from './samsara.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -154,7 +155,7 @@ function normalizeCustomer(c) {
 // ===============================================================
 // Routes
 // ===============================================================
-export function initTruckMate(app, { requireAuth, db }) {
+export function initTruckMate(app, { requireAuth, db, env = process.env }) {
   const cfgKey = 'taTruckMate';
 
   async function configFor(owner) {
@@ -377,6 +378,32 @@ export function initTruckMate(app, { requireAuth, db }) {
         trips,
         receivedAt: latest ? latest.receivedAt : null,
         ageMinutes: latest ? Math.round((Date.now() - Date.parse(latest.receivedAt)) / 60000) : null,
+      });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // ---- Samsara correlation (stage 1: diagnostic) ----
+  // Live telematics for cross-checking against TruckMate. This endpoint dumps
+  // counts + a few sample records of each Samsara resource so we can see how
+  // this org names its trucks/trailers/drivers (the keys we match on) and which
+  // reading carries reefer temperature — before wiring the exact reconciliation.
+  app.get('/truckmate/samsara-debug', requireAuth, async (req, res) => {
+    try {
+      const token = samsaraTokenFrom(env);
+      if (!token) return res.status(503).json({ error: 'No Samsara token configured (set SAMSARA_TOKEN or SAMSARA_TOKEN_TM).' });
+      const snap = await snapshot(token);
+      const summarize = (v) => {
+        if (v && v.error) return { error: v.error };
+        const arr = Array.isArray(v) ? v : [];
+        return { count: arr.length, sampleKeys: arr[0] ? Object.keys(arr[0]) : [], samples: arr.slice(0, 3) };
+      };
+      res.json({
+        drivers: summarize(snap.drivers),
+        vehicles: summarize(snap.vehicles),
+        trailers: summarize(snap.trailers),
+        stats: summarize(snap.stats),
+        assignments: summarize(snap.assignments),
+        reefer: summarize(snap.reefer),
       });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });

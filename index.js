@@ -570,7 +570,7 @@ initFleet(app, { requireAuth, db, env: process.env });
 // RingCentral: SMS from the company's own business numbers, plus the call log
 // so "was this customer actually called?" comes from records, not memory.
 const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.env });
-initTruckMate(app, { requireAuth, db });
+initTruckMate(app, { requireAuth, db, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
 // falls back to Twilio. DRY-RUN until NOTIFY_ALLOW_SEND=true — see notify.js.
