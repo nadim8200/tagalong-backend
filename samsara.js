@@ -48,6 +48,29 @@ export const vehicleStats = (token, types = 'gps,engineStates,fuelPercents,obdOd
   sGet(token, `/fleet/vehicles/stats?types=${types}`);
 export const hosClocks = (token) => sGet(token, '/fleet/hos/clocks?limit=200');
 
+// ---- LIVE reefer via the Readings API (the source the Samsara UI uses) ----
+// /readings/latest gives the last-known value per asset. readingIds is capped at
+// 3 per request, so we fetch in batches and merge by entityId (the asset id).
+const readingsLatest = (token, ids) => sGet(token, `/readings/latest?entityType=asset&readingIds=${ids.join(',')}`);
+export async function reeferReadings(token) {
+  const batches = [
+    ['reeferReturnAirZone1', 'reeferSetPointZone1', 'reeferSupplyAirZone1'],
+    ['reeferAmbientAir', 'reeferState', 'reeferRunMode'],
+    ['reeferFuelLevel', 'reeferPowerSource', 'reeferEngineHours'],
+  ];
+  const byEntity = {};
+  for (const ids of batches) {
+    let data;
+    try { data = await readingsLatest(token, ids); } catch { continue; }
+    for (const r of (Array.isArray(data) ? data : [])) {
+      const id = String(r.entityId);
+      if (!byEntity[id]) byEntity[id] = {};
+      byEntity[id][r.readingId] = { value: r.value, at: r.happenedAtTime };
+    }
+  }
+  return byEntity; // { entityId: { readingId: { value, at } } }
+}
+
 // Reefer / trailer temperature. The reliable source is the legacy "all reefers"
 // endpoint, which returns every reefer's zone temps + setpoints — but it REQUIRES
 // a startMs/endMs window (we ask for the last hour and take the latest reading).
@@ -68,16 +91,17 @@ export async function reeferStats(token) {
 // one resource failing (returns an { error } marker for that slice instead).
 export async function snapshot(token) {
   const safe = (p) => p.then((v) => v).catch((e) => ({ error: String(e.message || e) }));
-  const [drivers, vehicles, trailers, stats, assignments, reefer, hos] = await Promise.all([
+  const [drivers, vehicles, trailers, stats, assignments, reefer, hos, reeferRead] = await Promise.all([
     safe(listDrivers(token)),
     safe(listVehicles(token)),
     safe(listTrailers(token)),
     safe(vehicleStats(token)),
     safe(driverVehicleAssignments(token)),
-    safe(reeferStats(token)),
+    safe(reeferStats(token)),      // legacy bulk — kept only for asset id→name mapping
     safe(hosClocks(token)),
+    safe(reeferReadings(token)),   // LIVE reefer values (Readings API)
   ]);
-  return { drivers, vehicles, trailers, stats, assignments, reefer, hos };
+  return { drivers, vehicles, trailers, stats, assignments, reefer, hos, reeferRead };
 }
 
 // ===============================================================
@@ -181,6 +205,46 @@ export function analyzeReefers(rawReefer) {
   return { total: recs.length, withTemp, nonZero, fresh, freshRealSamples };
 }
 
+// Parse one asset's merged reefer readings (Readings API, °C) into °F fields
+// matching the reefer panel: Return Air, Set Point, Supply/Discharge Air, Ambient,
+// power state, run mode (Continuous/Start-Stop), power source, fuel, engine hours.
+const cToF = (c) => (c == null ? null : round1(Number(c) * 9 / 5 + 32));
+function parseReadingReefer(rec) {
+  const val = (k) => (rec[k] && rec[k].value != null ? rec[k].value : null);
+  const at = (k) => (rec[k] && rec[k].at ? rec[k].at : null);
+  const tAt = at('reeferReturnAirZone1') || at('reeferSetPointZone1') || at('reeferState') || at('reeferAmbientAir');
+  const ms = tAt ? Date.parse(tAt) : null;
+  const fuel = val('reeferFuelLevel');
+  const eng = val('reeferEngineHours');
+  return {
+    tempF: cToF(val('reeferReturnAirZone1')),      // Return Air (RA) — the load temp
+    setpointF: cToF(val('reeferSetPointZone1')),   // Set Point (SP)
+    supplyF: cToF(val('reeferSupplyAirZone1')),    // Supply/Discharge Air (DA)
+    ambientF: cToF(val('reeferAmbientAir')),
+    state: val('reeferState'),                     // On / Off
+    runMode: val('reeferRunMode'),                 // Continuous / Start-Stop
+    powerSource: val('reeferPowerSource'),
+    fuel: fuel != null ? Math.round(fuel) : null,
+    engineHours: eng != null ? round1(eng) : null,
+    at: tAt,
+    stale: ms ? (Date.now() - ms) > 6 * 60 * 60 * 1000 : true,
+  };
+}
+
+// Audit the live readings feed: how many assets report a fresh return-air temp.
+export function analyzeReeferReadings(reeferRead) {
+  if (!reeferRead || reeferRead.error) return { error: (reeferRead && reeferRead.error) || 'none' };
+  const ids = Object.keys(reeferRead);
+  let withRA = 0; let fresh = 0; const samples = [];
+  for (const id of ids) {
+    const p = parseReadingReefer(reeferRead[id]);
+    if (p.tempF != null) withRA += 1;
+    if (!p.stale) fresh += 1;
+    if (!p.stale && p.tempF != null && samples.length < 6) samples.push({ entityId: id, ...p });
+  }
+  return { entities: ids.length, withReturnAir: withRA, fresh, samples };
+}
+
 export function indexSnapshot(snap) {
   const driversByCode = {};
   for (const d of arr(snap.drivers)) if (d.username) driversByCode[norm(d.username)] = { id: d.id, name: d.name };
@@ -191,10 +255,19 @@ export function indexSnapshot(snap) {
     if (s.name) statsByUnit[norm(s.name)] = s;
     if (s.externalIds && s.externalIds.unitId) statsByUnit[norm(s.externalIds.unitId)] = s;
   }
+  // map asset id → name (trailer number) from every asset list we have
+  const nameById = {};
+  for (const v of arr(snap.vehicles)) if (v.id != null && v.name) nameById[String(v.id)] = v.name;
+  for (const t of arr(snap.trailers)) if (t.id != null && t.name) nameById[String(t.id)] = t.name;
+  for (const r of reeferRecords(snap.reefer)) if (r.id != null && r.name) nameById[String(r.id)] = r.name;
+  // LIVE reefer values keyed by trailer number (and by asset id as a fallback)
   const reeferByKey = {};
-  for (const r of reeferRecords(snap.reefer)) {
-    const p = parseReefer(r);
-    for (const key of [r.name, r.id, r.assetName]) if (key) reeferByKey[norm(key)] = p;
+  const reads = (snap.reeferRead && !snap.reeferRead.error) ? snap.reeferRead : {};
+  for (const [entityId, rec] of Object.entries(reads)) {
+    const parsed = parseReadingReefer(rec);
+    const name = nameById[String(entityId)];
+    if (name) reeferByKey[norm(name)] = parsed;
+    reeferByKey[norm(entityId)] = parsed;
   }
   // HOS clocks keyed by Samsara driver id — drive/shift time left + duty status.
   const MIN = 60 * 1000;
@@ -240,9 +313,17 @@ export function correlate(item, idx) {
   if (veh && veh.staticAssignedDriver) live.samsaraDriver = veh.staticAssignedDriver.name;
   const reef = idx.reeferByKey[norm(t.trailer)] || idx.reeferByKey[norm(t.trailer2)];
   if (reef) {
-    live.tempF = reef.tempF; live.setpointF = reef.setpointF; live.reeferPower = reef.power;
-    live.reeferFuel = reef.fuel; live.reeferEngineHours = reef.engineHours;
-    live.tempAt = reef.at; live.tempStale = reef.stale; live.reeferAlarms = reef.alarms;
+    live.tempF = reef.tempF;              // return air (the load temp)
+    live.setpointF = reef.setpointF;      // set point
+    live.supplyF = reef.supplyF;          // supply/discharge air
+    live.ambientF = reef.ambientF;
+    live.reeferState = reef.state;        // On / Off
+    live.reeferRunMode = reef.runMode;    // Continuous / Start-Stop
+    live.reeferPowerSource = reef.powerSource;
+    live.reeferFuel = reef.fuel;
+    live.reeferEngineHours = reef.engineHours;
+    live.reeferPower = reef.state;        // back-compat
+    live.tempAt = reef.at; live.tempStale = reef.stale;
   }
   return Object.keys(live).length ? live : null;
 }
