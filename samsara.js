@@ -162,6 +162,25 @@ function reeferRecords(reefer) {
   return [];
 }
 
+// One-shot audit of the reefer feed: how many reefers report a real, fresh
+// temperature vs zero/stale — tells us whether live reefer temp exists at all,
+// and under what names, so we know whether the gap is matching or missing data.
+export function analyzeReefers(rawReefer) {
+  const recs = reeferRecords(rawReefer);
+  let withTemp = 0; let nonZero = 0; let fresh = 0;
+  const freshRealSamples = [];
+  for (const r of recs) {
+    const p = parseReefer(r);
+    if (p.tempF != null) withTemp += 1;
+    if (p.tempF != null && p.tempF !== 32) nonZero += 1; // 32°F == 0 milli-°C
+    if (!p.stale) fresh += 1;
+    if (!p.stale && p.tempF != null && p.tempF !== 32 && freshRealSamples.length < 6) {
+      freshRealSamples.push({ name: p.name, tempF: p.tempF, setpointF: p.setpointF, at: p.at });
+    }
+  }
+  return { total: recs.length, withTemp, nonZero, fresh, freshRealSamples };
+}
+
 export function indexSnapshot(snap) {
   const driversByCode = {};
   for (const d of arr(snap.drivers)) if (d.username) driversByCode[norm(d.username)] = { id: d.id, name: d.name };
