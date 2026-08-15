@@ -46,6 +46,7 @@ export const listTrailers = (token) => sGet(token, '/fleet/trailers?limit=512');
 export const driverVehicleAssignments = (token) => sGet(token, '/fleet/driver-vehicle-assignments');
 export const vehicleStats = (token, types = 'gps,engineStates,fuelPercents,obdOdometerMeters') =>
   sGet(token, `/fleet/vehicles/stats?types=${types}`);
+export const hosClocks = (token) => sGet(token, '/fleet/hos/clocks?limit=200');
 
 // Reefer / trailer temperature. The reliable source is the legacy "all reefers"
 // endpoint, which returns every reefer's zone temps + setpoints — but it REQUIRES
@@ -67,15 +68,16 @@ export async function reeferStats(token) {
 // one resource failing (returns an { error } marker for that slice instead).
 export async function snapshot(token) {
   const safe = (p) => p.then((v) => v).catch((e) => ({ error: String(e.message || e) }));
-  const [drivers, vehicles, trailers, stats, assignments, reefer] = await Promise.all([
+  const [drivers, vehicles, trailers, stats, assignments, reefer, hos] = await Promise.all([
     safe(listDrivers(token)),
     safe(listVehicles(token)),
     safe(listTrailers(token)),
     safe(vehicleStats(token)),
     safe(driverVehicleAssignments(token)),
     safe(reeferStats(token)),
+    safe(hosClocks(token)),
   ]);
-  return { drivers, vehicles, trailers, stats, assignments, reefer };
+  return { drivers, vehicles, trailers, stats, assignments, reefer, hos };
 }
 
 // ===============================================================
@@ -119,21 +121,36 @@ const pickPath = (flat, regexes, wantNumber = true) => {
   return null;
 };
 
-// Pull temp / setpoint / power / timestamp out of one reefer record, whatever
-// its shape. Heuristic — verify against the diagnostic once live.
+// Samsara reefer shape (legacy /v1/fleet/assets/reefers):
+//   { id, name, reeferStats: { returnAirTemperature:[{changedAtMs, tempInMilliC}],
+//     ambientAirTemperature:[...], setPoint:[{changedAtMs, tempInMilliC}],
+//     powerStatus:[{changedAtMs, status}], reeferAlarms:[...] } }
+// Each is a time-series ARRAY — take the most recent entry. Temps are milli-°C.
+const latestOf = (a) => (Array.isArray(a) && a.length
+  ? a.reduce((x, y) => (Number(y.changedAtMs || 0) >= Number(x.changedAtMs || 0) ? y : x))
+  : null);
+const milliCToF = (m) => (m == null ? null : round1((Number(m) / 1000) * 9 / 5 + 32));
+
 function parseReefer(r) {
-  const flat = flatten(r);
-  const tKey = pickPath(flat, [/reefer.*temp/i, /ambient.*air/i, /return.*air/i, /temp.*zone.?1/i, /zone.?1.*temp/i, /tempinmillic/i, /temperature/i]);
-  const sKey = pickPath(flat, [/set.?point/i]);
-  const pKey = pickPath(flat, [/power.?status/i, /reeferpower/i, /powerstate/i], false);
-  const aKey = pickPath(flat, [/time$/i, /timestamp/i], false);
+  const rs = (r && r.reeferStats) || {};
+  const tRec = latestOf(rs.returnAirTemperature) || latestOf(rs.ambientAirTemperature) || latestOf(rs.dischargeAirTemperature);
+  const sRec = latestOf(rs.setPoint);
+  const pRec = latestOf(rs.powerStatus);
+  const aRec = latestOf(rs.reeferAlarms);
+  const changed = tRec && tRec.changedAtMs ? Number(tRec.changedAtMs) : null;
   return {
     name: r.name || r.assetName || null,
-    id: r.id || null,
-    tempF: tKey ? toF(flat[tKey], tKey) : null,
-    setpointF: sKey ? toF(flat[sKey], sKey) : null,
-    power: pKey ? flat[pKey] : null,
-    at: aKey ? flat[aKey] : null,
+    id: r.id != null ? String(r.id) : null,
+    tempF: tRec ? milliCToF(tRec.tempInMilliC) : null,
+    setpointF: sRec ? milliCToF(sRec.tempInMilliC) : null,
+    power: pRec ? (pRec.status || null) : null,
+    fuel: (() => { const f = latestOf(rs.fuelPercentage); return f && f.fuelPercentage != null ? f.fuelPercentage : null; })(),
+    engineHours: (() => { const e = latestOf(rs.engineHours); return e && e.engineHours != null ? e.engineHours : null; })(),
+    alarms: aRec && Array.isArray(aRec.alarms) && aRec.alarms.length ? aRec.alarms : null,
+    at: changed ? new Date(changed).toISOString() : null,
+    // these legacy "Carrier" reefers can report months-old values — flag stale so
+    // we neither trust the number nor raise a false temperature alert on it.
+    stale: changed ? (Date.now() - changed) > 6 * 60 * 60 * 1000 : true,
   };
 }
 function reeferRecords(reefer) {
@@ -160,7 +177,26 @@ export function indexSnapshot(snap) {
     const p = parseReefer(r);
     for (const key of [r.name, r.id, r.assetName]) if (key) reeferByKey[norm(key)] = p;
   }
-  return { driversByCode, vehByUnit, statsByUnit, reeferByKey };
+  // HOS clocks keyed by Samsara driver id — drive/shift time left + duty status.
+  const MIN = 60 * 1000;
+  const hosById = {};
+  for (const c of arr(snap.hos)) {
+    const id = c.driver && c.driver.id;
+    if (!id) continue;
+    const drive = (c.clocks && c.clocks.drive) || {};
+    const shift = (c.clocks && c.clocks.shift) || {};
+    const cycle = (c.clocks && c.clocks.cycle) || {};
+    const mins = (ms) => (ms != null ? Math.round(ms / MIN) : null);
+    hosById[String(id)] = {
+      status: (c.currentDutyStatus && c.currentDutyStatus.hosStatusType) || null,
+      vehicle: (c.currentVehicle && c.currentVehicle.name) || null,
+      driveLeftMin: mins(drive.driveRemainingDurationMs),
+      shiftLeftMin: mins(shift.shiftRemainingDurationMs),
+      cycleLeftMin: mins(cycle.cycleRemainingDurationMs),
+      breakInMin: mins(drive.timeUntilBreakDurationMs),
+    };
+  }
+  return { driversByCode, vehByUnit, statsByUnit, reeferByKey, hosById };
 }
 
 // Build the live data object for one TruckMate trip item.
@@ -169,8 +205,8 @@ export function correlate(item, idx) {
   const live = {};
   const d1 = idx.driversByCode[norm(t.driver)];
   const d2 = idx.driversByCode[norm(t.driver2)];
-  if (d1) live.driver1 = d1.name;
-  if (d2) live.driver2 = d2.name;
+  if (d1) { live.driver1 = d1.name; if (idx.hosById[String(d1.id)]) live.hos = idx.hosById[String(d1.id)]; }
+  if (d2) { live.driver2 = d2.name; if (idx.hosById[String(d2.id)]) live.hos2 = idx.hosById[String(d2.id)]; }
   const st = idx.statsByUnit[norm(t.powerUnit)];
   if (st) {
     const g = st.gps || {};
@@ -184,7 +220,11 @@ export function correlate(item, idx) {
   const veh = idx.vehByUnit[norm(t.powerUnit)];
   if (veh && veh.staticAssignedDriver) live.samsaraDriver = veh.staticAssignedDriver.name;
   const reef = idx.reeferByKey[norm(t.trailer)] || idx.reeferByKey[norm(t.trailer2)];
-  if (reef) { live.tempF = reef.tempF; live.setpointF = reef.setpointF; live.reeferPower = reef.power; live.tempAt = reef.at; }
+  if (reef) {
+    live.tempF = reef.tempF; live.setpointF = reef.setpointF; live.reeferPower = reef.power;
+    live.reeferFuel = reef.fuel; live.reeferEngineHours = reef.engineHours;
+    live.tempAt = reef.at; live.tempStale = reef.stale; live.reeferAlarms = reef.alarms;
+  }
   return Object.keys(live).length ? live : null;
 }
 
