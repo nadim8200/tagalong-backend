@@ -1611,20 +1611,45 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const fuelNow = (rawFuel != null && Number.isFinite(rawFuel) && rawFuel > 0 && rawFuel <= 100)
               ? rawFuel : null;
 
-            if (fuelNow != null && engineOnNow) {
+            // per-car off switch for a hopelessly noisy sender
+            const refuelOff = (d.attributes || {}).refuelAlerts === false;
+            if (fuelNow != null && engineOnNow && !refuelOff) {
+              const nowMs2 = Date.now();
               // Real fills are big (a quarter tank or more). Small moves are noise,
               // so the bar is 20 points by default — lower it per car if needed.
               const minJump = Number((d.attributes || {}).refuelMinPct) > 0
                 ? Number((d.attributes || {}).refuelMinPct) : 20;
               const lastKey = `fuel:${d.id}`;
               const pendKey = `fuelpend:${d.id}`;
+              const histKey = `fuelhist:${d.id}`;
+              const doneKey = `fueldone:${d.id}`;
               const prev = rec.sigs[lastKey] != null ? Number(rec.sigs[lastKey]) : null;
               const pending = rec.sigs[pendKey] != null ? Number(rec.sigs[pendKey]) : null;
 
+              // Rolling window of recent engine-on readings (value + time). The
+              // KEY discriminator between a real fill and a garbage sender: a real
+              // tank sits STEADY for a while and then jumps once at the pump. A bad
+              // sender (Matt) bounces 20-40 points every reading and never settles.
+              // So we only trust a rise when the readings BEFORE it were stable.
+              let hist = [];
+              try { hist = JSON.parse(rec.sigs[histKey] || '[]'); } catch { hist = []; }
+              hist.push({ v: fuelNow, t: nowMs2 });
+              hist = hist.filter((h) => nowMs2 - h.t <= 30 * 60000).slice(-8);
+              rec.sigs[histKey] = JSON.stringify(hist); changed = true;
+
+              const prior = hist.slice(0, -1);                    // readings before this one
+              const pv = prior.map((h) => h.v);
+              const spread = pv.length ? Math.max(...pv) - Math.min(...pv) : 999;
+              const stable = pv.length >= 3 && spread <= 8 && (nowMs2 - prior[0].t) >= 3 * 60000;
+              const fromLevel = pv.length ? pv.slice().sort((a, b) => a - b)[Math.floor(pv.length / 2)] : prev; // steady pre-fill level (median)
+
+              // Cooldown: a vehicle physically can't refuel twice in a few hours,
+              // so at most one refuel alert per 4h. This alone caps any residual noise.
+              const lastDone = Number(rec.sigs[doneKey] || 0);
+              const cooled = !lastDone || (nowMs2 - lastDone) >= 4 * 60 * 60000;
+
               if (pending != null) {
-                // We saw a jump last poll — confirm only if it HELD (engine still
-                // on, level stayed up). A one-poll spike at wake never confirms,
-                // so it's silently discarded.
+                // We saw a stable-then-jump last poll — confirm only if it HELD.
                 if (fuelNow >= pending - 5) {
                   const from = rec.sigs[`fuelfrom:${d.id}`];
                   toSend.push({
@@ -1633,17 +1658,19 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                       ? `Filled from ${Math.round(Number(from))}% to ${Math.round(fuelNow)}%.`
                       : `Fuel now at ${Math.round(fuelNow)}%.`,
                   });
-                  rec.sigs[lastKey] = String(fuelNow); // fill confirmed → raise the baseline
+                  rec.sigs[lastKey] = String(fuelNow);   // confirmed → raise baseline
+                  rec.sigs[doneKey] = String(nowMs2);    // start the cooldown
+                  rec.sigs[histKey] = JSON.stringify([{ v: fuelNow, t: nowMs2 }]); // reset window
                 }
                 delete rec.sigs[pendKey];
                 delete rec.sigs[`fuelfrom:${d.id}`];
                 changed = true;
-              } else if (prev != null && fuelNow - prev >= minJump) {
-                // Candidate fill — hold it for one more reading before telling
-                // anyone, so a single bad sample can't fire and the number we
-                // report is where it actually settled.
+              } else if (stable && cooled && fromLevel != null && fuelNow - fromLevel >= minJump) {
+                // Candidate fill — steady beforehand, big jump, cooldown clear.
+                // Hold one more reading before telling anyone so a single sample
+                // can't fire and the number we report is where it settled.
                 rec.sigs[pendKey] = String(fuelNow);
-                rec.sigs[`fuelfrom:${d.id}`] = String(prev);
+                rec.sigs[`fuelfrom:${d.id}`] = String(fromLevel);
                 changed = true;
               }
 
