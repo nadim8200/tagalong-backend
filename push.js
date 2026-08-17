@@ -495,6 +495,20 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     } catch { return []; }
   }
 
+  // Every GPS fix the device logged in the window (not just the latest). The
+  // tracker reports many fixes between our 30s polls, so this history is what
+  // lets us catch a hard brake / hard acceleration that happened between polls.
+  async function recentRoute(deviceId, fromISO, toISO) {
+    try {
+      const r = await fetch(`${TRACCAR_URL}/api/reports/route?deviceId=${deviceId}&from=${fromISO}&to=${toISO}`, {
+        headers: { ...traccarHeaders, Accept: 'application/json' },
+      });
+      if (!r.ok) return [];
+      const arr = await r.json();
+      return Array.isArray(arr) ? arr : [];
+    } catch { return []; }
+  }
+
   // ---- turn a Traccar event into a friendly push (null = ignore) ----
   const NAMED = (d) => (d.attributes && d.attributes.displayName) || d.name || 'Your car';
   function eventToPush(d, ev, geoNames = {}) {
@@ -1030,6 +1044,50 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             if (ev.type === 'ignitionOn' || p.key === 'ign-on') rec.sigs[`startedat:${d.id}`] = String(Date.now());
             toSend.push(p);
           }
+
+          // ---- hard acceleration / braking from the fix HISTORY (GPS) ----
+          //
+          // The accelerometer's Green Driving event is the ideal source, but many
+          // of these trackers don't send it — so speeding (which Traccar computes
+          // from the speed limit) was the ONLY harsh event that ever fired. This
+          // scans every fix the device logged since the last poll and looks for a
+          // sharp speed JUMP (accel) or DROP (brake) over a short window — the
+          // quick change a 30s latest-only comparison always missed. On by
+          // default; tune per car via accelJumpMph / brakeDropMph / harshWindowSec,
+          // or disable with harshFromGps:false.
+          if (((d.attributes || {}).harshFromGps !== false)) {
+            const route = await recentRoute(d.id, fromISO, toISO);
+            const pts = route
+              .map((p) => ({ mph: Math.round((p.speed || 0) * KNOTS_TO_MPH), t: p.fixTime ? new Date(p.fixTime).getTime() : 0 }))
+              .filter((p) => p.t)
+              .sort((a, b) => a.t - b.t);
+            const jumpMph = Number((d.attributes || {}).accelJumpMph) > 0 ? Number((d.attributes || {}).accelJumpMph) : 14;
+            const dropMph = Number((d.attributes || {}).brakeDropMph) > 0 ? Number((d.attributes || {}).brakeDropMph) : 14;
+            const winSec = Number((d.attributes || {}).harshWindowSec) > 0 ? Number((d.attributes || {}).harshWindowSec) : 6;
+            let bestAccel = 0; let accelTo = 0; let accelAt = 0;
+            let bestBrake = 0; let brakeFrom = 0; let brakeAt = 0;
+            for (let i = 1; i < pts.length; i++) {
+              for (let j = i - 1; j >= 0 && (pts[i].t - pts[j].t) / 1000 <= winSec; j--) {
+                const dMph = pts[i].mph - pts[j].mph;
+                if (dMph > bestAccel && pts[i].mph >= 20) { bestAccel = dMph; accelTo = pts[i].mph; accelAt = pts[i].t; }
+                const drop = -dMph;
+                if (drop > bestBrake && pts[j].mph >= 20) { bestBrake = drop; brakeFrom = pts[j].mph; brakeAt = pts[i].t; }
+              }
+            }
+            if (bestAccel >= 6 || bestBrake >= 6) {
+              console.log(`[push] HARSH-DIAG ${NAMED(d)}: maxAccel +${Math.round(bestAccel)}mph maxBrake -${Math.round(bestBrake)}mph over ${pts.length} fixes | needs +${jumpMph}/-${dropMph} within ${winSec}s`);
+            }
+            // fire once per event (dedup by the fix time that triggered it)
+            if (bestAccel >= jumpMph && accelAt > Number(rec.sigs[`accelat:${d.id}`] || 0)) {
+              rec.sigs[`accelat:${d.id}`] = String(accelAt); changed = true;
+              toSend.push({ title: `🏎️ ${NAMED(d)} — hard acceleration`, body: `Sped up ${Math.round(bestAccel)} mph (to ${accelTo} mph).` });
+            }
+            if (bestBrake >= dropMph && brakeAt > Number(rec.sigs[`brakeat:${d.id}`] || 0)) {
+              rec.sigs[`brakeat:${d.id}`] = String(brakeAt); changed = true;
+              toSend.push({ title: `🛑 ${NAMED(d)} — hard braking`, body: `Slowed ${Math.round(bestBrake)} mph (from ${brakeFrom} mph).` });
+            }
+          }
+
           // derived (disconnect, dtc, low fuel/battery, tow)
           const derived = derivedAlerts(d, pos);
           for (const da of derived) {
