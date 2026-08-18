@@ -47,6 +47,8 @@ export const driverVehicleAssignments = (token) => sGet(token, '/fleet/driver-ve
 export const vehicleStats = (token, types = 'gps,engineStates,fuelPercents,obdOdometerMeters') =>
   sGet(token, `/fleet/vehicles/stats?types=${types}`);
 export const hosClocks = (token) => sGet(token, '/fleet/hos/clocks?limit=200');
+// Saved known locations (customers/terminals) with geocoded lat/lng + geofences.
+export const listAddresses = (token) => sGet(token, '/addresses');
 
 // ---- LIVE reefer via the Readings API (the source the Samsara UI uses) ----
 // /readings/latest gives the last-known value per asset. readingIds is capped at
