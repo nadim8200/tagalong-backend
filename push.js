@@ -1047,17 +1047,14 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
 
           // ---- hard acceleration / braking / cornering ----
           //
-          // Two sources, best first:
-          //  1) the tracker's OWN Green Driving event (the accel/brake/corner
-          //     scenario configured on the Teltonika — io253 type / io254 value,
-          //     or an alarm attribute) when Traccar exposes it on a fix.
-          //  2) a GPS speed-delta fallback for trackers that don't send it.
-          // Either way we scan the whole fix HISTORY since the last poll (not just
-          // the latest fix), so a quick event between 30s polls isn't averaged
-          // away — which is why only speeding used to fire. On by default; disable
-          // with harshFromGps:false; tune the fallback via accelJumpMph /
-          // brakeDropMph / harshWindowSec.
-          if (((d.attributes || {}).harshFromGps !== false)) {
+          // SOURCE: the tracker's ACCELEROMETER (Teltonika "Green Driving"). That
+          // is the accurate g-force source — it distinguishes a hard launch from a
+          // normal one, which GPS speed CANNOT. We scan the whole fix HISTORY since
+          // the last poll (not just the latest fix) so a quick event between 30s
+          // polls isn't missed. The GPS speed-delta estimate below is OFF by
+          // default (it flooded on normal driving) and only used if a car opts in
+          // with harshFromGps:true.
+          {
             const route = await recentRoute(d.id, fromISO, toISO);
             const pts = route
               .map((p) => ({ mph: Math.round((p.speed || 0) * KNOTS_TO_MPH), t: p.fixTime ? new Date(p.fixTime).getTime() : 0, a: p.attributes || {} }))
@@ -1066,7 +1063,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
 
             let accelDone = false; let brakeDone = false;
 
-            // 1) the device's own Green Driving flag on any fix
+            // ---- accelerometer / Green Driving event on any fix (PRIMARY) ----
             for (const pt of pts) {
               const al = String(pt.a.alarm || '').toLowerCase();
               const gdt = pt.a.greenDrivingType != null ? Number(pt.a.greenDrivingType)
@@ -1085,35 +1082,38 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
               if (kind === 'brake') brakeDone = true;
             }
 
-            // once-per-poll diagnostic: surface any green-driving-ish attribute
-            // keys so we can confirm exactly what Traccar names them.
-            const gdKeys = pts.length ? Object.keys(pts[pts.length - 1].a).filter((k) => /green|harsh|accel|brak|corner|eco/i.test(k)) : [];
+            // DIAGNOSTIC: surface any green-driving-ish attribute keys on the fixes
+            // so we can confirm exactly what Traccar names the accelerometer event
+            // (io253 / greenDrivingType / alarm / axis…) and map it precisely.
+            const gdKeys = pts.length ? Object.keys(pts[pts.length - 1].a).filter((k) => /green|harsh|accel|brak|corner|eco|axis|io25[0-9]/i.test(k)) : [];
             if (gdKeys.length) console.log(`[push] GD-DIAG ${NAMED(d)}: ${gdKeys.map((k) => `${k}=${pts[pts.length - 1].a[k]}`).join(' ')}`);
 
-            // 2) GPS speed-delta fallback (for whatever the device didn't flag)
-            const jumpMph = Number((d.attributes || {}).accelJumpMph) > 0 ? Number((d.attributes || {}).accelJumpMph) : 14;
-            const dropMph = Number((d.attributes || {}).brakeDropMph) > 0 ? Number((d.attributes || {}).brakeDropMph) : 14;
-            const winSec = Number((d.attributes || {}).harshWindowSec) > 0 ? Number((d.attributes || {}).harshWindowSec) : 6;
-            let bestAccel = 0; let accelTo = 0; let accelAt = 0;
-            let bestBrake = 0; let brakeFrom = 0; let brakeAt = 0;
-            for (let i = 1; i < pts.length; i++) {
-              for (let j = i - 1; j >= 0 && (pts[i].t - pts[j].t) / 1000 <= winSec; j--) {
-                const dMph = pts[i].mph - pts[j].mph;
-                if (dMph > bestAccel && pts[i].mph >= 20) { bestAccel = dMph; accelTo = pts[i].mph; accelAt = pts[i].t; }
-                const drop = -dMph;
-                if (drop > bestBrake && pts[j].mph >= 20) { bestBrake = drop; brakeFrom = pts[j].mph; brakeAt = pts[i].t; }
+            // ---- GPS speed-delta estimate (OPT-IN ONLY: harshFromGps:true) ----
+            // Disabled by default. GPS can't tell a hard launch from a brisk normal
+            // one at our sampling, so it flooded ("Sped up 16 mph to 28 mph"). Kept
+            // only as a fallback for a car that has no working accelerometer.
+            if (((d.attributes || {}).harshFromGps === true)) {
+              const jumpMph = Number((d.attributes || {}).accelJumpMph) > 0 ? Number((d.attributes || {}).accelJumpMph) : 22;
+              const dropMph = Number((d.attributes || {}).brakeDropMph) > 0 ? Number((d.attributes || {}).brakeDropMph) : 22;
+              const winSec = Number((d.attributes || {}).harshWindowSec) > 0 ? Number((d.attributes || {}).harshWindowSec) : 5;
+              let bestAccel = 0; let accelTo = 0; let accelAt = 0;
+              let bestBrake = 0; let brakeFrom = 0; let brakeAt = 0;
+              for (let i = 1; i < pts.length; i++) {
+                for (let j = i - 1; j >= 0 && (pts[i].t - pts[j].t) / 1000 <= winSec; j--) {
+                  const dMph = pts[i].mph - pts[j].mph;
+                  if (dMph > bestAccel && pts[i].mph >= 25) { bestAccel = dMph; accelTo = pts[i].mph; accelAt = pts[i].t; }
+                  const drop = -dMph;
+                  if (drop > bestBrake && pts[j].mph >= 25) { bestBrake = drop; brakeFrom = pts[j].mph; brakeAt = pts[i].t; }
+                }
               }
-            }
-            if (bestAccel >= 6 || bestBrake >= 6) {
-              console.log(`[push] HARSH-DIAG ${NAMED(d)}: maxAccel +${Math.round(bestAccel)}mph maxBrake -${Math.round(bestBrake)}mph over ${pts.length} fixes | needs +${jumpMph}/-${dropMph} within ${winSec}s`);
-            }
-            if (!accelDone && bestAccel >= jumpMph && accelAt > Number(rec.sigs[`accelat:${d.id}`] || 0)) {
-              rec.sigs[`accelat:${d.id}`] = String(accelAt); changed = true;
-              toSend.push({ title: `🏎️ ${NAMED(d)} — hard acceleration`, body: `Sped up ${Math.round(bestAccel)} mph (to ${accelTo} mph).` });
-            }
-            if (!brakeDone && bestBrake >= dropMph && brakeAt > Number(rec.sigs[`brakeat:${d.id}`] || 0)) {
-              rec.sigs[`brakeat:${d.id}`] = String(brakeAt); changed = true;
-              toSend.push({ title: `🛑 ${NAMED(d)} — hard braking`, body: `Slowed ${Math.round(bestBrake)} mph (from ${brakeFrom} mph).` });
+              if (!accelDone && bestAccel >= jumpMph && accelAt > Number(rec.sigs[`accelat:${d.id}`] || 0)) {
+                rec.sigs[`accelat:${d.id}`] = String(accelAt); changed = true;
+                toSend.push({ title: `🏎️ ${NAMED(d)} — hard acceleration`, body: `Sped up ${Math.round(bestAccel)} mph (to ${accelTo} mph).` });
+              }
+              if (!brakeDone && bestBrake >= dropMph && brakeAt > Number(rec.sigs[`brakeat:${d.id}`] || 0)) {
+                rec.sigs[`brakeat:${d.id}`] = String(brakeAt); changed = true;
+                toSend.push({ title: `🛑 ${NAMED(d)} — hard braking`, body: `Slowed ${Math.round(bestBrake)} mph (from ${brakeFrom} mph).` });
+              }
             }
           }
 
