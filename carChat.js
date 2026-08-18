@@ -11,7 +11,7 @@ const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 
 export function initCarChat(app, { requireAuth, env = process.env }) {
   const key = env.ANTHROPIC_API_KEY || '';
-  const model = env.CAR_CHAT_MODEL || 'claude-3-5-haiku-latest';
+  const model = env.CAR_CHAT_MODEL || 'claude-haiku-4-5-20251001';
 
   // The app calls this only on a rule miss. Body: { question, lang, snapshot }.
   app.post('/car/chat', requireAuth, async (req, res) => {
