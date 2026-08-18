@@ -31,6 +31,7 @@ import { initNotify } from './notify.js';
 import { initFleet } from './fleet.js';
 import { initRingCentral } from './ringcentral.js';
 import { initTruckMate } from './truckmate.js';
+import { initCarChat } from './carChat.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -571,6 +572,7 @@ initFleet(app, { requireAuth, db, env: process.env });
 // so "was this customer actually called?" comes from records, not memory.
 const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.env });
 initTruckMate(app, { requireAuth, db, env: process.env });
+initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
 // falls back to Twilio. DRY-RUN until NOTIFY_ALLOW_SEND=true — see notify.js.
