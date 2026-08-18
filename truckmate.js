@@ -7,7 +7,7 @@
 // browser, and is verified against the live endpoint before it replaces a
 // working config.
 // ---------------------------------------------------------------
-import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses } from './samsara.js';
+import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe } from './samsara.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -435,6 +435,14 @@ export function initTruckMate(app, { requireAuth, db, env = process.env }) {
             return { count: arr.length, sampleKeys: arr[0] ? Object.keys(arr[0]) : [], samples: arr.slice(0, 5).map((x) => ({ name: x.name, formattedAddress: x.formattedAddress, latitude: x.latitude, longitude: x.longitude })) };
           } catch (e) { return { error: String(e.message || e) }; }
         })(),
+        readingCatalog: await (async () => {
+          try {
+            const defs = await readingsDefinitions(token);
+            const arr = Array.isArray(defs) ? defs : [];
+            return { count: arr.length, ids: arr.map((d) => d.id || d.name).filter(Boolean) };
+          } catch (e) { return { error: String(e.message || e) }; }
+        })(),
+        capabilities: await capabilityProbe(token).catch((e) => ({ error: String(e.message || e) })),
       });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });

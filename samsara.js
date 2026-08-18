@@ -49,6 +49,35 @@ export const vehicleStats = (token, types = 'gps,engineStates,fuelPercents,obdOd
 export const hosClocks = (token) => sGet(token, '/fleet/hos/clocks?limit=200');
 // Saved known locations (customers/terminals) with geocoded lat/lng + geofences.
 export const listAddresses = (token) => sGet(token, '/addresses');
+// The authoritative list of every reading/stat this org actually has (engine,
+// tire, DEF, reefer, etc.) — so we build only what's real, not guessed.
+export const readingsDefinitions = (token) => sGet(token, '/readings/definitions');
+
+// Probe what the token + account can access. For each capability: ok/scope-error
+// and how much data. Keeps us from building UI for data that isn't there.
+export async function capabilityProbe(token) {
+  const test = async (label, path) => {
+    try {
+      const r = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) { const b = await r.text().catch(() => ''); return { label, ok: false, status: r.status, note: b.slice(0, 120) }; }
+      const j = await r.json();
+      const arr = Array.isArray(j.data) ? j.data : (Array.isArray(j) ? j : []);
+      return { label, ok: true, count: arr.length, sampleKeys: arr[0] ? Object.keys(arr[0]).slice(0, 14) : [] };
+    } catch (e) { return { label, ok: false, error: String(e.message || e).slice(0, 100) }; }
+  };
+  const now = Date.now();
+  const dayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+  const nowIso = new Date(now).toISOString();
+  const [addresses, assignments, safety, faults, dvirs, trips] = await Promise.all([
+    test('addresses', '/addresses'),
+    test('driverVehicleAssignments', '/fleet/driver-vehicle-assignments'),
+    test('safetyEvents', `/fleet/safety-events?startTime=${dayAgo}&endTime=${nowIso}`),
+    test('vehicleFaults', '/fleet/vehicles/engine-faults'),
+    test('dvirs', `/fleet/dvirs?startTime=${dayAgo}&endTime=${nowIso}`),
+    test('trips', `/fleet/trips?startTime=${dayAgo}&endTime=${nowIso}`),
+  ]);
+  return { addresses, assignments, safety, faults, dvirs, trips };
+}
 
 // ---- LIVE reefer via the Readings API (the source the Samsara UI uses) ----
 // /readings/latest gives the last-known value per asset. readingIds is capped at
