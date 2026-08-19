@@ -233,6 +233,73 @@ function requireAuth(req, res, next) {
 }
 app.get('/auth/me', requireAuth, (req, res) => res.json(req.user));
 
+// ---- self-serve account deletion (App Store Guideline 5.1.1(v)) ----
+// A signed-in customer can permanently delete THEIR OWN account from inside the
+// app. We remove their Traccar login and personal data (push tokens, alert
+// history). Their physical tracker is NOT deleted — it stays in our inventory,
+// gets flagged `accountDeleted` so we can see the account was removed, and is
+// returned to the unclaimed pool so it can be reassigned. Admin accounts can't
+// self-delete through this consumer path.
+app.delete('/account', requireAuth, async (req, res) => {
+  const uid = req.user && req.user.id;
+  if (!uid) return res.status(400).json({ error: 'No account to delete.' });
+  if (req.user.admin || req.user.role === 'admin') {
+    return res.status(403).json({ error: 'Admin accounts cannot be deleted from the app.' });
+  }
+  try {
+    // 1) look up the full user record for account #, name + email (for the flag)
+    const users = await (await fetch(`${TRACCAR_URL}/api/users`, { headers: traccarHeaders })).json().catch(() => []);
+    const meUser = (Array.isArray(users) ? users : []).find((u) => String(u.id) === String(uid)) || {};
+    const myAttrs = meUser.attributes || {};
+    const acct = String(myAttrs.account || myAttrs.acct || '');
+    const cid = String(myAttrs.customerId || '');
+    const marker = {
+      at: new Date().toISOString(),
+      name: meUser.name || req.user.name || '',
+      email: meUser.email || req.user.email || '',
+      account: acct, customerId: cid, userId: String(uid),
+    };
+
+    // 2) flag / release this account's trackers (keep them in inventory)
+    const devs = await (await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders })).json().catch(() => []);
+    const memberId = `u${uid}`;
+    let flagged = 0;
+    for (const d of (Array.isArray(devs) ? devs : [])) {
+      const a = d.attributes || {};
+      const owned = (acct && String(a.account || '') === acct) || (cid && String(a.customerId || '') === cid);
+      const links = Array.isArray(a.memberLinks) ? a.memberLinks : [];
+      const shared = links.some((m) => m && m.memberId === memberId);
+      if (!owned && !shared) continue;
+      const nextAttrs = { ...a };
+      if (links.length) nextAttrs.memberLinks = links.filter((m) => !(m && m.memberId === memberId));
+      if (owned) { nextAttrs.accountDeleted = marker; nextAttrs.claimed = false; }
+      const put = await fetch(`${TRACCAR_URL}/api/devices/${d.id}`, {
+        method: 'PUT', headers: { ...traccarHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...d, attributes: nextAttrs }),
+      });
+      if (put.ok) flagged += 1;
+    }
+
+    // 3) wipe personal data — push tokens + alert history (best-effort)
+    try { const p = await db.get('taPush', {}); if (p && p[String(uid)]) { delete p[String(uid)]; await db.set('taPush', p); } } catch { /* ignore */ }
+    try { if (db.pool) await db.pool.query('DELETE FROM ta_alert_log WHERE user_key = $1', [String(uid)]); } catch { /* ignore */ }
+
+    // 4) delete the Traccar login itself
+    const del = await fetch(`${TRACCAR_URL}/api/users/${uid}`, { method: 'DELETE', headers: traccarHeaders });
+    if (!del.ok && del.status !== 204) {
+      const detail = await del.text().catch(() => '');
+      console.error('[account] user delete failed:', del.status, detail.slice(0, 160));
+      return res.status(502).json({ error: `Could not delete account (${del.status}).` });
+    }
+    console.log(`[account] DELETED user ${uid} (acct ${acct || '—'}); ${flagged} device(s) flagged/released`);
+    res.clearCookie(COOKIE, cookieOpts);
+    res.json({ ok: true, devicesFlagged: flagged });
+  } catch (e) {
+    console.error('[account] delete error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---- Stripe Checkout (payments) ----
 // Prices come from the server-side catalog (host device's taShop.products), never
 // from the client, so a customer can't set their own price.
