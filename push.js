@@ -1368,6 +1368,24 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const tripKey = `tripon:${d.id}`;
             const startGuard = `startedat:${d.id}`; // shared with the ignitionOn event
 
+            // ---- QUIET → parked reset (fixes "no more 'started' alerts") ----
+            // OBD units SLEEP when parked and stop reporting, so the fresh-fix
+            // "engine off" resets below never run — tripKey/rpmon/accvibon stay
+            // stuck 'on' after the first drive and suppress every later start.
+            // If the tracker has been silent longer than the trip gap AND its last
+            // report wasn't at driving speed (so a mid-drive signal drop can't
+            // re-arm a phantom start), consider the car parked and re-arm the
+            // engine-off signals so the next movement fires a fresh "started".
+            {
+              const lastFixMs = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+              const lastMph = Math.round(((pos && pos.speed) || 0) * KNOTS_TO_MPH);
+              if (lastFixMs && (nowMs - lastFixMs) >= gapMs && lastMph < 6) {
+                if (rec.sigs[tripKey] === 'on') { rec.sigs[tripKey] = 'off'; changed = true; }
+                if (rec.sigs[`rpmon:${d.id}`] === 'on') { rec.sigs[`rpmon:${d.id}`] = 'off'; changed = true; }
+                if (rec.sigs[`accvibon:${d.id}`] === 'on') { rec.sigs[`accvibon:${d.id}`] = 'off'; changed = true; }
+              }
+            }
+
             // ---- RPM says the engine is running — the most DIRECT "car is on"
             // signal, and it works on cars the motion path misses (the C300 idles
             // before it rolls, and GPS speed lags). The instant an OBD reports RPM
