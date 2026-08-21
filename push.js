@@ -1404,7 +1404,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                 if (rec.sigs[tripKey] === 'on') { rec.sigs[tripKey] = 'off'; changed = true; }
                 if (rec.sigs[`rpmon:${d.id}`] === 'on') { rec.sigs[`rpmon:${d.id}`] = 'off'; changed = true; }
                 if (rec.sigs[`accvibon:${d.id}`] === 'on') { rec.sigs[`accvibon:${d.id}`] = 'off'; changed = true; }
-                if (rec.sigs[`ignflag:${d.id}`] === 'on') { rec.sigs[`ignflag:${d.id}`] = 'off'; changed = true; }
+                if (rec.sigs[`ignflag:${d.id}`] && rec.sigs[`ignflag:${d.id}`] !== 'off') { rec.sigs[`ignflag:${d.id}`] = 'off'; changed = true; }
               }
             }
 
@@ -1420,16 +1420,24 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
               const ia = (pos && pos.attributes) || {};
               const ignKey = `ignflag:${d.id}`;
               if (ia.ignition === true) {
-                if (rec.sigs[ignKey] === 'off') {
+                if (!rec.sigs[ignKey] || rec.sigs[ignKey] === 'off') {
+                  // First sighting after off — mark PENDING, do NOT alert yet. A
+                  // real running engine stays on to the next poll (~30-60s); a
+                  // wake-up / voltage blip is gone by then. This is what kills the
+                  // false "car started" alerts on a parked car.
+                  rec.sigs[ignKey] = 'pending'; changed = true;
+                } else if (rec.sigs[ignKey] === 'pending') {
+                  // Still on a 2nd consecutive poll → a real, sustained start.
                   const lastStart = Number(rec.sigs[startGuard] || 0);
                   if (nowMs - lastStart > gapMs) {
                     rec.sigs[startGuard] = String(nowMs);
                     rec.sigs[tripKey] = 'on';
                     toSend.push({ title: `🚗 ${NAMED(d)} started`, body: 'The engine was turned on.' });
                   }
+                  rec.sigs[ignKey] = 'on'; changed = true;
                 }
-                rec.sigs[ignKey] = 'on'; changed = true;
-              } else if (ia.ignition === false && rec.sigs[ignKey] !== 'off') {
+              } else if (ia.ignition === false && rec.sigs[ignKey] && rec.sigs[ignKey] !== 'off') {
+                // Dropped back off (incl. a pending blip that never confirmed).
                 rec.sigs[ignKey] = 'off'; changed = true;
               }
             }
