@@ -1394,6 +1394,33 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                 if (rec.sigs[tripKey] === 'on') { rec.sigs[tripKey] = 'off'; changed = true; }
                 if (rec.sigs[`rpmon:${d.id}`] === 'on') { rec.sigs[`rpmon:${d.id}`] = 'off'; changed = true; }
                 if (rec.sigs[`accvibon:${d.id}`] === 'on') { rec.sigs[`accvibon:${d.id}`] = 'off'; changed = true; }
+                if (rec.sigs[`ignflag:${d.id}`] === 'on') { rec.sigs[`ignflag:${d.id}`] = 'off'; changed = true; }
+              }
+            }
+
+            // ---- IGNITION FLAG: the most DIRECT "key turned on" signal, and it
+            // fires at a standstill — so a car that's started but hasn't rolled
+            // yet still alerts. Traccar sets attributes.ignition from the device's
+            // ignition line (DIN1 / io239) or, on OBD units, from RPM/voltage. On
+            // a real off→on transition the engine just cranked. Uses the shared
+            // start guard, so it never doubles up with the RPM / accel / motion
+            // paths below. (Requires the tracker to actually REPORT a record while
+            // parked+running — see the Data Acquisition note if it stays quiet.)
+            if (fresh) {
+              const ia = (pos && pos.attributes) || {};
+              const ignKey = `ignflag:${d.id}`;
+              if (ia.ignition === true) {
+                if (rec.sigs[ignKey] === 'off') {
+                  const lastStart = Number(rec.sigs[startGuard] || 0);
+                  if (nowMs - lastStart > gapMs) {
+                    rec.sigs[startGuard] = String(nowMs);
+                    rec.sigs[tripKey] = 'on';
+                    toSend.push({ title: `🚗 ${NAMED(d)} started`, body: 'The engine was turned on.' });
+                  }
+                }
+                rec.sigs[ignKey] = 'on'; changed = true;
+              } else if (ia.ignition === false && rec.sigs[ignKey] !== 'off') {
+                rec.sigs[ignKey] = 'off'; changed = true;
               }
             }
 
