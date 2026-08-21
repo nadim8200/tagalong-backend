@@ -154,8 +154,19 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     for (const tr of tokenRecs) {
       const token = typeof tr === 'string' ? tr : tr.token;
       const host = apnsHostFor(typeof tr === 'string' ? '' : tr.env);
-      const r = await sendOne(token, payload, host);
+      let r = await sendOne(token, payload, host); // eslint-disable-line no-await-in-loop
       console.log(`[push]   APNs → ${r.ok ? 'OK 200' : `FAIL ${r.status}`} (${host})`);
+      // A 400 is almost always BadDeviceToken = the token was sent to the WRONG
+      // Apple environment (a production/TestFlight token hitting the sandbox host,
+      // or vice-versa). That's the #1 reason pushes silently vanish while in-app
+      // alerts still show. Instead of pruning it, retry the OTHER host — this
+      // self-heals a mis-detected sandbox/production environment.
+      if (!r.ok && r.status === 400) {
+        const alt = host.includes('sandbox') ? 'api.push.apple.com' : 'api.sandbox.push.apple.com';
+        r = await sendOne(token, payload, alt); // eslint-disable-line no-await-in-loop
+        console.log(`[push]   APNs retry → ${r.ok ? 'OK 200' : `FAIL ${r.status}`} (${alt})`);
+      }
+      // Only prune a token that's truly gone (410) or still bad on both hosts.
       if (!r.ok && (r.status === 410 || r.status === 400)) dead.push(token);
     }
     return dead;
