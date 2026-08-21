@@ -1066,7 +1066,17 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           // default (it flooded on normal driving) and only used if a car opts in
           // with harshFromGps:true.
           {
-            const route = await recentRoute(d.id, fromISO, toISO);
+            // SCALING: the per-device route report is the single biggest cost
+            // each poll cycle. Harsh driving can only happen on a car that's
+            // actually running/moving, so skip the fetch entirely for parked or
+            // asleep cars — the majority most of the time. This keeps memory and
+            // Traccar load roughly flat as the fleet grows instead of linear.
+            const fixMs = pos && pos.fixTime ? new Date(pos.fixTime).getTime() : 0;
+            const freshPos = fixMs && (Date.now() - fixMs) <= FRESH_FIX_MS;
+            const activeNow = freshPos && (liveMph(pos) >= 3
+              || (pos && (pos.attributes || {}).ignition === true)
+              || rec.sigs[`tripon:${d.id}`] === 'on');
+            const route = activeNow ? await recentRoute(d.id, fromISO, toISO) : [];
             const pts = route
               .map((p) => ({ mph: Math.round((p.speed || 0) * KNOTS_TO_MPH), t: p.fixTime ? new Date(p.fixTime).getTime() : 0, a: p.attributes || {} }))
               .filter((p) => p.t)
