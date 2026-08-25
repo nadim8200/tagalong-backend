@@ -1050,6 +1050,24 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             const sig = `ev:${ev.id}`;
             if (rec.sigs[sig]) continue;
             rec.sigs[sig] = 1;
+            // Modern cars (Mercedes / VW / BMW especially) DE-ENERGIZE the OBD
+            // port when they sleep, to stop the tracker draining the battery. The
+            // tracker's external voltage falls toward 0 and it fires a power-cut /
+            // "battery disconnected" alarm — even though nothing was unplugged and
+            // it's still reporting on a healthy internal battery. Suppress that
+            // false alarm when the car is PARKED and the tracker is clearly fine.
+            // A genuine unplug WHILE DRIVING is still caught by the disconnect
+            // logic (which watches for the tracker going silent at speed).
+            if (p.key === 'alarm-power') {
+              const pa = (pos && pos.attributes) || {};
+              const internal = Number(pa.batteryLevel);
+              const parked = liveMph(pos) < 3;
+              const trackerHealthy = !Number.isFinite(internal) || internal >= 20;
+              if (parked && trackerHealthy) {
+                console.log(`[push] SLEEP-SUPPRESS ${NAMED(d)}: OBD port de-energized while parked (internal batt ${Number.isFinite(internal) ? `${internal}%` : 'n/a'}) — car asleep, not unplugged`);
+                continue;
+              }
+            }
             // If the tracker DID report ignition, mark the shared guard so the
             // motion-derived "car started" below doesn't fire a second time.
             if (ev.type === 'ignitionOn' || p.key === 'ign-on') rec.sigs[`startedat:${d.id}`] = String(Date.now());
@@ -1419,15 +1437,24 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             if (fresh) {
               const ia = (pos && pos.attributes) || {};
               const ignKey = `ignflag:${d.id}`;
-              if (ia.ignition === true) {
+              // The ignition flag ALONE is unreliable: some OBD units report it
+              // true at rest battery voltage (~12.4V) while the engine is off,
+              // which fired phantom "started" alerts on a parked car. Require real
+              // engine-RUNNING evidence too: charging voltage (>13.0V = alternator
+              // spinning), live RPM, or actual movement. A parked car at 12.4V has
+              // none of these, so it won't alert.
+              const volts = Number(ia.power);
+              const rpmv = Number(ia.io36 != null ? ia.io36 : ia.rpm);
+              const running = (Number.isFinite(volts) && volts >= 13.0)
+                || (Number.isFinite(rpmv) && rpmv > 200)
+                || liveMph(pos) >= 3;
+              if (ia.ignition === true && running) {
                 if (!rec.sigs[ignKey] || rec.sigs[ignKey] === 'off') {
-                  // First sighting after off — mark PENDING, do NOT alert yet. A
-                  // real running engine stays on to the next poll (~30-60s); a
-                  // wake-up / voltage blip is gone by then. This is what kills the
-                  // false "car started" alerts on a parked car.
+                  // First confirmed-running sighting — mark PENDING, don't alert
+                  // yet. A real start stays running to the next poll (~30-60s).
                   rec.sigs[ignKey] = 'pending'; changed = true;
                 } else if (rec.sigs[ignKey] === 'pending') {
-                  // Still on a 2nd consecutive poll → a real, sustained start.
+                  // Still ignition-on AND running on a 2nd poll → a real start.
                   const lastStart = Number(rec.sigs[startGuard] || 0);
                   if (nowMs - lastStart > gapMs) {
                     rec.sigs[startGuard] = String(nowMs);
@@ -1436,8 +1463,9 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
                   }
                   rec.sigs[ignKey] = 'on'; changed = true;
                 }
-              } else if (ia.ignition === false && rec.sigs[ignKey] && rec.sigs[ignKey] !== 'off') {
-                // Dropped back off (incl. a pending blip that never confirmed).
+              } else if (rec.sigs[ignKey] && rec.sigs[ignKey] !== 'off') {
+                // Ignition off, OR "on" with no running evidence (rest voltage) —
+                // treat as off so a phantom flag can't stay armed or alert.
                 rec.sigs[ignKey] = 'off'; changed = true;
               }
             }
