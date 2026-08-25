@@ -1426,48 +1426,20 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
               }
             }
 
-            // ---- IGNITION FLAG: the most DIRECT "key turned on" signal, and it
-            // fires at a standstill — so a car that's started but hasn't rolled
-            // yet still alerts. Traccar sets attributes.ignition from the device's
-            // ignition line (DIN1 / io239) or, on OBD units, from RPM/voltage. On
-            // a real off→on transition the engine just cranked. Uses the shared
-            // start guard, so it never doubles up with the RPM / accel / motion
-            // paths below. (Requires the tracker to actually REPORT a record while
-            // parked+running — see the Data Acquisition note if it stays quiet.)
-            if (fresh) {
+            // ---- ENGINE-ON is decided by RPM, NOT the ignition flag ----
+            // On these OBD cars the ignition flag and system voltage LIE: a parked
+            // Mercedes reads "ignition on" at ~12.8V while the engine is off, which
+            // fired phantom "started" alerts. RPM can't lie — an OBD tracker only
+            // sees engine RPM when the engine is actually turning. So the RPM path
+            // just below is the SOLE standstill "started" trigger; the ignition
+            // flag is no longer used to alert at all (motion stays as the fallback
+            // for any car that doesn't stream RPM). Diagnostic: log what a parked,
+            // fresh-fix car actually reports, so we can confirm this tracker sends
+            // RPM (io36) — grep Render logs for "ENGINE-DIAG".
+            if (fresh && liveMph(pos) < 3) {
               const ia = (pos && pos.attributes) || {};
-              const ignKey = `ignflag:${d.id}`;
-              // The ignition flag ALONE is unreliable: some OBD units report it
-              // true at rest battery voltage (~12.4V) while the engine is off,
-              // which fired phantom "started" alerts on a parked car. Require real
-              // engine-RUNNING evidence too: charging voltage (>13.0V = alternator
-              // spinning), live RPM, or actual movement. A parked car at 12.4V has
-              // none of these, so it won't alert.
-              const volts = Number(ia.power);
-              const rpmv = Number(ia.io36 != null ? ia.io36 : ia.rpm);
-              const running = (Number.isFinite(volts) && volts >= 13.0)
-                || (Number.isFinite(rpmv) && rpmv > 200)
-                || liveMph(pos) >= 3;
-              if (ia.ignition === true && running) {
-                if (!rec.sigs[ignKey] || rec.sigs[ignKey] === 'off') {
-                  // First confirmed-running sighting — mark PENDING, don't alert
-                  // yet. A real start stays running to the next poll (~30-60s).
-                  rec.sigs[ignKey] = 'pending'; changed = true;
-                } else if (rec.sigs[ignKey] === 'pending') {
-                  // Still ignition-on AND running on a 2nd poll → a real start.
-                  const lastStart = Number(rec.sigs[startGuard] || 0);
-                  if (nowMs - lastStart > gapMs) {
-                    rec.sigs[startGuard] = String(nowMs);
-                    rec.sigs[tripKey] = 'on';
-                    toSend.push({ title: `🚗 ${NAMED(d)} started`, body: 'The engine was turned on.' });
-                  }
-                  rec.sigs[ignKey] = 'on'; changed = true;
-                }
-              } else if (rec.sigs[ignKey] && rec.sigs[ignKey] !== 'off') {
-                // Ignition off, OR "on" with no running evidence (rest voltage) —
-                // treat as off so a phantom flag can't stay armed or alert.
-                rec.sigs[ignKey] = 'off'; changed = true;
-              }
+              const rpmSeen = ia.io36 != null ? ia.io36 : ia.rpm;
+              console.log(`[push] ENGINE-DIAG ${NAMED(d)} parked: rpm=${rpmSeen != null ? rpmSeen : 'n/a'} volts=${ia.power != null ? ia.power : 'n/a'} ignitionFlag=${ia.ignition}`);
             }
 
             // ---- RPM says the engine is running — the most DIRECT "car is on"
