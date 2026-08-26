@@ -1096,7 +1096,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
               || rec.sigs[`tripon:${d.id}`] === 'on');
             const route = activeNow ? await recentRoute(d.id, fromISO, toISO) : [];
             const pts = route
-              .map((p) => ({ mph: Math.round((p.speed || 0) * KNOTS_TO_MPH), t: p.fixTime ? new Date(p.fixTime).getTime() : 0, a: p.attributes || {} }))
+              .map((p) => ({ mph: Math.round((p.speed || 0) * KNOTS_TO_MPH), t: p.fixTime ? new Date(p.fixTime).getTime() : 0, course: Number(p.course) || 0, a: p.attributes || {} }))
               .filter((p) => p.t)
               .sort((a, b) => a.t - b.t);
 
@@ -1139,6 +1139,14 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
               let bestBrake = 0; let brakeFrom = 0; let brakeAt = 0;
               for (let i = 1; i < pts.length; i++) {
                 for (let j = i - 1; j >= 0 && (pts[i].t - pts[j].t) / 1000 <= winSec; j--) {
+                  // Skip speed changes that happen through a TURN. GPS speed is
+                  // noisy while the heading swings, so a sharp turn shows a fake
+                  // "speed jump" that read as hard acceleration/braking. If the
+                  // course changed more than 30° across this window, it's a corner,
+                  // not a launch — don't count it.
+                  const hd = Math.abs(pts[i].course - pts[j].course) % 360;
+                  const turned = Math.min(hd, 360 - hd) > 30;
+                  if (turned) continue;
                   const dMph = pts[i].mph - pts[j].mph;
                   if (dMph > bestAccel && pts[i].mph >= 25) { bestAccel = dMph; accelTo = pts[i].mph; accelAt = pts[i].t; }
                   const drop = -dMph;
