@@ -1112,6 +1112,21 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
               else if (/hardbrak|harshbrak|braking/.test(al) || gdt === 2) kind = 'brake';
               else if (/corner/.test(al) || gdt === 3) kind = 'corner';
               if (!kind) continue;
+              // Some trackers mislabel a SHARP TURN as "hard acceleration" — the
+              // lateral G of cornering trips the accel axis. A real launch holds a
+              // straight-ish heading; a turn swings it hard. If the car's course
+              // swung >30° around this event, it's a corner, not a launch — so
+              // reclassify accel/brake to cornering instead of a false alert.
+              if (kind === 'accel' || kind === 'brake') {
+                let headSwing = 0;
+                for (const q of pts) {
+                  const dt = (q.t - pt.t) / 1000;
+                  if (dt < -4 || dt > 4) continue;
+                  const h = Math.abs(q.course - pt.course) % 360;
+                  headSwing = Math.max(headSwing, Math.min(h, 360 - h));
+                }
+                if (headSwing > 30) kind = 'corner';
+              }
               const seen = `gd-${kind}:${d.id}`;
               if (pt.t <= Number(rec.sigs[seen] || 0)) continue;
               rec.sigs[seen] = String(pt.t); changed = true;
