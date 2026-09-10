@@ -47,6 +47,32 @@ export const driverVehicleAssignments = (token) => sGet(token, '/fleet/driver-ve
 export const vehicleStats = (token, types = 'gps,engineStates,fuelPercents,obdOdometerMeters') =>
   sGet(token, `/fleet/vehicles/stats?types=${types}`);
 export const hosClocks = (token) => sGet(token, '/fleet/hos/clocks?limit=200');
+
+// Breadcrumb GPS history for ONE vehicle over [startIso, endIso]. Returns a
+// time-sorted list of {t, lat, lng, mph} — used to draw where a truck has been
+// over the life of the current trip.
+export async function vehicleGpsHistory(token, vehicleId, startIso, endIso) {
+  const path = `/fleet/vehicles/stats/history?types=gps`
+    + `&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}`
+    + `&vehicleIds=${encodeURIComponent(vehicleId)}`;
+  const data = await sGet(token, path, { maxPages: 50 });
+  const pts = [];
+  for (const v of arr(data)) for (const g of arr(v.gps)) {
+    if (g.latitude != null && g.longitude != null) {
+      pts.push({
+        t: g.time || null, lat: g.latitude, lng: g.longitude,
+        mph: g.speedMilesPerHour != null ? Math.round(g.speedMilesPerHour) : null,
+      });
+    }
+  }
+  pts.sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+  return pts;
+}
+
+// Resolve a TruckMate power-unit number to its Samsara vehicle {id, name, …}.
+export function vehicleForUnit(idx, unit) {
+  return (idx && idx.vehByUnit && idx.vehByUnit[norm(unit)]) || null;
+}
 // Saved known locations (customers/terminals) with geocoded lat/lng + geofences.
 export const listAddresses = (token) => sGet(token, '/addresses');
 // The authoritative list of every reading/stat this org actually has (engine,
