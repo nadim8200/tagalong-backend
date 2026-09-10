@@ -7,7 +7,7 @@
 // browser, and is verified against the live endpoint before it replaces a
 // working config.
 // ---------------------------------------------------------------
-import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe } from './samsara.js';
+import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit } from './samsara.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -390,6 +390,34 @@ export function initTruckMate(app, { requireAuth, db, env = process.env }) {
         ageMinutes: latest ? Math.round((Date.now() - Date.parse(latest.receivedAt)) / 60000) : null,
       });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // ---- GPS breadcrumb for one truck (the "where has it been" map) ----
+  // Resolves a TruckMate power unit → Samsara vehicle, then pulls its GPS
+  // history over the trip window. ?since=ISO (trip start) or ?hours=N (default
+  // 24, cap 72). Points are downsampled to keep the payload light.
+  app.get('/truckmate/route/:unit', requireAuth, async (req, res) => {
+    try {
+      const token = samsaraTokenFrom(env);
+      if (!token) return res.json({ points: [], reason: 'no-samsara' });
+      const idx = await getLiveIndex(token);
+      const veh = vehicleForUnit(idx, req.params.unit);
+      if (!veh || veh.id == null) return res.json({ points: [], reason: 'no-vehicle' });
+
+      const now = Date.now();
+      let start = now - 24 * 3600000;
+      const hours = parseInt(req.query.hours, 10);
+      if (hours) start = now - Math.min(Math.max(hours, 1), 72) * 3600000;
+      if (req.query.since) { const s = Date.parse(req.query.since); if (!isNaN(s)) start = Math.max(s, now - 72 * 3600000); }
+
+      const pts = await vehicleGpsHistory(token, veh.id, new Date(start).toISOString(), new Date(now).toISOString());
+      const MAX = 400;
+      const step = Math.ceil(pts.length / MAX) || 1;
+      const slim = step > 1 ? pts.filter((_, i) => i % step === 0 || i === pts.length - 1) : pts;
+      res.json({ points: slim, vehicle: veh.name || String(veh.id), from: new Date(start).toISOString(), to: new Date(now).toISOString(), count: pts.length });
+    } catch (e) {
+      res.json({ points: [], error: String(e.message || e) });
+    }
   });
 
   // ---- Samsara correlation (stage 1: diagnostic) ----
