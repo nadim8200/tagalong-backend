@@ -203,6 +203,7 @@ function traccarLive(device, p) {
     lat: hasFix ? p.latitude : null,
     lng: hasFix ? p.longitude : null,
     speedMph: (!stale && ignition) ? tmMph(p.speed) : 0,
+    course: (p && p.course != null) ? Number(p.course) : null,   // heading for the map arrow
     engine: ignition ? 'On' : 'Off',
     ignition,
     fuelPct: a.io48 != null ? Math.round(Number(a.io48)) : null,
@@ -510,6 +511,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
             if (tl.lat != null) { s.lat = tl.lat; s.lng = tl.lng; }
             if (tl.location) s.location = tl.location;
             if (tl.speedMph != null) s.speedMph = tl.speedMph;
+            if (tl.course != null) s.course = tl.course;
             if (tl.engine) s.engine = tl.engine;
             if (tl.ignition != null) s.ignition = tl.ignition;
             if (tl.fuelPct != null) s.fuelPct = tl.fuelPct;
