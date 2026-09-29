@@ -52,25 +52,37 @@ export function initRateCon(app, { requireAuth, db, env = process.env }) {
       if (!key) return res.status(503).json({ error: 'AI reader not configured (ANTHROPIC_API_KEY).' });
       const trip = String(req.params.trip || '').trim();
       if (!trip) return res.status(400).json({ error: 'Missing trip.' });
-      const { dataBase64, mediaType, filename } = req.body || {};
-      if (!dataBase64) return res.status(400).json({ error: 'No file data.' });
+      const body = req.body || {};
+      // Accept a list of pages (multi-page rate cons) OR a single file (legacy).
+      const pages = Array.isArray(body.pages) && body.pages.length
+        ? body.pages
+        : (body.dataBase64 ? [{ dataBase64: body.dataBase64, mediaType: body.mediaType, filename: body.filename }] : []);
+      if (!pages.length) return res.status(400).json({ error: 'No file data.' });
 
-      const isPdf = /pdf/i.test(mediaType || '') || /\.pdf$/i.test(filename || '');
-      const block = isPdf
-        ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: dataBase64 } }
-        : { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: dataBase64 } };
+      const pageIsPdf = (p) => /pdf/i.test(p.mediaType || '') || /\.pdf$/i.test(p.filename || '');
+      const anyPdf = pages.some(pageIsPdf);
+      // One content block per page, in order, then the extraction prompt. Claude
+      // reads every page together and returns a single merged extraction.
+      const content = [];
+      pages.forEach((p, i) => {
+        if (pages.length > 1) content.push({ type: 'text', text: `--- Page ${i + 1} of ${pages.length}${p.filename ? ` (${p.filename})` : ''} ---` });
+        content.push(pageIsPdf(p)
+          ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: p.dataBase64 } }
+          : { type: 'image', source: { type: 'base64', media_type: p.mediaType || 'image/jpeg', data: p.dataBase64 } });
+      });
+      content.push({ type: 'text', text: PROMPT });
 
       const r = await fetch(ANTHROPIC_URL, {
         method: 'POST',
         headers: {
           'x-api-key': key,
           'anthropic-version': '2023-06-01',
-          ...(isPdf ? { 'anthropic-beta': 'pdfs-2024-09-25' } : {}),
+          ...(anyPdf ? { 'anthropic-beta': 'pdfs-2024-09-25' } : {}),
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          model, max_tokens: 1800,
-          messages: [{ role: 'user', content: [block, { type: 'text', text: PROMPT }] }],
+          model, max_tokens: 2200,
+          messages: [{ role: 'user', content }],
         }),
       });
       if (!r.ok) {
@@ -86,7 +98,9 @@ export function initRateCon(app, { requireAuth, db, env = process.env }) {
         parsed = JSON.parse(m ? m[0] : text);
       } catch { parsed = { summary: 'Could not auto-parse — raw text stored.', raw: text, specialInstructions: [] }; }
 
-      const record = { ...parsed, filename: filename || null, uploadedAt: new Date().toISOString() };
+      const names = pages.map((p) => p.filename).filter(Boolean);
+      const filename = names.length ? (names.length > 1 ? `${names[0]} +${names.length - 1} more` : names[0]) : null;
+      const record = { ...parsed, filename, pageCount: pages.length, uploadedAt: new Date().toISOString() };
       if (db && db.enabled) {
         const site = String(req.query.site || 'florida-beauty');
         await db.update(storeKey(site), (cur) => ({ ...(cur || {}), [trip]: record }), {});
