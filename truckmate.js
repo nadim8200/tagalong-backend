@@ -155,7 +155,65 @@ function normalizeCustomer(c) {
 // ===============================================================
 // Routes
 // ===============================================================
-export function initTruckMate(app, { requireAuth, db, env = process.env }) {
+// ---- Traccar (Teltonika FMC/FMM OBD trackers) live overlay -----------------
+// Trucks tracked by a Teltonika device report to Traccar, not Samsara. We index
+// those devices by their name (= the power-unit number, e.g. "2403") so a trip
+// whose powerUnit matches gets the same live overlay Samsara trucks get.
+const tmNorm = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/^0+(?=\d)/, '');
+const tmMph = (kn) => Math.round((kn || 0) * 1.15078);
+
+function traccarLive(device, p) {
+  const a = (p && p.attributes) || {};
+  const hasFix = !!p && p.latitude != null && p.longitude != null
+    && !(Math.abs(p.latitude) < 0.001 && Math.abs(p.longitude) < 0.001);
+  const power = a.power != null ? Number(a.power) : null;      // vehicle battery V
+  const rpm = a.io36 != null ? Number(a.io36) : null;
+  const ignition = a.ignition === true || (rpm != null && rpm > 200) || (power != null && power >= 13.0);
+  const times = p ? [p.fixTime, p.deviceTime, p.serverTime].map((t) => (t ? new Date(t).getTime() : 0)) : [];
+  const last = Math.max(0, ...times);
+  const stale = last ? (Date.now() - last > 15 * 60 * 1000) : true;
+  return {
+    source: 'traccar',
+    location: (p && p.address) || null,
+    lat: hasFix ? p.latitude : null,
+    lng: hasFix ? p.longitude : null,
+    speedMph: (!stale && ignition) ? tmMph(p.speed) : 0,
+    engine: ignition ? 'On' : 'Off',
+    ignition,
+    fuelPct: a.io48 != null ? Math.round(Number(a.io48)) : null,
+    power,
+    dtcCount: a.io30 != null ? Number(a.io30) : null,
+    gpsAt: (p && (p.fixTime || p.deviceTime)) || null,
+    stale,
+    // reefer/HOS come only from Samsara — leave null so the panel degrades cleanly
+    tempF: null, setpointF: null, reeferState: null, hos: null,
+  };
+}
+
+export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders }) {
+  // 30s-cached index of Traccar devices → live overlay, keyed by unit number.
+  let _tmTraccar = { at: 0, idx: null };
+  async function traccarLiveIndex() {
+    if (!TRACCAR_URL || !traccarHeaders) return null;
+    if (_tmTraccar.idx && Date.now() - _tmTraccar.at < 30000) return _tmTraccar.idx;
+    const [devs, poss] = await Promise.all([
+      fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders }).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+      fetch(`${TRACCAR_URL}/api/positions`, { headers: traccarHeaders }).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    ]);
+    const posByDev = {};
+    for (const p of (Array.isArray(poss) ? poss : [])) posByDev[p.deviceId] = p;
+    const byUnit = {};
+    for (const d of (Array.isArray(devs) ? devs : [])) {
+      const p = posByDev[d.id];
+      const live = traccarLive(d, p);
+      const nm = (d.attributes && d.attributes.displayName) || d.name || '';
+      if (nm) byUnit[tmNorm(nm)] = live;
+      if (d.name) byUnit[tmNorm(d.name)] = live;
+    }
+    _tmTraccar = { at: Date.now(), idx: byUnit };
+    return byUnit;
+  }
+
   const cfgKey = 'taTruckMate';
 
   async function configFor(owner) {
@@ -379,6 +437,17 @@ export function initTruckMate(app, { requireAuth, db, env = process.env }) {
           trips.forEach((item) => { try { const live = correlate(item, idx); if (live) item._samsara = live; } catch { /* per-trip skip */ } });
         }
       } catch { /* no live overlay this cycle */ }
+      // Traccar overlay for trucks on Teltonika trackers (e.g. 2403) that Samsara
+      // doesn't have — matched by power-unit number. Only fills trips Samsara missed.
+      try {
+        const tIdx = await traccarLiveIndex();
+        if (tIdx) trips.forEach((item) => {
+          if (item._samsara) return;
+          const t = (item && item.trip) || item || {};
+          const unit = tmNorm(t.powerUnit);
+          if (unit && tIdx[unit]) item._samsara = tIdx[unit];
+        });
+      } catch { /* no traccar overlay this cycle */ }
       // heartbeat from the raw ingest log
       const ing = (db && db.enabled) ? await db.get(`taTruckMateIngest:${site}`, { deliveries: [] }) : { deliveries: [] };
       const latest = (ing.deliveries || [])[0] || null;
