@@ -214,6 +214,28 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     return byUnit;
   }
 
+  // GPS breadcrumb from Traccar for a unit (the FMC00A track TagAlong shows).
+  async function traccarRouteForUnit(unit, fromIso, toIso) {
+    if (!TRACCAR_URL || !traccarHeaders) return [];
+    const devs = await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders })
+      .then((r) => (r.ok ? r.json() : [])).catch(() => []);
+    const want = tmNorm(unit);
+    const dev = (Array.isArray(devs) ? devs : []).find((d) =>
+      tmNorm((d.attributes && d.attributes.displayName) || d.name) === want || tmNorm(d.name) === want);
+    if (!dev) return [];
+    const url = `${TRACCAR_URL}/api/reports/route?deviceId=${dev.id}`
+      + `&from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`;
+    const rows = await fetch(url, { headers: { ...traccarHeaders, Accept: 'application/json' } })
+      .then((r) => (r.ok ? r.json() : [])).catch(() => []);
+    const pts = [];
+    for (const p of (Array.isArray(rows) ? rows : [])) {
+      if (p.latitude != null && p.longitude != null && !(Math.abs(p.latitude) < 0.001 && Math.abs(p.longitude) < 0.001)) {
+        pts.push({ t: p.fixTime || p.deviceTime || null, lat: p.latitude, lng: p.longitude, mph: p.speed != null ? Math.round(p.speed * 1.15078) : null });
+      }
+    }
+    return pts;
+  }
+
   const cfgKey = 'taTruckMate';
 
   async function configFor(owner) {
@@ -442,10 +464,25 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
       try {
         const tIdx = await traccarLiveIndex();
         if (tIdx) trips.forEach((item) => {
-          if (item._samsara) return;
           const t = (item && item.trip) || item || {};
           const unit = tmNorm(t.powerUnit);
-          if (unit && tIdx[unit]) item._samsara = tIdx[unit];
+          const tl = unit ? tIdx[unit] : null;
+          if (!tl) return;
+          if (!item._samsara) { item._samsara = tl; return; }
+          // Truck also has an FMC00A (Traccar) — the feed TagAlong shows. Prefer its
+          // live position/telemetry when the fix is fresh; keep Samsara HOS + reefer.
+          if (!tl.stale) {
+            const s = item._samsara;
+            if (tl.lat != null) { s.lat = tl.lat; s.lng = tl.lng; }
+            if (tl.location) s.location = tl.location;
+            if (tl.speedMph != null) s.speedMph = tl.speedMph;
+            if (tl.engine) s.engine = tl.engine;
+            if (tl.ignition != null) s.ignition = tl.ignition;
+            if (tl.fuelPct != null) s.fuelPct = tl.fuelPct;
+            if (tl.power != null) s.power = tl.power;
+            if (tl.gpsAt) s.gpsAt = tl.gpsAt;
+            s.source = 'traccar+samsara';
+          }
         });
       } catch { /* no traccar overlay this cycle */ }
       // Attach any stored rate confirmation (broker instructions) per trip so the
@@ -479,23 +516,29 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   // 24, cap 72). Points are downsampled to keep the payload light.
   app.get('/truckmate/route/:unit', requireAuth, async (req, res) => {
     try {
-      const token = samsaraTokenFrom(env);
-      if (!token) return res.json({ points: [], reason: 'no-samsara' });
-      const idx = await getLiveIndex(token);
-      const veh = vehicleForUnit(idx, req.params.unit);
-      if (!veh || veh.id == null) return res.json({ points: [], reason: 'no-vehicle' });
-
       const now = Date.now();
       let start = now - 24 * 3600000;
       const hours = parseInt(req.query.hours, 10);
       if (hours) start = now - Math.min(Math.max(hours, 1), 72) * 3600000;
       if (req.query.since) { const s = Date.parse(req.query.since); if (!isNaN(s)) start = Math.max(s, now - 72 * 3600000); }
+      const fromIso = new Date(start).toISOString(); const toIso = new Date(now).toISOString();
+      const downsample = (pts) => { const MAX = 400; const step = Math.ceil(pts.length / MAX) || 1; return step > 1 ? pts.filter((_, i) => i % step === 0 || i === pts.length - 1) : pts; };
 
-      const pts = await vehicleGpsHistory(token, veh.id, new Date(start).toISOString(), new Date(now).toISOString());
-      const MAX = 400;
-      const step = Math.ceil(pts.length / MAX) || 1;
-      const slim = step > 1 ? pts.filter((_, i) => i % step === 0 || i === pts.length - 1) : pts;
-      res.json({ points: slim, vehicle: veh.name || String(veh.id), from: new Date(start).toISOString(), to: new Date(now).toISOString(), count: pts.length });
+      // 1) Prefer the FMC00A / Traccar track (the one TagAlong shows) when the
+      //    truck has a Traccar device matching this unit.
+      try {
+        const tpts = await traccarRouteForUnit(req.params.unit, fromIso, toIso);
+        if (tpts.length) return res.json({ points: downsample(tpts), vehicle: req.params.unit, source: 'traccar', from: fromIso, to: toIso, count: tpts.length });
+      } catch { /* fall through to Samsara */ }
+
+      // 2) Otherwise use Samsara vehicle history.
+      const token = samsaraTokenFrom(env);
+      if (!token) return res.json({ points: [], reason: 'no-samsara' });
+      const idx = await getLiveIndex(token);
+      const veh = vehicleForUnit(idx, req.params.unit);
+      if (!veh || veh.id == null) return res.json({ points: [], reason: 'no-vehicle' });
+      const pts = await vehicleGpsHistory(token, veh.id, fromIso, toIso);
+      res.json({ points: downsample(pts), vehicle: veh.name || String(veh.id), source: 'samsara', from: fromIso, to: toIso, count: pts.length });
     } catch (e) {
       res.json({ points: [], error: String(e.message || e) });
     }
