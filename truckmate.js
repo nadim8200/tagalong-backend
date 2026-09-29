@@ -448,6 +448,18 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
           if (unit && tIdx[unit]) item._samsara = tIdx[unit];
         });
       } catch { /* no traccar overlay this cycle */ }
+      // Attach any stored rate confirmation (broker instructions) per trip so the
+      // dispatcher sees the "has instructions" chip + AI check without extra fetches.
+      try {
+        if (db && db.enabled) {
+          const rcs = await db.get(`taTruckMateRateCon:${site}`, {});
+          trips.forEach((item) => {
+            const t = (item && item.trip) || item || {};
+            const rc = rcs[String(t.tripNumber)];
+            if (rc) item._ratecon = rc;
+          });
+        }
+      } catch { /* no rate-con overlay this cycle */ }
       // heartbeat from the raw ingest log
       const ing = (db && db.enabled) ? await db.get(`taTruckMateIngest:${site}`, { deliveries: [] }) : { deliveries: [] };
       const latest = (ing.deliveries || [])[0] || null;
