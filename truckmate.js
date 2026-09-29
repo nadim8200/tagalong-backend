@@ -526,10 +526,14 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
       try {
         if (db && db.enabled) {
           const rcs = await db.get(`taTruckMateRateCon:${site}`, {});
+          const checks = await db.get(`taTruckMateRcCheck:${site}`, {});
           trips.forEach((item) => {
             const t = (item && item.trip) || item || {};
             const rc = rcs[String(t.tripNumber)];
             if (rc) item._ratecon = rc;
+            // handling-instruction sign-offs (keyed by instruction text)
+            const ck = checks[String(t.tripNumber)];
+            if (ck) item._rccheck = ck;
           });
         }
       } catch { /* no rate-con overlay this cycle */ }

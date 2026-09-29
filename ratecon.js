@@ -38,12 +38,43 @@ export function initRateCon(app, { requireAuth, db, env = process.env }) {
   const key = env.ANTHROPIC_API_KEY || '';
   const model = env.RATECON_MODEL || env.CAR_CHAT_MODEL || 'claude-haiku-4-5-20251001';
   const storeKey = (site) => `taTruckMateRateCon:${site}`;
+  // Handling-instruction checklist lives in its OWN store so re-uploading the rate
+  // con never wipes the dispatcher's sign-offs. Keyed by the instruction text so it
+  // survives re-ordering. Must match the key used by the active-board overlay.
+  const checkKey = (site) => `taTruckMateRcCheck:${site}`;
+  const whoAmI = (req) => (req.user && (req.user.name || (req.user.email || '').split('@')[0])) || 'Dispatcher';
 
   app.get('/truckmate/ratecon/:trip', requireAuth, async (req, res) => {
     try {
       const site = String(req.query.site || 'florida-beauty');
       const all = (db && db.enabled) ? await db.get(storeKey(site), {}) : {};
-      res.json(all[String(req.params.trip)] || null);
+      const checks = (db && db.enabled) ? await db.get(checkKey(site), {}) : {};
+      const rec = all[String(req.params.trip)] || null;
+      res.json(rec ? { ...rec, _check: checks[String(req.params.trip)] || {} } : null);
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // Check / uncheck one handling instruction. Records WHO signed it off and WHEN
+  // as proof; unchecking clears the sign-off.
+  app.post('/truckmate/ratecon/:trip/check', requireAuth, async (req, res) => {
+    try {
+      const site = String(req.query.site || 'florida-beauty');
+      const trip = String(req.params.trip || '').trim();
+      const { instruction, done } = req.body || {};
+      if (!trip || !instruction) return res.status(400).json({ error: 'Missing trip or instruction.' });
+      if (!(db && db.enabled)) return res.status(503).json({ error: 'No store configured.' });
+      const by = whoAmI(req);
+      const byEmail = (req.user && req.user.email) || null;
+      const at = new Date().toISOString();
+      const next = await db.update(checkKey(site), (cur) => {
+        const all = { ...(cur || {}) };
+        const t = { ...(all[trip] || {}) };
+        if (done) t[String(instruction)] = { done: true, by, byEmail, at };
+        else delete t[String(instruction)];
+        all[trip] = t;
+        return all;
+      }, {});
+      res.json(next[trip] || {});
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
 
