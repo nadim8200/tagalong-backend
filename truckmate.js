@@ -162,6 +162,31 @@ function normalizeCustomer(c) {
 const tmNorm = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/^0+(?=\d)/, '');
 const tmMph = (kn) => Math.round((kn || 0) * 1.15078);
 
+// Decode OBD trouble codes from a Traccar position's attributes — same approach
+// the TagAlong app uses (scan every field for a P/C/B/U#### token).
+const TM_DTC = {
+  P0500: 'Vehicle speed sensor malfunction', U0010: 'CAN communication bus fault (module)',
+  P2002: 'Diesel particulate filter efficiency below threshold', P0420: 'Catalyst efficiency below threshold',
+  P0128: 'Coolant thermostat below regulating temperature', P0300: 'Random/multiple cylinder misfire',
+};
+const tmDtcMeaning = (c) => {
+  if (TM_DTC[c]) return TM_DTC[c];
+  const area = { P: 'Powertrain (engine/transmission)', C: 'Chassis (brakes/suspension)', B: 'Body (interior systems)', U: 'Network (module communication)' }[c[0]];
+  return area ? `${area} fault — look up ${c}` : 'Unknown code';
+};
+function tmDtcCodes(a) {
+  if (!a || typeof a !== 'object') return [];
+  const found = new Set();
+  const scan = (raw) => {
+    if (raw == null || raw === '' || raw === 0) return;
+    String(raw).split(/[,;\s|/]+/).forEach((s) => { const t = s.trim().toUpperCase(); if (/^[PCBU]\d{4}$/.test(t)) found.add(t); });
+  };
+  [a.io281, a.dtcs, a.dtc, a.faultCodes, a.troubleCodes, a.dtcFaults, a.dtcNumber].forEach(scan);
+  Object.keys(a).forEach((k) => { if (/dtc|fault|trouble/i.test(k)) scan(a[k]); });
+  Object.keys(a).forEach((k) => { if (/vin|serial|imei|iccid/i.test(k)) return; const v = a[k]; if (typeof v === 'string' && /[PCBU]\d{4}/.test(v)) scan(v); });
+  return [...found].map((c) => ({ code: c, meaning: tmDtcMeaning(c) }));
+}
+
 function traccarLive(device, p) {
   const a = (p && p.attributes) || {};
   const hasFix = !!p && p.latitude != null && p.longitude != null
@@ -182,7 +207,11 @@ function traccarLive(device, p) {
     ignition,
     fuelPct: a.io48 != null ? Math.round(Number(a.io48)) : null,
     power,
+    rpm,
     dtcCount: a.io30 != null ? Number(a.io30) : null,
+    dtcCodes: tmDtcCodes(a),
+    sat: a.sat != null ? Number(a.sat) : null,
+    rssi: a.rssi != null ? Number(a.rssi) : null,
     gpsAt: (p && (p.fixTime || p.deviceTime)) || null,
     stale,
     // reefer/HOS come only from Samsara — leave null so the panel degrades cleanly
@@ -469,10 +498,15 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
           const tl = unit ? tIdx[unit] : null;
           if (!tl) return;
           if (!item._samsara) { item._samsara = tl; return; }
+          const s = item._samsara;
+          // Engine trouble codes from the FMC00A matter regardless of GPS freshness.
+          if (tl.dtcCodes && tl.dtcCodes.length) s.dtcCodes = tl.dtcCodes;
+          if (tl.dtcCount != null) s.dtcCount = tl.dtcCount;
+          if (tl.sat != null) s.sat = tl.sat;
+          if (tl.rssi != null) s.rssi = tl.rssi;
           // Truck also has an FMC00A (Traccar) — the feed TagAlong shows. Prefer its
           // live position/telemetry when the fix is fresh; keep Samsara HOS + reefer.
           if (!tl.stale) {
-            const s = item._samsara;
             if (tl.lat != null) { s.lat = tl.lat; s.lng = tl.lng; }
             if (tl.location) s.location = tl.location;
             if (tl.speedMph != null) s.speedMph = tl.speedMph;
