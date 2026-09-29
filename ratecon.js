@@ -1,0 +1,99 @@
+// ---------------------------------------------------------------
+// Rate-confirmation reader for the AI dispatcher.
+//
+// A dispatcher uploads the broker's rate con (PDF or image). We send it to
+// Claude, which reads it natively (no OCR library needed) and returns the key
+// fields — rate, stops, appointment times, reference numbers, and especially the
+// SPECIAL INSTRUCTIONS — as structured JSON. The result is stored per trip so it
+// shows on the TruckMate trip card and the crew can follow it.
+//
+//   POST /truckmate/ratecon/:trip   { dataBase64, mediaType, filename }
+//   GET  /truckmate/ratecon/:trip
+//
+// Key lives server-side (ANTHROPIC_API_KEY); the file never leaves our backend.
+// ---------------------------------------------------------------
+const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+
+const PROMPT = [
+  'You are a freight dispatch assistant. Read this rate confirmation (rate con) and extract its details.',
+  'Return ONLY a JSON object (no prose, no markdown fences) with these keys:',
+  '{',
+  '  "broker": string|null, "brokerPhone": string|null, "brokerEmail": string|null,',
+  '  "loadNumber": string|null, "referenceNumbers": string[],',
+  '  "rate": number|null, "rateText": string|null, "currency": string|null,',
+  '  "equipment": string|null, "commodity": string|null, "weight": string|null,',
+  '  "tempSetting": string|null,',
+  '  "pickups": [{"name":string|null,"city":string|null,"state":string|null,"zip":string|null,"date":string|null,"time":string|null,"appointment":string|null,"refs":string|null}],',
+  '  "deliveries": [{"name":string|null,"city":string|null,"state":string|null,"zip":string|null,"date":string|null,"time":string|null,"appointment":string|null,"refs":string|null}],',
+  '  "accessorials": string[],',
+  '  "specialInstructions": string[],',
+  '  "detention": string|null, "lumper": string|null,',
+  '  "summary": string',
+  '}',
+  'For "specialInstructions" capture every must-follow requirement a driver/dispatcher needs: appointment/FCFS rules, check-in steps, lumper/pallet exchange, temperature/continuous-cool, load locks, seals, PODs required, no-touch, detention terms, driver requirements, penalties, TONU, etc. Be thorough and quote the con.',
+  'Use null when a field is absent. Do not invent values. "summary" is one short sentence.',
+].join('\n');
+
+export function initRateCon(app, { requireAuth, db, env = process.env }) {
+  const key = env.ANTHROPIC_API_KEY || '';
+  const model = env.RATECON_MODEL || env.CAR_CHAT_MODEL || 'claude-haiku-4-5-20251001';
+  const storeKey = (site) => `taTruckMateRateCon:${site}`;
+
+  app.get('/truckmate/ratecon/:trip', requireAuth, async (req, res) => {
+    try {
+      const site = String(req.query.site || 'florida-beauty');
+      const all = (db && db.enabled) ? await db.get(storeKey(site), {}) : {};
+      res.json(all[String(req.params.trip)] || null);
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  app.post('/truckmate/ratecon/:trip', requireAuth, async (req, res) => {
+    try {
+      if (!key) return res.status(503).json({ error: 'AI reader not configured (ANTHROPIC_API_KEY).' });
+      const trip = String(req.params.trip || '').trim();
+      if (!trip) return res.status(400).json({ error: 'Missing trip.' });
+      const { dataBase64, mediaType, filename } = req.body || {};
+      if (!dataBase64) return res.status(400).json({ error: 'No file data.' });
+
+      const isPdf = /pdf/i.test(mediaType || '') || /\.pdf$/i.test(filename || '');
+      const block = isPdf
+        ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: dataBase64 } }
+        : { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: dataBase64 } };
+
+      const r = await fetch(ANTHROPIC_URL, {
+        method: 'POST',
+        headers: {
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+          ...(isPdf ? { 'anthropic-beta': 'pdfs-2024-09-25' } : {}),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model, max_tokens: 1800,
+          messages: [{ role: 'user', content: [block, { type: 'text', text: PROMPT }] }],
+        }),
+      });
+      if (!r.ok) {
+        const detail = await r.text().catch(() => '');
+        console.error('[ratecon] anthropic', r.status, detail.slice(0, 200));
+        return res.status(502).json({ error: `AI error (${r.status})` });
+      }
+      const j = await r.json();
+      const text = (j.content || []).map((c) => c.text || '').join('').trim();
+      let parsed = null;
+      try {
+        const m = text.match(/\{[\s\S]*\}/);
+        parsed = JSON.parse(m ? m[0] : text);
+      } catch { parsed = { summary: 'Could not auto-parse — raw text stored.', raw: text, specialInstructions: [] }; }
+
+      const record = { ...parsed, filename: filename || null, uploadedAt: new Date().toISOString() };
+      if (db && db.enabled) {
+        const site = String(req.query.site || 'florida-beauty');
+        await db.update(storeKey(site), (cur) => ({ ...(cur || {}), [trip]: record }), {});
+      }
+      res.json(record);
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  console.log('[ratecon] rate-confirmation reader ready' + (key ? '' : ' (no ANTHROPIC_API_KEY — uploads will 503)'));
+}

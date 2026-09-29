@@ -33,6 +33,7 @@ import { initRingCentral } from './ringcentral.js';
 import { initTruckMate } from './truckmate.js';
 import { initCarChat } from './carChat.js';
 import { initDbpo } from './dbpo.js';
+import { initRateCon } from './ratecon.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -648,6 +649,9 @@ initNotify(app, { requireAuth, db, pool: db.pool, env: process.env, ringcentral:
 
 // Dynamic BPO campaign portal — live call workspace (claims + per-lead updates).
 initDbpo(app, { db });
+
+// AI dispatcher — read uploaded rate confirmations (broker instructions).
+initRateCon(app, { requireAuth, db, env: process.env });
 
 app.get('/', (_req, res) => res.send('TagAlong backend is running.'));
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));
