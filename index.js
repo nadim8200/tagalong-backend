@@ -28,6 +28,7 @@ import { initLoads } from './loads.js';
 import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
 import { initWatchtower } from './watchtower.js';
+import { initManifests } from './manifest.js';
 import { initNotify } from './notify.js';
 import { initFleet } from './fleet.js';
 import { initRingCentral } from './ringcentral.js';
@@ -642,6 +643,10 @@ initFleet(app, { requireAuth, db, env: process.env });
 // so "was this customer actually called?" comes from records, not memory.
 const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.env });
 const truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders });
+
+// Outbound trip sheets — the AI reads the daily paper manifests (printed +
+// handwritten) so the Watchtower knows the real stop order and appointments.
+initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard });
 
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the

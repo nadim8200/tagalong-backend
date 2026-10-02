@@ -7,6 +7,7 @@
 // browser, and is verified against the live endpoint before it replaces a
 // working config.
 // ---------------------------------------------------------------
+import { compareWithTruckMate } from './manifest.js';
 import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit } from './samsara.js';
 
 // ===============================================================
@@ -541,6 +542,18 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         });
       }
     } catch { /* no rate-con overlay this cycle */ }
+    // The day's uploaded trip sheet (real stop order, handwritten appointments,
+    // pickup plan, call-aheads) + how it differs from what TruckMate sent.
+    try {
+      if (db && db.enabled) {
+        const sheets = await db.get(`taTruckMateManifest:${site}`, {});
+        trips.forEach((item) => {
+          const t = (item && item.trip) || item || {};
+          const sh = sheets[String(t.tripNumber)];
+          if (sh) item._manifest = { ...sh, diffs: compareWithTruckMate(sh, item) };
+        });
+      }
+    } catch { /* no trip-sheet overlay this cycle */ }
     // Detect NEW truck→load assignments: a truck's power unit appearing on an
     // active trip it wasn't on before. Each is announced once (state persists),
     // so the dispatcher gets a single pop-up and AI dispatching "starts now".

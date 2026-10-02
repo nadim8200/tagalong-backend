@@ -94,7 +94,10 @@ const isDone = (code) => /^(delvd|deliv|del$|cmplt|complete|canc|void|avail|avbl
 const isRolling = (code) => /^(depship|depcons|intran|enroute)/i.test(String(code || ''));
 // dispatched but the driver hasn't picked the trailer up yet — the truck's GPS
 // isn't with the load, so no ETA / stopped / tracking judgements yet
-const notStarted = (code) => /^(disp|assgn|assigned|printed|avail|avbl|new|plan)/i.test(String(code || ''));
+const notStartedCode = (code) => /^(disp|assgn|assigned|printed|avail|avbl|new|plan)/i.test(String(code || ''));
+// not started = TruckMate says so, or the trip sheet says the driver picks the
+// load up later ("picking it up Friday around 6 AM") and that time hasn't come
+const notStarted = (code, f, now) => notStartedCode(code) || !!(f && f.pickupAtMs && now != null && now < f.pickupAtMs);
 const isAtStop = (code) => /^(arrship|arrcons|spot)/i.test(String(code || ''));
 
 // Everything the rules need from one board item, flattened once.
@@ -154,10 +157,45 @@ function tripFacts(item, now) {
     const last = open[open.length - 1];
     if (last && last.apptMs == null) last.apptMs = dueMs;
   }
+  // The uploaded paper trip sheet is the source of truth for stop ORDER,
+  // handwritten appointments, the pickup plan and call-ahead rules. Match its
+  // stops to TruckMate's by city + state (a city can span several zips).
+  const sheet = (item && item._manifest) || null;
+  let pickupAtMs = null;
+  if (sheet) {
+    const ck = (city, state) => `${String(city || '').trim().toUpperCase()}|${String(state || '').trim().toUpperCase()}`;
+    const byCity = new Map();
+    for (const ms of sheet.stops || []) {
+      if (!/DELIVER|PICKUP/i.test(ms.action || '')) continue;
+      const k = ck(ms.city, ms.state);
+      const arr = byCity.get(k) || [];
+      arr.push(ms);
+      byCity.set(k, arr);
+    }
+    for (const st of stops) {
+      const parts = st.label.split(',').map((x) => x.trim());
+      const hits = byCity.get(ck(parts[0], parts[1])) || [];
+      if (!hits.length) continue;
+      st.seq = Math.min(...hits.map((h) => (h.stopNumber != null ? h.stopNumber : 999)));
+      st.customers = [...new Set(hits.map((h) => h.customer).filter(Boolean))];
+      st.callAhead = hits.flatMap((h) => h.callAhead || []).filter((c) => c && (c.phone || c.contact));
+      for (const h of hits) {
+        if (!h.apptDate || !h.apptTime) continue;
+        const ms = localToUtcMs(`${h.apptDate}T${h.apptTime}`, st.tz);
+        if (!Number.isNaN(ms) && (st.apptMs == null || ms < st.apptMs)) { st.apptMs = ms; st.apptFrom = h.apptSource || 'sheet'; st.apptNeeded = false; }
+      }
+    }
+    if (sheet.pickupAt) {
+      const ms = localToUtcMs(String(sheet.pickupAt).slice(0, 16), 'America/New_York');
+      if (!Number.isNaN(ms)) pickupAtMs = ms;
+    }
+  }
   const instr = (item && item._ratecon && Array.isArray(item._ratecon.specialInstructions))
     ? [...new Set(item._ratecon.specialInstructions.map((x) => String(x).trim()).filter(Boolean))] : [];
   const checks = (item && item._rccheck) || {};
   return {
+    sheet,
+    pickupAtMs,
     trip: String(t.tripNumber || (item && item._id) || ''),
     unit: String(t.powerUnit || ''),
     trailer: String(t.trailer || t.trailer2 || ''),
@@ -175,6 +213,38 @@ function tripFacts(item, now) {
     instrPending: instr.filter((s) => !(checks[s] && checks[s].done)).length,
     instrTotal: instr.length,
   };
+}
+
+// Projected arrival at every open stop: truck → stops in trip-sheet order (or,
+// without a sheet, outward from the terminal) with ~30 min unloading at each.
+// Returns null when a check can't be trusted yet (not started, no fresh GPS,
+// stops still geocoding).
+function routeEtas(f, ctx) {
+  if (notStarted(f.status, f, ctx.now) || !f.live || !f.gpsFresh || f.live.lat == null) return null;
+  const open = f.stops.filter((st) => !st.delivered);
+  if (!open.length) return null;
+  const pts = new Map();
+  for (const st of open) {
+    const g = st.zip ? ctx.geo(st.zip) : null;
+    if (!g) return null;
+    pts.set(st.key, g);
+  }
+  const o = ctx.origin;
+  const fromOrigin = (st) => haversineMi(o.lat, o.lng, pts.get(st.key).lat, pts.get(st.key).lng);
+  const ordered = [...open].sort((a, b) => ((a.seq != null ? a.seq : 999) - (b.seq != null ? b.seq : 999)) || (fromOrigin(a) - fromOrigin(b)));
+  const hos = f.live.hos || {};
+  const restDoneMin = (hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stoppedMin) ? f.stoppedMin : 0;
+  const out = [];
+  let miles = 0; let at = { lat: f.live.lat, lng: f.live.lng };
+  ordered.forEach((st, i) => {
+    const g = pts.get(st.key);
+    miles += haversineMi(at.lat, at.lng, g.lat, g.lng) * 1.2;
+    at = g;
+    const eta = miles > 0 ? estimateArrival(miles, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, restDoneMin, now: ctx.now }) : ctx.now;
+    out.push({ stop: st, miles, etaMs: (eta || ctx.now) + i * 30 * MIN, stopsBefore: i });
+  });
+  out.guess = hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stopStartUnknown;
+  return out;
 }
 
 // ---- the checks. Each returns an alert draft or null. ----
@@ -214,56 +284,58 @@ const RULES = [
     };
   },
   function lateRisk(f, ctx) {
-    if (notStarted(f.status) || !f.live || !f.gpsFresh || f.live.lat == null) return null;
-    const open = f.stops.filter((st) => !st.delivered);
-    const targets = open.filter((st) => st.apptMs != null);
-    if (!targets.length) return null;               // flower stops without an appointment: nothing to miss
-    // Stop order isn't in the feed, so order the open stops by distance from the
-    // terminal — outbound routes fan out from Miami, matching the trip sheets.
-    const pts = new Map();
-    for (const st of open) {
-      const g = st.zip ? ctx.geo(st.zip) : null;
-      if (!g) return null;                            // still geocoding — check again next minute
-      pts.set(st.key, g);
-    }
-    const o = ctx.origin;
-    const fromOrigin = (st) => haversineMi(o.lat, o.lng, pts.get(st.key).lat, pts.get(st.key).lng);
-    const ordered = [...open].sort((a, b) => fromOrigin(a) - fromOrigin(b));
-    const hos = f.live.hos || {};
-    const restDoneMin = (hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stoppedMin) ? f.stoppedMin : 0;
+    const route = routeEtas(f, ctx);
+    if (!route) return null;
+    const hos = (f.live && f.live.hos) || {};
     let worst = null;
-    for (const target of targets) {
-      // drive truck → every open stop before it → the appointment stop
-      let miles = 0; let dwell = 0;
-      let at = { lat: f.live.lat, lng: f.live.lng };
-      for (const st of ordered) {
-        const g = pts.get(st.key);
-        miles += haversineMi(at.lat, at.lng, g.lat, g.lng) * 1.2;
-        at = g;
-        if (st === target) break;
-        dwell += 30;                                  // ~30 min to unload each stop on the way
-      }
-      if (miles < 5) continue;
-      const eta = estimateArrival(miles, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, restDoneMin, now: ctx.now });
-      if (!eta) continue;
-      const etaMs = eta + dwell * MIN;
-      const lateMin = (etaMs - target.apptMs) / MIN;
-      if (lateMin > 0 && (!worst || lateMin > worst.lateMin)) worst = { lateMin, target, miles, etaMs, stopsBefore: Math.round(dwell / 30) };
+    for (const r of route) {
+      if (r.stop.apptMs == null || r.miles < 5) continue;
+      const lateMin = (r.etaMs - r.stop.apptMs) / MIN;
+      if (lateMin > 0 && (!worst || lateMin > worst.lateMin)) worst = { ...r, lateMin };
     }
     if (!worst) return null;
-    const t = worst.target;
-    // out of hours and parked since before we started watching: we don't know
-    // when the 10-hour break began, so don't page anyone on a guess
-    const guess = hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stopStartUnknown;
+    const t = worst.stop;
+    const guess = route.guess;
+    const where = (t.customers && t.customers[0]) ? `${t.customers[0]} (${t.label.replace(/, \d{5}$/, '')})` : t.label.replace(/, \d{5}$/, '');
     return {
       code: 'late-risk', severity: worst.lateMin > 60 && !guess ? 'critical' : 'warning', key: t.key,
-      title: `Will miss ${t.label.replace(/, \d{5}$/, '')} appointment by ~${fmtMin(worst.lateMin)}`,
-      detail: `${Math.round(worst.miles)} mi${worst.stopsBefore ? ` with ${worst.stopsBefore} stop${worst.stopsBefore === 1 ? '' : 's'} first` : ''}. Projected ${fmtTime(worst.etaMs)} vs appointment ${fmtTime(t.apptMs)}${f.team ? ' (team)' : ` · drive left ${fmtMin(hos.driveLeftMin)}`}.${guess ? ' Break start unknown — confirm with the driver.' : ''} Warn the broker/receiver or plan a rescue.`,
+      title: `Will miss ${where} appointment by ~${fmtMin(worst.lateMin)}`,
+      detail: `${Math.round(worst.miles)} mi${worst.stopsBefore ? ` with ${worst.stopsBefore} stop${worst.stopsBefore === 1 ? '' : 's'} first` : ''}. Projected ${fmtTime(worst.etaMs)} vs appointment ${fmtTime(t.apptMs)}${t.apptFrom === 'handwritten' ? ' (handwritten on sheet)' : ''}${f.team ? ' (team)' : ` · drive left ${fmtMin(hos.driveLeftMin)}`}.${guess ? ' Break start unknown — confirm with the driver.' : ''} Warn the broker/receiver or plan a rescue.`,
+    };
+  },
+  // "CALL ISRAEL 413-883-7695 1HR BEFORE ARRIVING" — raise it when the truck
+  // is inside that window, so the call actually happens.
+  function callAheadDue(f, ctx) {
+    const route = routeEtas(f, ctx);
+    if (!route) return null;
+    for (const r of route) {
+      for (const c of r.stop.callAhead || []) {
+        const lead = c.leadMinutes != null ? c.leadMinutes : 60;
+        const minsAway = (r.etaMs - ctx.now) / MIN;
+        if (minsAway > lead + 20 || minsAway < -15) continue;
+        const who = [c.contact, c.phone].filter(Boolean).join(' ');
+        const where = (r.stop.customers && r.stop.customers[0]) || r.stop.label.replace(/, \d{5}$/, '');
+        return {
+          code: 'call-ahead', severity: 'warning', key: `${r.stop.key}:${c.phone || c.contact}`,
+          title: `${c.method === 'text' ? 'Text' : 'Call'} ${who} now — ~${fmtMin(Math.max(0, minsAway))} from ${where}`,
+          detail: `Trip sheet: ${c.method === 'text' ? 'text' : 'call'} ${lead >= 60 ? `${Math.round(lead / 60)} hr` : `${lead} min`} before arriving${c.purpose ? ` (${c.purpose})` : ''}.`,
+        };
+      }
+    }
+    return null;
+  },
+  function sheetMismatch(f) {
+    const diffs = (f.sheet && f.sheet.diffs) || [];
+    if (!diffs.length) return null;
+    return {
+      code: 'sheet-mismatch', severity: 'warning', key: diffs.map((d) => d.kind).sort().join(','),
+      title: `Trip sheet ≠ TruckMate (${diffs.length} difference${diffs.length === 1 ? '' : 's'})`,
+      detail: diffs.slice(0, 4).map((d) => d.msg).join(' · '),
     };
   },
   function apptTimeMissing(f) {
     const st = f.stops.find((x) => !x.delivered && x.apptNeeded && x.apptMs == null);
-    if (!st || notStarted(f.status)) return null;
+    if (!st || notStarted(f.status, f, Date.now())) return null;
     return {
       code: 'appt-missing', severity: 'warning', key: st.key,
       title: `Appointment required at ${st.label.replace(/, \d{5}$/, '')} — no time in TruckMate`,
@@ -284,7 +356,7 @@ const RULES = [
   },
   function stopped(f, ctx) {
     const l = f.live;
-    if (!isRolling(f.status) || !l || !f.gpsFresh || !f.stoppedMin) return null;
+    if (!isRolling(f.status) || !l || !f.gpsFresh || !f.stoppedMin || notStarted(f.status, f, ctx.now)) return null;
     const mins = f.stoppedMin;
     if (mins < 60) return null;
     const left = l.hos && l.hos.driveLeftMin;
@@ -316,7 +388,7 @@ const RULES = [
     };
   },
   function trackingLost(f) {
-    if (!isRolling(f.status) || !f.unit) return null;
+    if (!isRolling(f.status) || !f.unit || notStarted(f.status, f, Date.now())) return null;
     if (f.live && f.gpsAgeMin != null && f.gpsAgeMin <= 60) return null;
     return {
       code: 'tracking-lost', severity: 'warning',

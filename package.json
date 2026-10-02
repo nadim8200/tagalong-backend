@@ -2,7 +2,7 @@
   "name": "tagalong-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "TagAlong backend \u2014 hides the Traccar admin token, adds real login, proxies tracking calls.",
+  "description": "TagAlong backend — hides the Traccar admin token, adds real login, proxies tracking calls.",
   "type": "module",
   "main": "index.js",
   "engines": {
@@ -13,6 +13,7 @@
     "dev": "node --watch index.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
