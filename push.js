@@ -1981,5 +1981,33 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     console.log(`[push] APNs enabled v25 (${USE_DB ? 'Postgres-backed state' : 'file/Traccar fallback'}; repeating speeding alert) — polling every ${pollSec}s.`);
   }
 
-  return { enabled, sendToTokens };
+  // Push to specific people by account email (e.g. the Watchtower's fleet
+  // managers). Returns how many phones each email reached so the UI can show
+  // "no phone registered" instead of failing silently.
+  async function sendToEmails(emails, { title, body, data }) {
+    const want = new Set((emails || []).map((e) => String(e || '').trim().toLowerCase()).filter(Boolean));
+    if (!want.size) return [];
+    const { store } = await readStore();
+    const out = [];
+    for (const rec of Object.values(store)) {
+      const email = String((rec && rec.email) || '').toLowerCase();
+      if (!want.has(email)) continue;
+      const tokens = rec.tokens || [];
+      if (enabled && tokens.length) await sendToTokens(tokens, { title, body, data }); // eslint-disable-line no-await-in-loop
+      out.push({ email, phones: tokens.length });
+    }
+    return out;
+  }
+  // Which of these emails have at least one phone registered for push.
+  async function phonesFor(emails) {
+    const { store } = await readStore();
+    const byEmail = {};
+    for (const rec of Object.values(store)) {
+      const email = String((rec && rec.email) || '').toLowerCase();
+      if (email) byEmail[email] = (byEmail[email] || 0) + ((rec.tokens || []).length);
+    }
+    return (emails || []).map((e) => ({ email: e, phones: byEmail[String(e).toLowerCase()] || 0 }));
+  }
+
+  return { enabled, sendToTokens, sendToEmails, phonesFor };
 }

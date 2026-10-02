@@ -27,6 +27,7 @@ import { initDb } from './db.js';
 import { initLoads } from './loads.js';
 import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
+import { initWatchtower } from './watchtower.js';
 import { initNotify } from './notify.js';
 import { initFleet } from './fleet.js';
 import { initRingCentral } from './ringcentral.js';
@@ -617,7 +618,7 @@ app.post('/fleet/release', requireAuth, requireFleet, async (req, res) => {
 
 // Locked-phone push notifications (APNs). Registers /push/register + /push/unregister
 // and starts the server-side alert poller. No-ops safely until the APNS_* env vars are set.
-initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env: process.env, db });
+const push = initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env: process.env, db });
 
 // Dispatch loads + the API a partner TMS integrates against. Safely no-ops
 // (503 with a clear message) until DATABASE_URL is configured.
@@ -640,7 +641,12 @@ initFleet(app, { requireAuth, db, env: process.env });
 // RingCentral: SMS from the company's own business numbers, plus the call log
 // so "was this customer actually called?" comes from records, not memory.
 const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.env });
-initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders });
+const truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders });
+
+// Watchtower — checks every active trip each minute (reefer, late risk, HOS,
+// stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
+// fleet managers' TagAlong app.
+initWatchtower(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, push });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and

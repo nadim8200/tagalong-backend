@@ -473,121 +473,126 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   // first), plus a heartbeat (when the connector last delivered) so the UI can
   // show live/stale. This is the endpoint the dispatcher panel should read — NOT
   // ingest/latest, which is only the most recent delta.
-  app.get('/truckmate/active', requireAuth, async (req, res) => {
+  // The whole active board (trips + live overlays + rate cons + assignment
+  // events). Shared by the dispatcher console and the Watchtower monitor.
+  async function buildBoard(site) {
+    const store = (db && db.enabled) ? await db.get(`taTruckMateActive:${site}`, { trips: {} }) : { trips: {} };
+    const recs = Object.values(store.trips || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const trips = recs.map((r) => r.item);
+    // Overlay LIVE Samsara data (driver names, GPS/fuel/engine, reefer temp) on
+    // each trip so the dispatcher can cross-check it against TruckMate. Cached
+    // ~60s; if Samsara is down or unconfigured we just skip the overlay.
     try {
-      const site = String(req.query.site || 'florida-beauty');
-      const store = (db && db.enabled) ? await db.get(`taTruckMateActive:${site}`, { trips: {} }) : { trips: {} };
-      const recs = Object.values(store.trips || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-      const trips = recs.map((r) => r.item);
-      // Overlay LIVE Samsara data (driver names, GPS/fuel/engine, reefer temp) on
-      // each trip so the dispatcher can cross-check it against TruckMate. Cached
-      // ~60s; if Samsara is down or unconfigured we just skip the overlay.
-      try {
-        const token = samsaraTokenFrom(env);
-        if (token) {
-          const idx = await getLiveIndex(token);
-          trips.forEach((item) => { try { const live = correlate(item, idx); if (live) item._samsara = live; } catch { /* per-trip skip */ } });
+      const token = samsaraTokenFrom(env);
+      if (token) {
+        const idx = await getLiveIndex(token);
+        trips.forEach((item) => { try { const live = correlate(item, idx); if (live) item._samsara = live; } catch { /* per-trip skip */ } });
+      }
+    } catch { /* no live overlay this cycle */ }
+    // Traccar overlay for trucks on Teltonika trackers (e.g. 2403) that Samsara
+    // doesn't have — matched by power-unit number. Only fills trips Samsara missed.
+    try {
+      const tIdx = await traccarLiveIndex();
+      if (tIdx) trips.forEach((item) => {
+        const t = (item && item.trip) || item || {};
+        const unit = tmNorm(t.powerUnit);
+        const tl = unit ? tIdx[unit] : null;
+        if (!tl) return;
+        if (!item._samsara) { item._samsara = tl; return; }
+        const s = item._samsara;
+        // Engine trouble codes from the FMC00A matter regardless of GPS freshness.
+        if (tl.dtcCodes && tl.dtcCodes.length) {
+          const have = new Set((s.dtcCodes || []).map((c) => c.code));
+          s.dtcCodes = [...(s.dtcCodes || []), ...tl.dtcCodes.filter((c) => !have.has(c.code))];
         }
-      } catch { /* no live overlay this cycle */ }
-      // Traccar overlay for trucks on Teltonika trackers (e.g. 2403) that Samsara
-      // doesn't have — matched by power-unit number. Only fills trips Samsara missed.
-      try {
-        const tIdx = await traccarLiveIndex();
-        if (tIdx) trips.forEach((item) => {
+        if (tl.dtcCount != null) s.dtcCount = tl.dtcCount;
+        if (tl.sat != null) s.sat = tl.sat;
+        if (tl.rssi != null) s.rssi = tl.rssi;
+        // Truck also has an FMC00A (Traccar) — the feed TagAlong shows. Prefer its
+        // live position/telemetry when the fix is fresh; keep Samsara HOS + reefer.
+        if (!tl.stale) {
+          if (tl.lat != null) { s.lat = tl.lat; s.lng = tl.lng; }
+          if (tl.location) s.location = tl.location;
+          if (tl.speedMph != null) s.speedMph = tl.speedMph;
+          if (tl.course != null) s.course = tl.course;
+          if (tl.engine) s.engine = tl.engine;
+          if (tl.ignition != null) s.ignition = tl.ignition;
+          if (tl.fuelPct != null) s.fuelPct = tl.fuelPct;
+          if (tl.power != null) s.power = tl.power;
+          if (tl.rpm != null) s.rpm = tl.rpm;
+          if (tl.gpsAt) s.gpsAt = tl.gpsAt;
+          s.source = 'traccar+samsara';
+        }
+      });
+    } catch { /* no traccar overlay this cycle */ }
+    // Attach any stored rate confirmation (broker instructions) per trip so the
+    // dispatcher sees the "has instructions" chip + AI check without extra fetches.
+    try {
+      if (db && db.enabled) {
+        const rcs = await db.get(`taTruckMateRateCon:${site}`, {});
+        const checks = await db.get(`taTruckMateRcCheck:${site}`, {});
+        trips.forEach((item) => {
+          const t = (item && item.trip) || item || {};
+          const rc = rcs[String(t.tripNumber)];
+          if (rc) item._ratecon = rc;
+          // handling-instruction sign-offs (keyed by instruction text)
+          const ck = checks[String(t.tripNumber)];
+          if (ck) item._rccheck = ck;
+        });
+      }
+    } catch { /* no rate-con overlay this cycle */ }
+    // Detect NEW truck→load assignments: a truck's power unit appearing on an
+    // active trip it wasn't on before. Each is announced once (state persists),
+    // so the dispatcher gets a single pop-up and AI dispatching "starts now".
+    let assignEvents = [];
+    try {
+      if (db && db.enabled) {
+        const cur = trips.map((item) => {
           const t = (item && item.trip) || item || {};
           const unit = tmNorm(t.powerUnit);
-          const tl = unit ? tIdx[unit] : null;
-          if (!tl) return;
-          if (!item._samsara) { item._samsara = tl; return; }
-          const s = item._samsara;
-          // Engine trouble codes from the FMC00A matter regardless of GPS freshness.
-          if (tl.dtcCodes && tl.dtcCodes.length) {
-            const have = new Set((s.dtcCodes || []).map((c) => c.code));
-            s.dtcCodes = [...(s.dtcCodes || []), ...tl.dtcCodes.filter((c) => !have.has(c.code))];
-          }
-          if (tl.dtcCount != null) s.dtcCount = tl.dtcCount;
-          if (tl.sat != null) s.sat = tl.sat;
-          if (tl.rssi != null) s.rssi = tl.rssi;
-          // Truck also has an FMC00A (Traccar) — the feed TagAlong shows. Prefer its
-          // live position/telemetry when the fix is fresh; keep Samsara HOS + reefer.
-          if (!tl.stale) {
-            if (tl.lat != null) { s.lat = tl.lat; s.lng = tl.lng; }
-            if (tl.location) s.location = tl.location;
-            if (tl.speedMph != null) s.speedMph = tl.speedMph;
-            if (tl.course != null) s.course = tl.course;
-            if (tl.engine) s.engine = tl.engine;
-            if (tl.ignition != null) s.ignition = tl.ignition;
-            if (tl.fuelPct != null) s.fuelPct = tl.fuelPct;
-            if (tl.power != null) s.power = tl.power;
-            if (tl.rpm != null) s.rpm = tl.rpm;
-            if (tl.gpsAt) s.gpsAt = tl.gpsAt;
-            s.source = 'traccar+samsara';
-          }
-        });
-      } catch { /* no traccar overlay this cycle */ }
-      // Attach any stored rate confirmation (broker instructions) per trip so the
-      // dispatcher sees the "has instructions" chip + AI check without extra fetches.
-      try {
-        if (db && db.enabled) {
-          const rcs = await db.get(`taTruckMateRateCon:${site}`, {});
-          const checks = await db.get(`taTruckMateRcCheck:${site}`, {});
-          trips.forEach((item) => {
-            const t = (item && item.trip) || item || {};
-            const rc = rcs[String(t.tripNumber)];
-            if (rc) item._ratecon = rc;
-            // handling-instruction sign-offs (keyed by instruction text)
-            const ck = checks[String(t.tripNumber)];
-            if (ck) item._rccheck = ck;
-          });
-        }
-      } catch { /* no rate-con overlay this cycle */ }
-      // Detect NEW truck→load assignments: a truck's power unit appearing on an
-      // active trip it wasn't on before. Each is announced once (state persists),
-      // so the dispatcher gets a single pop-up and AI dispatching "starts now".
-      let assignEvents = [];
-      try {
-        if (db && db.enabled) {
-          const cur = trips.map((item) => {
-            const t = (item && item.trip) || item || {};
-            const unit = tmNorm(t.powerUnit);
-            const trip = String(t.tripNumber || (item && item._id) || '');
-            if (!unit || !trip) return null;
-            return { unit, trip, origin: t.origZoneDesc || '', dest: t.destZoneDesc || '', driver: t.driver || '', trailer: t.trailer || '' };
-          }).filter(Boolean);
-          const store = await db.update(`taTMAssign:${site}`, (prev) => {
-            const s = { seen: {}, events: [], initialized: false, ...(prev || {}) };
-            const nowIso = new Date().toISOString();
-            if (!s.initialized) {
-              // first run adopts existing assignments silently (no pop-up flood)
-              cur.forEach((c) => { s.seen[c.unit] = { trip: c.trip, at: nowIso }; });
-              s.initialized = true;
-              return s;
-            }
-            cur.forEach((c) => {
-              const seen = s.seen[c.unit];
-              if (!seen || seen.trip !== c.trip) {
-                s.seen[c.unit] = { trip: c.trip, at: nowIso };
-                s.events.unshift({ id: `${c.unit}:${c.trip}`, unit: c.unit, trip: c.trip, origin: c.origin, dest: c.dest, driver: c.driver, trailer: c.trailer, at: nowIso });
-              }
-            });
-            s.events = s.events.slice(0, 50);
+          const trip = String(t.tripNumber || (item && item._id) || '');
+          if (!unit || !trip) return null;
+          return { unit, trip, origin: t.origZoneDesc || '', dest: t.destZoneDesc || '', driver: t.driver || '', trailer: t.trailer || '' };
+        }).filter(Boolean);
+        const store = await db.update(`taTMAssign:${site}`, (prev) => {
+          const s = { seen: {}, events: [], initialized: false, ...(prev || {}) };
+          const nowIso = new Date().toISOString();
+          if (!s.initialized) {
+            // first run adopts existing assignments silently (no pop-up flood)
+            cur.forEach((c) => { s.seen[c.unit] = { trip: c.trip, at: nowIso }; });
+            s.initialized = true;
             return s;
-          }, { seen: {}, events: [], initialized: false });
-          const cutoff = Date.now() - 24 * 3600 * 1000;
-          assignEvents = (store.events || []).filter((e) => Date.parse(e.at) >= cutoff);
-        }
-      } catch { /* assignment detection is best-effort */ }
-      // heartbeat from the raw ingest log
-      const ing = (db && db.enabled) ? await db.get(`taTruckMateIngest:${site}`, { deliveries: [] }) : { deliveries: [] };
-      const latest = (ing.deliveries || [])[0] || null;
-      res.json({
-        site,
-        count: trips.length,
-        trips,
-        assignEvents,
-        receivedAt: latest ? latest.receivedAt : null,
-        ageMinutes: latest ? Math.round((Date.now() - Date.parse(latest.receivedAt)) / 60000) : null,
-      });
+          }
+          cur.forEach((c) => {
+            const seen = s.seen[c.unit];
+            if (!seen || seen.trip !== c.trip) {
+              s.seen[c.unit] = { trip: c.trip, at: nowIso };
+              s.events.unshift({ id: `${c.unit}:${c.trip}`, unit: c.unit, trip: c.trip, origin: c.origin, dest: c.dest, driver: c.driver, trailer: c.trailer, at: nowIso });
+            }
+          });
+          s.events = s.events.slice(0, 50);
+          return s;
+        }, { seen: {}, events: [], initialized: false });
+        const cutoff = Date.now() - 24 * 3600 * 1000;
+        assignEvents = (store.events || []).filter((e) => Date.parse(e.at) >= cutoff);
+      }
+    } catch { /* assignment detection is best-effort */ }
+    // heartbeat from the raw ingest log
+    const ing = (db && db.enabled) ? await db.get(`taTruckMateIngest:${site}`, { deliveries: [] }) : { deliveries: [] };
+    const latest = (ing.deliveries || [])[0] || null;
+    return {
+      site,
+      count: trips.length,
+      trips,
+      assignEvents,
+      receivedAt: latest ? latest.receivedAt : null,
+      ageMinutes: latest ? Math.round((Date.now() - Date.parse(latest.receivedAt)) / 60000) : null,
+    };
+  }
+
+  app.get('/truckmate/active', requireAuth, async (req, res) => {
+    try {
+      res.json(await buildBoard(String(req.query.site || 'florida-beauty')));
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
 
@@ -719,4 +724,6 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         ageMinutes: Math.round((Date.now() - Date.parse(latest.receivedAt)) / 60000), data: latest.data });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
+
+  return { buildBoard };
 }
