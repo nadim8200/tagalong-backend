@@ -46,6 +46,10 @@ export const listTrailers = (token) => sGet(token, '/fleet/trailers?limit=512');
 export const driverVehicleAssignments = (token) => sGet(token, '/fleet/driver-vehicle-assignments');
 export const vehicleStats = (token, types = 'gps,engineStates,fuelPercents,obdOdometerMeters') =>
   sGet(token, `/fleet/vehicles/stats?types=${types}`);
+// Engine-health readings (battery, RPM, fault codes, coolant) — a second call
+// because the stats endpoint caps the number of types per request.
+export const vehicleHealthStats = (token) =>
+  vehicleStats(token, 'batteryMilliVolts,engineRpm,faultCodes,engineCoolantTemperatureMilliC');
 export const hosClocks = (token) => sGet(token, '/fleet/hos/clocks?limit=200');
 
 // Breadcrumb GPS history for ONE vehicle over [startIso, endIso]. Returns a
@@ -148,7 +152,7 @@ export async function reeferStats(token) {
 // one resource failing (returns an { error } marker for that slice instead).
 export async function snapshot(token) {
   const safe = (p) => p.then((v) => v).catch((e) => ({ error: String(e.message || e) }));
-  const [drivers, vehicles, trailers, stats, assignments, reefer, hos, reeferRead] = await Promise.all([
+  const [drivers, vehicles, trailers, stats, assignments, reefer, hos, reeferRead, health] = await Promise.all([
     safe(listDrivers(token)),
     safe(listVehicles(token)),
     safe(listTrailers(token)),
@@ -157,7 +161,16 @@ export async function snapshot(token) {
     safe(reeferStats(token)),      // legacy bulk — kept only for asset id→name mapping
     safe(hosClocks(token)),
     safe(reeferReadings(token)),   // LIVE reefer values (Readings API)
+    safe(vehicleHealthStats(token)),
   ]);
+  // fold the engine-health readings into each vehicle's stats record
+  if (Array.isArray(stats) && Array.isArray(health)) {
+    const byId = new Map(health.map((h) => [String(h.id), h]));
+    stats.forEach((st) => {
+      const h = byId.get(String(st.id));
+      if (h) ['batteryMilliVolts', 'engineRpm', 'faultCodes', 'engineCoolantTemperatureMilliC'].forEach((k) => { if (h[k] != null) st[k] = h[k]; });
+    });
+  }
   return { drivers, vehicles, trailers, stats, assignments, reefer, hos, reeferRead };
 }
 
@@ -348,6 +361,28 @@ export function indexSnapshot(snap) {
   return { driversByCode, vehByUnit, statsByUnit, reeferByKey, hosById };
 }
 
+// Samsara engine fault codes → the same [{code, meaning}] shape the FMC00A
+// feed uses. Heavy trucks report J1939 SPN/FMI; light vehicles report OBD-II.
+function samsaraDtcCodes(fc) {
+  if (!fc || typeof fc !== 'object') return [];
+  const out = [];
+  const seen = new Set();
+  const add = (code, meaning) => {
+    if (!code || seen.has(code)) return;
+    seen.add(code);
+    out.push({ code, meaning: meaning || 'Engine fault' });
+  };
+  arr(fc.j1939 && fc.j1939.diagnosticTroubleCodes).forEach((d) => {
+    if (d && d.spnId != null) add(`SPN ${d.spnId} FMI ${d.fmiId != null ? d.fmiId : '?'}`, [d.spnDescription, d.fmiDescription].filter(Boolean).join(' — '));
+  });
+  arr(fc.obdii && fc.obdii.diagnosticTroubleCodes).forEach((m) => {
+    ['confirmedDtcs', 'pendingDtcs', 'permanentDtcs'].forEach((k) => arr(m && m[k]).forEach((d) => {
+      if (d) add(d.dtcShortCode || (d.dtcId != null ? `DTC ${d.dtcId}` : ''), d.dtcDescription);
+    }));
+  });
+  return out;
+}
+
 // Build the live data object for one TruckMate trip item.
 export function correlate(item, idx) {
   const t = (item && item.trip) || item || {};
@@ -365,6 +400,16 @@ export function correlate(item, idx) {
     live.gpsAt = g.time || null;
     live.fuelPct = st.fuelPercent ? st.fuelPercent.value : null;
     live.engine = st.engineState ? st.engineState.value : null;
+    // same telemetry fields the FMC00A feed provides, so both look alike
+    live.source = 'samsara';
+    live.course = g.headingDegrees != null ? Math.round(g.headingDegrees) : null;
+    live.ignition = live.engine ? /^(on|idle)$/i.test(String(live.engine)) : null;
+    const mv = st.batteryMilliVolts ? st.batteryMilliVolts.value : null;
+    live.power = mv != null ? round1(mv / 1000) : null;
+    live.rpm = st.engineRpm ? st.engineRpm.value : null;
+    const cmc = st.engineCoolantTemperatureMilliC ? st.engineCoolantTemperatureMilliC.value : null;
+    live.coolantF = cmc != null ? Math.round((cmc / 1000) * 9 / 5 + 32) : null;
+    live.dtcCodes = samsaraDtcCodes(st.faultCodes);
   }
   const veh = idx.vehByUnit[norm(t.powerUnit)];
   if (veh && veh.staticAssignedDriver) live.samsaraDriver = veh.staticAssignedDriver.name;

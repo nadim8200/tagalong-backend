@@ -501,7 +501,10 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
           if (!item._samsara) { item._samsara = tl; return; }
           const s = item._samsara;
           // Engine trouble codes from the FMC00A matter regardless of GPS freshness.
-          if (tl.dtcCodes && tl.dtcCodes.length) s.dtcCodes = tl.dtcCodes;
+          if (tl.dtcCodes && tl.dtcCodes.length) {
+            const have = new Set((s.dtcCodes || []).map((c) => c.code));
+            s.dtcCodes = [...(s.dtcCodes || []), ...tl.dtcCodes.filter((c) => !have.has(c.code))];
+          }
           if (tl.dtcCount != null) s.dtcCount = tl.dtcCount;
           if (tl.sat != null) s.sat = tl.sat;
           if (tl.rssi != null) s.rssi = tl.rssi;
@@ -516,6 +519,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
             if (tl.ignition != null) s.ignition = tl.ignition;
             if (tl.fuelPct != null) s.fuelPct = tl.fuelPct;
             if (tl.power != null) s.power = tl.power;
+            if (tl.rpm != null) s.rpm = tl.rpm;
             if (tl.gpsAt) s.gpsAt = tl.gpsAt;
             s.source = 'traccar+samsara';
           }
