@@ -537,6 +537,42 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
           });
         }
       } catch { /* no rate-con overlay this cycle */ }
+      // Detect NEW truck→load assignments: a truck's power unit appearing on an
+      // active trip it wasn't on before. Each is announced once (state persists),
+      // so the dispatcher gets a single pop-up and AI dispatching "starts now".
+      let assignEvents = [];
+      try {
+        if (db && db.enabled) {
+          const cur = trips.map((item) => {
+            const t = (item && item.trip) || item || {};
+            const unit = tmNorm(t.powerUnit);
+            const trip = String(t.tripNumber || (item && item._id) || '');
+            if (!unit || !trip) return null;
+            return { unit, trip, origin: t.origZoneDesc || '', dest: t.destZoneDesc || '', driver: t.driver || '', trailer: t.trailer || '' };
+          }).filter(Boolean);
+          const store = await db.update(`taTMAssign:${site}`, (prev) => {
+            const s = { seen: {}, events: [], initialized: false, ...(prev || {}) };
+            const nowIso = new Date().toISOString();
+            if (!s.initialized) {
+              // first run adopts existing assignments silently (no pop-up flood)
+              cur.forEach((c) => { s.seen[c.unit] = { trip: c.trip, at: nowIso }; });
+              s.initialized = true;
+              return s;
+            }
+            cur.forEach((c) => {
+              const seen = s.seen[c.unit];
+              if (!seen || seen.trip !== c.trip) {
+                s.seen[c.unit] = { trip: c.trip, at: nowIso };
+                s.events.unshift({ id: `${c.unit}:${c.trip}`, unit: c.unit, trip: c.trip, origin: c.origin, dest: c.dest, driver: c.driver, trailer: c.trailer, at: nowIso });
+              }
+            });
+            s.events = s.events.slice(0, 50);
+            return s;
+          }, { seen: {}, events: [], initialized: false });
+          const cutoff = Date.now() - 24 * 3600 * 1000;
+          assignEvents = (store.events || []).filter((e) => Date.parse(e.at) >= cutoff);
+        }
+      } catch { /* assignment detection is best-effort */ }
       // heartbeat from the raw ingest log
       const ing = (db && db.enabled) ? await db.get(`taTruckMateIngest:${site}`, { deliveries: [] }) : { deliveries: [] };
       const latest = (ing.deliveries || [])[0] || null;
@@ -544,6 +580,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         site,
         count: trips.length,
         trips,
+        assignEvents,
         receivedAt: latest ? latest.receivedAt : null,
         ageMinutes: latest ? Math.round((Date.now() - Date.parse(latest.receivedAt)) / 60000) : null,
       });
