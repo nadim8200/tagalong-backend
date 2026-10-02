@@ -32,6 +32,28 @@ const zipOf = (s) => { const m = String(s || '').match(/\b(\d{5})\b/); return m 
 const fmtMin = (m) => (m == null ? '—' : m >= 60 ? `${Math.floor(m / 60)}h ${Math.round(m % 60)}m` : `${Math.round(m)}m`);
 const fmtTime = (ms) => new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
+// TruckMate times carry no zone ("2026-10-03T06:00:00") — they are the
+// receiver's local wall clock. Read them in the stop's time zone (by state).
+const STATE_TZ = {
+  CT: 'America/New_York', DE: 'America/New_York', FL: 'America/New_York', GA: 'America/New_York', MA: 'America/New_York', MD: 'America/New_York', ME: 'America/New_York', MI: 'America/Detroit', NC: 'America/New_York', NH: 'America/New_York', NJ: 'America/New_York', NY: 'America/New_York', OH: 'America/New_York', PA: 'America/New_York', RI: 'America/New_York', SC: 'America/New_York', VA: 'America/New_York', VT: 'America/New_York', WV: 'America/New_York', DC: 'America/New_York', IN: 'America/Indiana/Indianapolis', KY: 'America/New_York',
+  AL: 'America/Chicago', AR: 'America/Chicago', IA: 'America/Chicago', IL: 'America/Chicago', KS: 'America/Chicago', LA: 'America/Chicago', MN: 'America/Chicago', MO: 'America/Chicago', MS: 'America/Chicago', NE: 'America/Chicago', ND: 'America/Chicago', OK: 'America/Chicago', SD: 'America/Chicago', TN: 'America/Chicago', TX: 'America/Chicago', WI: 'America/Chicago',
+  CO: 'America/Denver', ID: 'America/Boise', MT: 'America/Denver', NM: 'America/Denver', UT: 'America/Denver', WY: 'America/Denver', AZ: 'America/Phoenix',
+  CA: 'America/Los_Angeles', NV: 'America/Los_Angeles', OR: 'America/Los_Angeles', WA: 'America/Los_Angeles',
+};
+const stateOf = (s) => { const m = String(s || '').match(/,\s*([A-Z]{2})\b/); return m ? m[1] : ''; };
+function localToUtcMs(wall, tz) {
+  const m = String(wall || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return NaN;
+  if (/(Z|[+-]\d{2}:?\d{2})$/.test(String(wall))) return Date.parse(wall); // already has a zone
+  const asUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+  try {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz || 'America/New_York', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+      .formatToParts(new Date(asUtc)).map((p) => [p.type, p.value]));
+    const seen = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour % 24, +parts.minute);
+    return asUtc - (seen - asUtc);                    // shift by the zone's offset at that moment
+  } catch { return asUtc; }
+}
+
 function haversineMi(aLat, aLng, bLat, bLng) {
   const R = 3958.8; const r = Math.PI / 180;
   const dLat = (bLat - aLat) * r; const dLng = (bLng - aLng) * r;
@@ -41,12 +63,15 @@ function haversineMi(aLat, aLng, bLat, bLng) {
 
 // Same HOS-aware estimate the console uses (55 mph bent to the DOT clock:
 // 11h drive / 14h shift / 30-min break / 10h reset; teams ~20h per day).
-function estimateArrival(miles, { team, driveLeftMin, shiftLeftMin, now = Date.now() } = {}) {
+// restDoneMin: how long a driver who is out of hours has already been parked,
+// so the 10-hour reset isn't assumed to start right now.
+function estimateArrival(miles, { team, driveLeftMin, shiftLeftMin, restDoneMin = 0, now = Date.now() } = {}) {
   if (!miles || miles <= 0) return null;
   const H = 3600000;
   let driveHrs = miles / CRUISE_MPH;
   let t = now;
   if (team) return t + driveHrs * (24 / 20) * H;
+  let restCredit = Math.max(0, Math.min(10, restDoneMin / 60));
   let first = driveLeftMin != null ? driveLeftMin / 60 : 11;
   if (shiftLeftMin != null) first = Math.min(first, shiftLeftMin / 60);
   first = Math.max(first, 0);
@@ -55,7 +80,8 @@ function estimateArrival(miles, { team, driveLeftMin, shiftLeftMin, now = Date.n
   driveHrs -= d;
   let guard = 0;
   while (driveHrs > 0.01 && guard++ < 60) {
-    t += 10 * H;
+    t += (10 - restCredit) * H;
+    restCredit = 0;
     d = Math.min(driveHrs, 11);
     t += (d + (d > 8 ? 0.5 : 0)) * H;
     driveHrs -= d;
@@ -64,7 +90,11 @@ function estimateArrival(miles, { team, driveLeftMin, shiftLeftMin, now = Date.n
 }
 
 const isDone = (code) => /^(delvd|deliv|del$|cmplt|complete|canc|void|avail|avbl|new)/i.test(String(code || ''));
-const isRolling = (code) => /^(depship|intran|enroute)/i.test(String(code || ''));
+// DEPSHIP / DEPCONS = departed shipper / departed a consignee → rolling to the next stop
+const isRolling = (code) => /^(depship|depcons|intran|enroute)/i.test(String(code || ''));
+// dispatched but the driver hasn't picked the trailer up yet — the truck's GPS
+// isn't with the load, so no ETA / stopped / tracking judgements yet
+const notStarted = (code) => /^(disp|assgn|assigned|printed|avail|avbl|new|plan)/i.test(String(code || ''));
 const isAtStop = (code) => /^(arrship|arrcons|spot)/i.test(String(code || ''));
 
 // Everything the rules need from one board item, flattened once.
@@ -73,6 +103,36 @@ function tripFacts(item, now) {
   const billsRaw = (item && (item.freightBills || item.orders)) || t.freightBills || [];
   const bills = Array.isArray(billsRaw) ? billsRaw : [];
   const temps = bills.map((b) => num(b.temperature)).filter((x) => x > 0);
+  // TruckMate sends one bill per consignee, sorted by BILL NUMBER (not stop
+  // order), often several bills per dock. Group them into physical stops by
+  // destination zone; a stop is delivered only when all its bills are.
+  const yes = (v) => v === true || v === 'True' || v === 'true' || v === 'Y';
+  const stopMap = new Map();
+  for (const b of bills) {
+    const label = b.endZoneDescription || b.endZone || '';
+    const key = String(b.endZone || label);
+    if (!key) continue;
+    const st = stopMap.get(key) || { key, label, zip: zipOf(label) || zipOf(b.endZone), tz: STATE_TZ[stateOf(label)] || 'America/New_York', pieces: 0, bills: 0, delivered: true, apptMs: null, apptNeeded: false };
+    st.pieces += num(b.pieces); st.bills += 1;
+    if (!b.actualDelivery) st.delivered = false;
+    // A REAL appointment is an exact time (deliverBy == deliverByEnd) or one
+    // TruckMate flags as required/made. The default multi-day window on flower
+    // bills (e.g. 10/02 00:00 → 10/06 23:59) is NOT an appointment.
+    // Midnight-to-midnight "exact" dates are leftovers too (one 624134 bill
+    // reads 09/22 00:00 → 09/22 00:00), so an unflagged exact time must have a
+    // real clock time, and anything over a day in the past is ignored.
+    // A flagged appointment still stamped 00:00 means the real time was never
+    // typed in (e.g. Produce Junction, written by hand on the sheet).
+    const by = localToUtcMs(b.deliverBy, st.tz); const end = localToUtcMs(b.deliverByEnd, st.tz);
+    const midnight = /T00:00(:00)?$/.test(String(b.deliverBy || '').slice(0, 19));
+    const exact = !Number.isNaN(by) && (Number.isNaN(end) || end === by);
+    const flagged = yes(b.deliveryApptReq) || yes(b.deliveryApptMade);
+    const fresh = !Number.isNaN(by) && by > now - 24 * 60 * MIN;
+    if (fresh && !midnight && (exact || flagged)) st.apptMs = st.apptMs == null ? by : Math.min(st.apptMs, by);
+    else if (flagged && midnight) st.apptNeeded = true;
+    stopMap.set(key, st);
+  }
+  const stops = [...stopMap.values()];
   const next = bills.find((b) => !b.actualDelivery) || null;
   const live = (item && item._samsara) || null;
   const gpsAgeMin = live && live.gpsAt ? (now - Date.parse(live.gpsAt)) / MIN : null;
@@ -81,12 +141,18 @@ function tripFacts(item, now) {
   const dels = (item && item._ratecon && item._ratecon.deliveries) || [];
   for (let i = dels.length - 1; i >= 0 && dueMs == null; i--) {
     const s = dels[i] || {};
-    const ms = Date.parse([s.date, s.time || s.appointment].filter(Boolean).join(' '));
-    if (!Number.isNaN(ms)) dueMs = ms;
+    const raw = [s.date, s.time || s.appointment].filter(Boolean).join(' ');
+    const d = new Date(`${raw} UTC`);                   // read the wall clock as-is…
+    if (!Number.isNaN(d.getTime())) {
+      const lastOpen = stops.filter((st) => !st.delivered).pop();
+      dueMs = localToUtcMs(d.toISOString().slice(0, 16), lastOpen ? lastOpen.tz : 'America/New_York'); // …then place it in the receiver's zone
+    }
   }
-  if (dueMs == null && next) {
-    const ms = Date.parse(next.deliverByEnd || next.deliverBy || '');
-    if (!Number.isNaN(ms)) dueMs = ms;
+  // a rate-con appointment belongs to the final undelivered stop
+  if (dueMs != null) {
+    const open = stops.filter((st) => !st.delivered);
+    const last = open[open.length - 1];
+    if (last && last.apptMs == null) last.apptMs = dueMs;
   }
   const instr = (item && item._ratecon && Array.isArray(item._ratecon.specialInstructions))
     ? [...new Set(item._ratecon.specialInstructions.map((x) => String(x).trim()).filter(Boolean))] : [];
@@ -102,7 +168,7 @@ function tripFacts(item, now) {
     dest: t.destZoneDesc || '',
     nextTo: next ? (next.endZoneDescription || next.endZone || t.destZoneDesc || '') : (t.destZoneDesc || ''),
     reqTemp: temps.length ? Math.min(...temps) : null,
-    dueMs,
+    stops,
     live,
     gpsFresh: gpsAgeMin != null && gpsAgeMin <= 30,
     gpsAgeMin,
@@ -148,21 +214,60 @@ const RULES = [
     };
   },
   function lateRisk(f, ctx) {
-    if (!f.dueMs || !f.live || !f.gpsFresh || f.live.lat == null) return null;
-    const zip = zipOf(f.nextTo);
-    const dest = zip ? ctx.geo(zip) : null;
-    if (!dest) return null;
-    const miles = haversineMi(f.live.lat, f.live.lng, dest.lat, dest.lng) * 1.2;
-    if (miles < 5) return null;
+    if (notStarted(f.status) || !f.live || !f.gpsFresh || f.live.lat == null) return null;
+    const open = f.stops.filter((st) => !st.delivered);
+    const targets = open.filter((st) => st.apptMs != null);
+    if (!targets.length) return null;               // flower stops without an appointment: nothing to miss
+    // Stop order isn't in the feed, so order the open stops by distance from the
+    // terminal — outbound routes fan out from Miami, matching the trip sheets.
+    const pts = new Map();
+    for (const st of open) {
+      const g = st.zip ? ctx.geo(st.zip) : null;
+      if (!g) return null;                            // still geocoding — check again next minute
+      pts.set(st.key, g);
+    }
+    const o = ctx.origin;
+    const fromOrigin = (st) => haversineMi(o.lat, o.lng, pts.get(st.key).lat, pts.get(st.key).lng);
+    const ordered = [...open].sort((a, b) => fromOrigin(a) - fromOrigin(b));
     const hos = f.live.hos || {};
-    const eta = estimateArrival(miles, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, now: ctx.now });
-    if (!eta) return null;
-    const lateMin = (eta - f.dueMs) / MIN;
-    if (lateMin <= 0) return null;
+    const restDoneMin = (hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stoppedMin) ? f.stoppedMin : 0;
+    let worst = null;
+    for (const target of targets) {
+      // drive truck → every open stop before it → the appointment stop
+      let miles = 0; let dwell = 0;
+      let at = { lat: f.live.lat, lng: f.live.lng };
+      for (const st of ordered) {
+        const g = pts.get(st.key);
+        miles += haversineMi(at.lat, at.lng, g.lat, g.lng) * 1.2;
+        at = g;
+        if (st === target) break;
+        dwell += 30;                                  // ~30 min to unload each stop on the way
+      }
+      if (miles < 5) continue;
+      const eta = estimateArrival(miles, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, restDoneMin, now: ctx.now });
+      if (!eta) continue;
+      const etaMs = eta + dwell * MIN;
+      const lateMin = (etaMs - target.apptMs) / MIN;
+      if (lateMin > 0 && (!worst || lateMin > worst.lateMin)) worst = { lateMin, target, miles, etaMs, stopsBefore: Math.round(dwell / 30) };
+    }
+    if (!worst) return null;
+    const t = worst.target;
+    // out of hours and parked since before we started watching: we don't know
+    // when the 10-hour break began, so don't page anyone on a guess
+    const guess = hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stopStartUnknown;
     return {
-      code: 'late-risk', severity: lateMin > 60 ? 'critical' : 'warning',
-      title: `Will miss delivery by ~${fmtMin(lateMin)}`,
-      detail: `${Math.round(miles)} mi to ${f.nextTo}. Projected ${fmtTime(eta)} vs due ${fmtTime(f.dueMs)}${f.team ? ' (team)' : ` · drive left ${fmtMin(hos.driveLeftMin)}`}. Warn the broker/receiver or plan a rescue.`,
+      code: 'late-risk', severity: worst.lateMin > 60 && !guess ? 'critical' : 'warning', key: t.key,
+      title: `Will miss ${t.label.replace(/, \d{5}$/, '')} appointment by ~${fmtMin(worst.lateMin)}`,
+      detail: `${Math.round(worst.miles)} mi${worst.stopsBefore ? ` with ${worst.stopsBefore} stop${worst.stopsBefore === 1 ? '' : 's'} first` : ''}. Projected ${fmtTime(worst.etaMs)} vs appointment ${fmtTime(t.apptMs)}${f.team ? ' (team)' : ` · drive left ${fmtMin(hos.driveLeftMin)}`}.${guess ? ' Break start unknown — confirm with the driver.' : ''} Warn the broker/receiver or plan a rescue.`,
+    };
+  },
+  function apptTimeMissing(f) {
+    const st = f.stops.find((x) => !x.delivered && x.apptNeeded && x.apptMs == null);
+    if (!st || notStarted(f.status)) return null;
+    return {
+      code: 'appt-missing', severity: 'warning', key: st.key,
+      title: `Appointment required at ${st.label.replace(/, \d{5}$/, '')} — no time in TruckMate`,
+      detail: 'The receiver needs an appointment but the time was never entered, so lateness can\'t be checked. Enter the appointment in TruckMate.',
     };
   },
   function hosLow(f) {
@@ -179,16 +284,21 @@ const RULES = [
   },
   function stopped(f, ctx) {
     const l = f.live;
-    if (!isRolling(f.status) || !l || !f.gpsFresh) return null;
-    const st = ctx.unitState(f.unit);
-    if (!st || !st.stoppedSince) return null;
-    const mins = (ctx.now - st.stoppedSince) / MIN;
+    if (!isRolling(f.status) || !l || !f.gpsFresh || !f.stoppedMin) return null;
+    const mins = f.stoppedMin;
     if (mins < 60) return null;
     const left = l.hos && l.hos.driveLeftMin;
     if (left != null && left < 90) return null;            // likely a legal rest, not a problem
-    const zip = zipOf(f.nextTo);
-    const dest = zip ? ctx.geo(zip) : null;
-    if (dest && l.lat != null && haversineMi(l.lat, l.lng, dest.lat, dest.lng) < 15) return null; // at/near the receiver
+    // parked at / near any customer still to be delivered = unloading, not a problem
+    const nearStop = f.stops.some((s2) => {
+      if (s2.delivered || !s2.zip) return false;
+      const g = ctx.geo(s2.zip);
+      return g && l.lat != null && haversineMi(l.lat, l.lng, g.lat, g.lng) < 15;
+    });
+    if (nearStop) return null;
+    // still at the Miami terminal / yard = waiting for pickup, not stuck
+    const o = ctx.origin;
+    if (l.lat != null && haversineMi(l.lat, l.lng, o.lat, o.lng) < 30) return null;
     const codes = (l.dtcCodes || []).length;
     return {
       code: 'stopped', severity: mins >= 120 || codes ? 'critical' : 'warning',
@@ -224,7 +334,11 @@ const RULES = [
   },
 ];
 
-export function evaluateBoard(board, ctx) {
+// Florida Beauty's Miami terminal — where the outbound trips load.
+const MIAMI_TERMINAL = { lat: 25.795, lng: -80.33 };
+
+export function evaluateBoard(board, ctxIn) {
+  const ctx = { origin: MIAMI_TERMINAL, unitState: () => null, ...ctxIn };
   const out = [];
   if (board && board.ageMinutes != null && board.ageMinutes > 30) {
     out.push({
@@ -236,6 +350,9 @@ export function evaluateBoard(board, ctx) {
   for (const item of (board && board.trips) || []) {
     const f = tripFacts(item, ctx.now);
     if (!f.trip || isDone(f.status)) continue;
+    const us = ctx.unitState ? ctx.unitState(f.unit) : null;
+    f.stoppedMin = us && us.stoppedSince ? (ctx.now - us.stoppedSince) / MIN : 0;
+    f.stopStartUnknown = !!(us && us.stopStartUnknown);
     for (const rule of RULES) {
       let a = null;
       try { a = rule(f, ctx); } catch { a = null; }
@@ -268,7 +385,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     geoQueue.add(zip);
     return undefined;
   }
-  async function drainGeo(limit = 8) {
+  async function drainGeo(limit = 25) {
     const key = env.GOOGLE_GEOCODE_KEY || env.GOOGLE_MAPS_KEY || '';
     let n = 0;
     for (const zip of [...geoQueue]) {
@@ -329,8 +446,12 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
         const l = item && item._samsara;
         const u = norm(t.powerUnit);
         if (!u || !l || l.speedMph == null) continue;
+        const isNew = !s.units[u];
         const us = s.units[u] || {};
-        if (l.speedMph > 3) { us.stoppedSince = null; us.lastMovingAt = now; } else if (!us.stoppedSince) us.stoppedSince = now;
+        if (l.speedMph > 3) { us.stoppedSince = null; us.stopStartUnknown = false; us.lastMovingAt = now; } else if (!us.stoppedSince) {
+          us.stoppedSince = now;
+          us.stopStartUnknown = isNew;                  // already parked when we first saw it
+        }
         s.units[u] = us;
       }
       const ctx = { now, geo, unitState: (unit) => s.units[norm(unit)] };
