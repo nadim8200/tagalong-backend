@@ -1082,6 +1082,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             toSend.push(p);
           }
 
+          // Strongest real speed change the GPS saw this poll (in G), used below to
+          // confirm the accelerometer. null = no fixes fetched (car parked/asleep).
+          let gpsBrakeG = null; let gpsAccelG = null;
+
           // ---- hard acceleration / braking / cornering ----
           //
           // SOURCE: the tracker's ACCELEROMETER (Teltonika "Green Driving"). That
@@ -1107,6 +1111,26 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
               .map((p) => ({ mph: Math.round((p.speed || 0) * KNOTS_TO_MPH), t: p.fixTime ? new Date(p.fixTime).getTime() : 0, course: Number(p.course) || 0, a: p.attributes || {} }))
               .filter((p) => p.t)
               .sort((a, b) => a.t - b.t);
+
+            // How hard did the car REALLY slow down / speed up? Compare fixes up to
+            // 6 s apart (skipping turns, where GPS speed is noisy) and convert the
+            // steepest change to G. A misread accelerometer (an OBD tracker plugged
+            // in at an angle) can tag hundreds of ordinary stops as "hard braking"
+            // — 2614 reported 0.4–0.65 G while the GPS showed ~0.05 G.
+            if (pts.length > 1) {
+              gpsBrakeG = 0; gpsAccelG = 0;
+              for (let i = 1; i < pts.length; i++) {
+                for (let j = i - 1; j >= 0 && (pts[i].t - pts[j].t) / 1000 <= 6; j--) {
+                  const sec = (pts[i].t - pts[j].t) / 1000;
+                  if (sec < 1) continue;
+                  const hd = Math.abs(pts[i].course - pts[j].course) % 360;
+                  if (Math.min(hd, 360 - hd) > 30) continue;
+                  const g = ((pts[i].mph - pts[j].mph) / sec) * 0.44704 / 9.81;
+                  if (-g > gpsBrakeG) gpsBrakeG = -g;
+                  if (g > gpsAccelG) gpsAccelG = g;
+                }
+              }
+            }
 
             let accelDone = false; let brakeDone = false;
 
@@ -1906,8 +1930,19 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
           // vehicle every 2 minutes instead of a burst.
           {
             const kept = [];
+            // Confirm with GPS: drop a hard braking / acceleration alert when the
+            // speed data shows nothing close to it (per-car override: harshMinG).
+            const minG = Number((d.attributes || {}).harshMinG) > 0 ? Number((d.attributes || {}).harshMinG) : 0.2;
             for (const a of toSend) {
               const m = /hard (braking|acceleration|cornering)/i.exec((a && a.title) || '');
+              if (m && m[1].toLowerCase() === 'braking' && gpsBrakeG != null && gpsBrakeG < minG) {
+                console.log(`[push]   suppressed "${a.title}" — GPS shows only ${gpsBrakeG.toFixed(2)} G`);
+                continue;
+              }
+              if (m && m[1].toLowerCase() === 'acceleration' && gpsAccelG != null && gpsAccelG < minG) {
+                console.log(`[push]   suppressed "${a.title}" — GPS shows only ${gpsAccelG.toFixed(2)} G`);
+                continue;
+              }
               if (m) {
                 const k = `hb:${d.id}:${m[1].toLowerCase()}`;
                 if (Date.now() - Number(rec.sigs[k] || 0) < 2 * 60 * 1000) continue;
