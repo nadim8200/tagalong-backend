@@ -966,8 +966,16 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     if (r.ok) { dev.attributes = { ...a, speedLimit: wantKnots }; console.log(`[push] speedLimit set on ${(a.displayName || dev.name)}: ${hardMph} mph`); }
   }
 
+  // Never run two polls at once. When a poll runs longer than the interval
+  // (busy server, e.g. right after a deploy) a second one used to start with
+  // the same "already sent" state and re-send every alert in the window.
+  let polling = false;
   async function poll() {
-    if (!enabled) return;
+    if (!enabled || polling) return;
+    polling = true;
+    try { await pollOnce(); } finally { polling = false; }
+  }
+  async function pollOnce() {
     if (!lastCheck) await loadLastCheck();
     const now = Date.now();
     const fromISO = new Date(lastCheck).toISOString();
@@ -1890,6 +1898,26 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
             } else if (rec.sigs[sig] === 'over') {
               rec.sigs[sig] = 'ok'; changed = true; // slowed/stopped → re-arm
             }
+          }
+
+          // One push per driving event. The tracker's sensor, Traccar's event and
+          // the speed-drop check can all report the SAME hard brake, and a truck
+          // can log several brake-tagged fixes in a row — send one per kind per
+          // vehicle every 2 minutes instead of a burst.
+          {
+            const kept = [];
+            for (const a of toSend) {
+              const m = /hard (braking|acceleration|cornering)/i.exec((a && a.title) || '');
+              if (m) {
+                const k = `hb:${d.id}:${m[1].toLowerCase()}`;
+                if (Date.now() - Number(rec.sigs[k] || 0) < 2 * 60 * 1000) continue;
+                rec.sigs[k] = String(Date.now());
+                changed = true;
+              }
+              kept.push(a);
+            }
+            toSend.length = 0;
+            toSend.push(...kept);
           }
 
           for (const a of toSend) {
