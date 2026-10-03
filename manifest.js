@@ -30,6 +30,7 @@ const STOP = obj({
   subStop: { type: 'boolean', description: 'True for a "+" line delivered at the same place as the stop above it.' },
   action: { type: 'string', description: 'LOAD, PICKUP or DELIVER as printed.' },
   customer: str,
+  address: { ...str, description: 'Street address if printed for this stop, verbatim. Null if not on the sheet.' },
   city: str,
   state: { ...str, description: 'Two-letter state code.' },
   zip: str,
@@ -51,6 +52,7 @@ const STOP = obj({
       purpose: str,
     }),
   },
+  references: { ...strs, description: 'Reference / PO / load numbers printed for this stop, exactly as written (e.g. "M5036254: DECOWRAPS / LOAD# 9-29-26").' },
   instructions: { ...strs, description: 'Every printed must-follow location note for this stop (do not repeat the generic "verify box count / take picture of two sides of each pallet" boilerplate).' },
   handwritten: { ...strs, description: 'Handwritten marks next to this stop, transcribed (e.g. "CERTIFICATE SELECT GROWERS", "SPLIT").' },
 });
@@ -121,7 +123,42 @@ export function compareWithTruckMate(sheet, item) {
   return out;
 }
 
-export function initManifests(app, { requireAuth, db, env = process.env, buildBoard }) {
+// Stable identity for one stop on one trip sheet: stop number + sub-stop
+// position + customer + city. Survives a re-upload of the same sheet, and keeps
+// two visits to the same city (or customer) apart.
+export function stopKeyOf(stop, indexInNumber = 0) {
+  const n = stop && stop.stopNumber != null ? stop.stopNumber : 'x';
+  const who = norm(stop && stop.customer).slice(0, 40);
+  return `${n}.${indexInNumber}|${who}|${cityKey(stop && stop.city, stop && stop.state)}`;
+}
+export function keyStops(stops) {
+  const seen = {};
+  return (stops || []).map((st) => {
+    const n = st && st.stopNumber != null ? st.stopNumber : 'x';
+    const i = seen[n] = (seen[n] == null ? 0 : seen[n] + 1);
+    return { ...st, key: stopKeyOf(st, i) };
+  });
+}
+// What changed between the previous sheet for a trip and a re-upload.
+export function sheetChanges(prev, next) {
+  if (!prev) return null;
+  const a = new Map(keyStops(prev.stops).map((s) => [s.key, s]));
+  const b = new Map(keyStops(next.stops).map((s) => [s.key, s]));
+  const label = (s) => `${s.stopNumber != null ? `Stop ${s.stopNumber} ` : ''}${s.customer || ''} (${[s.city, s.state].filter(Boolean).join(', ')})`.trim();
+  const added = [...b.keys()].filter((k) => !a.has(k)).map((k) => label(b.get(k)));
+  const removed = [...a.keys()].filter((k) => !b.has(k)).map((k) => label(a.get(k)));
+  const changed = [];
+  for (const [k, s] of b) {
+    const o = a.get(k);
+    if (!o) continue;
+    const before = `${o.apptDate || ''} ${o.apptTime || ''}`.trim(); const after = `${s.apptDate || ''} ${s.apptTime || ''}`.trim();
+    if (before !== after) changed.push(`${label(s)}: appointment ${before || 'none'} → ${after || 'none'}`);
+    if ((o.pieces || null) !== (s.pieces || null)) changed.push(`${label(s)}: pieces ${o.pieces ?? '—'} → ${s.pieces ?? '—'}`);
+  }
+  return { added, removed, changed, previousUploadedAt: prev.uploadedAt || null, previousVersion: prev.version || 1 };
+}
+
+export function initManifests(app, { requireAuth, db, env = process.env, buildBoard, docs = null }) {
   const enabled = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN);
   const client = enabled ? new Anthropic() : null;
   const model = env.MANIFEST_MODEL || 'claude-opus-5-5';
@@ -185,12 +222,27 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
 
       const board = await boardIndex(site);
       const now = new Date().toISOString();
+      // Originals were stored first (one per page, POST /truckmate/docs);
+      // originalIds[i] is the stored page that page i+1 came from.
+      const originalIds = Array.isArray(req.body.originalIds) ? req.body.originalIds.map((x) => (x == null ? null : String(x))) : [];
+      const pageNo = (label) => { const m = String(label || '').match(/Page\s+(\d+)/i); return m ? Number(m[1]) : null; };
+      const prevAll = (db && db.enabled) ? await db.get(storeKey(site), {}) : {};
       const trips = (parsed.trips || []).filter((t) => t && t.tripNumber).map((t) => {
         const tripNumber = String(t.tripNumber).replace(/\D/g, '') || String(t.tripNumber);
-        const rec = { ...t, tripNumber, uploadedAt: now, uploadedBy: who(req), pageCount: pages.length };
+        const prev = prevAll[tripNumber] || null;
+        const rec = { ...t, tripNumber, uploadedAt: now, uploadedBy: who(req), pageCount: pages.length, batchId: req.body.batchId || null };
+        rec.stops = keyStops(rec.stops);
+        rec.version = prev ? (prev.version || 1) + 1 : 1;
+        rec.changes = sheetChanges(prev, rec);
+        rec.docIds = (t.pages || []).map(pageNo).filter(Boolean).map((n) => originalIds[n - 1]).filter(Boolean);
         rec.diffs = compareWithTruckMate(rec, board.get(tripNumber));
         return rec;
       });
+      if (docs && docs.enabled) {
+        const byDoc = new Map();
+        trips.forEach((t) => t.docIds.forEach((id) => byDoc.set(id, [...(byDoc.get(id) || []), t.tripNumber])));
+        try { await docs.linkDocs({ site, kind: 'tripsheet', links: [...byDoc].map(([docId, tr]) => ({ docId, trips: tr })) }); } catch (e) { console.warn('[manifest] could not link originals:', e.message); }
+      }
       if (db && db.enabled) {
         await db.update(storeKey(site), (cur) => {
           const all = { ...(cur || {}) };

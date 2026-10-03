@@ -440,7 +440,7 @@ export function evaluateBoard(board, ctxIn) {
   return out;
 }
 
-export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push }) {
+export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null }) {
   if (!db || !db.enabled) { console.log('[watchtower] off — needs DATABASE_URL'); return; }
   const sites = String(env.WATCH_SITES || 'florida-beauty').split(',').map((s) => s.trim()).filter(Boolean);
   const CFG = 'taWatchCfg';
@@ -507,6 +507,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     const now = Date.now();
     await loadGeo();
     const board = await buildBoard(site);
+    if (afterBoard) { try { await afterBoard(site, board); } catch (e) { console.warn('[watchtower] afterBoard:', e.message); } }
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
     const toPush = []; const toEscalate = [];
 

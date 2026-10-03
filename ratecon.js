@@ -34,7 +34,7 @@ const PROMPT = [
   'Use null when a field is absent. Do not invent values. "summary" is one short sentence.',
 ].join('\n');
 
-export function initRateCon(app, { requireAuth, db, env = process.env }) {
+export function initRateCon(app, { requireAuth, db, env = process.env, docs = null }) {
   const key = env.ANTHROPIC_API_KEY || '';
   const model = env.RATECON_MODEL || env.CAR_CHAT_MODEL || 'claude-haiku-4-5-20251001';
   const storeKey = (site) => `taTruckMateRateCon:${site}`;
@@ -131,9 +131,18 @@ export function initRateCon(app, { requireAuth, db, env = process.env }) {
 
       const names = pages.map((p) => p.filename).filter(Boolean);
       const filename = names.length ? (names.length > 1 ? `${names[0]} +${names.length - 1} more` : names[0]) : null;
-      const record = { ...parsed, filename, pageCount: pages.length, uploadedAt: new Date().toISOString() };
+      const site = String(req.query.site || 'florida-beauty');
+      const record = { ...parsed, filename, pageCount: pages.length, uploadedAt: new Date().toISOString(), uploadedBy: whoAmI(req) };
+      // Keep the ORIGINAL files (bytes, name, type) so "View PDF" opens exactly
+      // what was uploaded. Each upload is a new version; older ones stay.
+      if (docs && docs.enabled) {
+        try {
+          const stored = await docs.storeDocs({ site, kind: 'ratecon', trip, files: pages, by: whoAmI(req) });
+          record.docIds = stored.map((d) => d.id);
+          record.version = stored.length ? stored[0].version : null;
+        } catch (e) { record.docError = `Original not stored: ${e.message}`; }
+      }
       if (db && db.enabled) {
-        const site = String(req.query.site || 'florida-beauty');
         await db.update(storeKey(site), (cur) => ({ ...(cur || {}), [trip]: record }), {});
       }
       res.json(record);

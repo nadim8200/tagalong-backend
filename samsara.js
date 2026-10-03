@@ -50,6 +50,11 @@ export const vehicleStats = (token, types = 'gps,engineStates,fuelPercents,obdOd
 // because the stats endpoint caps the number of types per request.
 export const vehicleHealthStats = (token) =>
   vehicleStats(token, 'batteryMilliVolts,engineRpm,faultCodes,engineCoolantTemperatureMilliC');
+// More engine readings, where the vehicle gateway reports them. If Samsara
+// rejects a type for this account the call fails alone and these just show
+// "Not reported" — nothing else is affected.
+export const vehicleHealthStats2 = (token) =>
+  vehicleStats(token, 'defLevelMilliPercent,engineLoadPercent,engineOilPressureKPa,obdEngineSeconds');
 export const hosClocks = (token) => sGet(token, '/fleet/hos/clocks?limit=200');
 
 // Breadcrumb GPS history for ONE vehicle over [startIso, endIso]. Returns a
@@ -152,7 +157,8 @@ export async function reeferStats(token) {
 // one resource failing (returns an { error } marker for that slice instead).
 export async function snapshot(token) {
   const safe = (p) => p.then((v) => v).catch((e) => ({ error: String(e.message || e) }));
-  const [drivers, vehicles, trailers, stats, assignments, reefer, hos, reeferRead, health] = await Promise.all([
+  const fetchedAt = new Date().toISOString();
+  const [drivers, vehicles, trailers, stats, assignments, reefer, hos, reeferRead, health, health2] = await Promise.all([
     safe(listDrivers(token)),
     safe(listVehicles(token)),
     safe(listTrailers(token)),
@@ -162,16 +168,19 @@ export async function snapshot(token) {
     safe(hosClocks(token)),
     safe(reeferReadings(token)),   // LIVE reefer values (Readings API)
     safe(vehicleHealthStats(token)),
+    safe(vehicleHealthStats2(token)),
   ]);
   // fold the engine-health readings into each vehicle's stats record
-  if (Array.isArray(stats) && Array.isArray(health)) {
-    const byId = new Map(health.map((h) => [String(h.id), h]));
+  for (const [extra, keys] of [[health, ['batteryMilliVolts', 'engineRpm', 'faultCodes', 'engineCoolantTemperatureMilliC']],
+    [health2, ['defLevelMilliPercent', 'engineLoadPercent', 'engineOilPressureKPa', 'obdEngineSeconds']]]) {
+    if (!Array.isArray(stats) || !Array.isArray(extra)) continue;
+    const byId = new Map(extra.map((h) => [String(h.id), h]));
     stats.forEach((st) => {
       const h = byId.get(String(st.id));
-      if (h) ['batteryMilliVolts', 'engineRpm', 'faultCodes', 'engineCoolantTemperatureMilliC'].forEach((k) => { if (h[k] != null) st[k] = h[k]; });
+      if (h) keys.forEach((k) => { if (h[k] != null) st[k] = h[k]; });
     });
   }
-  return { drivers, vehicles, trailers, stats, assignments, reefer, hos, reeferRead };
+  return { drivers, vehicles, trailers, stats, assignments, reefer, hos, reeferRead, fetchedAt };
 }
 
 // ===============================================================
@@ -350,6 +359,9 @@ export function indexSnapshot(snap) {
     const cycle = (c.clocks && c.clocks.cycle) || {};
     const mins = (ms) => (ms != null ? Math.round(ms / MIN) : null);
     hosById[String(id)] = {
+      driverId: String(id),
+      driverName: (c.driver && c.driver.name) || null,
+      at: snap.fetchedAt || null,                       // when these clocks were read from Samsara
       status: (c.currentDutyStatus && c.currentDutyStatus.hosStatusType) || null,
       vehicle: (c.currentVehicle && c.currentVehicle.name) || null,
       driveLeftMin: mins(drive.driveRemainingDurationMs),
@@ -358,7 +370,7 @@ export function indexSnapshot(snap) {
       breakInMin: mins(drive.timeUntilBreakDurationMs),
     };
   }
-  return { driversByCode, vehByUnit, statsByUnit, reeferByKey, hosById };
+  return { driversByCode, vehByUnit, statsByUnit, reeferByKey, hosById, fetchedAt: snap.fetchedAt || null };
 }
 
 // Samsara engine fault codes → the same [{code, meaning}] shape the FMC00A
@@ -410,7 +422,18 @@ export function correlate(item, idx) {
     const cmc = st.engineCoolantTemperatureMilliC ? st.engineCoolantTemperatureMilliC.value : null;
     live.coolantF = cmc != null ? Math.round((cmc / 1000) * 9 / 5 + 32) : null;
     live.dtcCodes = samsaraDtcCodes(st.faultCodes);
+    live.dtcAt = st.faultCodes && st.faultCodes.time ? st.faultCodes.time : null;
+    const v = (k) => (st[k] && st[k].value != null ? st[k].value : null);
+    const tm = (k) => (st[k] && st[k].time) || null;
+    live.defPct = v('defLevelMilliPercent') != null ? Math.round(v('defLevelMilliPercent') / 1000) : null;
+    live.engineLoadPct = v('engineLoadPercent');
+    live.oilPressurePsi = v('engineOilPressureKPa') != null ? Math.round(v('engineOilPressureKPa') * 0.145038) : null;
+    live.engineHours = v('obdEngineSeconds') != null ? Math.round(v('obdEngineSeconds') / 3600) : null;
+    live.odometerMi = v('obdOdometerMeters') != null ? Math.round(v('obdOdometerMeters') / 1609.344) : null;
+    live.fuelAt = tm('fuelPercent'); live.powerAt = tm('batteryMilliVolts'); live.defAt = tm('defLevelMilliPercent'); live.coolantAt = tm('engineCoolantTemperatureMilliC');
+    live.engineAt = tm('engineState');
   }
+  if (idx.fetchedAt) live.sourceAt = idx.fetchedAt;
   const veh = idx.vehByUnit[norm(t.powerUnit)];
   if (veh && veh.staticAssignedDriver) live.samsaraDriver = veh.staticAssignedDriver.name;
   const reef = idx.reeferByKey[norm(t.trailer)] || idx.reeferByKey[norm(t.trailer2)];

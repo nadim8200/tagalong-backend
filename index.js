@@ -29,6 +29,9 @@ import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
 import { initWatchtower } from './watchtower.js';
 import { initManifests } from './manifest.js';
+import { initDocuments } from './documents.js';
+import { initStopVisits } from './stopvisits.js';
+import { listAddresses, samsaraTokenFrom } from './samsara.js';
 import { initNotify } from './notify.js';
 import { initFleet } from './fleet.js';
 import { initRingCentral } from './ringcentral.js';
@@ -642,16 +645,20 @@ initFleet(app, { requireAuth, db, env: process.env });
 // RingCentral: SMS from the company's own business numbers, plus the call log
 // so "was this customer actually called?" comes from records, not memory.
 const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.env });
-const truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders });
+// Original uploaded documents (rate cons, trip sheets) kept privately in Postgres.
+const docs = initDocuments(app, { requireAuth, db });
+// Geofence stop tracking (validated Samsara address boundaries only).
+const stopVisits = initStopVisits({ db, env: process.env, listAddresses, tokenFrom: samsaraTokenFrom });
+const truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
-initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard });
+initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, docs });
 
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
-initWatchtower(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, push });
+initWatchtower(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: (site, board) => stopVisits.process(site, board) });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
@@ -662,7 +669,7 @@ initNotify(app, { requireAuth, db, pool: db.pool, env: process.env, ringcentral:
 initDbpo(app, { db });
 
 // AI dispatcher — read uploaded rate confirmations (broker instructions).
-initRateCon(app, { requireAuth, db, env: process.env });
+initRateCon(app, { requireAuth, db, env: process.env, docs });
 
 app.get('/', (_req, res) => res.send('TagAlong backend is running.'));
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));

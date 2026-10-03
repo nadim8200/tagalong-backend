@@ -7,7 +7,7 @@
 // browser, and is verified against the live endpoint before it replaces a
 // working config.
 // ---------------------------------------------------------------
-import { compareWithTruckMate } from './manifest.js';
+import { compareWithTruckMate, keyStops } from './manifest.js';
 import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit } from './samsara.js';
 
 // ===============================================================
@@ -221,7 +221,7 @@ function traccarLive(device, p) {
   };
 }
 
-export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders }) {
+export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders, docs = null }) {
   // 30s-cached index of Traccar devices → live overlay, keyed by unit number.
   let _tmTraccar = { at: 0, idx: null };
   async function traccarLiveIndex() {
@@ -550,10 +550,31 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         trips.forEach((item) => {
           const t = (item && item.trip) || item || {};
           const sh = sheets[String(t.tripNumber)];
-          if (sh) item._manifest = { ...sh, diffs: compareWithTruckMate(sh, item) };
+          if (sh) item._manifest = { ...sh, stops: keyStops(sh.stops), diffs: compareWithTruckMate(sh, item) };
         });
       }
     } catch { /* no trip-sheet overlay this cycle */ }
+    // Geofence stop visits (server-tracked) and the stored original documents.
+    try {
+      if (db && db.enabled) {
+        const visits = await db.get(`taStopVisits:${site}`, {});
+        trips.forEach((item) => {
+          const t = (item && item.trip) || item || {};
+          const v = visits[String(t.tripNumber)];
+          if (v) item._visits = v;
+        });
+      }
+      if (docs && docs.enabled) {
+        const nums = trips.map((i) => String(((i && i.trip) || i || {}).tripNumber || '')).filter(Boolean);
+        const list = nums.length ? await docs.listDocs({ site, trips: nums }) : [];
+        const byTrip = {};
+        list.forEach((d) => d.trips.forEach((n) => { (byTrip[n] = byTrip[n] || []).push(d); }));
+        trips.forEach((item) => {
+          const n = String(((item && item.trip) || item || {}).tripNumber || '');
+          if (byTrip[n]) item._docs = byTrip[n];
+        });
+      }
+    } catch (e) { console.warn('[truckmate] visits/docs overlay:', e.message); }
     // Detect NEW truck→load assignments: a truck's power unit appearing on an
     // active trip it wasn't on before. Each is announced once (state persists),
     // so the dispatcher gets a single pop-up and AI dispatching "starts now".
