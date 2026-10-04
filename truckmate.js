@@ -221,7 +221,7 @@ function traccarLive(device, p) {
   };
 }
 
-export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders, docs = null }) {
+export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders, docs = null, overlays = [] }) {
   // 30s-cached index of Traccar devices → live overlay, keyed by unit number.
   let _tmTraccar = { at: 0, idx: null };
   async function traccarLiveIndex() {
@@ -574,7 +574,19 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
           if (byTrip[n]) item._docs = byTrip[n];
         });
       }
+      // every page of uploaded trip packets that was matched to a trip
+      if (db && db.enabled) {
+        const packets = await db.get(`taTruckMatePacket:${site}`, {});
+        trips.forEach((item) => {
+          const n = String(((item && item.trip) || item || {}).tripNumber || '');
+          if (packets[n]) item._packet = packets[n];
+        });
+      }
     } catch (e) { console.warn('[truckmate] visits/docs overlay:', e.message); }
+    // extra overlays (outside carriers, check-ins, …)
+    for (const fn of overlays) {
+      try { await fn(site, trips); } catch (e) { console.warn('[truckmate] overlay:', e.message); } // eslint-disable-line no-await-in-loop
+    }
     // Detect NEW truck→load assignments: a truck's power unit appearing on an
     // active trip it wasn't on before. Each is announced once (state persists),
     // so the dispatcher gets a single pop-up and AI dispatching "starts now".

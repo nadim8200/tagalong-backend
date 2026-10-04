@@ -193,7 +193,14 @@ function tripFacts(item, now) {
   const instr = (item && item._ratecon && Array.isArray(item._ratecon.specialInstructions))
     ? [...new Set(item._ratecon.specialInstructions.map((x) => String(x).trim()).filter(Boolean))] : [];
   const checks = (item && item._rccheck) || {};
+  // Outside carrier: no ELD/HOS/engine from us; tracking = check-ins.
+  const oc = (item && item._oc) || null;
+  const checkins = (item && item._checkins) || [];
+  const lastCheckinMs = Math.max(0, ...checkins.map((c) => Date.parse(c.at) || 0), live && live.gpsAt ? Date.parse(live.gpsAt) || 0 : 0) || null;
   return {
+    oc,
+    lastCheckinMs,
+    lastCheckin: checkins[0] || null,
     sheet,
     pickupAtMs,
     trip: String(t.tripNumber || (item && item._id) || ''),
@@ -324,6 +331,20 @@ const RULES = [
     }
     return null;
   },
+  // OC loads: no GPS from us, so the check-in IS the tracking. Flag when the
+  // carrier hasn't reported in a while (or never) once the trip is moving.
+  function carrierUpdateOverdue(f, ctx) {
+    if (!f.oc || notStarted(f.status, f, ctx.now)) return null;
+    const name = (f.oc.carrier && f.oc.carrier.name) || 'the carrier';
+    const phone = f.oc.carrier && f.oc.carrier.dispatchPhone;
+    const hrs = f.lastCheckinMs ? (ctx.now - f.lastCheckinMs) / 3600000 : null;
+    if (hrs != null && hrs < 4) return null;
+    return {
+      code: 'carrier-update-overdue', severity: hrs != null && hrs >= 8 ? 'critical' : 'warning',
+      title: hrs == null ? `No check-in from ${name} yet` : `No update from ${name} in ${Math.floor(hrs)}h`,
+      detail: `Outside carrier load${f.oc.truck ? ` (their truck ${f.oc.truck})` : ''}. ${phone ? `Call their dispatch ${phone}` : 'Call the carrier'}${f.oc.driverPhone ? ` or the driver ${f.oc.driverPhone}` : ''} and log the check-in.${f.lastCheckin ? ` Last: “${String(f.lastCheckin.text || '').slice(0, 80)}”` : ''}`,
+    };
+  },
   function sheetMismatch(f) {
     const diffs = (f.sheet && f.sheet.diffs) || [];
     if (!diffs.length) return null;
@@ -343,6 +364,7 @@ const RULES = [
     };
   },
   function hosLow(f) {
+    if (f.oc) return null;                              // outside carrier: not our ELD / engine
     const l = f.live;
     if (!l || f.team || !l.hos || l.hos.driveLeftMin == null) return null;
     const left = l.hos.driveLeftMin;
@@ -355,6 +377,7 @@ const RULES = [
     };
   },
   function stopped(f, ctx) {
+    if (f.oc) return null;                              // outside carrier: not our ELD / engine
     const l = f.live;
     if (!isRolling(f.status) || !l || !f.gpsFresh || !f.stoppedMin || notStarted(f.status, f, ctx.now)) return null;
     const mins = f.stoppedMin;
@@ -379,6 +402,7 @@ const RULES = [
     };
   },
   function checkEngine(f) {
+    if (f.oc) return null;                              // outside carrier: not our ELD / engine
     const codes = (f.live && f.live.dtcCodes) || [];
     if (!codes.length) return null;
     return {
@@ -388,6 +412,7 @@ const RULES = [
     };
   },
   function trackingLost(f) {
+    if (f.oc) return null;                              // outside carrier: not our ELD / engine
     if (!isRolling(f.status) || !f.unit || notStarted(f.status, f, Date.now())) return null;
     if (f.live && f.gpsAgeMin != null && f.gpsAgeMin <= 60) return null;
     return {

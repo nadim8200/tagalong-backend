@@ -15,8 +15,9 @@
 // (lineage), and the newest is what the trip shows by default.
 // ---------------------------------------------------------------
 import crypto from 'node:crypto';
+import { PDFDocument } from 'pdf-lib';
 
-const KINDS = new Set(['ratecon', 'tripsheet']);
+const KINDS = new Set(['ratecon', 'tripsheet', 'packet']);
 const MAX_FILE_BYTES = 14 * 1024 * 1024;
 const OK_TYPES = /^(application\/pdf|image\/(jpeg|png|webp|heic|heif|gif))$/i;
 
@@ -35,6 +36,9 @@ export const docMeta = (r) => ({
   version: r.version != null ? Number(r.version) : null,
   uploadedAt: r.uploaded_at instanceof Date ? r.uploaded_at.toISOString() : r.uploaded_at,
   uploadedBy: r.uploaded_by || null,
+  docType: r.doc_type || null,          // manifest, bol, pod, email, driver_id, carrier_confirmation, …
+  restricted: !!r.restricted,           // driver IDs and whole packets that contain them
+  packetId: r.packet_id ? String(r.packet_id) : null,
 });
 
 export function initDocuments(app, { requireAuth, db }) {
@@ -65,6 +69,9 @@ export function initDocuments(app, { requireAuth, db }) {
           )`);
         await pool.query('CREATE INDEX IF NOT EXISTS ta_docs_trips ON ta_docs USING GIN (trips)');
         await pool.query('CREATE INDEX IF NOT EXISTS ta_docs_batch ON ta_docs (batch_id)');
+        await pool.query('ALTER TABLE ta_docs ADD COLUMN IF NOT EXISTS doc_type TEXT');
+        await pool.query('ALTER TABLE ta_docs ADD COLUMN IF NOT EXISTS restricted BOOLEAN NOT NULL DEFAULT false');
+        await pool.query('ALTER TABLE ta_docs ADD COLUMN IF NOT EXISTS packet_id BIGINT');
       })().catch((e) => { ready = null; throw e; });
     }
     return ready;
@@ -75,6 +82,38 @@ export function initDocuments(app, { requireAuth, db }) {
 
   // Store originals. Used by the rate-con reader (same request) and by the
   // trip-sheet upload (one file per request, before extraction).
+  async function insertOne({ site, kind, trip, batchId, page, filename, mediaType, buf, version, by, restricted = false, packetId = null }) {
+    const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+    const { rows } = await pool.query(
+      `INSERT INTO ta_docs (site, kind, trips, batch_id, page, filename, media_type, size_bytes, sha256, version, uploaded_by, data, restricted, packet_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       RETURNING id, site, kind, trips, batch_id, page, filename, media_type, size_bytes, sha256, version, uploaded_at, uploaded_by, doc_type, restricted, packet_id`,
+      [site, kind, trip ? [String(trip)] : [], batchId, page, filename, mediaType, buf.length, sha256, version, by || null, buf, restricted, packetId],
+    );
+    return docMeta(rows[0]);
+  }
+
+  // A scanned multi-page PDF (a "trip packet") is kept whole — restricted,
+  // because packets can include a driver's ID — and also split into one stored
+  // document per page, so each page can be attached to its own trip, opened on
+  // its own, and a driver-ID page locked without hiding the rest.
+  async function storePacketPdf({ site, batchId, buf, filename, by }) {
+    let src;
+    try { src = await PDFDocument.load(buf, { ignoreEncryption: true }); } catch { return null; }
+    const n = src.getPageCount();
+    if (n < 2) return null;
+    const packet = await insertOne({ site, kind: 'packet', trip: null, batchId, page: null, filename, mediaType: 'application/pdf', buf, version: null, by, restricted: true });
+    const pages = [];
+    for (let i = 0; i < n; i++) {
+      const one = await PDFDocument.create(); // eslint-disable-line no-await-in-loop
+      const [pg] = await one.copyPages(src, [i]); // eslint-disable-line no-await-in-loop
+      one.addPage(pg);
+      const bytes = Buffer.from(await one.save()); // eslint-disable-line no-await-in-loop
+      pages.push(await insertOne({ site, kind: 'tripsheet', trip: null, batchId, page: i + 1, filename: `${filename || 'packet.pdf'} · page ${i + 1}`, mediaType: 'application/pdf', buf: bytes, version: null, by, packetId: packet.id })); // eslint-disable-line no-await-in-loop
+    }
+    return { packet, pages };
+  }
+
   async function storeDocs({ site, kind, trip = null, batchId = null, files, by }) {
     if (!enabled) return [];
     if (!KINDS.has(kind)) throw new Error('Unknown document kind.');
@@ -95,15 +134,12 @@ export function initDocuments(app, { requireAuth, db }) {
       if (buf.length > MAX_FILE_BYTES) throw new Error(`${f.filename || `File ${i + 1}`} is larger than 14 MB.`);
       const mediaType = String(f.mediaType || '').toLowerCase() || (/\.pdf$/i.test(f.filename || '') ? 'application/pdf' : '');
       if (!OK_TYPES.test(mediaType)) throw new Error(`${f.filename || `File ${i + 1}`}: only PDF or image files can be stored.`);
-      const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
-      const { rows } = await pool.query( // eslint-disable-line no-await-in-loop
-        `INSERT INTO ta_docs (site, kind, trips, batch_id, page, filename, media_type, size_bytes, sha256, version, uploaded_by, data)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-         RETURNING id, site, kind, trips, batch_id, page, filename, media_type, size_bytes, sha256, version, uploaded_at, uploaded_by`,
-        [site, kind, trip ? [String(trip)] : [], batchId, f.page != null ? Number(f.page) : i + 1, String(f.filename || '').slice(0, 240) || null,
-          mediaType, buf.length, sha256, version, by || null, buf],
-      );
-      out.push(docMeta(rows[0]));
+      if (kind === 'tripsheet' && /pdf/i.test(mediaType)) {
+        const split = await storePacketPdf({ site, batchId, buf, filename: String(f.filename || '').slice(0, 200) || null, by }); // eslint-disable-line no-await-in-loop
+        if (split) { out.push(...split.pages.map((pg) => ({ ...pg, fileIndex: i }))); continue; }
+      }
+      const one = await insertOne({ site, kind, trip, batchId, page: f.page != null ? Number(f.page) : i + 1, filename: String(f.filename || '').slice(0, 240) || null, mediaType, buf, version, by }); // eslint-disable-line no-await-in-loop
+      out.push({ ...one, fileIndex: i });
     }
     return out;
   }
@@ -119,7 +155,22 @@ export function initDocuments(app, { requireAuth, db }) {
         'UPDATE ta_docs SET trips = $1 WHERE id = $2 AND site = $3 AND kind = $4',
         [trips.map(String), docId, site, kind],
       );
+      // the whole packet this page came from belongs to every trip found in it
+      await pool.query( // eslint-disable-line no-await-in-loop
+        `UPDATE ta_docs p SET trips = ARRAY(SELECT DISTINCT x FROM unnest(p.trips || $1::text[]) x)
+           FROM ta_docs c WHERE c.id = $2 AND c.site = $3 AND p.id = c.packet_id`,
+        [trips.map(String), docId, site],
+      );
     }
+  }
+
+  async function markDocs({ site, ids, docType = null, restricted = null }) {
+    if (!enabled || !ids.length) return;
+    await ensureTable();
+    await pool.query(
+      `UPDATE ta_docs SET doc_type = COALESCE($1, doc_type), restricted = COALESCE($2, restricted) WHERE site = $3 AND id = ANY($4::bigint[])`,
+      [docType, restricted, site, ids.map(Number)],
+    );
   }
 
   async function listDocs({ site, trips = null, kind = null, batchId = null }) {
@@ -130,7 +181,7 @@ export function initDocuments(app, { requireAuth, db }) {
     if (kind) { args.push(kind); where.push(`kind = $${args.length}`); }
     if (batchId) { args.push(batchId); where.push(`batch_id = $${args.length}`); }
     const { rows } = await pool.query(
-      `SELECT id, site, kind, trips, batch_id, page, filename, media_type, size_bytes, sha256, version, uploaded_at, uploaded_by
+      `SELECT id, site, kind, trips, batch_id, page, filename, media_type, size_bytes, sha256, version, uploaded_at, uploaded_by, doc_type, restricted, packet_id
          FROM ta_docs WHERE ${where.join(' AND ')} ORDER BY uploaded_at DESC, page ASC LIMIT 2000`, args,
     );
     return rows.map(docMeta);
@@ -159,9 +210,21 @@ export function initDocuments(app, { requireAuth, db }) {
     if (!/^\d+$/.test(String(req.params.id))) return res.status(400).json({ error: 'Bad document id.' });
     try {
       await ensureTable();
-      const { rows } = await pool.query('SELECT filename, media_type, data FROM ta_docs WHERE id = $1 AND site = $2', [req.params.id, siteOf(req)]);
+      const { rows } = await pool.query('SELECT filename, media_type, data, restricted, doc_type FROM ta_docs WHERE id = $1 AND site = $2', [req.params.id, siteOf(req)]);
       if (!rows.length) return res.status(404).json({ error: 'Document not found.' });
       const r = rows[0];
+      // Restricted (driver ID, or a whole packet containing one): only opened
+      // on an explicit reveal, and every reveal is logged with who and when.
+      if (r.restricted) {
+        if (String(req.query.reveal || '') !== '1') return res.status(403).json({ error: 'Restricted document — confirm to view.', restricted: true, docType: r.doc_type || null });
+        try {
+          await db.update(`taDocAccess:${siteOf(req)}`, (cur) => {
+            const list = Array.isArray(cur) ? cur : [];
+            list.unshift({ id: String(req.params.id), by: who(req), at: new Date().toISOString(), docType: r.doc_type || null });
+            return list.slice(0, 500);
+          }, []);
+        } catch { /* logging must not block viewing */ }
+      }
       const name = String(r.filename || `document-${req.params.id}`).replace(/[^\w.\- ]+/g, '_');
       res.setHeader('Content-Type', r.media_type);
       res.setHeader('Content-Disposition', `inline; filename="${name}"`);
@@ -172,5 +235,5 @@ export function initDocuments(app, { requireAuth, db }) {
   });
 
   console.log(`[docs] original document storage ${enabled ? 'ready (Postgres)' : 'OFF — needs DATABASE_URL'}`);
-  return { storeDocs, linkDocs, listDocs, enabled };
+  return { storeDocs, linkDocs, listDocs, markDocs, enabled };
 }

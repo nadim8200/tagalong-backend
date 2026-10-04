@@ -30,6 +30,7 @@ import { initDispatcher } from './dispatcher.js';
 import { initWatchtower } from './watchtower.js';
 import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
+import { initCarriers } from './carriers.js';
 import { initStopVisits } from './stopvisits.js';
 import { listAddresses, samsaraTokenFrom } from './samsara.js';
 import { initNotify } from './notify.js';
@@ -649,11 +650,13 @@ const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.e
 const docs = initDocuments(app, { requireAuth, db });
 // Geofence stop tracking (validated Samsara address boundaries only).
 const stopVisits = initStopVisits({ db, env: process.env, listAddresses, tokenFrom: samsaraTokenFrom });
-const truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs });
+// Outside carriers (OC): carrier list, OC marks, check calls / email check-ins.
+const carriers = initCarriers(app, { requireAuth, db });
+const truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay] });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
-initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, docs });
+initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, docs, carriers });
 
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
