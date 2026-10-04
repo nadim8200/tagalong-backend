@@ -31,6 +31,7 @@ import { initWatchtower } from './watchtower.js';
 import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
 import { initCarriers } from './carriers.js';
+import { initDriverLinks } from './driverlink.js';
 import { initStopVisits } from './stopvisits.js';
 import { listAddresses, samsaraTokenFrom } from './samsara.js';
 import { initNotify } from './notify.js';
@@ -652,7 +653,10 @@ const docs = initDocuments(app, { requireAuth, db });
 const stopVisits = initStopVisits({ db, env: process.env, listAddresses, tokenFrom: samsaraTokenFrom });
 // Outside carriers (OC): carrier list, OC marks, check calls / email check-ins.
 const carriers = initCarriers(app, { requireAuth, db });
-const truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay] });
+// OC driver tracking links (TagAlong app / browser) — positions overlay the board.
+let truckmate;
+const driverLinks = initDriverLinks(app, { requireAuth, db, carriers, ringcentral: rc, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay], routeProviders: [driverLinks.routeFor] });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.

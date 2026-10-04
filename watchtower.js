@@ -199,6 +199,7 @@ function tripFacts(item, now) {
   const lastCheckinMs = Math.max(0, ...checkins.map((c) => Date.parse(c.at) || 0), live && live.gpsAt ? Date.parse(live.gpsAt) || 0 : 0) || null;
   return {
     oc,
+    driverLink: (item && item._driverLink) || null,
     lastCheckinMs,
     lastCheckin: checkins[0] || null,
     sheet,
@@ -339,10 +340,17 @@ const RULES = [
     const phone = f.oc.carrier && f.oc.carrier.dispatchPhone;
     const hrs = f.lastCheckinMs ? (ctx.now - f.lastCheckinMs) / 3600000 : null;
     if (hrs != null && hrs < 4) return null;
+    // Driver tracking link: say what happened to it, so the call is targeted.
+    const dl = f.driverLink;
+    const linkNote = !dl || ['revoked', 'completed', 'expired'].includes(dl.status) ? ' No tracking link is active — send one from the Outside carrier section.'
+      : dl.status === 'stopped' ? ' The driver turned off location sharing in the tracking link.'
+      : dl.status === 'quiet' ? ' The driver’s tracking link went quiet (phone locked, app closed or no signal).'
+      : dl.status === 'opened' ? ' The driver opened the tracking link but has not shared location.'
+      : ' The driver has not opened the tracking link yet.';
     return {
       code: 'carrier-update-overdue', severity: hrs != null && hrs >= 8 ? 'critical' : 'warning',
       title: hrs == null ? `No check-in from ${name} yet` : `No update from ${name} in ${Math.floor(hrs)}h`,
-      detail: `Outside carrier load${f.oc.truck ? ` (their truck ${f.oc.truck})` : ''}. ${phone ? `Call their dispatch ${phone}` : 'Call the carrier'}${f.oc.driverPhone ? ` or the driver ${f.oc.driverPhone}` : ''} and log the check-in.${f.lastCheckin ? ` Last: “${String(f.lastCheckin.text || '').slice(0, 80)}”` : ''}`,
+      detail: `Outside carrier load${f.oc.truck ? ` (their truck ${f.oc.truck})` : ''}. ${phone ? `Call their dispatch ${phone}` : 'Call the carrier'}${f.oc.driverPhone ? ` or the driver ${f.oc.driverPhone}` : ''} and log the check-in.${linkNote}${f.lastCheckin ? ` Last: “${String(f.lastCheckin.text || '').slice(0, 80)}”` : ''}`,
     };
   },
   function sheetMismatch(f) {

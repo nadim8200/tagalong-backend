@@ -221,7 +221,7 @@ function traccarLive(device, p) {
   };
 }
 
-export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders, docs = null, overlays = [] }) {
+export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders, docs = null, overlays = [], routeProviders = [] }) {
   // 30s-cached index of Traccar devices → live overlay, keyed by unit number.
   let _tmTraccar = { at: 0, idx: null };
   async function traccarLiveIndex() {
@@ -655,6 +655,14 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
       if (req.query.since) { const s = Date.parse(req.query.since); if (!isNaN(s)) start = Math.max(s, now - 72 * 3600000); }
       const fromIso = new Date(start).toISOString(); const toIso = new Date(now).toISOString();
       const downsample = (pts) => { const MAX = 400; const step = Math.ceil(pts.length / MAX) || 1; return step > 1 ? pts.filter((_, i) => i % step === 0 || i === pts.length - 1) : pts; };
+
+      // 0) Outside-carrier loads: the driver's phone (TagAlong tracking link).
+      for (const fn of routeProviders) {
+        try {
+          const dpts = await fn(String(req.query.site || 'florida-beauty'), req.params.unit, start); // eslint-disable-line no-await-in-loop
+          if (dpts && dpts.length) return res.json({ points: downsample(dpts), vehicle: req.params.unit, source: 'driver app', from: fromIso, to: toIso, count: dpts.length });
+        } catch { /* fall through */ }
+      }
 
       // 1) Prefer the FMC00A / Traccar track (the one TagAlong shows) when the
       //    truck has a Traccar device matching this unit.
