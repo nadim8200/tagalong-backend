@@ -428,7 +428,8 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
         rec.stops = keyStops(rec.stops);
         rec.version = prev ? (prev.version || 1) + 1 : 1;
         rec.changes = sheetChanges(prev, rec);
-        rec.docIds = [...new Set((t.sourcePages || []).map((sp) => docOf(sp.file, sp.page)).filter(Boolean))];
+        // the manifest's own pages (1, or 2 with the continuation), in page order
+        rec.docIds = [...new Set([...(t.sourcePages || [])].sort((a, b) => (a.file - b.file) || (a.page - b.page)).map((sp) => docOf(sp.file, sp.page)).filter(Boolean))];
         rec.onBoard = board.has(tripNumber);
         rec.diffs = rec.onBoard ? compareWithTruckMate(rec, board.get(tripNumber)) : [];
         return rec;

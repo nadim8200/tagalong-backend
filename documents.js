@@ -234,6 +234,45 @@ export function initDocuments(app, { requireAuth, db }) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // Several stored pages as ONE PDF, in the order given — e.g. a trip's manifest
+  // (page 1 + its continuation page). PDFs keep their pages; photos become pages.
+  // Restricted pages (driver IDs) are never merged.
+  app.get('/truckmate/docs/merged', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Document storage is not configured.' });
+    const ids = String(req.query.ids || '').split(',').map((x) => x.trim()).filter((x) => /^\d+$/.test(x)).slice(0, 12);
+    if (!ids.length) return res.status(400).json({ error: 'No documents asked for.' });
+    try {
+      await ensureTable();
+      const { rows } = await pool.query('SELECT id, media_type, data, restricted FROM ta_docs WHERE site = $1 AND id = ANY($2::bigint[])', [siteOf(req), ids]);
+      const byId = new Map(rows.map((r) => [String(r.id), r]));
+      const out = await PDFDocument.create();
+      let added = 0;
+      for (const id of ids) {
+        const r = byId.get(id);
+        if (!r || r.restricted) continue;
+        const buf = Buffer.from(r.data);
+        try {
+          if (/pdf/i.test(r.media_type)) {
+            const src = await PDFDocument.load(buf, { ignoreEncryption: true }); // eslint-disable-line no-await-in-loop
+            const pages = await out.copyPages(src, src.getPageIndices()); // eslint-disable-line no-await-in-loop
+            pages.forEach((pg) => out.addPage(pg)); added += pages.length;
+          } else if (/png|jpe?g/i.test(r.media_type)) {
+            const img = /png/i.test(r.media_type) ? await out.embedPng(buf) : await out.embedJpg(buf); // eslint-disable-line no-await-in-loop
+            const pg = out.addPage([img.width, img.height]);
+            pg.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height }); added += 1;
+          }
+        } catch (e) { console.warn('[docs] merge skipped', id, e.message); }
+      }
+      if (!added) return res.status(404).json({ error: 'These pages are not stored as PDF or photos.' });
+      const bytes = await out.save();
+      const name = String(req.query.name || 'trip-sheet').replace(/[^\w.\- ]+/g, '_');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${name}.pdf"`);
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.send(Buffer.from(bytes));
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   console.log(`[docs] original document storage ${enabled ? 'ready (Postgres)' : 'OFF — needs DATABASE_URL'}`);
   return { storeDocs, linkDocs, listDocs, markDocs, enabled };
 }
