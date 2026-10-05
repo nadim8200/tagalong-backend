@@ -8,7 +8,8 @@
 // working config.
 // ---------------------------------------------------------------
 import { compareWithTruckMate, keyStops, linkSheetStops } from './manifest.js';
-import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit } from './samsara.js';
+import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit, trailerLocations } from './samsara.js';
+import { buildFleet } from './fleetmap.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -646,6 +647,21 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   // Resolves a TruckMate power unit → Samsara vehicle, then pulls its GPS
   // history over the trip window. ?since=ISO (trip start) or ?hours=N (default
   // 24, cap 72). Points are downsampled to keep the payload light.
+  // Fleet map: every truck and trailer with a live position (polled ~30 s).
+  app.get('/truckmate/fleet-map', requireAuth, async (req, res) => {
+    try {
+      const site = String(req.query.site || 'florida-beauty');
+      const board = await buildBoard(site);
+      const token = samsaraTokenFrom(env);
+      const [idx, traccar, trailerLoc] = await Promise.all([
+        token ? getLiveIndex(token).catch(() => null) : null,
+        traccarLiveIndex().catch(() => null),
+        token ? trailerLocations(token).catch((e) => ({ byId: {}, source: null, error: String(e.message || e) })) : null,
+      ]);
+      res.json(buildFleet({ trips: board.trips || [], idx, traccar, trailerLoc }));
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
   app.get('/truckmate/route/:unit', requireAuth, async (req, res) => {
     try {
       const now = Date.now();

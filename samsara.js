@@ -114,6 +114,41 @@ export async function capabilityProbe(token) {
   return { addresses, assignments, safety, faults, dvirs, trips };
 }
 
+// ---- Trailer positions (for the fleet map) ----
+// Trailers with a Samsara gateway report GPS as asset locations. We try the
+// current location stream first, then the legacy assets endpoint, and keep the
+// latest fix per asset. Cached 2 minutes. Returns { byId, source, error }.
+let _trailerLoc = { at: 0, token: null, val: null };
+export async function trailerLocations(token) {
+  if (_trailerLoc.val && _trailerLoc.token === token && Date.now() - _trailerLoc.at < 120000) return _trailerLoc.val;
+  const end = new Date(); const start = new Date(end.getTime() - 12 * 3600000);
+  const byId = {}; let source = null; const errors = [];
+  const keep = (id, fix) => { if (!id || fix.lat == null || fix.lng == null) return; const cur = byId[id]; if (!cur || String(fix.at) > String(cur.at)) byId[id] = fix; };
+  try {
+    const rows = await sGet(token, `/assets/location-and-speed/stream?startTime=${start.toISOString()}&endTime=${end.toISOString()}&includeReverseGeo=true&includeSpeed=true&limit=512`, { maxPages: 40 });
+    for (const r of arr(rows)) {
+      const loc = r.location || {};
+      const mps = r.speed && r.speed.gpsSpeedMetersPerSecond;
+      const ad = loc.address || {};
+      keep(String((r.asset && r.asset.id) || ''), { lat: loc.latitude, lng: loc.longitude, at: r.happenedAtTime || null, speedMph: mps != null ? Math.round(mps * 2.23694) : null, course: loc.headingDegrees != null ? Math.round(loc.headingDegrees) : null, location: [ad.city, ad.state].filter(Boolean).join(', ') || null });
+    }
+    source = 'asset location stream';
+  } catch (e) { errors.push(String(e.message || e).slice(0, 120)); }
+  if (!Object.keys(byId).length) {
+    try {
+      const j = await sGet(token, `/v1/fleet/assets/locations?startMs=${start.getTime()}&endMs=${end.getTime()}`, { paginate: false });
+      for (const a of arr(j.assets || j)) {
+        const last = arr(a.locations).reduce((m, x) => (!m || x.timeMs > m.timeMs ? x : m), null);
+        if (last) keep(String(a.id), { lat: last.latitude, lng: last.longitude, at: new Date(last.timeMs).toISOString(), speedMph: last.speedMilesPerHour != null ? Math.round(last.speedMilesPerHour) : null, course: null, location: last.location || null });
+      }
+      if (Object.keys(byId).length) source = 'legacy asset locations';
+    } catch (e) { errors.push(String(e.message || e).slice(0, 120)); }
+  }
+  const val = { byId, source, error: Object.keys(byId).length ? null : (errors.join(' | ') || 'no trailer GPS reported') };
+  _trailerLoc = { at: Date.now(), token, val };
+  return val;
+}
+
 // ---- LIVE reefer via the Readings API (the source the Samsara UI uses) ----
 // /readings/latest gives the last-known value per asset. readingIds is capped at
 // 3 per request, so we fetch in batches and merge by entityId (the asset id).
@@ -370,7 +405,11 @@ export function indexSnapshot(snap) {
       breakInMin: mins(drive.timeUntilBreakDurationMs),
     };
   }
-  return { driversByCode, vehByUnit, statsByUnit, reeferByKey, hosById, fetchedAt: snap.fetchedAt || null };
+  // every trailer asset we know (trailer list + reefer units), for the fleet map
+  const trailerAssets = {};
+  for (const t of arr(snap.trailers)) if (t.id != null) trailerAssets[String(t.id)] = t.name || String(t.id);
+  for (const r of reeferRecords(snap.reefer)) if (r.id != null && !trailerAssets[String(r.id)]) trailerAssets[String(r.id)] = r.name || String(r.id);
+  return { driversByCode, vehByUnit, statsByUnit, reeferByKey, hosById, trailerAssets, fetchedAt: snap.fetchedAt || null };
 }
 
 // Samsara engine fault codes → the same [{code, meaning}] shape the FMC00A
