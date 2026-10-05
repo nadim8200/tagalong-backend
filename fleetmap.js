@@ -119,3 +119,65 @@ export function buildFleet({ trips = [], idx = null, traccar = null, trailerLoc 
     at: new Date(now).toISOString(),
   };
 }
+
+// ---- how long each truck / trailer has sat still, and where dropped trailers are ----
+// The store is updated every few minutes (and on every map view). Trailers keep
+// their last known spot after they leave a load — Samsara gives us no trailer
+// GPS, so a dropped trailer stays where its truck last had it.
+const STILL_M = 300;           // moved less than this = still parked
+const KEEP_DAYS = 30;          // forget trailers not seen on a load for a month
+const distM = (a, b) => {
+  const R = 6371000; const r = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * r; const dLng = (b.lng - a.lng) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+};
+const nk = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/^0+(?=\d)/, '');
+
+export function updateStill(store, fleet, now = Date.now()) {
+  const s = { trucks: { ...((store && store.trucks) || {}) }, trailers: { ...((store && store.trailers) || {}) } };
+  const step = (prev, x, extra) => {
+    const at = x.gpsAt && Date.parse(x.gpsAt) <= now ? x.gpsAt : new Date(now).toISOString();
+    const moved = !prev || distM(prev, x) > STILL_M;
+    return {
+      ...(prev || {}), ...extra,
+      lat: moved ? x.lat : prev.lat, lng: moved ? x.lng : prev.lng,
+      since: moved ? at : prev.since,
+      fromStart: moved ? !prev : !!prev.fromStart,      // still since tracking began (true length unknown)
+      seenAt: at, location: x.location || (prev && prev.location) || null,
+    };
+  };
+  for (const t of fleet.trucks || []) if (t.lat != null && t.state !== 'stale') s.trucks[nk(t.unit)] = step(s.trucks[nk(t.unit)], t, { unit: t.unit });
+  for (const t of fleet.trailers || []) {
+    if (t.lat == null) continue;
+    s.trailers[nk(t.trailer)] = step(s.trailers[nk(t.trailer)], t, { trailer: t.trailer, lastTrip: t.trip || (s.trailers[nk(t.trailer)] || {}).lastTrip || null, lastTruck: t.truck || (s.trailers[nk(t.trailer)] || {}).lastTruck || null });
+  }
+  const cutoff = now - KEEP_DAYS * 24 * 3600000;
+  for (const [k, v] of Object.entries(s.trailers)) if (Date.parse(v.seenAt || 0) < cutoff) delete s.trailers[k];
+  return s;
+}
+
+// Add stillSince / assigned to the live fleet, plus dropped trailers at their last spot.
+export function withStill(fleet, store, now = Date.now()) {
+  const st = store || { trucks: {}, trailers: {} };
+  const trucks = (fleet.trucks || []).map((t) => {
+    const p = st.trucks[nk(t.unit)];
+    return { ...t, stillSince: p && t.state !== 'moving' ? p.since : null, stillFromStart: !!(p && p.fromStart) };
+  });
+  const live = new Set();
+  const trailers = (fleet.trailers || []).map((t) => {
+    live.add(nk(t.trailer));
+    const p = st.trailers[nk(t.trailer)];
+    return { ...t, assigned: !!t.trip, stillSince: p ? p.since : null, stillFromStart: !!(p && p.fromStart) };
+  });
+  for (const [k, p] of Object.entries(st.trailers)) {
+    if (live.has(k) || p.lat == null) continue;
+    trailers.push({
+      id: `drop-${k}`, kind: 'trailer', trailer: p.trailer || k, lat: p.lat, lng: p.lng, gpsAt: p.seenAt, location: p.location,
+      source: p.lastTruck ? `Last known — dropped by truck ${p.lastTruck}` : 'Last known position', hitched: false,
+      trip: null, truck: null, assigned: false, lastTrip: p.lastTrip || null, lastTruck: p.lastTruck || null,
+      state: 'parked', stillSince: p.since, stillFromStart: !!p.fromStart,
+    });
+  }
+  return { ...fleet, trucks, trailers: trailers.sort((a, b) => String(a.trailer).localeCompare(String(b.trailer), undefined, { numeric: true })), trackingSince: st.startedAt || null };
+}

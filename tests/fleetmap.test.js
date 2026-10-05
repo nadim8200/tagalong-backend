@@ -39,3 +39,28 @@ test('fleet map: trucks from Samsara, fresher FMC00A wins, customer TagAlong car
   assert.equal(tr['7338'].source, 'With truck 2611'); assert.equal(tr['7338'].lat, 30.3);
   assert.equal(tr.RR53153.source, 'With truck OC1016');
 });
+
+test('still-tracking: parked time keeps counting, moving resets it, dropped trailers stay at their last spot', async () => {
+  const { updateStill, withStill } = await import('../fleetmap.js');
+  const t0 = Date.parse('2026-10-01T12:00:00Z');
+  const fleetAt = (lat, withTrailer) => ({
+    trucks: [{ unit: '2614', lat, lng: -88, state: 'parked', gpsAt: null }],
+    trailers: withTrailer ? [{ trailer: '7358', lat, lng: -88, trip: '624304', truck: '2614', location: 'Monroe, IL' }] : [],
+  });
+  let s = updateStill({}, fleetAt(42.0, true), t0);
+  s = updateStill(s, fleetAt(42.0005, true), t0 + 2 * 86400000);          // ~55 m: still parked
+  let f = withStill(fleetAt(42.0005, true), s, t0 + 2 * 86400000);
+  assert.equal(f.trailers[0].stillSince, new Date(t0).toISOString());
+  assert.equal(f.trailers[0].assigned, true);
+  assert.equal(f.trailers[0].stillFromStart, true);
+  s = updateStill(s, fleetAt(42.5, true), t0 + 3 * 86400000);              // moved: clock restarts
+  assert.equal(s.trailers['7358'].since, new Date(t0 + 3 * 86400000).toISOString());
+  assert.equal(s.trailers['7358'].fromStart, false);
+  // load delivered, trailer dropped: no longer on a trip, kept at its last spot
+  f = withStill(fleetAt(43, false), s, t0 + 4 * 86400000);
+  const dropped = f.trailers.find((t) => t.trailer === '7358');
+  assert.equal(dropped.assigned, false);
+  assert.equal(dropped.lat, 42.5);
+  assert.match(dropped.source, /dropped by truck 2614/);
+  assert.equal(dropped.lastTrip, '624304');
+});

@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------
 import { compareWithTruckMate, keyStops, linkSheetStops } from './manifest.js';
 import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit, trailerLocations } from './samsara.js';
-import { buildFleet } from './fleetmap.js';
+import { buildFleet, updateStill, withStill } from './fleetmap.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -648,19 +648,31 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   // history over the trip window. ?since=ISO (trip start) or ?hours=N (default
   // 24, cap 72). Points are downsampled to keep the payload light.
   // Fleet map: every truck and trailer with a live position (polled ~30 s).
+  // Also keeps how long each has sat still, and where dropped trailers are.
+  async function refreshFleet(site) {
+    const board = await buildBoard(site);
+    const token = samsaraTokenFrom(env);
+    const [idx, traccar, trailerLoc] = await Promise.all([
+      token ? getLiveIndex(token).catch(() => null) : null,
+      traccarLiveIndex().catch(() => null),
+      token ? trailerLocations(token).catch((e) => ({ byId: {}, source: null, error: String(e.message || e) })) : null,
+    ]);
+    const fleet = buildFleet({ trips: board.trips || [], idx, traccar, trailerLoc });
+    let store = null;
+    if (db && db.enabled) {
+      store = await db.update(`taFleetStill:${site}`, (cur) => ({ ...updateStill(cur, fleet), startedAt: (cur && cur.startedAt) || new Date().toISOString() }), {});
+    }
+    return withStill(fleet, store);
+  }
   app.get('/truckmate/fleet-map', requireAuth, async (req, res) => {
-    try {
-      const site = String(req.query.site || 'florida-beauty');
-      const board = await buildBoard(site);
-      const token = samsaraTokenFrom(env);
-      const [idx, traccar, trailerLoc] = await Promise.all([
-        token ? getLiveIndex(token).catch(() => null) : null,
-        traccarLiveIndex().catch(() => null),
-        token ? trailerLocations(token).catch((e) => ({ byId: {}, source: null, error: String(e.message || e) })) : null,
-      ]);
-      res.json(buildFleet({ trips: board.trips || [], idx, traccar, trailerLoc }));
-    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+    try { res.json(await refreshFleet(String(req.query.site || 'florida-beauty'))); }
+    catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
+  // keep tracking parked time even when nobody has the map open
+  if (db && db.enabled && process.env.NODE_ENV !== 'test') {
+    const tick = setInterval(() => { refreshFleet('florida-beauty').catch((e) => console.warn('[fleet] still-tracking:', e.message)); }, 5 * 60000);
+    if (tick.unref) tick.unref();
+  }
 
   app.get('/truckmate/route/:unit', requireAuth, async (req, res) => {
     try {
