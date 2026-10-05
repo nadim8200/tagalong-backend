@@ -53,3 +53,46 @@ test('Watchtower: OC loads skip ELD/engine rules and get a carrier-update rule',
   assert.equal(stale[0].severity, 'critical');
   assert.match(stale[0].detail, /555-0147/);
 });
+
+test('sheet vs TruckMate: Saint/St spellings and a neighbouring town with the same pieces are the same stop', async () => {
+  const { compareWithTruckMate, linkSheetStops } = await import('../manifest.js');
+  const sheet = { tripNumber: '624248', stops: [
+    { action: 'DELIVER', city: 'SAINT LOUIS', state: 'MO', pieces: 36 },
+    { action: 'DELIVER', city: 'ST LOUIS', state: 'MO', pieces: 14 },
+    { action: 'DELIVER', city: 'LOMBARD', state: 'IL', pieces: 88 },
+    { action: 'DELIVER', city: 'PENNSAUKEN', state: 'NJ', pieces: 19 },
+  ] };
+  const item = { trip: { tripNumber: '624248' }, freightBills: [
+    { endZoneDescription: 'SAINT LOUIS, MO, 63103', pieces: 50 },
+    { endZoneDescription: 'LOMBARD, IL, 60148', pieces: 91 },
+    { endZoneDescription: 'MERCHANTVILLE, NJ, 08109', pieces: 19 },
+  ] };
+  const diffs = compareWithTruckMate(sheet, item);
+  assert.deepEqual(diffs.map((d) => d.msg), ['LOMBARD, IL: sheet 88 pcs vs TruckMate 91 pcs.']);
+  const linked = linkSheetStops(sheet.stops, item);
+  assert.equal(linked[1].tmPlace, 'SAINT LOUIS, MO');
+  assert.equal(linked[3].tmPlace, 'MERCHANTVILLE, NJ');
+  assert.equal(linked[3].tmMatchedBy, 'same state + same pieces');
+});
+
+test('packet pages: truck, OC carrier, driver, consignee, "follows manifest" and shared load # all match', () => {
+  const trips = [
+    { tripNumber: '624194', truck: '2215', trailer: '2035', drivers: [{ name: 'Marcelo Castillo' }], stops: [{ action: 'DELIVER', customer: 'Dadu NY' }] },
+    { tripNumber: '624257', truck: '176', outsideCarrier: { isOutsideCarrier: true, name: 'ZEAL XPRESS INC', driverName: 'Farooque Ahmed Mohsin' }, stops: [{ action: 'DELIVER', customer: 'Designers Choice' }] },
+  ];
+  const board = new Map([['624268', { trip: { tripNumber: '624268', powerUnit: 'OC1016', trailer: '2048' }, freightBills: [] }]]);
+  const pages = [
+    { file: 1, page: 2, type: 'driver_id', driverName: 'FAROOQUE AHMED MOHSIN', summary: 'Driver ID' },
+    { file: 1, page: 3, type: 'email', summary: "Email 'Re: Load Rate Confirmation #12349 FL to MA' with Rizwan (Track & Trace, Zeal Xpress Inc)", references: ['Rate Confirmation #12349'] },
+    { file: 1, page: 9, type: 'other', summary: 'Broker reload / fuel instructions sheet (follows manifest 624194).' },
+    { file: 1, page: 19, type: 'other', summary: 'FBF warehouse load sheet for truck 2215 / trailer 2035' },
+    { file: 1, page: 26, type: 'other', summary: 'FBF warehouse load sheet page 1 of 2 for truck OC1016 / trailer 2048' },
+    { file: 1, page: 31, type: 'bill_of_lading', summary: 'Nazcaflor USA bill of lading for 20 boxes of oriental lilies to Designers Choice, Hyde Park MA' },
+    { file: 1, page: 40, type: 'carrier_confirmation', summary: 'Pelica rate confirmation', references: ['Load #12349'] },
+    { file: 1, page: 44, type: 'invoice', summary: 'Invoice for something unrelated', references: ['W2317484'] },
+  ];
+  const m = matchPacketPages(pages, trips, board);
+  assert.deepEqual(m.map((x) => x.trip), ['624257', '624257', '624194', '624194', '624268', '624257', '624257', null]);
+  assert.equal(m[4].matchedBy, 'truck OC1016');
+  assert.match(m[6].matchedBy, /same load # as another page/);
+});

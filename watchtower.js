@@ -163,11 +163,16 @@ function tripFacts(item, now) {
   const sheet = (item && item._manifest) || null;
   let pickupAtMs = null;
   if (sheet) {
-    const ck = (city, state) => `${String(city || '').trim().toUpperCase()}|${String(state || '').trim().toUpperCase()}`;
+    // same normalization as the trip-sheet reader: SAINT/ST, FORT/FT, MOUNT/MT
+    const nc = (c) => String(c || '').trim().toUpperCase().replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim()
+      .replace(/^SAINTE /, 'STE ').replace(/^SAINT /, 'ST ').replace(/^FORT /, 'FT ').replace(/^MOUNT /, 'MT ');
+    const ck = (city, state) => `${nc(city)}|${String(state || '').trim().toUpperCase()}`;
     const byCity = new Map();
     for (const ms of sheet.stops || []) {
       if (!/DELIVER|PICKUP/i.test(ms.action || '')) continue;
-      const k = ck(ms.city, ms.state);
+      // a sheet stop paired with a differently-named TruckMate town uses that town
+      const tp = ms.tmPlace ? String(ms.tmPlace).split(',').map((x) => x.trim()) : null;
+      const k = tp ? ck(tp[0], tp[1]) : ck(ms.city, ms.state);
       const arr = byCity.get(k) || [];
       arr.push(ms);
       byCity.set(k, arr);

@@ -7,7 +7,7 @@
 // browser, and is verified against the live endpoint before it replaces a
 // working config.
 // ---------------------------------------------------------------
-import { compareWithTruckMate, keyStops } from './manifest.js';
+import { compareWithTruckMate, keyStops, linkSheetStops } from './manifest.js';
 import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit } from './samsara.js';
 
 // ===============================================================
@@ -550,7 +550,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         trips.forEach((item) => {
           const t = (item && item.trip) || item || {};
           const sh = sheets[String(t.tripNumber)];
-          if (sh) item._manifest = { ...sh, stops: keyStops(sh.stops), diffs: compareWithTruckMate(sh, item) };
+          if (sh) item._manifest = { ...sh, stops: linkSheetStops(keyStops(sh.stops), item), diffs: compareWithTruckMate(sh, item), attachedAt: sh.uploadedAt || null };
         });
       }
     } catch { /* no trip-sheet overlay this cycle */ }
