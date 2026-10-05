@@ -22,6 +22,22 @@ const OC_UNIT = /^OC[\s-]?\d+/i;
 export const isOcUnit = (u) => OC_UNIT.test(String(u || '').trim());
 export const TRACKING_METHODS = ['check_call', 'driver_link', 'eld_share', 'platform', 'email'];
 
+// What an OC load still needs from the carrier/driver: names and phones for
+// every driver (one solo, two team), their truck # and trailer #. Pure.
+export function ocMissing(oc) {
+  if (!oc) return [];
+  const digits = (p) => String(p || '').replace(/\D+/g, '').length >= 10;
+  const out = [];
+  const team = oc.crew === 'team';
+  if (!oc.driverName) out.push(team ? 'driver 1 name' : 'driver name');
+  if (!digits(oc.driverPhone)) out.push(team ? 'driver 1 phone' : 'driver phone');
+  if (team && !oc.driver2Name) out.push('driver 2 name');
+  if (team && !digits(oc.driver2Phone)) out.push('driver 2 phone');
+  if (!oc.truck) out.push('truck #');
+  if (!oc.trailer) out.push('trailer #');
+  return out;
+}
+
 // The OC picture for one board item from every source we have. Pure, so the
 // Watchtower and the console agree. Priority: manual mark > trip sheet > unit code.
 export function ocFor(item, store) {
@@ -40,19 +56,26 @@ export function ocFor(item, store) {
   if (!carrier && code && (store.codes || {})[code]) carrier = carriers[store.codes[code]] || null;
   if (!carrier && fromSheet && fromSheet.name) carrier = Object.values(carriers).find((c) => norm(c.name) === norm(fromSheet.name)) || null;
   const pick = (k) => (mark && mark[k]) || (fromSheet && fromSheet[k]) || null;
-  return {
+  const out = {
     isOC: true,
     code,
-    source: mark ? (mark.source || 'manual') : (fromSheet ? 'trip sheet' : 'TruckMate unit code'),
+    source: mark && mark.source ? mark.source : (fromSheet ? 'trip sheet' : (code ? 'TruckMate unit code' : 'manual')),
     carrier: carrier || (fromSheet && fromSheet.name ? { id: null, name: fromSheet.name, dispatchPhone: fromSheet.dispatchPhone || null, email: fromSheet.email || null, mc: fromSheet.mc || null, dot: fromSheet.dot || null, trackingMethod: 'check_call', unsaved: true } : null),
     truck: pick('truck') || (code ? null : unit || null),
     trailer: pick('trailer') || t.trailer || null,
     driverName: pick('driverName'),
     driverPhone: pick('driverPhone'),
+    driver2Name: pick('driver2Name'),
+    driver2Phone: pick('driver2Phone'),
+    // solo / team is the dispatcher's call; TruckMate's 2nd driver is the default hint
+    crew: (mark && mark.crew) || (t.driver2 ? 'team' : 'solo'),
+    infoFrom: mark && mark.infoAt ? { by: mark.infoBy || 'driver app', at: mark.infoAt } : null,
     markedBy: mark ? mark.by || null : null,
     markedAt: mark ? mark.at || null : null,
     evidence: fromSheet ? fromSheet.evidence || null : null,
   };
+  out.missing = ocMissing(out);
+  return out;
 }
 
 export function initCarriers(app, { requireAuth, db }) {
@@ -104,6 +127,30 @@ export function initCarriers(app, { requireAuth, db }) {
       all[trip] = [...add, ...have].sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 100);
       return all;
     }, {});
+  }
+
+  // The driver filled in the tracking-link form: names, phones, truck, trailer.
+  // Merged into the trip's mark so every screen and the Watchtower see it.
+  async function setDriverInfo(site, trip, info) {
+    if (!enabled) return null;
+    let mark = null;
+    await db.update(key(site), (cur) => {
+      const s = { ...empty, ...(cur || {}), marks: { ...((cur || {}).marks || {}) } };
+      const prev = s.marks[trip] && !s.marks[trip].cleared ? s.marks[trip] : {};
+      const [d1 = {}, d2 = {}] = info.drivers || [];
+      mark = {
+        ...prev,
+        driverName: clean(d1.name) || prev.driverName || null, driverPhone: clean(d1.phone) || prev.driverPhone || null,
+        driver2Name: clean(d2.name) || (info.crew === 'team' ? prev.driver2Name || null : null),
+        driver2Phone: clean(d2.phone) || (info.crew === 'team' ? prev.driver2Phone || null : null),
+        truck: clean(info.truck) || prev.truck || null, trailer: clean(info.trailer) || prev.trailer || null,
+        crew: prev.crew || info.crew || null,
+        infoAt: new Date().toISOString(), infoBy: clean(d1.name) ? `${clean(d1.name)} (driver app)` : 'driver app',
+      };
+      s.marks[trip] = mark;
+      return s;
+    }, empty);
+    return mark;
   }
 
   // Board overlay: _oc and _checkins on every item (one read each per build).
@@ -185,7 +232,26 @@ export function initCarriers(app, { requireAuth, db }) {
         if (b.clear) { s.marks[trip] = { cleared: true, by: who(req), at: new Date().toISOString() }; mark = s.marks[trip]; return s; }
         let carrierId = b.carrierId || null;
         if (!carrierId && clean(b.carrierName)) { const r = upsertInto(s, { name: b.carrierName }); s = r.store; carrierId = r.carrier.id; }
-        mark = { carrierId, truck: clean(b.truck), trailer: clean(b.trailer), driverName: clean(b.driverName), driverPhone: clean(b.driverPhone), source: 'manual', by: who(req), at: new Date().toISOString() };
+        // carrier's main phone, typed by the dispatcher on the OC form
+        // carrier details typed on the OC form (main phone, email, MC, DOT) — kept
+        // as the dispatcher's values, so a later trip sheet never overwrites them
+        const fields = { carrierPhone: 'dispatchPhone', carrierEmail: 'email', mc: 'mc', dot: 'dot' };
+        if (carrierId && s.carriers[carrierId] && Object.keys(fields).some((k) => k in b)) {
+          const c = { ...s.carriers[carrierId] };
+          const edited = new Set(c.edited || []);
+          for (const [k, f] of Object.entries(fields)) if (k in b) { c[f] = clean(b[k]); edited.add(f); }
+          if (clean(b.carrierName) && clean(b.carrierName) !== c.name) { c.name = clean(b.carrierName); edited.add('name'); }
+          c.edited = [...edited];
+          s.carriers = { ...s.carriers, [carrierId]: c };
+        }
+        const prev = s.marks[trip] && !s.marks[trip].cleared ? s.marks[trip] : {};
+        mark = {
+          carrierId, truck: clean(b.truck), trailer: clean(b.trailer), driverName: clean(b.driverName), driverPhone: clean(b.driverPhone),
+          driver2Name: clean(b.driver2Name), driver2Phone: clean(b.driver2Phone),
+          crew: b.crew === 'team' || b.crew === 'solo' ? b.crew : (prev.crew || null),
+          infoAt: prev.infoAt || null, infoBy: prev.infoBy || null,
+          source: 'manual', by: who(req), at: new Date().toISOString(),
+        };
         s.marks = { ...s.marks, [trip]: mark };
         return s;
       }, empty);
@@ -206,5 +272,5 @@ export function initCarriers(app, { requireAuth, db }) {
   });
 
   console.log(`[carriers] outside-carrier tracking ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, recordFromSheets, addCheckins, read };
+  return { overlay, recordFromSheets, addCheckins, read, setDriverInfo };
 }

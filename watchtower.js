@@ -353,6 +353,24 @@ const RULES = [
       detail: `Outside carrier load${f.oc.truck ? ` (their truck ${f.oc.truck})` : ''}. ${phone ? `Call their dispatch ${phone}` : 'Call the carrier'}${f.oc.driverPhone ? ` or the driver ${f.oc.driverPhone}` : ''} and log the check-in.${linkNote}${f.lastCheckin ? ` Last: “${String(f.lastCheckin.text || '').slice(0, 80)}”` : ''}`,
     };
   },
+  // OC loads must have every driver's name + phone (solo or team) and their
+  // truck # / trailer #. Fires once the load is moving or pickup is ≤12h away.
+  function ocInfoMissing(f, ctx) {
+    const miss = (f.oc && f.oc.missing) || [];
+    if (!miss.length) return null;
+    const soon = f.pickupAtMs && f.pickupAtMs - ctx.now < 12 * 3600000;
+    if (notStarted(f.status, f, ctx.now) && !soon) return null;
+    const name = (f.oc.carrier && f.oc.carrier.name) || 'the carrier';
+    const dl = f.driverLink;
+    const how = dl && !['revoked', 'completed', 'expired'].includes(dl.status)
+      ? 'The tracking link asks the driver for it before sharing — remind them to open it'
+      : 'Send the tracking link (the driver must fill it in) or get it from the carrier';
+    return {
+      code: 'oc-info-missing', severity: 'warning', key: miss.join(','),
+      title: `${f.oc.crew === 'team' ? 'Team' : 'Solo'} OC load missing driver info (${miss.length})`,
+      detail: `${name}: missing ${miss.join(', ')}. ${how}${f.oc.carrier && f.oc.carrier.dispatchPhone ? ` · carrier dispatch ${f.oc.carrier.dispatchPhone}` : ''}.`,
+    };
+  },
   function sheetMismatch(f) {
     const diffs = (f.sheet && f.sheet.diffs) || [];
     if (!diffs.length) return null;

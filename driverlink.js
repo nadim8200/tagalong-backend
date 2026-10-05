@@ -30,7 +30,9 @@ import crypto from 'crypto';
 
 const LINK_DAYS = 5;
 const MIN_STORE_GAP_MS = 25 * 1000;   // keep at most one stored point per ~25s
-const MAX_POINTS = 2000;
+const MAX_POINTS = 6000;              // per trip; parked time folds into one point
+const STAY_M = 150;                   // closer than this to the last point = not moving
+const STOP_MIN = 10;                  // parked this long = a stop in the history
 const FRESH_MIN = 20;                 // a fix older than this is not "live"
 const MIN = 60000;
 
@@ -41,6 +43,94 @@ const toE164 = (p) => {
   return d.length > 6 ? `+${d}` : null;
 };
 const num = (v) => (v == null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+
+const distM = (a, b) => {
+  const R = 6371000; const r = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * r; const dLng = (b.lng - a.lng) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+};
+
+// Add fixes to a trip's track. A parked truck does not pile up points: the last
+// point just stretches (`until`), which is also how stops are found later.
+export function appendTrack(pts, fixes) {
+  const out = Array.isArray(pts) ? [...pts] : [];
+  let added = 0;
+  for (const f of fixes) {
+    const last = out[out.length - 1];
+    if (last && f.at <= (last.until || last.at)) continue;                // old / duplicate
+    if (last && distM(last, f) < STAY_M) { out[out.length - 1] = { ...last, until: f.at }; continue; }
+    if (last && Date.parse(f.at) - Date.parse(last.until || last.at) < MIN_STORE_GAP_MS) continue;
+    out.push({ lat: f.lat, lng: f.lng, at: f.at, speedMph: f.speedMph, course: f.course }); added += 1;
+  }
+  return { pts: out.slice(-MAX_POINTS), added };
+}
+
+// Whole-trip history from a stored track: the trail, every stop (parked
+// ≥ STOP_MIN) with how long, and the distance covered. Pure (tested).
+export function tripHistory(pts) {
+  const list = Array.isArray(pts) ? pts : [];
+  const stops = [];
+  let meters = 0;
+  list.forEach((p, i) => {
+    if (i > 0) meters += distM(list[i - 1], p);
+    const mins = p.until ? (Date.parse(p.until) - Date.parse(p.at)) / MIN : 0;
+    if (mins >= STOP_MIN) stops.push({ n: stops.length + 1, lat: p.lat, lng: p.lng, from: p.at, to: p.until, minutes: Math.round(mins) });
+  });
+  return {
+    points: list.map((p) => ({ lat: p.lat, lng: p.lng, at: p.at, until: p.until || null, speedMph: p.speedMph != null ? p.speedMph : null, course: p.course != null ? p.course : null })),
+    stops,
+    startedAt: list.length ? list[0].at : null,
+    lastAt: list.length ? (list[list.length - 1].until || list[list.length - 1].at) : null,
+    miles: Math.round(meters / 1609.344),
+  };
+}
+
+// What the tracking-link form needs before location can be shared. Pure.
+export function infoMissing(info, crew) {
+  const digits = (p) => String(p || '').replace(/\D+/g, '').length >= 10;
+  const out = [];
+  const ds = (info && info.drivers) || [];
+  const need = crew === 'team' ? 2 : 1;
+  for (let i = 0; i < need; i++) {
+    const d = ds[i] || {};
+    const who = need === 2 ? `driver ${i + 1} ` : 'driver ';
+    if (!String(d.name || '').trim() || String(d.name).trim().length < 2) out.push(`${who}name`);
+    if (!digits(d.phone)) out.push(`${who}phone`);
+  }
+  if (!String((info && info.truck) || '').trim()) out.push('truck #');
+  if (!String((info && info.trailer) || '').trim()) out.push('trailer #');
+  return out;
+}
+
+// "City, ST" for a GPS fix (OpenStreetMap). Cached by ~1 km and throttled to
+// one lookup per second, per their usage policy. Never throws.
+const STATES = { Alabama: 'AL', Alaska: 'AK', Arizona: 'AZ', Arkansas: 'AR', California: 'CA', Colorado: 'CO', Connecticut: 'CT', Delaware: 'DE', 'District of Columbia': 'DC', Florida: 'FL', Georgia: 'GA', Hawaii: 'HI', Idaho: 'ID', Illinois: 'IL', Indiana: 'IN', Iowa: 'IA', Kansas: 'KS', Kentucky: 'KY', Louisiana: 'LA', Maine: 'ME', Maryland: 'MD', Massachusetts: 'MA', Michigan: 'MI', Minnesota: 'MN', Mississippi: 'MS', Missouri: 'MO', Montana: 'MT', Nebraska: 'NE', Nevada: 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', Ohio: 'OH', Oklahoma: 'OK', Oregon: 'OR', Pennsylvania: 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD', Tennessee: 'TN', Texas: 'TX', Utah: 'UT', Vermont: 'VT', Virginia: 'VA', Washington: 'WA', 'West Virginia': 'WV', Wisconsin: 'WI', Wyoming: 'WY' };
+export function placeLabel(addr) {
+  const a = addr || {};
+  const city = a.city || a.town || a.village || a.hamlet || a.suburb || a.county || null;
+  const iso = String(a['ISO3166-2-lvl4'] || '');
+  const st = iso.startsWith('US-') ? iso.slice(3) : (STATES[a.state] || a.state || null);
+  return [city, st].filter(Boolean).join(', ') || null;
+}
+const placeCache = new Map();
+let lastLookup = 0;
+async function cityState(lat, lng, fetchFn = globalThis.fetch) {
+  const k = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  if (placeCache.has(k)) return placeCache.get(k);
+  if (Date.now() - lastLookup < 1100 || !fetchFn) return null;
+  lastLookup = Date.now();
+  try {
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 4000);
+    const r = await fetchFn(`https://nominatim.openstreetmap.org/reverse?format=json&zoom=10&addressdetails=1&lat=${lat}&lon=${lng}`, { headers: { 'User-Agent': 'TagAlong-Dispatch/1.0 (mytagalong.app)', 'Accept-Language': 'en' }, signal: ctl.signal });
+    clearTimeout(t);
+    const j = await r.json();
+    const label = placeLabel(j && j.address);
+    if (placeCache.size > 5000) placeCache.clear();
+    placeCache.set(k, label);
+    return label;
+  } catch { return null; }
+}
 
 // Status a dispatcher sees, from the link record alone. Pure (tested).
 export function linkStatus(link, now = Date.now()) {
@@ -81,13 +171,13 @@ export function cleanFixes(list, now = Date.now()) {
   }).filter(Boolean).sort((a, b) => a.at.localeCompare(b.at));
 }
 
-export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcentral = null, getBoard = null, env = process.env }) {
+export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcentral = null, getBoard = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const base = String(env.DRIVER_LINK_BASE || 'https://mytagalong.app').replace(/\/+$/, '');
   const company = env.DRIVER_LINK_COMPANY || 'Florida Beauty Flora';
   const linkKey = (tok) => `taDriverLink:${tok}`;
   const codeKey = (code) => `taDriverCode:${code}`;
-  const posKey = (tok) => `taDriverPos:${tok}`;
+  const posKey = (site, trip) => `taDriverPos:${site}:${trip}`;   // per TRIP: a new link continues the same history
   const siteKey = (site) => `taDriverLinks:${site}`;
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
@@ -115,6 +205,8 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
     sharing: !!link.sharing, lastPingAt: link.lastPingAt || null, lastPing: link.lastPing || null,
     stoppedAt: link.stoppedAt || null, revokedAt: link.revokedAt || null, completedAt: link.completedAt || null,
     points: link.points || 0,
+    infoAt: link.infoAt || null,
+    place: link.place ? link.place.label : null,
   } : null);
 
   const tripOf = (item) => (item && item.trip) || item || {};
@@ -156,7 +248,7 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
       const s = item._samsara || null;
       const ownGps = s && s.lat != null && s.gpsAt && Date.parse(s.gpsAt) > (p ? Date.parse(p.at) : 0);
       if (p && !ownGps && (fresh || !s || s.lat == null)) {
-        item._samsara = { ...(s || {}), source: 'driver app', lat: p.lat, lng: p.lng, speedMph: p.speedMph, course: p.course, gpsAt: p.at, accuracyM: p.accuracyM, location: null };
+        item._samsara = { ...(s || {}), source: 'driver app', lat: p.lat, lng: p.lng, speedMph: p.speedMph, course: p.course, gpsAt: p.at, accuracyM: p.accuracyM, location: link.place ? link.place.label : null };
       }
     }
     // Loads that left the board (delivered / removed) end their links.
@@ -184,8 +276,8 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
     const trips = boardTrips.get(site) || [];
     const item = trips.find((it) => String(tripOf(it).powerUnit || '').toUpperCase().replace(/[\s-]/g, '') === u);
     if (!item || !item._driverLink) return null;
-    const pts = (await db.get(posKey(item._driverLink.token), [])) || [];
-    const out = pts.filter((p) => Date.parse(p.at) >= fromMs);
+    const pts = (await db.get(posKey(site, String(tripOf(item).tripNumber || '')), [])) || [];
+    const out = pts.filter((p) => Date.parse(p.until || p.at) >= fromMs);
     return out.length ? out : null;
   }
 
@@ -194,6 +286,15 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
     if (!boardTrips.has(site) && getBoard) { try { await getBoard(site); } catch { /* board unavailable */ } }
     return (boardTrips.get(site) || []).find((it) => String(tripOf(it).tripNumber || '') === trip) || null;
   };
+
+  // Whole-trip history for an OC load: trail, stops and distance (kept after delivery).
+  app.get('/truckmate/oc/:trip/history', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    try {
+      const pts = (await db.get(posKey(siteOf(req), String(req.params.trip)), [])) || [];
+      res.json(tripHistory(pts));
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
 
   app.post('/truckmate/oc/:trip/link', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
@@ -276,7 +377,20 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
   });
 
   // ---- driver endpoints (token only) ----
+  // Solo/team comes from the dispatcher's current setting on the trip.
+  const ocNow = (link) => {
+    const item = (boardTrips.get(link.site) || []).find((it) => String(tripOf(it).tripNumber || '') === link.trip);
+    return (item && item._oc) || null;
+  };
+  const crewOf = (link) => { const oc = ocNow(link); return (oc && oc.crew) || link.crew || 'solo'; };
+  const infoOf = (link) => {
+    if (link.info) return link.info;
+    const oc = ocNow(link) || {};   // prefill with what dispatch already has
+    return { drivers: [{ name: oc.driverName || '', phone: oc.driverPhone || '' }, { name: oc.driver2Name || '', phone: oc.driver2Phone || '' }], truck: oc.truck || '', trailer: oc.trailer || '' };
+  };
+  const needInfo = (link) => !link.infoAt || infoMissing(link.info, crewOf(link)).length > 0;
   const publicView = (link, status) => ({
+    crew: crewOf(link), info: infoOf(link), needInfo: needInfo(link),
     active: isLive(status), status, company, trip: link.trip,
     carrierName: link.carrierName || null, origin: link.origin || null, destination: link.destination || null,
     sharing: !!link.sharing && status === 'sharing', lastPingAt: link.lastPingAt || null,
@@ -323,6 +437,29 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
     } catch (e) { res.status(500).json({ error: 'Could not open this link.' }); }
   });
 
+  // Required before sharing: every driver's name + phone (solo or team), truck #, trailer #.
+  app.post('/driver/link/:token/info', async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Tracking is not available right now.' });
+    try {
+      const tok = String(req.params.token);
+      const { link, status } = await activeLink(tok);
+      if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
+      if (!isLive(status)) return res.status(410).json({ active: false, status });
+      const b = req.body || {};
+      const crew = crewOf(link);
+      const cut = (v, n = 80) => String(v || '').trim().slice(0, n);
+      const info = {
+        drivers: (Array.isArray(b.drivers) ? b.drivers : []).slice(0, crew === 'team' ? 2 : 1).map((d) => ({ name: cut(d && d.name), phone: cut(d && d.phone, 30) })),
+        truck: cut(b.truck, 30), trailer: cut(b.trailer, 30),
+      };
+      const missing = infoMissing(info, crew);
+      if (missing.length) return res.status(400).json({ error: `Missing: ${missing.join(', ')}`, missing });
+      const updated = await db.update(linkKey(tok), (cur) => ({ ...cur, info, crew, infoAt: new Date().toISOString() }), link);
+      if (carriers && carriers.setDriverInfo) await carriers.setDriverInfo(link.site, link.trip, { ...info, crew });
+      res.json(publicView(updated, linkStatus(updated)));
+    } catch (e) { res.status(500).json({ error: 'Could not save your information.' }); }
+  });
+
   app.post('/driver/link/:token/ping', async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Tracking is not available right now.' });
     try {
@@ -330,19 +467,16 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
       const { link, status } = await activeLink(tok);
       if (!link) return res.status(404).json({ active: false, error: 'This tracking link is not valid.' });
       if (!isLive(status)) return res.status(410).json({ active: false, status });
+      if (needInfo(link)) return res.status(428).json({ needInfo: true, error: 'Fill in the driver, truck and trailer information first.', missing: infoMissing(link.info, crewOf(link)) });
       const b = req.body || {};
       const fixes = cleanFixes(b.points || b.point || b);
       if (!fixes.length) return res.status(400).json({ error: 'No usable location.' });
       const via = b.via === 'app' ? 'app' : 'browser';
       let added = 0;
-      await db.update(posKey(tok), (cur) => {
-        const pts = Array.isArray(cur) ? [...cur] : [];
-        for (const f of fixes) {
-          const last = pts[pts.length - 1];
-          if (last && Date.parse(f.at) - Date.parse(last.at) < MIN_STORE_GAP_MS) continue;
-          pts.push(f); added += 1;
-        }
-        return pts.slice(-MAX_POINTS);
+      await db.update(posKey(link.site, link.trip), (cur) => {
+        const r = appendTrack(cur, fixes);
+        added = r.added;
+        return r.pts;
       }, []);
       const last = fixes[fixes.length - 1];
       const updated = await db.update(linkKey(tok), (cur) => ({
@@ -353,6 +487,12 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
         openedAt: cur.openedAt || new Date().toISOString(), openedVia: cur.openedVia || via,
         points: (cur.points || 0) + added,
       }), link);
+      // City, state for the dispatcher — refreshed after ~2 km of movement.
+      const pl = updated.place;
+      if (!pl || Math.abs(pl.lat - last.lat) + Math.abs(pl.lng - last.lng) > 0.02) {
+        const label = await cityState(last.lat, last.lng, fetchFn);
+        if (label) await db.update(linkKey(tok), (cur) => ({ ...cur, place: { label, lat: last.lat, lng: last.lng, at: last.at } }), updated);
+      }
       res.json({ ok: true, active: true, status: linkStatus(updated), nextSec: 60 });
     } catch (e) { res.status(500).json({ error: 'Could not save the location.' }); }
   });
