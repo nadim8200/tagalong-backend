@@ -17,7 +17,7 @@
 import crypto from 'node:crypto';
 import { PDFDocument } from 'pdf-lib';
 
-const KINDS = new Set(['ratecon', 'tripsheet', 'packet', 'driverdoc', 'rundown']);   // rundown = the load's full PDF report   // driverdoc = POD / BOL sent by the driver
+const KINDS = new Set(['ratecon', 'tripsheet', 'packet', 'driverdoc', 'rundown', 'email']);   // email = attachment received by Jarvis   // rundown = the load's full PDF report   // driverdoc = POD / BOL sent by the driver
 const MAX_FILE_BYTES = 14 * 1024 * 1024;
 const OK_TYPES = /^(application\/pdf|image\/(jpeg|png|webp|heic|heif|gif))$/i;
 
@@ -283,5 +283,16 @@ export function initDocuments(app, { requireAuth, db }) {
     return ids.map((id) => byId.get(String(id))).filter((r) => r && !r.restricted).map((r) => ({ id: String(r.id), mediaType: r.media_type, data: Buffer.from(r.data), kind: r.kind, docType: r.doc_type, page: r.page }));
   }
 
-  return { storeDocs, linkDocs, listDocs, markDocs, readDocs, enabled };
+  // Drop packet pages we don't keep (only the trip sheets stay) and the whole
+  // scanned packet of that batch (it holds the BOLs / PODs / IDs we skip).
+  async function deleteDocs({ site, ids = [], packetBatch = null }) {
+    if (!enabled) return 0;
+    await ensureTable();
+    let n = 0;
+    if (ids.length) n += (await pool.query("DELETE FROM ta_docs WHERE site = $1 AND kind = 'tripsheet' AND id = ANY($2::bigint[])", [site, ids.map(Number)])).rowCount;
+    if (packetBatch) n += (await pool.query("DELETE FROM ta_docs WHERE site = $1 AND kind = 'packet' AND batch_id = $2", [site, String(packetBatch)])).rowCount;
+    return n;
+  }
+
+  return { storeDocs, linkDocs, listDocs, markDocs, readDocs, deleteDocs, enabled };
 }

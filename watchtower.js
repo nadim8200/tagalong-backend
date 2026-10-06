@@ -54,7 +54,7 @@ function localToUtcMs(wall, tz) {
   } catch { return asUtc; }
 }
 
-function haversineMi(aLat, aLng, bLat, bLng) {
+export function haversineMi(aLat, aLng, bLat, bLng) {
   const R = 3958.8; const r = Math.PI / 180;
   const dLat = (bLat - aLat) * r; const dLng = (bLng - aLng) * r;
   const s = Math.sin(dLat / 2) ** 2 + Math.cos(aLat * r) * Math.cos(bLat * r) * Math.sin(dLng / 2) ** 2;
@@ -65,7 +65,7 @@ function haversineMi(aLat, aLng, bLat, bLng) {
 // 11h drive / 14h shift / 30-min break / 10h reset; teams ~20h per day).
 // restDoneMin: how long a driver who is out of hours has already been parked,
 // so the 10-hour reset isn't assumed to start right now.
-function estimateArrival(miles, { team, driveLeftMin, shiftLeftMin, restDoneMin = 0, now = Date.now() } = {}) {
+export function estimateArrival(miles, { team, driveLeftMin, shiftLeftMin, restDoneMin = 0, now = Date.now() } = {}) {
   if (!miles || miles <= 0) return null;
   const H = 3600000;
   let driveHrs = miles / CRUISE_MPH;
@@ -412,9 +412,12 @@ const RULES = [
     const l = f.live;
     if (!isRolling(f.status) || !l || !f.gpsFresh || !f.stoppedMin || notStarted(f.status, f, ctx.now)) return null;
     const mins = f.stoppedMin;
-    if (mins < 60) return null;
+    // Resting = the ELD says off duty / sleeper (or the driver is out of hours).
+    // Not resting = on duty or "driving" while parked — that's the one to chase.
+    const duty = String((l.hos && l.hos.status) || '');
     const left = l.hos && l.hos.driveLeftMin;
-    if (left != null && left < 90) return null;            // likely a legal rest, not a problem
+    const resting = /^(offduty|sleeper|personalconveyance)/i.test(duty) || (left != null && left < 90);
+    if (resting ? mins < 11 * 60 : mins < 45) return null;   // a rest past 11h (10h reset + 1h) is worth a look too
     // parked at / near any customer still to be delivered = unloading, not a problem
     const nearStop = f.stops.some((s2) => {
       if (s2.delivered || !s2.zip) return false;
@@ -426,10 +429,18 @@ const RULES = [
     const o = ctx.origin;
     if (l.lat != null && haversineMi(l.lat, l.lng, o.lat, o.lng) < 30) return null;
     const codes = (l.dtcCodes || []).length;
+    const dutyLabel = { onDuty: 'on duty', driving: 'driving status', yardMove: 'yard move', offDuty: 'off duty', sleeperBerth: 'sleeper berth' }[duty] || (duty || 'duty status unknown');
+    if (resting) {
+      return {
+        code: 'stopped', severity: 'warning',
+        title: `Resting ${fmtMin(mins)} — longer than a 10-hour break`,
+        detail: `${l.location || 'Unknown location'} · ${dutyLabel}. Check the driver is OK and when they'll roll; update the customer if the ETA moves.`,
+      };
+    }
     return {
-      code: 'stopped', severity: mins >= 120 || codes ? 'critical' : 'warning',
-      title: codes ? `Possible breakdown — stopped ${fmtMin(mins)} with ${codes} engine code${codes === 1 ? '' : 's'}` : `Stopped ${fmtMin(mins)} in transit`,
-      detail: `${l.location || 'Unknown location'} · drive left ${fmtMin(left)}. Call the driver; arrange road service or a rescue if needed.`,
+      code: 'stopped', severity: mins >= 90 || codes ? 'critical' : 'warning',
+      title: codes ? `Possible breakdown — stopped ${fmtMin(mins)} with ${codes} engine code${codes === 1 ? '' : 's'}` : `Stopped ${fmtMin(mins)} and not resting`,
+      detail: `${l.location || 'Unknown location'} · ${dutyLabel} · drive left ${fmtMin(left)}. Call the driver. If it's a breakdown, arrange road service and turn on Breakdown on the load to notify the customers.`,
     };
   },
   function checkEngine(f) {
@@ -463,7 +474,7 @@ const RULES = [
 ];
 
 // Florida Beauty's Miami terminal — where the outbound trips load.
-const MIAMI_TERMINAL = { lat: 25.795, lng: -80.33 };
+export const MIAMI_TERMINAL = { lat: 25.795, lng: -80.33 };
 
 export function evaluateBoard(board, ctxIn) {
   const ctx = { origin: MIAMI_TERMINAL, unitState: () => null, ...ctxIn };
@@ -563,7 +574,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     const now = Date.now();
     await loadGeo();
     const board = await buildBoard(site);
-    if (afterBoard) { try { await afterBoard(site, board); } catch (e) { console.warn('[watchtower] afterBoard:', e.message); } }
+    if (afterBoard) { try { await afterBoard(site, board, { geo, now }); } catch (e) { console.warn('[watchtower] afterBoard:', e.message); } }
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
     const toPush = []; const toEscalate = [];
 

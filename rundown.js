@@ -193,14 +193,16 @@ export async function renderRundownPdf(r, { originals = [] } = {}) {
   if (r.checkins.length) r.checkins.slice().reverse().forEach((c) => bullet(`${fmt(c.at)} - ${c.source}${c.by ? ` (${c.by})` : ''}${c.from ? ` from ${c.from}` : ''}: ${c.location ? `${c.location} - ` : ''}${c.text}${c.issue ? ' [PROBLEM]' : ''}`, { size: 9.5 }));
   else none('No check-ins.');
 
-  h2('Calls & text conversations');
+  h2('Calls, texts & emails');
   if (r.comms.length) {
     r.comms.forEach((c) => {
       if (c.type === 'call') bullet(`${fmt(c.at)} - CALL by ${c.by || 'dispatch'} to ${c.label || c.to}`, { size: 9.5 });
       else if (c.type === 'reply') bullet(`${fmt(c.at)} - DRIVER (${c.from}): "${c.text}"`, { size: 9.5 });
+      else if (c.type === 'email' && c.dir === 'in') bullet(`${fmt(c.at)} - EMAIL from ${c.name ? `${c.name} ` : ''}<${c.from}> "${c.subject}": ${c.text}${(c.files || []).length ? ` [attached: ${c.files.join(', ')}]` : ''}`, { size: 9.5 });
+      else if (c.type === 'email') bullet(`${fmt(c.at)} - EMAIL REPLY by ${c.by || 'dispatch'} (from Jarvis) to ${c.to}: ${c.text}`, { size: 9.5 });
       else bullet(`${fmt(c.at)} - TEXT by ${c.by || 'dispatch'} to ${c.to}: "${c.text}"`, { size: 9.5 });
     });
-  } else none('No calls or texts from AI Dispatcher.');
+  } else none('No calls, texts or emails from AI Dispatcher.');
 
   h2('Documents on file');
   if (r.docs.length) r.docs.forEach((d) => bullet(`${d.kind}${d.docType ? ` / ${d.docType}` : ''} - ${d.filename || `page ${d.page || ''}`} - ${fmt(d.uploadedAt)}${d.uploadedBy ? ` by ${d.uploadedBy}` : ''}${d.restricted ? ' (restricted - not attached)' : ''}`, { size: 9.5 }));
@@ -257,7 +259,7 @@ export function initRundowns(app, { requireAuth, db, docs = null, env = process.
 
   // which stored pages go at the back: trip sheet, rate con, driver POD/BOL, packet BOL/POD pages
   function originalIds(stores) {
-    const want = (d) => !d.restricted && (d.kind === 'ratecon' || d.kind === 'driverdoc' || (d.kind === 'tripsheet' && /^(manifest|bill_of_lading|proof_of_delivery|packing_slip|shipping_ticket)/.test(d.docType || 'manifest')));
+    const want = (d) => !d.restricted && (d.kind === 'ratecon' || d.kind === 'driverdoc' || (d.kind === 'email' && /pdf|image/i.test(d.mediaType || '')) || (d.kind === 'tripsheet' && /^(manifest|bill_of_lading|proof_of_delivery|packing_slip|shipping_ticket)/.test(d.docType || 'manifest')));
     return stores.docs.filter(want).sort((a, b) => String(a.uploadedAt).localeCompare(String(b.uploadedAt)) || (a.page || 0) - (b.page || 0)).map((d) => d.id);
   }
 
@@ -303,7 +305,7 @@ export function initRundowns(app, { requireAuth, db, docs = null, env = process.
           to: rcpts,
           subject: `Load ${trip} ${d.reason === 'delivered' ? 'delivered' : 'finished'} — rundown${d.truck ? ` (Truck ${d.truck}` : ''}${d.destination ? ` → ${d.destination})` : d.truck ? ')' : ''}`,
           html: `<p><b>Trip ${trip}</b>${d.truck ? ` · Truck ${d.truck}` : ''}${d.oc ? ` · Outside carrier ${(d.oc.carrier && d.oc.carrier.name) || ''}` : ''}<br>${d.origin || ''} → ${d.destination || ''}<br>Finished ${fmt(d.finishedAt)}</p>
-<p>${d.bills.length} bill(s) · ${d.alerts.length} alert(s) · ${d.comms.length} call/text(s) · ${d.checkins.length} check-in(s)</p>
+<p>${d.bills.length} bill(s) · ${d.alerts.length} alert(s) · ${d.comms.length} call/text/email(s) · ${d.checkins.length} check-in(s)</p>
 <p>The full rundown — timeline, stops, alerts and who handled them, every call and text, and the original paperwork — is attached as a PDF.${note ? ` ${note}` : ''}</p>
 <p style="color:#667">Sent automatically by AI Dispatcher.</p>`,
           attachments: [{ name: `Rundown ${trip}.pdf`, contentType: 'application/pdf', bytes: made.bytes }],

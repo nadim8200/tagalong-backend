@@ -32,6 +32,18 @@ async function token(cfg, fetchFn) {
   return cached.token;
 }
 
+// Any Graph call as the app (used by the Jarvis inbox).
+export async function graph(path, { method = 'GET', body = null } = {}, { env = process.env, fetchFn = globalThis.fetch } = {}) {
+  const cfg = mailConfig(env);
+  if (!cfg.ready) throw new Error(`Outlook is not connected yet (missing ${cfg.missing.join(', ')} in Render).`);
+  const t = await token(cfg, fetchFn);
+  const r = await fetchFn(`${GRAPH}/users/${encodeURIComponent(cfg.from)}${path}`, { method, headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  if (r.status === 202 || r.status === 204) return null;
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(`Outlook (${r.status}): ${(j.error && j.error.message) || 'unknown'}`); e.status = r.status; throw e; }
+  return j;
+}
+
 // sendMail({ to: [..], subject, html, attachments: [{ name, contentType, bytes }] })
 export async function sendMail({ to, subject, html, attachments = [] }, { env = process.env, fetchFn = globalThis.fetch } = {}) {
   const cfg = mailConfig(env);

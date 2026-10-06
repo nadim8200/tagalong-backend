@@ -23,6 +23,11 @@ import Anthropic from '@anthropic-ai/sdk';
 const str = { type: ['string', 'null'] };
 const int = { type: ['integer', 'null'] };
 const strs = { type: 'array', items: { type: 'string' } };
+// Only the trip sheets are kept from an uploaded packet; BOLs, PODs, invoices,
+// packing slips, IDs… are read for context, then skipped (never left pending).
+export const SHEET_TYPES = new Set(['manifest', 'manifest_continuation']);
+export const keepPage = (pg, sheetDocIds = new Set()) => SHEET_TYPES.has(pg.type) || (pg.docId != null && sheetDocIds.has(String(pg.docId)));
+
 const obj = (properties) => ({ type: 'object', additionalProperties: false, required: Object.keys(properties), properties });
 
 const STOP = obj({
@@ -88,6 +93,18 @@ const TRIP = obj({
   handwrittenNotes: { ...strs, description: 'All other handwritten notes on the sheet, transcribed.' },
   generalInstructions: { ...strs, description: 'The trip-wide rules in the bottom boxes (routes like I-10 / I-40, no unauthorized stops, temperature, signatures).' },
   stops: { type: 'array', items: STOP },
+  contacts: {
+    type: 'array',
+    description: 'Every customer / broker contact for THIS trip found anywhere in the files that belong to it (the manifest, its rate confirmation, carrier confirmation, email print-outs, shipping papers): who to send load updates to. Only what is printed or written — never guess an email.',
+    items: obj({
+      role: { type: 'string', enum: ['broker', 'customer', 'receiver', 'shipper', 'other'] },
+      company: str,
+      name: { ...str, description: 'Person, if named.' },
+      email: str,
+      phone: str,
+      source: { ...str, description: 'Where it was found, e.g. "rate confirmation page 2", "manifest stop 3".' },
+    }),
+  },
   outsideCarrier: OUTSIDE,
   sourcePages: { type: 'array', description: 'Every page that is part of THIS manifest (page 1 and its continuation pages).', items: obj({ file: { type: 'integer' }, page: { type: 'integer' } }) },
   unreadable: { ...strs, description: 'Anything you could not read with confidence — say what and where.' },
@@ -96,7 +113,7 @@ const TRIP = obj({
 const PAGE = obj({
   file: { type: 'integer', description: 'The "File N" the page is in.' },
   page: { type: 'integer', description: 'Page number inside that file (1 for a photo).' },
-  type: { type: 'string', enum: ['manifest', 'manifest_continuation', 'rate_confirmation', 'carrier_confirmation', 'email', 'bill_of_lading', 'packing_slip', 'shipping_ticket', 'proof_of_delivery', 'driver_id', 'invoice', 'shipment_notice', 'other'] },
+  type: { type: 'string', enum: ['manifest', 'manifest_continuation', 'driver_instructions', 'loading_sheet', 'rate_confirmation', 'carrier_confirmation', 'email', 'bill_of_lading', 'packing_slip', 'shipping_ticket', 'proof_of_delivery', 'driver_id', 'invoice', 'shipment_notice', 'other'] },
   tripNumbers: { ...strs, description: 'Florida Beauty trip numbers (6 digits, e.g. 624257) written or printed on this page.' },
   references: { ...strs, description: 'Every load / BOL / PO / order / seal / pro / picklist / bill number on the page, exactly as printed (e.g. "P045280", "B180307", "SEAL# 09771655", "Load #425401").' },
   summary: { type: 'string', description: 'One factual sentence: what this page is and for whom (company names, route).' },
@@ -116,6 +133,10 @@ const SCHEMA = obj({ trips: { type: 'array', items: TRIP }, pages: { type: 'arra
 const PROMPT = `These files are Florida Beauty Flora trip paperwork: outbound trip sheets (manifests) and often a whole scanned "trip packet" — manifests mixed with rate confirmations, carrier confirmations, email print-outs, bills of lading, packing slips, shipping tickets, proof-of-delivery reports, invoices and sometimes a driver's licence. Each file is labeled "File N"; pages inside a PDF are numbered from 1.
 
 1. "pages": list EVERY page of every file exactly once, with its type, the trip numbers and reference numbers on it, and a one-sentence factual summary.
+   TRIP SHEET PAGES (the only pages the app keeps): "manifest" = FBF letterhead titled "MANIFEST" with "TRIP NUMBER #", DATE LOADED / TRUCK / TRAILER / DRIVER and the STOP # table. "manifest_continuation" = the page right after it on FBF letterhead with NO "MANIFEST" title that continues the numbered STOP rows (e.g. "10 DELIVER …", "+ …") and the temperature box. Nothing else is a manifest page, even when it has FBF letterhead or a trip number:
+   - "driver_instructions": the FBF page "FLOWER OUTBOUND INSTRUCTIONS" / "BROKER LOAD / RELOAD INSTRUCTIONS" / "DRIVERS MUST SAVE FUEL" (signed by the driver). Same boilerplate on every trip.
+   - "loading_sheet": the warehouse loading / pick sheet with "Truck#", "Trailer#", "Door", "CHKR", "Loader", "Priority N", "Truck Seqno" and "Route Name", listing customers with cubes and boxes.
+   - FBF bills of lading (FBF "as broker", FBF booking numbers like P045289), Fourkite / tracking agreements ("other"), shipment advices ("shipment_notice"), growers' BOLs and shipping tickets are NOT manifest pages.
 2. "trips": one entry per MANIFEST (header "MANIFEST", "TRIP NUMBER #"). A manifest usually spans 2 pages — the continuation page has no trip number and often ends with "CONTINUE"; attach it to the manifest before it and list both in sourcePages.
    - Keep stops in the printed STOP # order. Lines starting with "+" are extra consignees at the same stop (subStop=true, same stopNumber).
    - Handwriting matters most: appointments written next to a stop, who picks up and when, extra pallets, "SPLIT", certificate notes, phone numbers. Handwritten appointments go in apptDate/apptTime with apptSource="handwritten".
@@ -435,10 +456,16 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
         return rec;
       });
       // every page of the packet, typed and matched to a trip
-      const pagesOut = matchPacketPages(Array.isArray(parsed.pages) ? parsed.pages : [], trips, board).map((pg) => ({
+      const allPages = matchPacketPages(Array.isArray(parsed.pages) ? parsed.pages : [], trips, board).map((pg) => ({
         ...pg, docId: docOf(pg.file, pg.page), batchId: req.body.batchId || null, uploadedAt: now, uploadedBy: who(req),
         keyFields: pg.type === 'driver_id' ? [] : (pg.keyFields || []),
       }));
+      const sheetDocIds = new Set(trips.flatMap((t) => t.docIds));
+      const pagesOut = allPages.filter((pg) => keepPage(pg, sheetDocIds));
+      const skipped = allPages.filter((pg) => !keepPage(pg, sheetDocIds));
+      if (docs && docs.enabled && docs.deleteDocs) {
+        try { await docs.deleteDocs({ site, ids: skipped.map((pg) => pg.docId).filter((id) => id && !sheetDocIds.has(String(id))), packetBatch: req.body.batchId || null }); } catch (e) { console.warn('[manifest] could not drop skipped pages:', e.message); }
+      }
       if (docs && docs.enabled) {
         const byDoc = new Map();
         trips.forEach((t) => t.docIds.forEach((id) => byDoc.set(id, [...(byDoc.get(id) || []), t.tripNumber])));
@@ -468,7 +495,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
           const ocs = trips.filter((t) => t.outsideCarrier && t.outsideCarrier.isOutsideCarrier && t.outsideCarrier.name)
             .map((t) => ({ carrier: t.outsideCarrier, code: /^OC\s?-?\d+/i.test(String(t.truck || '')) ? String(t.truck).toUpperCase().replace(/[\s-]/g, '') : null }));
           await carriers.recordFromSheets(site, ocs);
-          for (const pg of pagesOut.filter((x) => x.type === 'email' && x.trip && (x.checkins || []).length)) {
+          for (const pg of allPages.filter((x) => x.type === 'email' && x.trip && (x.checkins || []).length)) {
             await carriers.addCheckins(site, pg.trip, pg.checkins.map((c) => ({ at: c.at || pg.date || now, source: 'email', from: c.from || null, text: c.text, issue: !!c.issue, page: `${pg.file}:${pg.page}` }))); // eslint-disable-line no-await-in-loop
           }
         } catch (e) { console.warn('[manifest] carriers/check-ins:', e.message); }
@@ -483,7 +510,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
           return all;
         }, {});
       }
-      res.json({ trips, pages: pagesOut.map((pg) => ({ file: pg.file, page: pg.page, type: pg.type, trip: pg.trip, matchedBy: pg.matchedBy, summary: pg.summary })), usage: msg.usage ? { input: msg.usage.input_tokens, output: msg.usage.output_tokens } : null });
+      res.json({ trips, pages: pagesOut.map((pg) => ({ file: pg.file, page: pg.page, type: pg.type, trip: pg.trip, matchedBy: pg.matchedBy, summary: pg.summary })), skipped: skipped.map((pg) => ({ file: pg.file, page: pg.page, type: pg.type })), usage: msg.usage ? { input: msg.usage.input_tokens, output: msg.usage.output_tokens } : null });
     } catch (e) {
       if (e instanceof Anthropic.RateLimitError) return res.status(429).json({ error: 'AI is busy — try again in a minute.' });
       if (e instanceof Anthropic.BadRequestError) return res.status(400).json({ error: `AI rejected the upload: ${e.message}` });
@@ -502,10 +529,14 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     const board = await boardIndex(site);
     const trips = Object.values(sheets);
     const moved = [];
+    const dropped = [];
     const all = await db.update(`taTruckMatePacket:${site}`, (cur) => {
       const a = { ...(cur || {}) };
-      const list = a.__unmatched || [];
-      if (!list.length) return a;
+      dropped.length = 0;
+      const all0 = a.__unmatched || [];
+      const list = all0.filter((p) => SHEET_TYPES.has(p.type));
+      dropped.push(...all0.filter((p) => !SHEET_TYPES.has(p.type)));
+      if (!list.length) { delete a.__unmatched; return a; }
       // matched pages of the same batches give page-to-page links
       const batches = new Set(list.map((p) => p.batchId));
       const context = Object.entries(a).filter(([k]) => k !== '__unmatched').flatMap(([, v]) => v).filter((p) => batches.has(p.batchId));
@@ -518,6 +549,9 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       if (!a.__unmatched.length) delete a.__unmatched;
       return a;
     }, {});
+    if (dropped.length && docs && docs.enabled && docs.deleteDocs) {
+      try { await docs.deleteDocs({ site, ids: dropped.map((p) => p.docId).filter(Boolean) }); } catch (e) { console.warn('[manifest] drop old pending pages:', e.message); }
+    }
     if (moved.length && docs && docs.enabled) {
       try { await docs.linkDocs({ site, kind: 'tripsheet', links: moved.filter((p) => p.docId).map((p) => ({ docId: p.docId, trips: [p.trip] })) }); } catch (e) { console.warn('[manifest] rematch link:', e.message); }
     }
