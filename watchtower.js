@@ -689,16 +689,31 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
       roadQueue.delete(k);
       roads.calls += 1;
       try {
-        const r = await fetch(`https://maps.googleapis.com/maps/api/distancematrix/json?units=imperial&origins=${a.lat},${a.lng}&destinations=${b.lat},${b.lng}&key=${key}`); // eslint-disable-line no-await-in-loop
-        const d = await r.json(); // eslint-disable-line no-await-in-loop
-        const el = d && d.rows && d.rows[0] && d.rows[0].elements && d.rows[0].elements[0];
-        if (d.status !== 'OK' || !el || el.status !== 'OK') {
-          roads.lastError = `${d.status}${el ? `/${el.status}` : ''}${d.error_message ? `: ${d.error_message.slice(0, 120)}` : ''}`;
-          if (d.status === 'REQUEST_DENIED' || d.status === 'OVER_QUERY_LIMIT') { roads.off = Date.now() + 6 * 3600000; break; }
+        // Routes API (current) first; the older Distance Matrix API as a fallback
+        let meters = null; let err = null;
+        const r1 = await fetch('https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix', { // eslint-disable-line no-await-in-loop
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'originIndex,destinationIndex,distanceMeters,condition' },
+          body: JSON.stringify({ origins: [{ waypoint: { location: { latLng: { latitude: a.lat, longitude: a.lng } } } }], destinations: [{ waypoint: { location: { latLng: { latitude: b.lat, longitude: b.lng } } } }], travelMode: 'DRIVE' }),
+        });
+        const j1 = await r1.json().catch(() => null); // eslint-disable-line no-await-in-loop
+        if (r1.ok && Array.isArray(j1) && j1[0] && j1[0].distanceMeters) meters = j1[0].distanceMeters;
+        else {
+          err = `routes ${r1.status}${j1 && j1.error ? `: ${String(j1.error.message || '').slice(0, 100)}` : ''}`;
+          const r2 = await fetch(`https://maps.googleapis.com/maps/api/distancematrix/json?units=imperial&origins=${a.lat},${a.lng}&destinations=${b.lat},${b.lng}&key=${key}`); // eslint-disable-line no-await-in-loop
+          const d = await r2.json().catch(() => ({})); // eslint-disable-line no-await-in-loop
+          const el = d && d.rows && d.rows[0] && d.rows[0].elements && d.rows[0].elements[0];
+          if (d.status === 'OK' && el && el.status === 'OK') meters = el.distance.value;
+          else err += ` · matrix ${d.status || r2.status}${d.error_message ? `: ${d.error_message.slice(0, 100)}` : ''}`;
+        }
+        if (meters == null) {
+          roads.lastError = err;
+          if (/40[13]|REQUEST_DENIED|OVER_QUERY_LIMIT|PERMISSION_DENIED/.test(err)) { roads.off = Date.now() + 6 * 3600000; break; }
           continue;
         }
+        roads.lastError = null;
         const straight = haversineMi(a.lat, a.lng, b.lat, b.lng);
-        const f = (el.distance.value / 1609.34) / straight;
+        const f = (meters / 1609.34) / straight;
         if (f > 0.95 && f < 3) roadCache[k] = Math.round(f * 1000) / 1000;
       } catch (e) { roads.lastError = e.message; break; }
     }
