@@ -10,6 +10,7 @@
 import { compareWithTruckMate, keyStops, linkSheetStops } from './manifest.js';
 import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit, trailerLocations } from './samsara.js';
 import { buildFleet, updateStill, withStill } from './fleetmap.js';
+import { tripTimes } from './triptimes.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -446,6 +447,25 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     return added;
   }
 
+  // When a trip was added to the board, and each TruckMate status change (to
+  // know when it was dispatched). Trips already on the board before this was
+  // recorded keep "addedBefore" instead of a made-up time.
+  function trackTripTimes(prev, t, now, timesSince) {
+    const inner = (t && t.trip) || t || {};
+    const status = String(inner.status || '');
+    const rec = { ...(prev || {}), item: t, updatedAt: now };
+    if (!rec.firstSeenAt) {
+      rec.firstSeenAt = now;
+      if (prev) rec.addedBefore = true;          // was already here when tracking started
+    }
+    const hist = Array.isArray(rec.statusHistory) ? rec.statusHistory : [];
+    const last = hist[hist.length - 1];
+    if (status && (!last || last.status !== status)) {
+      rec.statusHistory = [...hist, { status, desc: inner.statusDesc || null, at: now, first: !last && !!prev }].slice(-30);
+    }
+    return rec;
+  }
+
   // Fold this cycle's delta into the persistent active board. Live trips are
   // upserted by id (freshest wins); a trip flagged delivered is removed; trips we
   // haven't heard about in ACTIVE_TTL are aged out (covers a trip that closes
@@ -462,7 +482,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
       const id = String((t && t._id) || inner.tripNumber || '');
       if (!id) continue;
       if (t && t._event === 'delivered') { delete store.trips[id]; continue; }
-      store.trips[id] = { item: t, updatedAt: now };
+      store.trips[id] = trackTripTimes(store.trips[id], t, now, store.timesSince || (store.timesSince = now));
     }
     for (const [id, rec] of Object.entries(store.trips)) {
       if (!rec || (now - (rec.updatedAt || 0)) > ACTIVE_TTL_MS) delete store.trips[id];
@@ -480,7 +500,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   async function buildBoard(site) {
     const store = (db && db.enabled) ? await db.get(`taTruckMateActive:${site}`, { trips: {} }) : { trips: {} };
     const recs = Object.values(store.trips || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    const trips = recs.map((r) => r.item);
+    const trips = recs.map((r) => { if (r.item) r.item._times = tripTimes(r); return r.item; });
     // Overlay LIVE Samsara data (driver names, GPS/fuel/engine, reefer temp) on
     // each trip so the dispatcher can cross-check it against TruckMate. Cached
     // ~60s; if Samsara is down or unconfigured we just skip the overlay.
