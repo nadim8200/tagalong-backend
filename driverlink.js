@@ -171,7 +171,7 @@ export function cleanFixes(list, now = Date.now()) {
   }).filter(Boolean).sort((a, b) => a.at.localeCompare(b.at));
 }
 
-export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcentral = null, getBoard = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcentral = null, docs = null, getBoard = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const base = String(env.DRIVER_LINK_BASE || 'https://mytagalong.app').replace(/\/+$/, '');
   const company = env.DRIVER_LINK_COMPANY || 'Florida Beauty Flora';
@@ -182,7 +182,7 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const urlOf = (tok) => `${base}/t/${tok}`;
-  const messageFor = (link) => `${company} dispatch: please share your location for load ${link.trip} until delivery. Open in the TagAlong app: ${urlOf(link.token)} (load code ${link.code}). You can stop sharing any time.`;
+  const messageFor = (link) => `${company} dispatch: please share your location for load ${link.trip} until delivery. Open in the TagAlong app: ${urlOf(link.token)} (load code ${link.code}). You can stop sharing any time. Reply STOP to opt out.`;
 
   // Latest board snapshot per site, refreshed by the overlay (every board build).
   const boardTrips = new Map();
@@ -348,6 +348,7 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
       const link = tok ? await db.get(linkKey(tok), null) : null;
       if (!link || !isLive(linkStatus(link))) return res.status(404).json({ error: 'Create a tracking link first.' });
       const item = await findItem(site, trip);
+      if (!(item && item._oc && item._oc.smsConsent)) return res.status(409).json({ error: 'Record that the driver agreed to texts first (Outside carrier section).', needConsent: true });
       const to = toE164((req.body && req.body.to) || (item && item._oc && item._oc.driverPhone) || link.driverPhone);
       if (!to) return res.status(400).json({ error: 'Add the driver’s phone number first.' });
       const owner = String(req.user.company || req.user.id);
@@ -516,6 +517,26 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
       if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [entry]);
       res.json({ ok: true, entry });
     } catch (e) { res.status(500).json({ error: 'Could not send the check-in.' }); }
+  });
+
+  // The driver sends photos / PDFs of the signed POD or BOL from the link page.
+  app.post('/driver/link/:token/docs', async (req, res) => {
+    if (!enabled || !docs || !docs.enabled) return res.status(503).json({ error: 'Uploads are not available right now.' });
+    try {
+      const tok = String(req.params.token);
+      const { link, status } = await activeLink(tok);
+      if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
+      if (!isLive(status) && status !== 'completed') return res.status(410).json({ active: false, status });
+      const b = req.body || {};
+      const kind = b.kind === 'bol' ? 'bol' : 'pod';
+      const files = (Array.isArray(b.files) ? b.files : []).slice(0, 8);
+      if (!files.length) return res.status(400).json({ error: 'Add at least one photo.' });
+      const by = `${(link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'Driver'} (tracking link)`;
+      const stored = await docs.storeDocs({ site: link.site, kind: 'driverdoc', trip: link.trip, files: files.map((f, i) => ({ ...f, filename: f.filename || `${kind.toUpperCase()}-${link.trip}-${i + 1}.jpg`, page: i + 1 })), by });
+      await docs.markDocs({ site: link.site, ids: stored.map((d) => d.id), docType: kind === 'bol' ? 'bill_of_lading' : 'proof_of_delivery' });
+      if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: new Date().toISOString(), source: 'driver app', text: `Driver sent the ${kind.toUpperCase()} (${stored.length} ${stored.length === 1 ? 'page' : 'pages'})`, by }]);
+      res.json({ ok: true, count: stored.length });
+    } catch (e) { res.status(400).json({ error: e.message || 'Could not upload.' }); }
   });
 
   app.post('/driver/link/:token/stop', async (req, res) => {

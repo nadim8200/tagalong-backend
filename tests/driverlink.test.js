@@ -66,7 +66,7 @@ test('create → driver opens → pings → board shows phone GPS → check-in �
   const lookups = [];
   const fetchFn = async (url) => { lookups.push(url); return { json: async () => ({ address: { city: 'Jacksonville', state: 'Florida', 'ISO3166-2-lvl4': 'US-FL' } }) }; };
   const dl = initDriverLinks(app, { requireAuth: () => {}, db, carriers, ringcentral, env: {}, fetchFn });
-  const item = { trip: { tripNumber: '624268', powerUnit: 'OC1016', origZoneDesc: 'MIAMI, FL', destZoneDesc: 'ATLANTA, GA' }, freightBills: [{ billNumber: 'B1' }], _oc: { carrier: { name: 'Zeal Xpress Inc' }, driverPhone: '(305) 555-0117' } };
+  const item = { trip: { tripNumber: '624268', powerUnit: 'OC1016', origZoneDesc: 'MIAMI, FL', destZoneDesc: 'ATLANTA, GA' }, freightBills: [{ billNumber: 'B1' }], _oc: { carrier: { name: 'Zeal Xpress Inc' }, driverPhone: '(305) 555-0117', smsConsent: { by: 'Ana', at: '2026-10-04T10:00:00Z' } } };
   await dl.overlay('florida-beauty', [item]);
 
   const made = await app.call('POST', '/truckmate/oc/:trip/link', { trip: '624268' });
@@ -74,6 +74,7 @@ test('create → driver opens → pings → board shows phone GPS → check-in �
   assert.match(made.body.url, /^https:\/\/mytagalong\.app\/t\/[\w-]{20,}$/);
   assert.match(made.body.code, /^\d{6}$/);
   assert.match(made.body.message, /load 624268/);
+  assert.match(made.body.message, /Reply STOP to opt out\.$/);
   const tok = made.body.token;
 
   const txt = await app.call('POST', '/truckmate/oc/:trip/link/send', { trip: '624268' }, {}, { name: 'Ana', company: 'fbf' });
@@ -195,4 +196,30 @@ test('OC form saves the carrier name and main phone; the trip shows it', async (
   assert.equal(item._oc.truck, '176');
   assert.equal(item._oc.trailer, 'RR1');
   assert.deepEqual(item._oc.missing, []);
+});
+
+test('texting the link needs the driver\'s recorded consent', async () => {
+  const db = fakeDb(); const app = fakeApp();
+  const ringcentral = { sendSms: async () => ({ ok: true }) };
+  const dl = initDriverLinks(app, { requireAuth: () => {}, db, ringcentral, env: {}, fetchFn: null });
+  await dl.overlay('florida-beauty', [{ trip: { tripNumber: '5', powerUnit: 'OC5' }, _oc: { driverPhone: '3055550100' } }]);
+  await app.call('POST', '/truckmate/oc/:trip/link', { trip: '5' });
+  const r = await app.call('POST', '/truckmate/oc/:trip/link/send', { trip: '5' }, {}, { name: 'Ana', company: 'fbf' });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.needConsent, true);
+});
+
+test('driver uploads POD photos from the link: stored on the load, marked POD, logged', async () => {
+  const db = fakeDb(); const app = fakeApp();
+  const stored = []; const marked = []; const checkins = [];
+  const docs = { enabled: true, storeDocs: async (a) => { stored.push(a); return a.files.map((f, i) => ({ id: String(100 + i) })); }, markDocs: async (a) => { marked.push(a); } };
+  const carriers = { addCheckins: async (site, trip, list) => checkins.push({ trip, list }), setDriverInfo: async () => {} };
+  const dl = initDriverLinks(app, { requireAuth: () => {}, db, docs, carriers, env: {}, fetchFn: null });
+  await dl.overlay('florida-beauty', [{ trip: { tripNumber: '9', powerUnit: 'OC9' } }]);
+  const made = await app.call('POST', '/truckmate/oc/:trip/link', { trip: '9' });
+  const r = await app.call('POST', '/driver/link/:token/docs', { token: made.body.token }, { kind: 'pod', files: [{ mediaType: 'image/jpeg', dataBase64: 'AAAA' }, { mediaType: 'image/jpeg', dataBase64: 'BBBB' }] });
+  assert.equal(r.status, 200);
+  assert.equal(stored[0].kind, 'driverdoc'); assert.equal(stored[0].trip, '9');
+  assert.equal(marked[0].docType, 'proof_of_delivery');
+  assert.match(checkins[0].list[0].text, /POD \(2 pages\)/);
 });

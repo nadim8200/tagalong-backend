@@ -70,6 +70,8 @@ export function ocFor(item, store) {
     // solo / team is the dispatcher's call; TruckMate's 2nd driver is the default hint
     crew: (mark && mark.crew) || (t.driver2 ? 'team' : 'solo'),
     infoFrom: mark && mark.infoAt ? { by: mark.infoBy || 'driver app', at: mark.infoAt } : null,
+    // the driver agreed to load texts — who recorded it and when (carrier proof)
+    smsConsent: mark && mark.smsConsent ? mark.smsConsent : null,
     markedBy: mark ? mark.by || null : null,
     markedAt: mark ? mark.at || null : null,
     evidence: fromSheet ? fromSheet.evidence || null : null,
@@ -256,6 +258,24 @@ export function initCarriers(app, { requireAuth, db }) {
         return s;
       }, empty);
       res.json(mark);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Record (or withdraw) that the driver agreed to texts about this load.
+  app.post('/truckmate/oc/:trip/consent', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const trip = String(req.params.trip || '').trim();
+    const agreed = !!(req.body && req.body.agreed);
+    try {
+      let mark = null;
+      await db.update(key(siteOf(req)), (cur) => {
+        const s = { ...empty, ...(cur || {}), marks: { ...((cur || {}).marks || {}) } };
+        const prev = s.marks[trip] && !s.marks[trip].cleared ? s.marks[trip] : {};
+        mark = { ...prev, smsConsent: agreed ? { by: who(req), at: new Date().toISOString(), how: clean(req.body && req.body.how) || 'verbal (dispatcher call)' } : null };
+        s.marks[trip] = mark;
+        return s;
+      }, empty);
+      res.json({ smsConsent: mark.smsConsent });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

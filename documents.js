@@ -17,7 +17,7 @@
 import crypto from 'node:crypto';
 import { PDFDocument } from 'pdf-lib';
 
-const KINDS = new Set(['ratecon', 'tripsheet', 'packet']);
+const KINDS = new Set(['ratecon', 'tripsheet', 'packet', 'driverdoc']);   // driverdoc = POD / BOL sent by the driver
 const MAX_FILE_BYTES = 14 * 1024 * 1024;
 const OK_TYPES = /^(application\/pdf|image\/(jpeg|png|webp|heic|heif|gif))$/i;
 

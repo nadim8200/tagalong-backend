@@ -289,5 +289,53 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   });
 
   console.log('[ringcentral] ready — /ringcentral/config, /sms, /calls, /was-called, /numbers');
-  return { sendSms, wasCalled, accessToken };
+  // ---- click-to-call (RingOut) ----
+  // RingCentral rings the DISPATCHER's phone first; when they answer it dials
+  // the driver from the company number. Each dispatcher saves which phone rings.
+  const myPhoneKey = 'taRcMyPhone';
+  const userKey = (req) => String(req.user.id || req.user.email || req.user.name || 'me');
+  const e164 = (p) => { const d = String(p || '').replace(/\D+/g, ''); return d.length === 10 ? `+1${d}` : d.length === 11 && d.startsWith('1') ? `+${d}` : d.length > 6 ? `+${d}` : null; };
+  async function ringOut(owner, { from, to, callerId }) {
+    const body = { from: { phoneNumber: from }, to: { phoneNumber: to }, playPrompt: false };
+    if (callerId) body.callerId = { phoneNumber: callerId };
+    const out = await rcFetch(owner, '/restapi/v1.0/account/~/extension/~/ring-out', { method: 'POST', body: JSON.stringify(body) });
+    return { id: out.id, status: out.status && out.status.callStatus };
+  }
+  app.get('/ringcentral/my-phone', requireAuth, async (req, res) => {
+    if (!db || !db.enabled) return res.json({ phone: null });
+    res.json({ phone: ((await db.get(myPhoneKey, {}))[userKey(req)] || null) });
+  });
+  app.put('/ringcentral/my-phone', requireAuth, async (req, res) => {
+    if (!db || !db.enabled) return res.status(503).json({ error: 'Needs DATABASE_URL.' });
+    const phone = e164(req.body && req.body.phone);
+    if (!phone) return res.status(400).json({ error: 'Enter the phone that should ring (10 digits).' });
+    await db.update(myPhoneKey, (cur) => ({ ...(cur || {}), [userKey(req)]: phone }), {});
+    res.json({ phone });
+  });
+  // POST { to, trip?, label? } — every call is a dispatcher's click.
+  app.post('/ringcentral/call', requireAuth, async (req, res) => {
+    const b = req.body || {};
+    const to = e164(b.to);
+    if (!to) return res.status(400).json({ error: 'That phone number does not look right.' });
+    try {
+      const mine = db && db.enabled ? (await db.get(myPhoneKey, {}))[userKey(req)] : null;
+      if (!mine) return res.status(428).json({ error: 'Set the phone that should ring first.', needPhone: true });
+      const owner = String(req.user.company || req.user.id);
+      const cfg = await configFor(owner);
+      const r = await ringOut(owner, { from: mine, to, callerId: cfg && cfg.fromNumber });
+      if (onCall) { try { await onCall({ req, to, trip: b.trip ? String(b.trip) : null, label: b.label ? String(b.label).slice(0, 80) : null, by: (req.user && (req.user.name || req.user.email)) || 'dispatcher' }); } catch { /* logging only */ } }
+      res.json({ ok: true, ...r, ringing: mine });
+    } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+
+  // Inbound texts since a time (message store) — for driver replies.
+  async function inboundSince(owner, sinceIso) {
+    const q = new URLSearchParams({ messageType: 'SMS', direction: 'Inbound', dateFrom: sinceIso, perPage: '100' });
+    const j = await rcFetch(owner, `/restapi/v1.0/account/~/extension/~/message-store?${q}`);
+    return (j.records || []).map((m) => ({ id: String(m.id), from: m.from && m.from.phoneNumber, text: m.subject || '', at: m.creationTime }));
+  }
+  let onCall = null;
+  const setOnCall = (fn) => { onCall = fn; };
+
+  return { sendSms, wasCalled, accessToken, ringOut, inboundSince, configFor, setOnCall };
 }
