@@ -223,7 +223,7 @@ function traccarLive(device, p) {
   };
 }
 
-export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders, docs = null, overlays = [], routeProviders = [] }) {
+export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders, docs = null, overlays = [], routeProviders = [], onFinished = null }) {
   // 30s-cached index of Traccar devices → live overlay, keyed by unit number.
   let _tmTraccar = { at: 0, idx: null };
   async function traccarLiveIndex() {
@@ -481,11 +481,19 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
       const inner = (t && t.trip) || t || {};
       const id = String((t && t._id) || inner.tripNumber || '');
       if (!id) continue;
-      if (t && t._event === 'delivered') { delete store.trips[id]; continue; }
+      if (t && t._event === 'delivered') {
+        // the load is done: hand its full record to the rundown (PDF + email)
+        const prev = store.trips[id];
+        if (onFinished) Promise.resolve(onFinished(site, { ...(prev || {}), item: (t.trip || t.freightBills) ? t : (prev && prev.item) || t }, 'delivered')).catch((e) => console.warn('[truckmate] rundown:', e.message));
+        delete store.trips[id]; continue;
+      }
       store.trips[id] = trackTripTimes(store.trips[id], t, now, store.timesSince || (store.timesSince = now));
     }
     for (const [id, rec] of Object.entries(store.trips)) {
-      if (!rec || (now - (rec.updatedAt || 0)) > ACTIVE_TTL_MS) delete store.trips[id];
+      if (!rec || (now - (rec.updatedAt || 0)) > ACTIVE_TTL_MS) {
+        if (rec && onFinished) Promise.resolve(onFinished(site, rec, 'left the board — no TruckMate update for 36h')).catch((e) => console.warn('[truckmate] rundown:', e.message));
+        delete store.trips[id];
+      }
     }
     await db.set(key, store);
     return Object.keys(store.trips).length;

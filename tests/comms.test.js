@@ -44,3 +44,26 @@ test('Samsara driver profile: only name, phone and IDs leave the server', async 
   const p = driverProfile({ id: 7, name: 'Mark Bodien', username: 'MBODIEN', phone: '+19545550100', licenseNumber: 'B123456789', licenseState: 'FL', notes: 'x' });
   assert.deepEqual(p, { id: '7', name: 'Mark Bodien', username: 'MBODIEN', phone: '+19545550100' });
 });
+
+test('custom text: company name first, STOP line added, length capped', () => {
+  assert.equal(messageFor('custom', { text: '  Call me when you\'re empty  ' }), "Florida Beauty Flora dispatch: Call me when you're empty Reply STOP to opt out.");
+  assert.equal(messageFor('custom', { text: 'Ok thanks. Reply STOP to opt out.' }), 'Florida Beauty Flora dispatch: Ok thanks. Reply STOP to opt out.');
+  assert.equal(messageFor('custom', { text: '   ' }), null);
+  assert.ok(messageFor('custom', { text: 'x'.repeat(500) }).length < 360);
+});
+
+test('driver conversation: every call, text and reply on the driver\'s thread, tagged with the load', async () => {
+  const { initComms } = await import('../comms.js');
+  const m = new Map(); const clone = (v) => JSON.parse(JSON.stringify(v));
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? clone(m.get(k)) : fb), set: async (k, v) => m.set(k, clone(v)), update: async (k, fn, fb) => { const n = fn(m.has(k) ? clone(m.get(k)) : fb); m.set(k, clone(n)); return n; } };
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h[h.length - 1]; }, post: (p, ...h) => { routes[`POST ${p}`] = h[h.length - 1]; } };
+  const c = initComms(app, { requireAuth: () => {}, db, env: { NODE_ENV: 'test' } });
+  await c.log('florida-beauty', '624278', { type: 'call', to: '+19545550100', label: 'Mark Bodien', by: 'Rosa' });
+  await c.log('florida-beauty', '624278', { type: 'text', kind: 'custom', to: '+19545550100', text: 'Florida Beauty Flora dispatch: call me. Reply STOP to opt out.', by: 'Rosa' });
+  await c.log('florida-beauty', '624301', { type: 'reply', from: '(954) 555-0100', text: 'on my way' });
+  let out; const res = { json: (j) => { out = j; }, status: () => res };
+  await routes['GET /truckmate/drivers/:phone/thread']({ params: { phone: '9545550100' }, query: {}, body: {} }, res);
+  assert.deepEqual(out.map((e) => [e.type, e.trip]), [['reply', '624301'], ['text', '624278'], ['call', '624278']]);
+  assert.equal(out[1].by, 'Rosa');
+});

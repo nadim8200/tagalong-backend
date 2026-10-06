@@ -1,0 +1,57 @@
+// ---------------------------------------------------------------
+// Outlook / Microsoft 365 email (Microsoft Graph, app-only).
+//
+// Set in Render (never in the code or the chat):
+//   MS_TENANT_ID      — the company's Microsoft 365 tenant (directory) ID
+//   MS_CLIENT_ID      — the Azure app registration's application (client) ID
+//   MS_CLIENT_SECRET  — that app's client secret
+//   MAIL_FROM         — the mailbox it sends from, e.g. dispatch-reports@floridabeauty.us
+// The app needs the Microsoft Graph *application* permission Mail.Send with
+// admin consent; IT can limit it to just MAIL_FROM (application access policy).
+// ---------------------------------------------------------------
+
+const GRAPH = 'https://graph.microsoft.com/v1.0';
+let cached = { token: null, exp: 0 };
+
+export function mailConfig(env = process.env) {
+  const cfg = { tenant: env.MS_TENANT_ID, clientId: env.MS_CLIENT_ID, secret: env.MS_CLIENT_SECRET, from: env.MAIL_FROM };
+  const missing = Object.entries({ MS_TENANT_ID: cfg.tenant, MS_CLIENT_ID: cfg.clientId, MS_CLIENT_SECRET: cfg.secret, MAIL_FROM: cfg.from }).filter(([, v]) => !v).map(([k]) => k);
+  return { ...cfg, ready: !missing.length, missing };
+}
+
+async function token(cfg, fetchFn) {
+  if (cached.token && cached.exp > Date.now() + 60000) return cached.token;
+  const r = await fetchFn(`https://login.microsoftonline.com/${encodeURIComponent(cfg.tenant)}/oauth2/v2.0/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'client_credentials', client_id: cfg.clientId, client_secret: cfg.secret, scope: 'https://graph.microsoft.com/.default' }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Outlook sign-in failed (${r.status}): ${j.error_description || j.error || 'unknown'}`);
+  cached = { token: j.access_token, exp: Date.now() + (j.expires_in || 3600) * 1000 };
+  return cached.token;
+}
+
+// sendMail({ to: [..], subject, html, attachments: [{ name, contentType, bytes }] })
+export async function sendMail({ to, subject, html, attachments = [] }, { env = process.env, fetchFn = globalThis.fetch } = {}) {
+  const cfg = mailConfig(env);
+  if (!cfg.ready) throw new Error(`Outlook is not connected yet (missing ${cfg.missing.join(', ')} in Render).`);
+  const list = (Array.isArray(to) ? to : String(to || '').split(/[,;\s]+/)).map((x) => String(x).trim()).filter((x) => /@/.test(x));
+  if (!list.length) throw new Error('No recipients.');
+  const t = await token(cfg, fetchFn);
+  const body = {
+    message: {
+      subject,
+      body: { contentType: 'HTML', content: html },
+      toRecipients: list.map((address) => ({ emailAddress: { address } })),
+      attachments: attachments.map((a) => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: a.name, contentType: a.contentType || 'application/pdf', contentBytes: Buffer.from(a.bytes).toString('base64') })),
+    },
+    saveToSentItems: true,
+  };
+  const r = await fetchFn(`${GRAPH}/users/${encodeURIComponent(cfg.from)}/sendMail`, { method: 'POST', headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(`Outlook could not send (${r.status}): ${(j.error && j.error.message) || 'unknown'}`);
+  }
+  return { ok: true, to: list, from: cfg.from };
+}

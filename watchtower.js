@@ -567,6 +567,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
     const toPush = []; const toEscalate = [];
 
+    const archived = [];
     await db.update(stateKey(site), (prev) => {
       const s = { alerts: {}, units: {}, ...(prev || {}) };
       // track how long each rolling truck has been stationary
@@ -606,7 +607,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
           a.miss = (a.miss || 0) + 1;
           if (a.miss >= 2) { a.resolvedAt = now; a.resolvedBy = 'auto'; }
         }
-        if (a.resolvedAt && now - a.resolvedAt > 24 * 60 * MIN) delete s.alerts[id];
+        if (a.resolvedAt && now - a.resolvedAt > 24 * 60 * MIN) { archived.push(a); delete s.alerts[id]; }
       }
       for (const a of [...toPush, ...toEscalate]) { a.pushes = (a.pushes || 0) + 1; a.lastPushAt = now; }
       s.lastRun = now;
@@ -615,6 +616,14 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
       return s;
     }, { alerts: {}, units: {} });
 
+    // resolved alerts leave the live board after 24h but stay on the load's record (rundown)
+    if (archived.length) {
+      await db.update(`taWatchArchive:${site}`, (cur) => {
+        const all = { ...(cur || {}) };
+        for (const a of archived) { const k = String(a.trip || ''); if (k) all[k] = [...(all[k] || []), a].slice(-100); }
+        return all;
+      }, {});
+    }
     await notify(cfg, toPush);
     await notify(cfg, toEscalate, { escalated: true });
     await drainGeo();

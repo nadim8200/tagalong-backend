@@ -33,6 +33,7 @@ import { initDocuments } from './documents.js';
 import { initCarriers } from './carriers.js';
 import { initDriverLinks } from './driverlink.js';
 import { initComms } from './comms.js';
+import { initRundowns } from './rundown.js';
 import { initStopVisits } from './stopvisits.js';
 import { listAddresses, samsaraTokenFrom } from './samsara.js';
 import { initNotify } from './notify.js';
@@ -655,11 +656,13 @@ const stopVisits = initStopVisits({ db, env: process.env, listAddresses, tokenFr
 // Outside carriers (OC): carrier list, OC marks, check calls / email check-ins.
 const carriers = initCarriers(app, { requireAuth, db });
 // OC driver tracking links (TagAlong app / browser) — positions overlay the board.
+// load rundown PDF + Outlook email when a load finishes
+const rundowns = initRundowns(app, { requireAuth, db, docs, env: process.env });
 let truckmate;
 const driverLinks = initDriverLinks(app, { requireAuth, db, carriers, ringcentral: rc, docs, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // driver calls / texts on a load, and their replies (RingCentral)
 const comms = initComms(app, { requireAuth, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
-truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay], routeProviders: [driverLinks.routeFor] });
+truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.

@@ -17,7 +17,7 @@
 import crypto from 'node:crypto';
 import { PDFDocument } from 'pdf-lib';
 
-const KINDS = new Set(['ratecon', 'tripsheet', 'packet', 'driverdoc']);   // driverdoc = POD / BOL sent by the driver
+const KINDS = new Set(['ratecon', 'tripsheet', 'packet', 'driverdoc', 'rundown']);   // rundown = the load's full PDF report   // driverdoc = POD / BOL sent by the driver
 const MAX_FILE_BYTES = 14 * 1024 * 1024;
 const OK_TYPES = /^(application\/pdf|image\/(jpeg|png|webp|heic|heif|gif))$/i;
 
@@ -274,5 +274,14 @@ export function initDocuments(app, { requireAuth, db }) {
   });
 
   console.log(`[docs] original document storage ${enabled ? 'ready (Postgres)' : 'OFF — needs DATABASE_URL'}`);
-  return { storeDocs, linkDocs, listDocs, markDocs, enabled };
+  // Bytes of stored documents (for the load rundown). Restricted pages are never returned.
+  async function readDocs({ site, ids }) {
+    if (!enabled || !ids.length) return [];
+    await ensureTable();
+    const { rows } = await pool.query('SELECT id, media_type, data, restricted, kind, doc_type, page FROM ta_docs WHERE site = $1 AND id = ANY($2::bigint[])', [site, ids.map(Number)]);
+    const byId = new Map(rows.map((r) => [String(r.id), r]));
+    return ids.map((id) => byId.get(String(id))).filter((r) => r && !r.restricted).map((r) => ({ id: String(r.id), mediaType: r.media_type, data: Buffer.from(r.data), kind: r.kind, docType: r.doc_type, page: r.page }));
+  }
+
+  return { storeDocs, linkDocs, listDocs, markDocs, readDocs, enabled };
 }

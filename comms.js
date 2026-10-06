@@ -17,9 +17,15 @@ const last10 = (p) => String(p || '').replace(/\D+/g, '').slice(-10);
 const YES = /^\s*(yes|y|yep|yeah|si|sí|delivered|done|ok|okay|confirmed)\b/i;
 const ASK_HOURS = 48;          // a "YES" counts for an ask sent within this window
 
-export function messageFor(kind, { trip, stopLabel, link, phone }) {
+export function messageFor(kind, { trip, stopLabel, link, phone, text }) {
   const help = phone ? ` Questions? Call ${phone}.` : '';
   if (kind === 'confirm-stop') return `${COMPANY}: please confirm ${stopLabel || 'your stop'} on load ${trip} was delivered. Reply YES${help} Reply STOP to opt out.`;
+  if (kind === 'custom') {
+    // dispatcher's own words, framed the way the campaign was registered
+    const body = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+    if (!body) return null;
+    return `${COMPANY}: ${body}${/reply stop/i.test(body) ? '' : ' Reply STOP to opt out.'}`;
+  }
   if (kind === 'pod-request') return `${COMPANY}: please send the signed POD and BOL for load ${trip}.${link ? ` Upload photos here: ${link}` : ''} or reply with pictures. Reply STOP to opt out.`;
   return null;
 }
@@ -57,10 +63,23 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
   const confirmKey = (site) => `taStopConfirm:${site}`;
   const cursorKey = (site) => `taCommsCursor:${site}`;
   const consentKey = (site) => `taSmsConsent:${site}`;     // last10 phone → { by, at, name }
+  const threadKey = (site) => `taDriverThreads:${site}`;   // last10 phone → every call/text/reply, tagged with the load
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
 
+  // The driver's own conversation (kept per phone, across loads, after delivery).
+  async function thread(site, phone, entry) {
+    const k = last10(phone);
+    if (!enabled || k.length !== 10) return;
+    await db.update(threadKey(site), (cur) => {
+      const all = { ...(cur || {}) };
+      all[k] = [{ ...entry, at: entry.at || new Date().toISOString() }, ...(all[k] || [])].slice(0, 300);
+      return all;
+    }, {});
+  }
   async function log(site, trip, entry) {
+    const phone = entry.type === 'reply' ? entry.from : entry.to;
+    if (phone && !entry.noThread) await thread(site, phone, { ...entry, trip: trip || null });
     if (!enabled || !trip) return;
     await db.update(logKey(site), (cur) => {
       const all = { ...(cur || {}) };
@@ -110,8 +129,8 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
       const cfg = ringcentral.configFor ? await ringcentral.configFor(owner) : null;
       let link = item._driverLink && !['revoked', 'completed', 'expired'].includes(item._driverLink.status) ? item._driverLink.url : null;
       if (!link && b.kind === 'pod-request' && driverLinks && driverLinks.ensureDocsLink) link = await driverLinks.ensureDocsLink(site, trip, who(req));
-      const text = messageFor(b.kind, { trip, stopLabel: b.stopLabel, link, phone: cfg && cfg.fromNumber });
-      if (!text) return res.status(400).json({ error: 'Unknown message.' });
+      const text = messageFor(b.kind, { trip, stopLabel: b.stopLabel, link, phone: cfg && cfg.fromNumber, text: b.text });
+      if (!text) return res.status(400).json({ error: b.kind === 'custom' ? 'Type a message first.' : 'Unknown message.' });
       const sent = await ringcentral.sendSms(owner, { to, text });
       await log(site, trip, { type: 'text', kind: b.kind, to, text, by: who(req), stopKey: b.stopKey || null });
       await db.update(askKey(site), (cur) => [{ trip, kind: b.kind, stopKey: b.stopKey || null, stopLabel: b.stopLabel || null, phone: last10(to), at: new Date().toISOString() }, ...(Array.isArray(cur) ? cur : [])].slice(0, 500), []);
@@ -138,8 +157,10 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
     }
     for (const r of replies) {
       const { trips, confirm } = routeReply(r, { asks, driverPhones });
+      if (!trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: null }); // eslint-disable-line no-await-in-loop
+      if (trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: trips.join(', ') }); // eslint-disable-line no-await-in-loop
       for (const trip of trips) {
-        await log(site, trip, { type: 'reply', from: r.from, text: r.text, at: r.at }); // eslint-disable-line no-await-in-loop
+        await log(site, trip, { type: 'reply', from: r.from, text: r.text, at: r.at, noThread: true }); // eslint-disable-line no-await-in-loop
         if (carriers && carriers.addCheckins) await carriers.addCheckins(site, trip, [{ at: r.at, source: 'driver text', text: r.text, from: r.from }]); // eslint-disable-line no-await-in-loop
       }
       if (confirm) {
@@ -158,6 +179,13 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
     const t = setInterval(() => { pollReplies().catch((e) => console.warn('[comms] replies:', e.message)); }, 2 * 60000);
     if (t.unref) t.unref();
   }
+
+  // A driver's whole conversation, newest first, each entry tagged with its load.
+  app.get('/truckmate/drivers/:phone/thread', requireAuth, async (req, res) => {
+    if (!enabled) return res.json([]);
+    try { res.json(((await db.get(threadKey(siteOf(req)), {}))[last10(req.params.phone)] || []).map(({ noThread, ...e }) => e)); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+  });
 
   // board overlay: calls / texts / replies and driver-confirmed stops
   async function overlay(site, trips) {
