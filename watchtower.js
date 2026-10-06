@@ -596,6 +596,27 @@ export function evaluateBoard(board, ctxIn) {
   return out;
 }
 
+// Per-trip stop ETAs — the same math the late alerts use — for the console cards.
+export function boardEtas(board, ctxIn) {
+  const ctx = { origin: MIAMI_TERMINAL, unitState: () => null, ...ctxIn };
+  const out = {};
+  for (const item of (board && board.trips) || []) {
+    const f = tripFacts(item, ctx.now);
+    if (!f.trip || isDone(f.status)) continue;
+    const us = ctx.unitState ? ctx.unitState(f.unit) : null;
+    f.stoppedMin = us && us.stoppedSince ? (ctx.now - us.stoppedSince) / MIN : 0;
+    f.stopStartUnknown = !!(us && us.stopStartUnknown);
+    let route = null;
+    try { route = routeEtas(f, ctx); } catch { route = null; }
+    if (!route) continue;
+    out[f.trip] = {
+      at: ctx.now, team: f.team, guess: !!route.guess,
+      stops: route.map((r) => ({ key: r.stop.key, zip: r.stop.zip || null, label: r.stop.label, miles: Math.round(r.miles), etaMs: r.etaMs, apptMs: r.stop.apptMs ?? null, apptFrom: r.stop.apptFrom || null })),
+    };
+  }
+  return out;
+}
+
 export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null }) {
   if (!db || !db.enabled) { console.log('[watchtower] off — needs DATABASE_URL'); return; }
   const sites = String(env.WATCH_SITES || 'florida-beauty').split(',').map((s) => s.trim()).filter(Boolean);
@@ -733,6 +754,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
       }
       const ctx = { now, geo, roadMiles, unitState: (unit) => s.units[norm(unit)] };
       const found = evaluateBoard(board, ctx);
+      s.etas = boardEtas(board, ctx);
       const seen = new Set();
       for (const a of found) {
         seen.add(a.id);
@@ -803,7 +825,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
       const all = list(s);
       const open = all.filter((a) => !a.resolvedAt).sort(rank);
       res.json({
-        site: site(req), lastRun: s.lastRun || null, tripCount: s.tripCount || 0, feedAgeMinutes: s.feedAgeMinutes,
+        site: site(req), lastRun: s.lastRun || null, tripCount: s.tripCount || 0, feedAgeMinutes: s.feedAgeMinutes, etas: s.etas || {}, roads: s.roads || null,
         counts: { critical: open.filter((a) => a.severity === 'critical').length, warning: open.filter((a) => a.severity === 'warning').length, unacked: open.filter((a) => !a.ack && a.severity === 'critical').length },
         open,
         resolved: all.filter((a) => a.resolvedAt).sort((a, b) => b.resolvedAt - a.resolvedAt).slice(0, 50),

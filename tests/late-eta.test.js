@@ -25,7 +25,7 @@ test('team: both clocks used — rolling ~nonstop when one is fresh, waits when 
 
 const geo = (zip) => ({ 60148: { lat: 41.88, lng: -88.0 }, 33178: { lat: 25.83, lng: -80.36 }, 37086: { lat: 36.0, lng: -86.58 }, 33018: { lat: 25.91, lng: -80.33 } }[zip] || null);
 const ctx = (extra = {}) => ({ now: NOW, geo, unitState: () => ({}), ...extra });
-const trip = (n, status, bill, live, extra = {}) => ({ trip: { tripNumber: n, status, powerUnit: '1', ...(extra.trip || {}) }, freightBills: [bill], _samsara: { gpsAt: '2026-10-06T18:19:00Z', speedMph: 0, ...live }, ...extra });
+const trip = (n, status, bill, live, { trip: tExtra = {}, ...extra } = {}) => ({ trip: { tripNumber: n, status, powerUnit: '1', ...tExtra }, freightBills: [bill], _samsara: { gpsAt: '2026-10-06T18:19:00Z', speedMph: 0, ...live }, ...extra });
 const codes = (b, c) => evaluateBoard({ trips: [b] }, c || ctx()).filter((a) => /late-risk|appt-passed/.test(a.code));
 
 test('truck at the consignee (ARRCONS): no late alert', () => {
@@ -55,4 +55,12 @@ test('real road miles are used when known', () => {
   const a = codes(b, slow);
   assert.ok(asked.length > 0);
   assert.match(a[0].detail, /^400 mi/);
+});
+
+import { boardEtas } from '../watchtower.js';
+test('cards get the same stop ETAs the alerts use', () => {
+  const b = { trips: [trip('624304', 'DEPSHIP', { billNumber: 'B2', endZoneDescription: 'MIAMI, FL, 33178', pieces: 1 }, { lat: 26.7, lng: -80.1, hos: { driveLeftMin: 600, shiftLeftMin: 700 } }, { trip: { driver2: 'X' } })] };
+  const e = boardEtas(b, ctx())['624304'];
+  assert.equal(e.team, true); assert.equal(e.stops[0].zip, '33178');
+  assert.ok(e.stops[0].etaMs > NOW && e.stops[0].miles > 50);
 });
