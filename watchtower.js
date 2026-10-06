@@ -90,26 +90,52 @@ export function haversineMi(aLat, aLng, bLat, bLng) {
 // 11h drive / 14h shift / 30-min break / 10h reset; teams ~20h per day).
 // restDoneMin: how long a driver who is out of hours has already been parked,
 // so the 10-hour reset isn't assumed to start right now.
-export function estimateArrival(miles, { team, driveLeftMin, shiftLeftMin, restDoneMin = 0, now = Date.now() } = {}) {
+export function estimateArrival(miles, { team, driveLeftMin, shiftLeftMin, cycleLeftMin = null, restDoneMin = 0, partner = null, now = Date.now() } = {}) {
   if (!miles || miles <= 0) return null;
   const H = 3600000;
-  let driveHrs = miles / CRUISE_MPH;
+  let need = miles / CRUISE_MPH;                                  // hours behind the wheel
+  const hrs = (m, d) => Math.max(0, m != null ? m / 60 : d);
+  if (team) {
+    // Two drivers alternate: one drives until out of hours while the other
+    // rests in the sleeper; both clocks (11 drive / 14 shift / 70 cycle) count.
+    const fresh = () => ({ drive: 11, shift: 14, cycle: 70, rest: 0 });
+    let cur = { drive: hrs(driveLeftMin, 11), shift: hrs(shiftLeftMin, 14), cycle: hrs(cycleLeftMin, 70), rest: 0 };
+    let oth = partner ? { drive: hrs(partner.driveLeftMin, 11), shift: hrs(partner.shiftLeftMin, 14), cycle: hrs(partner.cycleLeftMin, 70), rest: 0 } : { ...fresh(), rest: 10 };
+    const restOther = (h) => { oth.rest += h; if (oth.rest >= 10 && oth.cycle > 0.01) { oth.drive = 11; oth.shift = 14; } };
+    let t = 0; let guard = 0;
+    while (need > 0.01 && guard++ < 200) {
+      const can = Math.min(cur.drive, cur.shift, cur.cycle);
+      if (can > 0.01) {
+        const d = Math.min(need, can);
+        t += d; need -= d; cur.drive -= d; cur.shift -= d; cur.cycle -= d; cur.rest = 0; restOther(d);
+        [cur, oth] = [oth, cur];
+        continue;
+      }
+      if (Math.min(oth.drive, oth.shift, oth.cycle) > 0.01) { [cur, oth] = [oth, cur]; continue; }
+      if (cur.cycle <= 0.01 && oth.cycle <= 0.01) { t += 34; cur = fresh(); oth = fresh(); continue; }   // both out of the 70: 34-hour restart
+      const wait = Math.max(0.25, Math.min(cur.cycle > 0.01 ? 10 - cur.rest : Infinity, oth.cycle > 0.01 ? 10 - oth.rest : Infinity));
+      t += wait;
+      for (const x of [cur, oth]) { x.rest += wait; if (x.rest >= 10 && x.cycle > 0.01) { x.drive = 11; x.shift = 14; } }
+    }
+    return now + t * H;
+  }
+  // Solo: today's clocks, then 10-hour resets; the 70-hour cycle forces a 34-hour restart.
   let t = now;
-  if (team) return t + driveHrs * (24 / 20) * H;
   let restCredit = Math.max(0, Math.min(10, restDoneMin / 60));
+  let cycle = hrs(cycleLeftMin, 70);
   let first = driveLeftMin != null ? driveLeftMin / 60 : 11;
   if (shiftLeftMin != null) first = Math.min(first, shiftLeftMin / 60);
-  first = Math.max(first, 0);
-  let d = Math.min(driveHrs, first);
+  first = Math.max(0, Math.min(first, cycle));
+  let d = Math.min(need, first);
   t += (d + (d > 8 ? 0.5 : 0)) * H;
-  driveHrs -= d;
+  need -= d; cycle -= d;
   let guard = 0;
-  while (driveHrs > 0.01 && guard++ < 60) {
-    t += (10 - restCredit) * H;
+  while (need > 0.01 && guard++ < 60) {
+    if (cycle <= 0.01) { t += Math.max(0, 34 - restCredit) * H; cycle = 70; } else t += (10 - Math.min(restCredit, 10)) * H;
     restCredit = 0;
-    d = Math.min(driveHrs, 11);
+    d = Math.min(need, 11, cycle);
     t += (d + (d > 8 ? 0.5 : 0)) * H;
-    driveHrs -= d;
+    need -= d; cycle -= d;
   }
   return t;
 }
@@ -156,7 +182,7 @@ function tripFacts(item, now) {
     const exact = !Number.isNaN(by) && (Number.isNaN(end) || end === by);
     const flagged = yes(b.deliveryApptReq) || yes(b.deliveryApptMade);
     const fresh = !Number.isNaN(by) && by > now - 24 * 60 * MIN;
-    if (fresh && !midnight && (exact || flagged)) st.apptMs = st.apptMs == null ? by : Math.min(st.apptMs, by);
+    if (fresh && !midnight && (exact || flagged) && (st.apptMs == null || by < st.apptMs)) { st.apptMs = by; st.apptFrom = flagged ? 'truckmate-appt' : 'truckmate-due'; }
     else if (flagged && midnight) st.apptNeeded = true;
     stopMap.set(key, st);
   }
@@ -180,7 +206,7 @@ function tripFacts(item, now) {
   if (dueMs != null) {
     const open = stops.filter((st) => !st.delivered);
     const last = open[open.length - 1];
-    if (last && last.apptMs == null) last.apptMs = dueMs;
+    if (last && (last.apptMs == null || last.apptFrom === 'truckmate-due')) { last.apptMs = dueMs; last.apptFrom = 'ratecon'; }
   }
   // The uploaded paper trip sheet is the source of truth for stop ORDER,
   // handwritten appointments, the pickup plan and call-ahead rules. Match its
@@ -257,6 +283,14 @@ function tripFacts(item, now) {
 // without a sheet, outward from the terminal) with ~30 min unloading at each.
 // Returns null when a check can't be trusted yet (not started, no fresh GPS,
 // stops still geocoding).
+// TruckMate "ARRCONS" = the truck is at a receiver: the first open stop on its route.
+function atConsigneeKey(f, route) {
+  if (!/^arrcon/i.test(String(f.status || ''))) return null;
+  if (route && route.length) return route[0].stop.key;
+  const open = f.stops.filter((st) => !st.delivered);
+  return open.length ? open[0].key : null;
+}
+
 function routeEtas(f, ctx) {
   if (notStarted(f.status, f, ctx.now) || !f.live || !f.gpsFresh || f.live.lat == null) return null;
   const open = f.stops.filter((st) => !st.delivered);
@@ -276,9 +310,10 @@ function routeEtas(f, ctx) {
   let miles = 0; let at = { lat: f.live.lat, lng: f.live.lng };
   ordered.forEach((st, i) => {
     const g = pts.get(st.key);
-    miles += haversineMi(at.lat, at.lng, g.lat, g.lng) * 1.2;
+    const road = ctx.roadMiles ? ctx.roadMiles(at, g) : null;      // real driving miles when known
+    miles += road != null ? road : haversineMi(at.lat, at.lng, g.lat, g.lng) * 1.2;
     at = g;
-    const eta = miles > 0 ? estimateArrival(miles, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, restDoneMin, now: ctx.now }) : ctx.now;
+    const eta = miles > 0 ? estimateArrival(miles, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, partner: f.live.hos2 || null, restDoneMin, now: ctx.now }) : ctx.now;
     out.push({ stop: st, miles, etaMs: (eta || ctx.now) + i * 30 * MIN, stopsBefore: i });
   });
   out.guess = hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stopStartUnknown;
@@ -325,20 +360,43 @@ const RULES = [
     const route = routeEtas(f, ctx);
     if (!route) return null;
     const hos = (f.live && f.live.hos) || {};
+    const atStop = atConsigneeKey(f, route);
     let worst = null;
     for (const r of route) {
-      if (r.stop.apptMs == null || r.miles < 5) continue;
+      if (r.stop.apptMs == null || r.miles < 5 || r.stop.key === atStop) continue;
+      if (r.stop.apptMs < ctx.now - 30 * MIN) continue;             // already passed — see apptPassed
       const lateMin = (r.etaMs - r.stop.apptMs) / MIN;
       if (lateMin > 0 && (!worst || lateMin > worst.lateMin)) worst = { ...r, lateMin };
     }
     if (!worst) return null;
     const t = worst.stop;
     const guess = route.guess;
+    const due = t.apptFrom === 'truckmate-due';                     // TruckMate due time, no confirmed appointment
     const where = (t.customers && t.customers[0]) ? `${t.customers[0]} (${t.label.replace(/, \d{5}$/, '')})` : t.label.replace(/, \d{5}$/, '');
+    const src = { handwritten: ' (handwritten on sheet)', printed: ' (trip sheet)', sheet: ' (trip sheet)', ratecon: ' (rate con)', 'truckmate-appt': ' (TruckMate appointment)', 'truckmate-due': ' (TruckMate due time — not a confirmed appointment)' }[t.apptFrom] || '';
     return {
-      code: 'late-risk', severity: worst.lateMin > 60 && !guess ? 'critical' : 'warning', key: t.key,
-      title: `Will miss ${where} appointment by ~${fmtMin(worst.lateMin)}`,
-      detail: `${Math.round(worst.miles)} mi${worst.stopsBefore ? ` with ${worst.stopsBefore} stop${worst.stopsBefore === 1 ? '' : 's'} first` : ''}. Projected ${fmtTime(worst.etaMs)} vs appointment ${fmtTime(t.apptMs)}${t.apptFrom === 'handwritten' ? ' (handwritten on sheet)' : ''}${f.team ? ' (team)' : ` · drive left ${fmtMin(hos.driveLeftMin)}`}.${guess ? ' Break start unknown — confirm with the driver.' : ''} Warn the broker/receiver or plan a rescue.`,
+      code: 'late-risk', severity: worst.lateMin > 60 && !guess && !due ? 'critical' : 'warning', key: t.key,
+      title: `${due ? 'May miss' : 'Will miss'} ${where} ${due ? 'due time' : 'appointment'} by ~${fmtMin(worst.lateMin)}`,
+      detail: `${Math.round(worst.miles)} mi${worst.stopsBefore ? ` with ${worst.stopsBefore} stop${worst.stopsBefore === 1 ? '' : 's'} first` : ''}. Projected ${fmtTime(worst.etaMs)} vs ${fmtTime(t.apptMs)}${src}${f.team ? ' (team)' : ` · drive left ${fmtMin(hos.driveLeftMin)}${hos.cycleLeftMin != null && hos.cycleLeftMin < 11 * 60 ? ` · 70-hr cycle left ${fmtMin(hos.cycleLeftMin)}` : ''}`}.${guess ? ' Break start unknown — confirm with the driver.' : ''} ${due ? 'Confirm the real appointment with the broker/receiver.' : 'Warn the broker/receiver or plan a rescue.'}`,
+    };
+  },
+  // The appointment time has already gone by and the stop isn't delivered:
+  // one calm "get a new appointment" alert instead of "will miss by 29h".
+  function apptPassed(f, ctx) {
+    if (notStarted(f.status, f, ctx.now) && !isRolling(f.status)) return null;
+    const route = routeEtas(f, ctx);
+    const atStop = atConsigneeKey(f, route);
+    const open = f.stops.filter((st) => !st.delivered && st.apptMs != null && st.key !== atStop && st.apptMs < ctx.now - 30 * MIN && st.apptMs > ctx.now - 48 * 60 * MIN);
+    if (!open.length) return null;
+    const st = open.sort((a, b) => a.apptMs - b.apptMs)[0];
+    const r = route ? route.find((x) => x.stop.key === st.key) : null;
+    if (r && r.miles < 5) return null;                               // parked at the receiver
+    const where = (st.customers && st.customers[0]) ? `${st.customers[0]} (${st.label.replace(/, \d{5}$/, '')})` : st.label.replace(/, \d{5}$/, '');
+    const due = st.apptFrom === 'truckmate-due';
+    return {
+      code: 'appt-passed', severity: 'warning', key: st.key,
+      title: `${due ? 'Due time' : 'Appointment'} passed at ${where} — ${fmtMin((ctx.now - st.apptMs) / MIN)} ago, not delivered`,
+      detail: `Was ${due ? 'due' : 'set for'} ${fmtTime(st.apptMs)}${due ? ' (TruckMate due time)' : ''}.${r ? ` Truck ${Math.round(r.miles)} mi away, ETA ${fmtTime(r.etaMs)}.` : ''} Confirm a new appointment with the receiver/broker and update TruckMate.`,
     };
   },
   // "CALL ISRAEL 413-883-7695 1HR BEFORE ARRIVING" — raise it when the truck
@@ -580,6 +638,52 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     if (n) await db.set('taGeoZip', geoCache);
   }
 
+  // ---- real road miles (Google), kept as a road/straight ratio per area pair ----
+  // Truck positions are rounded to ~0.5° cells, so one lookup serves a whole
+  // stretch of highway; each pair is looked up once and saved. Daily cap; on
+  // any Google refusal it falls back to straight line × 1.2.
+  let roadCache = null;
+  const roadQueue = new Map();
+  const roads = { calls: 0, day: null, lastError: null, off: 0 };
+  const cell = (p) => `${Math.round(p.lat * 2) / 2},${Math.round(p.lng * 2) / 2}`;
+  async function loadRoads() { if (!roadCache) roadCache = await db.get('taRoadFactor', {}); return roadCache; }
+  function roadMiles(a, b) {
+    if (!roadCache || a.lat == null || b.lat == null) return null;
+    const straight = haversineMi(a.lat, a.lng, b.lat, b.lng);
+    if (straight < 15) return null;
+    const k = `${cell(a)}>${cell(b)}`;
+    const f = roadCache[k];
+    if (f) return straight * f;
+    if (!roadQueue.has(k)) roadQueue.set(k, { a, b });
+    return null;
+  }
+  async function drainRoads(limit = 30) {
+    const key = env.GOOGLE_ROUTES_KEY || env.GOOGLE_GEOCODE_KEY || env.GOOGLE_MAPS_KEY || '';
+    const today = new Date().toISOString().slice(0, 10);
+    if (roads.day !== today) { roads.day = today; roads.calls = 0; }
+    if (!key || !roadQueue.size || Date.now() < roads.off || roads.calls >= Number(env.ROAD_DAILY_CAP || 2500)) return;
+    let n = 0;
+    for (const [k, { a, b }] of [...roadQueue]) {
+      if (n++ >= limit) break;
+      roadQueue.delete(k);
+      roads.calls += 1;
+      try {
+        const r = await fetch(`https://maps.googleapis.com/maps/api/distancematrix/json?units=imperial&origins=${a.lat},${a.lng}&destinations=${b.lat},${b.lng}&key=${key}`); // eslint-disable-line no-await-in-loop
+        const d = await r.json(); // eslint-disable-line no-await-in-loop
+        const el = d && d.rows && d.rows[0] && d.rows[0].elements && d.rows[0].elements[0];
+        if (d.status !== 'OK' || !el || el.status !== 'OK') {
+          roads.lastError = `${d.status}${el ? `/${el.status}` : ''}${d.error_message ? `: ${d.error_message.slice(0, 120)}` : ''}`;
+          if (d.status === 'REQUEST_DENIED' || d.status === 'OVER_QUERY_LIMIT') { roads.off = Date.now() + 6 * 3600000; break; }
+          continue;
+        }
+        const straight = haversineMi(a.lat, a.lng, b.lat, b.lng);
+        const f = (el.distance.value / 1609.34) / straight;
+        if (f > 0.95 && f < 3) roadCache[k] = Math.round(f * 1000) / 1000;
+      } catch (e) { roads.lastError = e.message; break; }
+    }
+    if (n) await db.set('taRoadFactor', roadCache);
+  }
+
   async function notify(cfg, alerts, { escalated = false } = {}) {
     if (!push || !push.sendToEmails || !cfg.recipients.length || !alerts.length) return;
     const tag = escalated ? '⏫ STILL OPEN — ' : '🚨 ';
@@ -604,6 +708,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
   async function cycle(site) {
     const now = Date.now();
     await loadGeo();
+    await loadRoads();
     const board = await buildBoard(site);
     if (afterBoard) { try { await afterBoard(site, board, { geo, now }); } catch (e) { console.warn('[watchtower] afterBoard:', e.message); } }
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
@@ -626,7 +731,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
         }
         s.units[u] = us;
       }
-      const ctx = { now, geo, unitState: (unit) => s.units[norm(unit)] };
+      const ctx = { now, geo, roadMiles, unitState: (unit) => s.units[norm(unit)] };
       const found = evaluateBoard(board, ctx);
       const seen = new Set();
       for (const a of found) {
@@ -653,6 +758,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
       }
       for (const a of [...toPush, ...toEscalate]) { a.pushes = (a.pushes || 0) + 1; a.lastPushAt = now; }
       s.lastRun = now;
+      s.roads = { saved: Object.keys(roadCache || {}).length, callsToday: roads.calls, waiting: roadQueue.size, lastError: roads.lastError, pausedUntil: roads.off > now ? new Date(roads.off).toISOString() : null };
       s.feedAgeMinutes = board.ageMinutes;
       s.tripCount = board.count;
       return s;
@@ -669,6 +775,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     await notify(cfg, toPush);
     await notify(cfg, toEscalate, { escalated: true });
     await drainGeo();
+    await drainRoads();
   }
 
   async function tick() {

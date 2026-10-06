@@ -129,7 +129,7 @@ export function initAssistant(app, { db, env = process.env, buildBoard }) {
       const w = await watch(site(req));
       const all = Object.values(w.alerts || {}).sort((a, c) => (c.openedAt || 0) - (a.openedAt || 0));
       const view = (a) => ({ trip: a.trip, unit: a.unit, code: a.code, severity: a.severity, title: a.title, detail: a.detail, openedAt: a.openedAt ? new Date(a.openedAt).toISOString() : null, resolvedAt: a.resolvedAt ? new Date(a.resolvedAt).toISOString() : null, resolvedBy: a.resolvedBy || null, ack: a.ack ? a.ack.by : null, pushes: a.pushes || 0 });
-      send(res, { lastRun: w.lastRun ? new Date(w.lastRun).toISOString() : null, open: all.filter((a) => !a.resolvedAt).map(view), resolved: all.filter((a) => a.resolvedAt).slice(0, 50).map(view) });
+      send(res, { lastRun: w.lastRun ? new Date(w.lastRun).toISOString() : null, roads: w.roads || null, open: all.filter((a) => !a.resolvedAt).map(view), resolved: all.filter((a) => a.resolvedAt).slice(0, 50).map(view) });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
