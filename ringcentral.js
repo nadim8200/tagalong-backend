@@ -39,7 +39,8 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   async function configFor(owner) {
     if (!db || !db.enabled) return null;
     const all = await db.get(cfgKey, {});
-    return all[owner] || null;
+    // a dispatcher's own setup, else the company-wide one (any dispatcher can text)
+    return all[owner] || all.__shared || null;
   }
 
   async function accessToken(owner) {
@@ -118,6 +119,8 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
 
       try {
         const me = await rcFetch(owner, '/restapi/v1.0/account/~/extension/~');
+        // it works — make it the company-wide setup so every dispatcher can text
+        await db.update(cfgKey, (cur) => ({ ...cur, __shared: cur[owner] }), {});
         return res.json({
           ok: true,
           extension: me.extensionNumber || null,
@@ -130,6 +133,24 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
         return res.status(400).json({ error: e.message });
       }
     } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+
+  // Pick the number texts come from (after connecting, from /ringcentral/numbers).
+  app.put('/ringcentral/from-number', requireAuth, async (req, res) => {
+    if (!db || !db.enabled) return res.status(503).json({ error: 'Needs DATABASE_URL.' });
+    const fromNumber = String((req.body && req.body.fromNumber) || '').trim();
+    if (!/^\+?\d{10,15}$/.test(fromNumber.replace(/[\s()-]/g, ''))) return res.status(400).json({ error: 'Pick a phone number.' });
+    const owner = String(req.user.company || req.user.id);
+    try {
+      let ok = false;
+      await db.update(cfgKey, (cur) => {
+        const all = { ...(cur || {}) };
+        for (const k of [owner, '__shared']) if (all[k]) { all[k] = { ...all[k], fromNumber }; ok = true; }
+        return all;
+      }, {});
+      if (!ok) return res.status(404).json({ error: 'Connect RingCentral first.' });
+      res.json({ ok: true, fromNumber });
+    } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   app.get('/ringcentral/config', requireAuth, async (req, res) => {
