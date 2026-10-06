@@ -64,7 +64,11 @@ export function tripTimes(rec) {
       if (st && !PRE_DISPATCH.test(st) && !DONE.test(st) && rec.updatedAt) dispatchedBefore = new Date(rec.updatedAt).toISOString();
     }
   }
+  // a load with no truck on it hasn't really been dispatched, whatever the status says
+  const noTruck = !String(inner.powerUnit || '').trim();
+  if (noTruck && dispatchedFrom !== 'TruckMate') { dispatchedAt = null; dispatchedBefore = null; dispatchedFrom = null; }
   return {
+    noTruck,
     createdAt: created ? created.at : null, createdBy, createdFrom: created ? (created.key === 'first bill' ? 'first freight bill' : 'TruckMate') : null,
     // not seen since tracking began → it was on the board before its last update
     addedAt: rec && (rec.firstSeenAt || rec.updatedAt) ? new Date(rec.firstSeenAt || rec.updatedAt).toISOString() : null,

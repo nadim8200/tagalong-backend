@@ -6,7 +6,7 @@ const T = (iso) => Date.parse(iso);
 
 test('created from the first freight bill; added when first seen; dispatched at the status change', () => {
   const rec = {
-    item: { trip: { tripNumber: '624278', status: 'DEPSHP' }, freightBills: [{ createdTime: '2026-10-03T09:40:00', createdBy: 'ANA' }, { createdTime: '2026-10-03T09:12:00', createdBy: 'ROSA' }] },
+    item: { trip: { tripNumber: '624278', status: 'DEPSHP', powerUnit: '937' }, freightBills: [{ createdTime: '2026-10-03T09:40:00', createdBy: 'ANA' }, { createdTime: '2026-10-03T09:12:00', createdBy: 'ROSA' }] },
     firstSeenAt: T('2026-10-03T09:15:00Z'),
     statusHistory: [{ status: 'AVAIL', at: T('2026-10-03T09:15:00Z') }, { status: 'DISP', at: T('2026-10-03T11:02:00Z') }, { status: 'DEPSHP', at: T('2026-10-03T13:30:00Z') }],
   };
@@ -18,7 +18,7 @@ test('created from the first freight bill; added when first seen; dispatched at 
 });
 
 test('already past dispatch when first seen → "dispatched before"; trip-level dates win', () => {
-  const before = tripTimes({ item: { trip: { status: 'ARRCONS' } }, firstSeenAt: T('2026-10-05T21:00:00Z'), addedBefore: true, statusHistory: [{ status: 'ARRCONS', at: T('2026-10-05T21:00:00Z'), first: true }] });
+  const before = tripTimes({ item: { trip: { status: 'ARRCONS', powerUnit: '2210' } }, firstSeenAt: T('2026-10-05T21:00:00Z'), addedBefore: true, statusHistory: [{ status: 'ARRCONS', at: T('2026-10-05T21:00:00Z'), first: true }] });
   assert.equal(before.dispatchedAt, null);
   assert.equal(before.dispatchedBefore, '2026-10-05T21:00:00.000Z');
   assert.equal(before.addedBefore, true);
@@ -30,10 +30,17 @@ test('already past dispatch when first seen → "dispatched before"; trip-level 
 });
 
 test('trip not updated since tracking began: added/dispatched "before" its last update', () => {
-  const t = tripTimes({ item: { trip: { status: 'DISP' } }, updatedAt: Date.parse('2026-10-05T20:10:00Z') });
+  const t = tripTimes({ item: { trip: { status: 'DISP', powerUnit: '2019' } }, updatedAt: Date.parse('2026-10-05T20:10:00Z') });
   assert.equal(t.addedBefore, true);
   assert.equal(t.addedAt, '2026-10-05T20:10:00.000Z');
   assert.equal(t.dispatchedBefore, '2026-10-05T20:10:00.000Z');
   const assigned = tripTimes({ item: { trip: { status: 'ASSGN' } }, updatedAt: Date.parse('2026-10-05T20:10:00Z') });
   assert.equal(assigned.dispatchedBefore, null);
+});
+
+test('load with no truck assigned: not dispatched, even if TruckMate says DISP', () => {
+  const t = tripTimes({ item: { trip: { tripNumber: '588879', status: 'DISP', powerUnit: '' } }, updatedAt: Date.parse('2026-10-05T20:10:00Z') });
+  assert.equal(t.noTruck, true);
+  assert.equal(t.dispatchedAt, null);
+  assert.equal(t.dispatchedBefore, null);
 });
