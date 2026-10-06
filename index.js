@@ -658,7 +658,7 @@ const carriers = initCarriers(app, { requireAuth, db });
 let truckmate;
 const driverLinks = initDriverLinks(app, { requireAuth, db, carriers, ringcentral: rc, docs, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // driver calls / texts on a load, and their replies (RingCentral)
-const comms = initComms(app, { requireAuth, db, ringcentral: rc, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const comms = initComms(app, { requireAuth, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay], routeProviders: [driverLinks.routeFor] });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +

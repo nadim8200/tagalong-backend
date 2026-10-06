@@ -223,3 +223,16 @@ test('driver uploads POD photos from the link: stored on the load, marked POD, l
   assert.equal(marked[0].docType, 'proof_of_delivery');
   assert.match(checkins[0].list[0].text, /POD \(2 pages\)/);
 });
+
+test('upload-only link for a company driver: no location sharing, no info form', async () => {
+  const db = fakeDb(); const app = fakeApp();
+  const dl = initDriverLinks(app, { requireAuth: () => {}, db, env: {}, fetchFn: null });
+  await dl.overlay('florida-beauty', [{ trip: { tripNumber: '624278', powerUnit: '937' } }]);
+  const url = await dl.ensureDocsLink('florida-beauty', '624278', 'Rosa');
+  assert.match(url, /\/t\/[\w-]+$/);
+  assert.equal(await dl.ensureDocsLink('florida-beauty', '624278', 'Rosa'), url, 'reuses the live link');
+  const tok = url.split('/t/')[1];
+  const view = await app.call('GET', '/driver/link/:token', { token: tok });
+  assert.equal(view.body.purpose, 'docs');
+  assert.equal(view.body.needInfo, false);
+});

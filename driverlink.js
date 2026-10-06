@@ -296,18 +296,15 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  app.post('/truckmate/oc/:trip/link', requireAuth, async (req, res) => {
-    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
-    const site = siteOf(req);
-    const trip = String(req.params.trip || '').trim();
-    if (!trip) return res.status(400).json({ error: 'Trip number missing.' });
-    try {
+  // purpose 'track' = OC driver shares location; 'docs' = any driver just sends
+  // POD / BOL photos (company trucks are already tracked by Samsara).
+  async function createLink(site, trip, { by = 'dispatcher', purpose = 'track' } = {}) {
       const item = await findItem(site, trip);
       const oc = item && item._oc;
       const now = new Date();
       const idx = await db.get(siteKey(site), { byTrip: {} });
       const old = (idx.byTrip || {})[trip];
-      if (old) await db.update(linkKey(old), (cur) => (cur ? { ...cur, revokedAt: cur.revokedAt || now.toISOString(), revokedBy: who(req), sharing: false } : cur), null);
+      if (old) await db.update(linkKey(old), (cur) => (cur ? { ...cur, revokedAt: cur.revokedAt || now.toISOString(), revokedBy: by, sharing: false } : cur), null);
       const token = crypto.randomBytes(18).toString('base64url');
       const code = await newCode();
       const link = {
@@ -318,15 +315,32 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
         driverPhone: (oc && oc.driverPhone) || null,
         origin: item ? tripOf(item).origZoneDesc || null : null,
         destination: item ? tripOf(item).destZoneDesc || null : null,
-        createdAt: now.toISOString(), createdBy: who(req),
+        createdAt: now.toISOString(), createdBy: by, purpose,
         expiresAt: new Date(now.getTime() + LINK_DAYS * 24 * 60 * MIN).toISOString(),
         sharing: false, points: 0,
       };
       await db.set(linkKey(token), link);
       await db.set(codeKey(code), { token, expiresAt: link.expiresAt });
       await db.update(siteKey(site), (cur) => ({ ...(cur || {}), byTrip: { ...((cur && cur.byTrip) || {}), [trip]: token } }), { byTrip: {} });
-      res.json(summary(link));
-    } catch (e) { res.status(500).json({ error: e.message }); }
+      return link;
+  }
+  // A link the driver can open to send POD / BOL: the trip's live link if it has
+  // one, else a new upload-only link. Returns its URL.
+  async function ensureDocsLink(site, trip, by) {
+    if (!enabled) return null;
+    const idx = await db.get(siteKey(site), { byTrip: {} });
+    const tok = (idx.byTrip || {})[trip];
+    const cur = tok ? await db.get(linkKey(tok), null) : null;
+    if (cur && isLive(linkStatus(cur))) return urlOf(cur.token);
+    return urlOf((await createLink(site, trip, { by, purpose: 'docs' })).token);
+  }
+
+  app.post('/truckmate/oc/:trip/link', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const trip = String(req.params.trip || '').trim();
+    if (!trip) return res.status(400).json({ error: 'Trip number missing.' });
+    try { res.json(summary(await createLink(siteOf(req), trip, { by: who(req) }))); }
+    catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   async function markSent(site, trip, patch) {
@@ -389,9 +403,9 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
     const oc = ocNow(link) || {};   // prefill with what dispatch already has
     return { drivers: [{ name: oc.driverName || '', phone: oc.driverPhone || '' }, { name: oc.driver2Name || '', phone: oc.driver2Phone || '' }], truck: oc.truck || '', trailer: oc.trailer || '' };
   };
-  const needInfo = (link) => !link.infoAt || infoMissing(link.info, crewOf(link)).length > 0;
+  const needInfo = (link) => link.purpose !== 'docs' && (!link.infoAt || infoMissing(link.info, crewOf(link)).length > 0);
   const publicView = (link, status) => ({
-    crew: crewOf(link), info: infoOf(link), needInfo: needInfo(link),
+    crew: crewOf(link), info: infoOf(link), needInfo: needInfo(link), purpose: link.purpose || 'track',
     active: isLive(status), status, company, trip: link.trip,
     carrierName: link.carrierName || null, origin: link.origin || null, destination: link.destination || null,
     sharing: !!link.sharing && status === 'sharing', lastPingAt: link.lastPingAt || null,
@@ -551,5 +565,5 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
   });
 
   console.log(`[driverlink] OC driver tracking links ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, routeFor };
+  return { overlay, routeFor, ensureDocsLink };
 }

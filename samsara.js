@@ -361,7 +361,7 @@ export function analyzeReeferReadings(reeferRead) {
 
 export function indexSnapshot(snap) {
   const driversByCode = {};
-  for (const d of arr(snap.drivers)) if (d.username) driversByCode[norm(d.username)] = { id: d.id, name: d.name };
+  for (const d of arr(snap.drivers)) if (d.username) driversByCode[norm(d.username)] = { id: d.id, name: d.name, info: driverProfile(d) };
   const vehByUnit = {};
   for (const v of arr(snap.vehicles)) for (const key of [v.name, v.externalIds && v.externalIds.unitId]) if (key) vehByUnit[norm(key)] = v;
   const statsByUnit = {};
@@ -435,13 +435,19 @@ function samsaraDtcCodes(fc) {
 }
 
 // Build the live data object for one TruckMate trip item.
+// What dispatch needs to reach a driver: name, phone, ID. Nothing else leaves the server.
+export function driverProfile(d) {
+  if (!d) return null;
+  return { id: d.id != null ? String(d.id) : null, name: d.name || null, username: d.username || null, phone: d.phone || null };
+}
+
 export function correlate(item, idx) {
   const t = (item && item.trip) || item || {};
   const live = {};
   const d1 = idx.driversByCode[norm(t.driver)];
   const d2 = idx.driversByCode[norm(t.driver2)];
-  if (d1) { live.driver1 = d1.name; if (idx.hosById[String(d1.id)]) live.hos = idx.hosById[String(d1.id)]; }
-  if (d2) { live.driver2 = d2.name; if (idx.hosById[String(d2.id)]) live.hos2 = idx.hosById[String(d2.id)]; }
+  if (d1) { live.driver1 = d1.name; live.driver1Info = d1.info || null; if (idx.hosById[String(d1.id)]) live.hos = idx.hosById[String(d1.id)]; }
+  if (d2) { live.driver2 = d2.name; live.driver2Info = d2.info || null; if (idx.hosById[String(d2.id)]) live.hos2 = idx.hosById[String(d2.id)]; }
   const st = idx.statsByUnit[norm(t.powerUnit)];
   if (st) {
     const g = st.gps || {};

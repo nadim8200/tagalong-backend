@@ -34,12 +34,29 @@ export function routeReply(reply, { asks = [], driverPhones = new Map(), now = D
   return { trips, confirm };
 }
 
-export function initComms(app, { requireAuth, db, ringcentral = null, carriers = null, getBoard = null, env = process.env }) {
+// Who to text on a load: the OC driver, or the company driver from Samsara
+// (driver 1 by default, driver 2 on a team). Consent: the OC load's record or
+// the driver's own record (kept per phone, so it carries across loads). Pure.
+export function recipientFor(item, which = 1, phoneConsent = {}) {
+  if (!item) return null;
+  const oc = item._oc;
+  if (oc) {
+    const phone = which === 2 ? oc.driver2Phone : oc.driverPhone;
+    const name = which === 2 ? oc.driver2Name : oc.driverName;
+    return phone ? { phone, name, consent: oc.smsConsent || phoneConsent[last10(phone)] || null, kind: 'oc' } : null;
+  }
+  const info = item._samsara && (which === 2 ? item._samsara.driver2Info : item._samsara.driver1Info);
+  if (!info || !info.phone) return null;
+  return { phone: info.phone, name: info.name, consent: phoneConsent[last10(info.phone)] || null, kind: 'company' };
+}
+
+export function initComms(app, { requireAuth, db, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, env = process.env }) {
   const enabled = !!(db && db.enabled);
   const logKey = (site) => `taTripComms:${site}`;
   const askKey = (site) => `taCommsAsks:${site}`;
   const confirmKey = (site) => `taStopConfirm:${site}`;
   const cursorKey = (site) => `taCommsCursor:${site}`;
+  const consentKey = (site) => `taSmsConsent:${site}`;     // last10 phone → { by, at, name }
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
 
@@ -59,6 +76,23 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
   const board = async (site) => { try { return getBoard ? ((await getBoard(site)).trips || []) : []; } catch { return []; } };
   const tripOf = (item) => (item && item.trip) || item || {};
 
+  // Record (or withdraw) that a driver agreed to texts — per phone, any load.
+  app.post('/truckmate/consent', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const b = req.body || {};
+    const k = last10(b.phone);
+    if (k.length !== 10) return res.status(400).json({ error: 'No phone number for this driver.' });
+    try {
+      const all = await db.update(consentKey(siteOf(req)), (cur) => {
+        const a = { ...(cur || {}) };
+        if (b.agreed) a[k] = { by: who(req), at: new Date().toISOString(), name: b.name ? String(b.name).slice(0, 80) : null, how: 'verbal (dispatcher call)' };
+        else delete a[k];
+        return a;
+      }, {});
+      res.json({ consent: all[k] || null });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.post('/truckmate/trips/:trip/text', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     if (!ringcentral) return res.status(503).json({ error: 'RingCentral is not connected.' });
@@ -67,14 +101,15 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
     const b = req.body || {};
     try {
       const item = (await board(site)).find((it) => String(tripOf(it).tripNumber) === trip);
-      const oc = item && item._oc;
-      if (!oc) return res.status(404).json({ error: 'Texts to drivers are for outside-carrier loads with a driver phone.' });
-      if (!oc.smsConsent) return res.status(409).json({ error: 'Record that the driver agreed to texts first (Outside carrier section).', needConsent: true });
-      const to = oc.driverPhone;
-      if (!to) return res.status(400).json({ error: 'Add the driver’s phone first.' });
+      const who2 = Number(b.driver) === 2 ? 2 : 1;
+      const rcpt = recipientFor(item, who2, await db.get(consentKey(site), {}));
+      if (!rcpt) return res.status(400).json({ error: 'No phone number for this driver (add it in Samsara, or on the outside-carrier form).' });
+      if (!rcpt.consent) return res.status(409).json({ error: 'Record that the driver agreed to texts first.', needConsent: true });
+      const to = rcpt.phone;
       const owner = String(req.user.company || req.user.id);
       const cfg = ringcentral.configFor ? await ringcentral.configFor(owner) : null;
-      const link = item._driverLink && !['revoked', 'completed', 'expired'].includes(item._driverLink.status) ? item._driverLink.url : null;
+      let link = item._driverLink && !['revoked', 'completed', 'expired'].includes(item._driverLink.status) ? item._driverLink.url : null;
+      if (!link && b.kind === 'pod-request' && driverLinks && driverLinks.ensureDocsLink) link = await driverLinks.ensureDocsLink(site, trip, who(req));
       const text = messageFor(b.kind, { trip, stopLabel: b.stopLabel, link, phone: cfg && cfg.fromNumber });
       if (!text) return res.status(400).json({ error: 'Unknown message.' });
       const sent = await ringcentral.sendSms(owner, { to, text });
@@ -97,8 +132,9 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
     const asks = await db.get(askKey(site), []);
     const driverPhones = new Map();
     for (const it of await board(site)) {
-      const oc = it._oc; if (!oc) continue;
-      for (const p of [oc.driverPhone, oc.driver2Phone]) if (last10(p).length === 10) driverPhones.set(last10(p), [...(driverPhones.get(last10(p)) || []), String(tripOf(it).tripNumber)]);
+      const s = it._samsara || {};
+      const phones = it._oc ? [it._oc.driverPhone, it._oc.driver2Phone] : [s.driver1Info && s.driver1Info.phone, s.driver2Info && s.driver2Info.phone];
+      for (const p of phones) if (last10(p).length === 10) driverPhones.set(last10(p), [...(driverPhones.get(last10(p)) || []), String(tripOf(it).tripNumber)]);
     }
     for (const r of replies) {
       const { trips, confirm } = routeReply(r, { asks, driverPhones });
@@ -126,9 +162,15 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
   // board overlay: calls / texts / replies and driver-confirmed stops
   async function overlay(site, trips) {
     if (!enabled) return;
-    const [logs, confirms] = await Promise.all([db.get(logKey(site), {}), db.get(confirmKey(site), {})]);
+    const [logs, confirms, consents] = await Promise.all([db.get(logKey(site), {}), db.get(confirmKey(site), {}), db.get(consentKey(site), {})]);
     for (const item of trips) {
       const trip = String(tripOf(item).tripNumber || '');
+      const s = item._samsara || {};
+      const dc = {};
+      for (const p of [s.driver1Info && s.driver1Info.phone, s.driver2Info && s.driver2Info.phone, item._oc && item._oc.driverPhone, item._oc && item._oc.driver2Phone]) {
+        if (p && consents[last10(p)]) dc[last10(p)] = consents[last10(p)];
+      }
+      if (Object.keys(dc).length) item._driverConsent = dc;
       if (logs[trip]) item._comms = logs[trip];
       if (confirms[trip]) item._stopConfirm = confirms[trip];
     }
