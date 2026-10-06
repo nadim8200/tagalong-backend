@@ -212,7 +212,44 @@ export function pairStops(sheetStops, bills) {
     const cand = [...tm.values()].filter((g) => !used.has(g.key) && g.state === p.state && g.pieces === p.pieces);
     if (cand.length === 1) { out.set(k, { ...cand[0], matchedBy: 'same state + same pieces' }); used.add(cand[0].key); }
   }
+  // Grouped stops: one side lists several towns under one stop and the counts
+  // add up exactly (TruckMate "Pensacola 78" = sheet Pensacola 28 + Kenner 35 +
+  // Biloxi 15; sheet "Mundelein 122" = TruckMate Mundelein 80 + McHenry 42).
+  const loosePaper = () => [...paper.values()].filter((p) => p.pieces && (!out.has(p.key) || (out.get(p.key).pieces !== p.pieces && !out.get(p.key).grouped)));
+  for (const g of tm.values()) {
+    if (!g.pieces) continue;
+    const mine = [...out.entries()].filter(([, m]) => m.key === g.key).map(([k]) => k);
+    if (mine.length && mine.every((k) => paper.get(k).pieces === g.pieces)) continue;
+    const pool = loosePaper().filter((p) => !out.has(p.key) || out.get(p.key).key === g.key);
+    const hit = subsetSum(pool, g.pieces);
+    if (hit && hit.length > 1) hit.forEach((p) => out.set(p.key, { ...g, matchedBy: 'grouped', grouped: hit.map((x) => x.key) }));
+  }
+  for (const p of loosePaper()) {
+    const m = out.get(p.key);
+    const pool = [...tm.values()].filter((g) => g.pieces && (!used.has(g.key) || (m && m.key === g.key)) && ![...out.values()].some((o) => o.grouped && o.key === g.key));
+    const hit = subsetSum(pool, p.pieces);
+    if (hit && hit.length > 1) {
+      const main = (m && hit.find((g) => g.key === m.key)) || hit[0];
+      out.set(p.key, { ...main, matchedBy: 'grouped', pieces: p.pieces, tmKeys: hit.map((g) => g.key), tmLabels: hit.map((g) => `${g.label} (${g.pieces})`) });
+      hit.forEach((g) => used.add(g.key));
+    }
+  }
   return out;
+}
+
+// 2–4 items whose pieces add up to exactly `target` (small lists only).
+function subsetSum(items, target) {
+  const list = items.slice(0, 16);
+  let best = null;
+  const walk = (i, picked, sum) => {
+    if (best) return;
+    if (sum === target && picked.length > 1) { best = picked; return; }
+    if (sum >= target || picked.length >= 4 || i >= list.length) return;
+    walk(i + 1, [...picked, list[i]], sum + list[i].pieces);
+    walk(i + 1, picked, sum);
+  };
+  walk(0, [], 0);
+  return best;
 }
 
 // Compare one trip sheet with what TruckMate sent for the same trip: stops on
@@ -237,9 +274,10 @@ export function compareWithTruckMate(sheet, item) {
     const k = cityKey(s.city, s.state);
     paper.set(k, { label: `${s.city}, ${s.state}`, pieces: (paper.get(k) ? paper.get(k).pieces : 0) + (s.pieces || 0) });
   }
-  const pairedTm = new Set([...pairs.values()].map((g) => g.key));
+  const pairedTm = new Set([...pairs.values()].flatMap((g) => [g.key, ...(g.tmKeys || [])]));
   for (const [k, p] of paper) {
     const m = pairs.get(k);
+    if (m && m.matchedBy === 'grouped') continue;           // counts add up across towns — not a conflict
     if (!m) out.push({ kind: 'not-in-truckmate', msg: `${p.label}: on the trip sheet (${p.pieces} pcs) but not in TruckMate.` });
     else if (p.pieces && m.pieces && p.pieces !== m.pieces) out.push({ kind: 'pieces', msg: `${p.label}: sheet ${p.pieces} pcs vs TruckMate ${m.pieces} pcs.` });
   }

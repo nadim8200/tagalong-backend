@@ -36,6 +36,7 @@ import { initComms } from './comms.js';
 import { initRundowns } from './rundown.js';
 import { initInbox } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
+import { initAssistant } from './assistant.js';
 import { initStopVisits } from './stopvisits.js';
 import { listAddresses, samsaraTokenFrom } from './samsara.js';
 import { initNotify } from './notify.js';
@@ -675,6 +676,7 @@ initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.bu
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
+initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard });
 initWatchtower(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await statusMail.process(site, board, ctx); } });
 initCarChat(app, { requireAuth, env: process.env });
 
