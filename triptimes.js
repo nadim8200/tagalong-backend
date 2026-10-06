@@ -57,11 +57,18 @@ export function tripTimes(rec) {
     const hit = hist.find((h) => !PRE_DISPATCH.test(h.status) && !DONE.test(h.status));
     if (hit && hit.first) dispatchedBefore = new Date(hit.at).toISOString();      // already past dispatch when first seen
     else if (hit) { dispatchedAt = new Date(hit.at).toISOString(); dispatchedFrom = 'status change'; }
+    else if (!hist.length) {
+      // no history recorded yet (no TruckMate update since tracking began):
+      // go by the current status — dispatched at some point before the last update
+      const st = String(inner.status || '');
+      if (st && !PRE_DISPATCH.test(st) && !DONE.test(st) && rec.updatedAt) dispatchedBefore = new Date(rec.updatedAt).toISOString();
+    }
   }
   return {
     createdAt: created ? created.at : null, createdBy, createdFrom: created ? (created.key === 'first bill' ? 'first freight bill' : 'TruckMate') : null,
-    addedAt: rec && rec.firstSeenAt ? new Date(rec.firstSeenAt).toISOString() : null,
-    addedBefore: !!(rec && rec.addedBefore),
+    // not seen since tracking began → it was on the board before its last update
+    addedAt: rec && (rec.firstSeenAt || rec.updatedAt) ? new Date(rec.firstSeenAt || rec.updatedAt).toISOString() : null,
+    addedBefore: !!(rec && (rec.addedBefore || (!rec.firstSeenAt && rec.updatedAt))),
     dispatchedAt, dispatchedBefore, dispatchedFrom,
     statusHistory: ((rec && rec.statusHistory) || []).map((h) => ({ status: h.status, desc: h.desc, at: new Date(h.at).toISOString() })),
   };

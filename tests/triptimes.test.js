@@ -28,3 +28,12 @@ test('already past dispatch when first seen → "dispatched before"; trip-level 
   const notYet = tripTimes({ item: { trip: { status: 'ASSGN' } }, firstSeenAt: T('2026-10-01T09:00:00Z'), statusHistory: [{ status: 'ASSGN', at: T('2026-10-01T09:00:00Z') }] });
   assert.equal(notYet.dispatchedAt, null); assert.equal(notYet.dispatchedBefore, null);
 });
+
+test('trip not updated since tracking began: added/dispatched "before" its last update', () => {
+  const t = tripTimes({ item: { trip: { status: 'DISP' } }, updatedAt: Date.parse('2026-10-05T20:10:00Z') });
+  assert.equal(t.addedBefore, true);
+  assert.equal(t.addedAt, '2026-10-05T20:10:00.000Z');
+  assert.equal(t.dispatchedBefore, '2026-10-05T20:10:00.000Z');
+  const assigned = tripTimes({ item: { trip: { status: 'ASSGN' } }, updatedAt: Date.parse('2026-10-05T20:10:00Z') });
+  assert.equal(assigned.dispatchedBefore, null);
+});
