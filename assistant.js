@@ -62,13 +62,14 @@ export function slimItem(it, alerts = []) {
 }
 
 export function initAssistant(app, { db, env = process.env, buildBoard }) {
-  const enabled = () => String(env.ASSISTANT_READ_KEY || '').length >= 24;
+  const secret = () => String(env.ASSISTANT_READ_KEY || '').trim();   // a pasted trailing newline must not break it
+  const enabled = () => secret().length >= 24;
   const site = (req) => String(req.query.site || 'florida-beauty');
   const hits = [];
   function guard(req, res, next) {
     if (!enabled()) return res.status(503).json({ error: 'Assistant access is off (set ASSISTANT_READ_KEY in Render).' });
-    const got = Buffer.from(String(req.get('x-assistant-key') || ''));
-    const want = Buffer.from(String(env.ASSISTANT_READ_KEY));
+    const got = Buffer.from(String(req.get('x-assistant-key') || '').trim());
+    const want = Buffer.from(secret());
     if (got.length !== want.length || !timingSafeEqual(got, want)) return res.status(401).json({ error: 'Bad assistant key.' });
     const now = Date.now();
     while (hits.length && now - hits[0] > 60000) hits.shift();
