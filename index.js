@@ -37,6 +37,7 @@ import { initRundowns } from './rundown.js';
 import { initInbox } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
+import { initVoice } from './voice.js';
 import { initStopVisits } from './stopvisits.js';
 import { listAddresses, samsaraTokenFrom } from './samsara.js';
 import { initNotify } from './notify.js';
@@ -70,7 +71,8 @@ if (!JWT_SECRET) { console.error('FATAL: set JWT_SECRET'); process.exit(1); }
 
 const origins = ALLOWED_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean);
 const app = express();
-app.use(express.json({ limit: '15mb' }));
+// keep the raw body for Retell (its signature is over the exact bytes)
+app.use(express.json({ limit: '15mb', verify: (req, _res, buf) => { if (req.url && req.url.startsWith('/retell/')) req.rawBody = buf.toString('utf8'); } }));
 app.use(cookieParser());
 app.use(cors({ origin: origins, credentials: true }));
 
@@ -677,6 +679,7 @@ initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.bu
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard });
+initVoice(app, { requireAuth, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initWatchtower(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await statusMail.process(site, board, ctx); } });
 initCarChat(app, { requireAuth, env: process.env });
 
