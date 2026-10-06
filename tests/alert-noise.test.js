@@ -9,7 +9,9 @@ test('engine faults: network/sensor/manufacturer codes are quiet; protection and
   assert.equal(faultSeverity({ code: 'SPN 100 FMI 1' }), 'critical');
   assert.equal(faultSeverity({ code: 'SPN 5246 FMI 15' }), 'critical');
   assert.equal(faultSeverity({ code: 'SPN 4364 FMI 1' }), 'warning');
-  assert.equal(faultSeverity({ code: 'SPN 412 FMI 0' }), 'warning');
+  assert.equal(faultSeverity({ code: 'SPN 412 FMI 0', meaning: 'Engine Exhaust Gas Recirculation 1 Temperature — High—most severe' }), 'warning');
+  assert.equal(faultSeverity({ code: 'SPN 596 FMI 1', meaning: 'Cruise Control Enable Switch — Low—most severe' }), null);
+  assert.equal(faultSeverity({ code: 'SPN 1487 FMI 0', meaning: 'Cab A/C Refrigerant Compressor Outlet Pressure — High—most severe' }), null);
   assert.equal(faultSeverity({ code: 'P0217' }), 'critical');
 });
 

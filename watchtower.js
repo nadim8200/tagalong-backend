@@ -70,7 +70,9 @@ export function faultSeverity(c) {
     const spn = Number(m[1]); const fmi = Number(m[2]);
     const rule = SPN_FMI_SERIOUS[spn];
     if (rule && (rule === 'any' || rule.includes(fmi))) return CRITICAL_SPN.has(spn) ? 'critical' : 'warning';
-    if (spn < 520192 && (fmi === 0 || fmi === 1)) return 'warning';             // "most severe" on a standard signal
+    // "most severe" on a standard signal — only for parts that keep the truck rolling
+    const what = String((c && c.meaning) || '');
+    if (spn < 520192 && (fmi === 0 || fmi === 1) && /engine|aftertreatment|exhaust|fuel|oil|coolant|turbo|charge air|brake|tire|transmission/i.test(what) && !/cruise|cab\b|a\/c|refrigerant|lamp|light|bulb|radio|seat|mirror/i.test(what)) return 'warning';
     return null;
   }
   const p = txt.match(/\b([PU][0-9A-F]{4})\b/);
