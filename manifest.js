@@ -259,8 +259,12 @@ export function compareWithTruckMate(sheet, item) {
   const out = [];
   if (!item) return [{ kind: 'missing-trip', msg: `Trip ${sheet.tripNumber} is not on the TruckMate board.` }];
   const t = item.trip || item;
-  if (sheet.truck && t.powerUnit && norm(sheet.truck) !== norm(t.powerUnit)) out.push({ kind: 'truck', msg: `Sheet says truck ${sheet.truck}, TruckMate has ${t.powerUnit}.` });
-  if (sheet.trailer && t.trailer && norm(sheet.trailer) !== norm(t.trailer)) out.push({ kind: 'trailer', msg: `Sheet says trailer ${sheet.trailer}, TruckMate has ${t.trailer}.` });
+  // An outside carrier rides under an OC code in TruckMate (OC2, OC 978) while the
+  // sheet shows the carrier's own truck / trailer — not a mismatch.
+  const ocUnit = (v) => /^OC\s?-?\d*$/i.test(String(v || '').trim());
+  const isOc = ocUnit(t.powerUnit) || ocUnit(t.trailer) || !!(sheet.outsideCarrier && sheet.outsideCarrier.isOutsideCarrier);
+  if (!isOc && sheet.truck && t.powerUnit && norm(sheet.truck) !== norm(t.powerUnit)) out.push({ kind: 'truck', msg: `Sheet says truck ${sheet.truck}, TruckMate has ${t.powerUnit}.` });
+  if (!isOc && sheet.trailer && t.trailer && norm(sheet.trailer) !== norm(t.trailer)) out.push({ kind: 'trailer', msg: `Sheet says trailer ${sheet.trailer}, TruckMate has ${t.trailer}.` });
   const pairs = pairStops(sheet.stops, item.freightBills);
   const tm = new Map();
   for (const b of item.freightBills || []) {

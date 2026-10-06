@@ -54,6 +54,29 @@ function localToUtcMs(wall, tz) {
   } catch { return asUtc; }
 }
 
+// Which engine faults matter on the road. SPN/FMI (J1939) or OBD P-codes.
+// critical = engine protection or an active derate; warning = likely derate soon.
+const SPN_FMI_SERIOUS = {
+  110: [0, 15, 16], 100: [1, 17, 18], 111: [1, 17, 18], 175: [0, 15, 16],      // coolant temp, oil pressure, coolant level, oil temp
+  4364: [1, 18], 1761: [1, 17, 18], 3364: [1, 18, 31], 3719: [0, 15, 16],       // SCR efficiency, DEF level / quality, DPF soot
+  3720: [0, 15, 16], 3251: [0, 16], 94: [1, 18], 102: [1, 18], 5246: 'any', 1569: 'any', // ash, DPF pressure, fuel, boost, inducement, derate
+};
+const CRITICAL_SPN = new Set([110, 100, 111, 5246, 1569]);
+const P_SERIOUS = { P0217: 'critical', P0524: 'critical', P0218: 'critical', P0300: 'warning', P0087: 'warning', P20EE: 'warning', P207F: 'warning' };
+export function faultSeverity(c) {
+  const txt = `${(c && c.code) || ''}`.toUpperCase();
+  const m = txt.match(/SPN\s*(\d+)\s*FMI\s*(\d+)/);
+  if (m) {
+    const spn = Number(m[1]); const fmi = Number(m[2]);
+    const rule = SPN_FMI_SERIOUS[spn];
+    if (rule && (rule === 'any' || rule.includes(fmi))) return CRITICAL_SPN.has(spn) ? 'critical' : 'warning';
+    if (spn < 520192 && (fmi === 0 || fmi === 1)) return 'warning';             // "most severe" on a standard signal
+    return null;
+  }
+  const p = txt.match(/\b([PU][0-9A-F]{4})\b/);
+  return p ? (P_SERIOUS[p[1]] || null) : null;
+}
+
 export function haversineMi(aLat, aLng, bLat, bLng) {
   const R = 3958.8; const r = Math.PI / 180;
   const dLat = (bLat - aLat) * r; const dLng = (bLng - aLng) * r;
@@ -447,10 +470,16 @@ const RULES = [
     if (f.oc) return null;                              // outside carrier: not our ELD / engine
     const codes = (f.live && f.live.dtcCodes) || [];
     if (!codes.length) return null;
+    // Only faults that can strand the truck, force a derate or damage the
+    // engine raise an alert; the rest stay on the truck's health card.
+    const serious = codes.map((c) => ({ c, s: faultSeverity(c) })).filter((x) => x.s);
+    if (!serious.length) return null;
+    const crit = serious.some((x) => x.s === 'critical');
+    const minor = codes.length - serious.length;
     return {
-      code: 'check-engine', severity: 'warning', key: codes.map((c) => c.code).sort().join(','),
-      title: `Check engine — ${codes.length} code${codes.length === 1 ? '' : 's'}`,
-      detail: codes.slice(0, 3).map((c) => `${c.code}: ${c.meaning}`).join(' · '),
+      code: 'check-engine', severity: crit ? 'critical' : 'warning', key: serious.map((x) => x.c.code).sort().join(','),
+      title: `Engine fault — ${serious[0].c.meaning ? String(serious[0].c.meaning).split(' — ')[0] : serious[0].c.code}${serious.length > 1 ? ` (+${serious.length - 1} more)` : ''}`,
+      detail: `${serious.slice(0, 3).map((x) => `${x.c.code}: ${x.c.meaning}`).join(' · ')}${minor ? ` · ${minor} minor code${minor === 1 ? '' : 's'} on the truck card` : ''}. ${crit ? 'Can stop the truck or force a derate — call the driver.' : 'Plan a shop visit; watch for a derate.'}`,
     };
   },
   function trackingLost(f) {
