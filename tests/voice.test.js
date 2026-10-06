@@ -87,7 +87,7 @@ test('problems and messages land on the load; the finished call (summary) too', 
   assert.equal(v.logged.at(-1).text, 'Driver reported a blown tire on I-57.');
 });
 
-test('setup creates Jarvis in Retell (Claude, English + Spanish, our tools, webhook)', async () => {
+test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our tools, webhook)', async () => {
   const v = setup();
   const r = await v.hit('POST /voice/setup', {});
   assert.deepEqual(r.out && { llm: r.out.llmId, agent: r.out.agentId }, { llm: 'llm_1', agent: 'agent_1' });
@@ -96,7 +96,9 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish, our tools, webh
   assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'take_message', 'confirm_delivered', 'report_problem', 'end_call', 'transfer_to_dispatch']);
   assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
-  assert.deepEqual(agent.language, ['en-US', 'es-ES']);
+  assert.deepEqual(agent.language, ['en-US', 'es-419', 'he-IL']);
+  assert.match(llm.general_prompt, /English, Spanish or Hebrew/);
+  assert.equal(llm.default_dynamic_variables.greeting, "Hi, this is Jarvis, Florida Beauty Flora's assistant. This call may be recorded. How can I help you?");
   assert.equal(agent.webhook_url, 'https://tagalong-backend-fdzx.onrender.com/retell/webhook');
   assert.equal(v.retellCalls[0].auth, `Bearer ${KEY}`);
 });

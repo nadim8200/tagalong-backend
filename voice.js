@@ -33,11 +33,11 @@ const norm = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const cityOf = (s) => String(s || '').replace(/,?\s*\d{5}(-\d{4})?\s*$/, '').trim();
 const fmt = (ms) => (ms ? new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' Eastern' : null);
 
-export const GREETING = "Hi, this is Jarvis, Florida Beauty Flora's automated dispatch assistant. This call may be recorded. How can I help you? — Hola, soy Jarvis, el asistente automático de despacho de Florida Beauty Flora. ¿En qué le puedo ayudar?";
+export const GREETING = "Hi, this is Jarvis, Florida Beauty Flora's assistant. This call may be recorded. How can I help you?";
 
 export const PROMPT = `You are Jarvis, the automated dispatch assistant for Florida Beauty Flora (a Miami flower and freight trucking company). You talk on the phone with truck drivers, customers (receivers, florists) and freight brokers.
 
-Language: speak English or Spanish — always answer in the language the caller is using, and switch if they switch. Keep every answer short and natural for a phone call (one to three sentences), friendly and professional.
+Language: speak English, Spanish or Hebrew — always answer in the language the caller is using, and switch if they switch. The greeting is in English only; if the caller answers in Spanish or Hebrew, continue in that language. Keep every answer short and natural for a phone call (one to three sentences), friendly and professional.
 
 Who you are: an automated assistant. If asked, say so plainly. You already said the call may be recorded.
 
@@ -183,6 +183,8 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
   const cfgKey = 'taRetellCfg';
   const callsKey = `taJarvisCalls:${site}`;
   const key = () => String(env.RETELL_API_KEY || '').trim();
+  // English, Latin-American Spanish, Hebrew (RETELL_LANGUAGES to change, comma-separated Retell locales)
+  const languages = () => String(env.RETELL_LANGUAGES || 'en-US,es-419,he-IL').split(',').map((x) => x.trim()).filter(Boolean);
   const backend = () => String(env.BACKEND_URL || env.RENDER_EXTERNAL_URL || 'https://tagalong-backend-fdzx.onrender.com').replace(/\/$/, '');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   let cached = { at: 0, items: [] };
@@ -322,7 +324,7 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
       const llm = cfg.llmId ? await retell(`/update-retell-llm/${cfg.llmId}`, { method: 'PATCH', body: llmBody }) : await retell('/create-retell-llm', { body: llmBody });
       const agentBody = {
         agent_name: 'Jarvis — Florida Beauty Flora dispatch', response_engine: { type: 'retell-llm', llm_id: llm.llm_id },
-        voice_id: env.RETELL_VOICE_ID || 'retell-Cimo', language: ['en-US', 'es-ES'],
+        voice_id: env.RETELL_VOICE_ID || 'retell-Cimo', language: languages(),
         webhook_url: `${base}/retell/webhook`, max_call_duration_ms: 15 * 60000, end_call_after_silence_ms: 30000,
       };
       const agent = cfg.agentId ? await retell(`/update-agent/${cfg.agentId}`, { method: 'PATCH', body: agentBody }) : await retell('/create-agent', { body: agentBody });
@@ -365,7 +367,7 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
       const call = await retell('/v2/create-phone-call', { body: {
         from_number: e164(env.RETELL_FROM_NUMBER), to_number: to, override_agent_id: cfg.agentId,
         metadata: { trip, purpose, which, by: who(req) },
-        retell_llm_dynamic_variables: { greeting: `Hi${d.name ? ` ${String(d.name).split(' ')[0]}` : ''}, this is Jarvis, the automated assistant from Florida Beauty Flora dispatch, calling about trip ${trip}. This call may be recorded. — Hola, soy Jarvis, el asistente automático de despacho, llamando por el viaje ${trip}.`, call_context: context },
+        retell_llm_dynamic_variables: { greeting: `Hi${d.name ? ` ${String(d.name).split(' ')[0]}` : ''}, this is Jarvis, the automated assistant from Florida Beauty Flora dispatch, calling about trip ${trip}. This call may be recorded.`, call_context: context },
       } });
       await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: to, trip, purpose, by: who(req), status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
       res.json({ ok: true, callId: call.call_id, to });
