@@ -184,7 +184,13 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   });
 
   // ---- send SMS ----
-  async function sendSms(owner, { to, text, from }) {
+  async function sendSms(owner, { to, text, from, allowOptedOut = false }) {
+    // Anyone who replied STOP gets nothing from any part of the app until START.
+    if (!allowOptedOut && db && db.enabled) {
+      const k = String(to || '').replace(/\D+/g, '').slice(-10);
+      const out = await db.get('taSmsOptOut', {});
+      if (out[k]) { const e = new Error(`This number replied STOP on ${String(out[k].at).slice(0, 10)} — no texts until they reply START.`); e.optedOut = true; throw e; }
+    }
     const cfg = await configFor(owner);
     const fromNumber = from || (cfg && cfg.fromNumber);
     if (!fromNumber) throw new Error('No RingCentral from-number configured.');

@@ -67,3 +67,37 @@ test('driver conversation: every call, text and reply on the driver\'s thread, t
   assert.deepEqual(out.map((e) => [e.type, e.trip]), [['reply', '624301'], ['text', '624278'], ['call', '624278']]);
   assert.equal(out[1].by, 'Rosa');
 });
+
+import { keyword, OPTIN_MSG, HELP_MSG, initComms } from '../comms.js';
+
+test('STOP / START / HELP keywords', () => {
+  for (const t of ['STOP', 'stop', ' Unsubscribe ', 'cancel', 'END', 'quit.']) assert.equal(keyword(t), 'stop', t);
+  for (const t of ['START', 'unstop']) assert.equal(keyword(t), 'start', t);
+  for (const t of ['HELP', 'help?', 'info']) assert.equal(keyword(t), 'help', t);
+  for (const t of ['yes', 'stop 3 delivered', 'please help me unload', 'ok']) assert.equal(keyword(t), null, t);
+  assert.match(OPTIN_MSG, /Msg frequency varies\. Msg & data rates may apply\. Reply HELP for help, STOP to opt out\.$/);
+  assert.match(HELP_MSG, /\(305\) 503-1200/);
+});
+
+test('opt-in text waits until texting is live, goes once; STOP blocks and removes consent; START re-subscribes; HELP answers', async () => {
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  let live = false; const sent = [];
+  const ringcentral = { configFor: async () => (live ? { fromNumber: '+17867233912' } : {}), sendSms: async (o, msg) => { sent.push(msg); return { id: 1 }; }, inboundSince: async () => [] };
+  const app = { get() {}, post() {}, put() {} };
+  const comms = initComms(app, { requireAuth: () => {}, db, ringcentral, env: { NODE_ENV: 'test' }, getBoard: async () => ({ trips: [{ trip: { tripNumber: '624257' }, _oc: { driverPhone: '(786) 555-0144', driverName: 'Oc Driver', smsConsent: { by: 'Ana', at: '2026-10-06T12:00:00Z' } } }] }) });
+  m.set('taSmsConsent:florida-beauty', { 3055550100: { by: 'Ana', at: '2026-10-06T12:00:00Z' } });
+  assert.equal(await comms.sendConfirmations(), 0, 'texting not live yet → nothing sent');
+  live = true;
+  assert.equal(await comms.sendConfirmations(), 2, 'company driver + OC driver');
+  assert.ok(sent.every((x) => x.text === OPTIN_MSG));
+  assert.equal(await comms.sendConfirmations(), 0, 'only once');
+  await comms.handleKeyword('florida-beauty', { from: '+13055550100', text: 'STOP', at: '2026-10-06T13:00:00Z' }, 'stop');
+  assert.ok((await db.get('taSmsOptOut', {}))['3055550100']);
+  assert.equal((await db.get('taSmsConsent:florida-beauty', {}))['3055550100'], undefined);
+  await comms.handleKeyword('florida-beauty', { from: '+13055550100', text: 'START', at: '2026-10-06T14:00:00Z' }, 'start');
+  assert.equal((await db.get('taSmsOptOut', {}))['3055550100'], undefined);
+  assert.equal(sent.at(-1).text, OPTIN_MSG, 'START gets the opt-in text again');
+  await comms.handleKeyword('florida-beauty', { from: '+13055550100', text: 'HELP' }, 'help');
+  assert.equal(sent.at(-1).text, HELP_MSG);
+});

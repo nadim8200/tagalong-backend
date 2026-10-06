@@ -16,6 +16,13 @@ const COMPANY = 'Florida Beauty Flora dispatch';
 const last10 = (p) => String(p || '').replace(/\D+/g, '').slice(-10);
 const YES = /^\s*(yes|y|yep|yeah|si|sí|delivered|done|ok|okay|confirmed)\b/i;
 const ASK_HOURS = 48;          // a "YES" counts for an ask sent within this window
+// Exactly as registered with the carriers (10DLC campaign).
+export const OPTIN_MSG = 'Florida Beauty Flora dispatch: you\'re subscribed to load and delivery updates. Msg frequency varies. Msg & data rates may apply. Reply HELP for help, STOP to opt out.';
+export const HELP_MSG = 'Florida Beauty Flora dispatch: for help call (305) 503-1200. Msg frequency varies. Msg & data rates may apply. Reply STOP to opt out.';
+const KW_STOP = /^\s*(stop|stopall|unsubscribe|cancel|end|quit)\s*[.!]*\s*$/i;
+const KW_START = /^\s*(start|unstop|subscribe|yes start)\s*[.!]*\s*$/i;
+const KW_HELP = /^\s*(help|info)\s*[.!?]*\s*$/i;
+export const keyword = (text) => (KW_STOP.test(text || '') ? 'stop' : KW_START.test(text || '') ? 'start' : KW_HELP.test(text || '') ? 'help' : null);
 
 export function messageFor(kind, { trip, stopLabel, link, phone, text }) {
   const help = phone ? ` Questions? Call ${phone}.` : '';
@@ -104,11 +111,12 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
     try {
       const all = await db.update(consentKey(siteOf(req)), (cur) => {
         const a = { ...(cur || {}) };
-        if (b.agreed) a[k] = { by: who(req), at: new Date().toISOString(), name: b.name ? String(b.name).slice(0, 80) : null, how: 'verbal (dispatcher call)' };
+        if (b.agreed) a[k] = { by: who(req), at: new Date().toISOString(), name: b.name ? String(b.name).slice(0, 80) : null, how: 'verbal (dispatcher read the opt-in script)', confirmSentAt: (a[k] && a[k].confirmSentAt) || null };
         else delete a[k];
         return a;
       }, {});
-      res.json({ consent: all[k] || null });
+      if (b.agreed) sendConfirmations(siteOf(req)).catch(() => {});
+      res.json({ consent: all[k] || null, optedOut: !!(await db.get(OPTOUT, {}))[k] });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -138,6 +146,57 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
 
+  // ---- STOP / START / HELP and the opt-in confirmation text ----
+  const OPTOUT = 'taSmsOptOut';                           // last10 → { at, text } (global, every sender checks it)
+  async function shared() { return ringcentral && ringcentral.configFor ? ringcentral.configFor('__shared') : null; }
+  async function handleKeyword(site, r, kw) {
+    const k = last10(r.from);
+    if (k.length !== 10) return;
+    if (kw === 'stop') {
+      await db.update(OPTOUT, (cur) => ({ ...(cur || {}), [k]: { at: r.at || new Date().toISOString(), text: String(r.text || '').slice(0, 40) } }), {});
+      await db.update(consentKey(site), (cur) => { const a = { ...(cur || {}) }; delete a[k]; return a; }, {});
+      await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, note: 'opted out (STOP)' });
+      return;                                              // the carrier sends the opt-out confirmation
+    }
+    if (kw === 'start') {
+      await db.update(OPTOUT, (cur) => { const a = { ...(cur || {}) }; delete a[k]; return a; }, {});
+      await db.update(consentKey(site), (cur) => ({ ...(cur || {}), [k]: { by: 'driver text (START)', at: r.at || new Date().toISOString(), how: 'replied START', confirmSentAt: null } }), {});
+      await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, note: 'opted back in (START)' });
+      await sendConfirmations(site);
+      return;
+    }
+    if (kw === 'help') {
+      try { await ringcentral.sendSms('__shared', { to: r.from, text: HELP_MSG }); await thread(site, r.from, { type: 'text', kind: 'help', to: r.from, text: HELP_MSG, by: 'AI Dispatcher (automatic)' }); } catch (e) { console.warn('[comms] help reply:', e.message); }
+    }
+  }
+  // Every recorded consent gets the registered opt-in text once — right away
+  // when texting is live, otherwise as soon as it goes live. OC consents
+  // (recorded on the load) are copied here by phone first.
+  async function sendConfirmations(site = 'florida-beauty') {
+    if (!enabled || !ringcentral) return 0;
+    const cfg = await shared();
+    if (!cfg || !cfg.fromNumber) return 0;                 // texting not live yet — they wait
+    const items = await board(site);
+    const oc = items.filter((it) => it._oc && it._oc.smsConsent).flatMap((it) => [it._oc.driverPhone, it._oc.driver2Phone].filter(Boolean).map((p) => ({ k: last10(p), c: it._oc.smsConsent, name: it._oc.driverName })));
+    const optOut = await db.get(OPTOUT, {});
+    const all = await db.update(consentKey(site), (cur) => {
+      const a = { ...(cur || {}) };
+      for (const x of oc) if (x.k.length === 10 && !a[x.k] && !optOut[x.k]) a[x.k] = { by: x.c.by, at: x.c.at, how: `${x.c.how || 'verbal'} (outside-carrier load)`, name: x.name || null };
+      return a;
+    }, {});
+    let n = 0;
+    for (const [k, c] of Object.entries(all)) {
+      if (c.confirmSentAt || optOut[k] || n >= 20) continue;
+      try {
+        await ringcentral.sendSms('__shared', { to: k, text: OPTIN_MSG }); // eslint-disable-line no-await-in-loop
+        n += 1;
+        await db.update(consentKey(site), (cur) => { const a = { ...(cur || {}) }; if (a[k]) a[k] = { ...a[k], confirmSentAt: new Date().toISOString() }; return a; }, {}); // eslint-disable-line no-await-in-loop
+        await thread(site, k, { type: 'text', kind: 'opt-in', to: k, text: OPTIN_MSG, by: 'AI Dispatcher (automatic)' }); // eslint-disable-line no-await-in-loop
+      } catch (e) { console.warn('[comms] opt-in text:', e.message); }
+    }
+    return n;
+  }
+
   // ---- driver replies (poll the company inbox) ----
   async function pollReplies(site = 'florida-beauty') {
     if (!enabled || !ringcentral || !ringcentral.inboundSince) return 0;
@@ -156,7 +215,9 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
       for (const p of phones) if (last10(p).length === 10) driverPhones.set(last10(p), [...(driverPhones.get(last10(p)) || []), String(tripOf(it).tripNumber)]);
     }
     for (const r of replies) {
-      const { trips, confirm } = routeReply(r, { asks, driverPhones });
+      const kw = keyword(r.text);
+      if (kw) { await handleKeyword(site, r, kw); } // eslint-disable-line no-await-in-loop
+      const { trips, confirm } = kw ? { trips: [], confirm: null } : routeReply(r, { asks, driverPhones });
       if (!trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: null }); // eslint-disable-line no-await-in-loop
       if (trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: trips.join(', ') }); // eslint-disable-line no-await-in-loop
       for (const trip of trips) {
@@ -176,7 +237,7 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
     return replies.length;
   }
   if (enabled && ringcentral && env.NODE_ENV !== 'test') {
-    const t = setInterval(() => { pollReplies().catch((e) => console.warn('[comms] replies:', e.message)); }, 2 * 60000);
+    const t = setInterval(() => { pollReplies().catch((e) => console.warn('[comms] replies:', e.message)); sendConfirmations().catch((e) => console.warn('[comms] opt-in:', e.message)); }, 2 * 60000);
     if (t.unref) t.unref();
   }
 
@@ -190,13 +251,14 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
   // board overlay: calls / texts / replies and driver-confirmed stops
   async function overlay(site, trips) {
     if (!enabled) return;
-    const [logs, confirms, consents] = await Promise.all([db.get(logKey(site), {}), db.get(confirmKey(site), {}), db.get(consentKey(site), {})]);
+    const [logs, confirms, consents, optOut] = await Promise.all([db.get(logKey(site), {}), db.get(confirmKey(site), {}), db.get(consentKey(site), {}), db.get('taSmsOptOut', {})]);
     for (const item of trips) {
       const trip = String(tripOf(item).tripNumber || '');
       const s = item._samsara || {};
       const dc = {};
       for (const p of [s.driver1Info && s.driver1Info.phone, s.driver2Info && s.driver2Info.phone, item._oc && item._oc.driverPhone, item._oc && item._oc.driver2Phone]) {
         if (p && consents[last10(p)]) dc[last10(p)] = consents[last10(p)];
+        if (p && optOut[last10(p)]) dc[last10(p)] = { optedOut: optOut[last10(p)].at };
       }
       if (Object.keys(dc).length) item._driverConsent = dc;
       if (logs[trip]) item._comms = logs[trip];
@@ -205,5 +267,5 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
   }
 
   console.log(`[comms] driver calls/texts ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, pollReplies, log };
+  return { overlay, pollReplies, log, sendConfirmations, handleKeyword };
 }
