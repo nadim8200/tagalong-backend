@@ -5,7 +5,8 @@ import { initVoice, findLoad, voiceFacts, PROMPT } from '../voice.js';
 
 const KEY = 'key_' + 'x'.repeat(30);
 const board = [
-  { trip: { tripNumber: '624393', status: 'DEPSHIP', powerUnit: '2607' }, freightBills: [{ billNumber: 'B0180251', billToName: 'Native Chicago', endZoneDescription: 'LOMBARD, IL, 60148', actualDelivery: null }, { billNumber: 'B0180252', billToName: 'Gateway', endZoneDescription: 'EDWARDSVILLE, IL, 62025', actualDelivery: '2026-10-06T10:00:00' }], _samsara: { location: 'I 57, Effingham, IL', gpsAt: '2026-10-06T18:00:00Z', speedMph: 63, driver1Info: { name: 'Michel Gonzalez', phone: '(786) 439-4668' } }, _manifest: { stops: [{ customer: 'Native Chicago', callAhead: [{ contact: 'Dock', phone: '630-555-0101' }] }] } },
+  { trip: { tripNumber: '624393', status: 'DEPSHIP', powerUnit: '2607', trailer: '7131' }, _ratecon: { loadNumber: 'LD-425397', referenceNumbers: ['PU#5103730'] }, freightBills: [{ billNumber: 'B0180251', billToName: 'Native Chicago', endZoneDescription: 'LOMBARD, IL, 60148', actualDelivery: null }, { billNumber: 'B0180252', billToName: 'Gateway', endZoneDescription: 'EDWARDSVILLE, IL, 62025', actualDelivery: '2026-10-06T10:00:00' }], _samsara: { location: 'I 57, Effingham, IL', gpsAt: '2026-10-06T18:00:00Z', speedMph: 63, driver1Info: { name: 'Michel Gonzalez', phone: '(786) 439-4668' } }, _manifest: { stops: [{ customer: 'Native Chicago', references: ['M5038497: ELITE FLOWER SERVICE / SEAL#6641429'], callAhead: [{ contact: 'Dock', phone: '630-555-0101' }] }] } },
+  { trip: { tripNumber: '624500', status: 'ASSGN', powerUnit: '2607', trailer: '7131' }, freightBills: [{ billNumber: 'B0190001', endZoneDescription: 'MIAMI, FL, 33178' }] },
   { trip: { tripNumber: '624297', status: 'DISP', powerUnit: '4504' }, freightBills: [{ billNumber: 'B0177001', endZoneDescription: 'LYONS, GA, 30436' }] },
 ];
 
@@ -41,6 +42,14 @@ test('finds the load by trip, bill, truck, or the caller\'s phone (driver or con
   assert.equal(findLoad(board, { trip: '624393' }).by, 'trip number');
   assert.equal(findLoad(board, { bill: 'b0180251' }).item.trip.tripNumber, '624393');
   assert.equal(findLoad(board, { truck: '4504' }).item.trip.tripNumber, '624297');
+  // trailer, and truck/trailer on two loads → the one on the road
+  assert.equal(findLoad(board, { trailer: '7131' }).item.trip.tripNumber, '624393');
+  assert.equal(findLoad(board, { trailer: 'trailer 7131' }).by, 'trailer number');
+  assert.equal(findLoad(board, { truck: '2607' }).item.trip.tripNumber, '624393');
+  // rate-con load #, PO on the trip sheet, partial bill number
+  assert.equal(findLoad(board, { bill: 'LD-425397' }).item.trip.tripNumber, '624393');
+  assert.equal(findLoad(board, { bill: 'M5038497' }).item.trip.tripNumber, '624393');
+  assert.equal(findLoad(board, { bill: '0190001' }).item.trip.tripNumber, '624500');
   assert.equal(findLoad(board, { phone: '+17864394668' }).role, 'driver');
   assert.equal(findLoad(board, { phone: '6305550101' }).role, 'contact');
   assert.equal(findLoad(board, { phone: '3055559999' }), null);
