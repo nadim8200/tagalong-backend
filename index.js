@@ -668,13 +668,14 @@ const driverLinks = initDriverLinks(app, { requireAuth, db, carriers, ringcentra
 // driver calls / texts on a load, and their replies (RingCentral)
 const comms = initComms(app, { requireAuth, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const statusMail = initStatusMail(app, { requireAuth, db, comms, ringcentral: rc, env: process.env });
-const inbox = initInbox(app, { requireAuth, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
+const inbox = initInbox(app, { requireAuth, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null) });
 truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
 const ratecon = initRateCon(app, { requireAuth, db, env: process.env, docs });
-initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, docs, carriers, ratecon });
+manifestsApi = initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, docs, carriers, ratecon });
 
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the

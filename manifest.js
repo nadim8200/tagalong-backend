@@ -606,6 +606,29 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     }
     return null;
   }
+  // One read rate con → its load (matched like a dispatcher would) or the waiting list.
+  // hintTrip: the load the email / upload already points at, used when nothing on the
+  // rate con itself decides it.
+  async function fileRateCon(site, rc, { labels = [], docIds = [], by = 'AI Dispatcher', source = 'packet', filename = null, pageCount = 1, board = null, sheets = null, hintTrip = null } = {}) {
+    const brd = board || await boardIndex(site);
+    const shs = sheets || Object.values((await db.get(storeKey(site), {})) || {});
+    let m = matchRateCon(rc, [...labels, rc.fbfBillNumber], brd, shs);
+    if (!m && hintTrip && brd.has(String(hintTrip))) m = { trip: String(hintTrip), matchedBy: source === 'email' ? 'the trip / bill number in the email' : 'the load it was uploaded to' };
+    const bill = rc.fbfBillNumber || labels.find(Boolean) || null;
+    const record = { ...rc, fbfBillNumber: bill ? billKey(bill) : null, filename, pageCount, uploadedAt: new Date().toISOString(), uploadedBy: by, source };
+    if (m) {
+      if (docs && docs.enabled && docs.retypeDocs && docIds.length) { try { record.version = await docs.retypeDocs({ site, ids: docIds, kind: 'ratecon', trip: m.trip }); record.docIds = docIds; } catch (e) { record.docError = e.message; } }
+      record.matchedBy = m.matchedBy;
+      await ratecon.save(site, m.trip, record);
+      return { trip: m.trip, matchedBy: m.matchedBy, record };
+    }
+    if (docs && docs.enabled && docs.retypeDocs && docIds.length) { try { await docs.retypeDocs({ site, ids: docIds, kind: 'ratecon', trip: null }); record.docIds = docIds; } catch (e) { record.docError = e.message; } }
+    const id = `rc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    await db.update(pendingKey(site), (cur) => [{ id, record }, ...(Array.isArray(cur) ? cur : [])].slice(0, 100), []);
+    record.pendingId = id;
+    return { trip: null, matchedBy: null, pendingId: id, record };
+  }
+
   async function readRateConPackets(site, rcUnits, sorted, board, docOf, by, sheets) {
     const groups = groupRateCons(rcUnits, sorted);
     const read = await pool(groups, 3, async (g) => {
@@ -614,23 +637,12 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       try { rc = await ratecon.read(pages); } catch (e) { rc = { summary: `Could not read: ${e.message}`, specialInstructions: [] }; }
       return { g, rc };
     });
-    const now = new Date().toISOString();
     const out = [];
     for (const { g, rc } of read) {
       const docIds = g.units.map((u) => docOf(u.file, u.page)).filter(Boolean);
-      const m = matchRateCon(rc, [g.rcBill, rc.fbfBillNumber], board, sheets);
-      const record = { ...rc, fbfBillNumber: (rc.fbfBillNumber || g.rcBill) ? billKey(rc.fbfBillNumber || g.rcBill) : null, filename: `${g.units[0].filename || 'packet'} · page${g.units.length > 1 ? 's' : ''} ${g.units[0].page}${g.units.length > 1 ? `–${g.units[g.units.length - 1].page}` : ''}`, pageCount: g.units.length, uploadedAt: now, uploadedBy: by, source: 'packet' };
-      if (m) {
-        if (docs && docs.enabled && docs.retypeDocs) { try { const v = await docs.retypeDocs({ site, ids: docIds, kind: 'ratecon', trip: m.trip }); record.docIds = docIds; record.version = v; } catch (e) { record.docError = e.message; } } // eslint-disable-line no-await-in-loop
-        record.matchedBy = m.matchedBy;
-        await ratecon.save(site, m.trip, record); // eslint-disable-line no-await-in-loop
-      } else {
-        if (docs && docs.enabled && docs.retypeDocs) { try { await docs.retypeDocs({ site, ids: docIds, kind: 'ratecon', trip: null }); record.docIds = docIds; } catch (e) { record.docError = e.message; } } // eslint-disable-line no-await-in-loop
-        const id = `rc_${Date.now().toString(36)}_${out.length}`;
-        await db.update(pendingKey(site), (cur) => [{ id, record }, ...(Array.isArray(cur) ? cur : [])].slice(0, 100), []); // eslint-disable-line no-await-in-loop
-        record.pendingId = id;
-      }
-      out.push({ trip: m ? m.trip : null, matchedBy: m ? m.matchedBy : null, broker: rc.broker || null, loadNumber: rc.loadNumber || null, bill: record.fbfBillNumber, pages: `${g.units[0].page}${g.units.length > 1 ? `–${g.units[g.units.length - 1].page}` : ''}`, instructions: (rc.specialInstructions || []).length, contacts: (rc.contacts || []).length, pendingId: record.pendingId || null });
+      const filename = `${g.units[0].filename || 'packet'} · page${g.units.length > 1 ? 's' : ''} ${g.units[0].page}${g.units.length > 1 ? `–${g.units[g.units.length - 1].page}` : ''}`;
+      const f = await fileRateCon(site, rc, { labels: [g.rcBill, rc.fbfBillNumber], docIds, by, source: 'packet', filename, pageCount: g.units.length, board, sheets }); // eslint-disable-line no-await-in-loop
+      out.push({ trip: f.trip, matchedBy: f.matchedBy, broker: rc.broker || null, loadNumber: rc.loadNumber || null, bill: f.record.fbfBillNumber, pages: `${g.units[0].page}${g.units.length > 1 ? `–${g.units[g.units.length - 1].page}` : ''}`, instructions: (rc.specialInstructions || []).length, contacts: (rc.contacts || []).length, pendingId: f.pendingId || null });
     }
     return out;
   }
@@ -919,4 +931,11 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
   });
 
   console.log(`[manifest] trip-sheet reader ready (${model})${enabled ? '' : ' — no ANTHROPIC_API_KEY, uploads will 503'}`);
+  // Read + file a rate con that arrived some other way (e.g. attached to an email).
+  async function readAndFileRateCon(site, pages, opts = {}) {
+    if (!ratecon || !ratecon.enabled) return null;
+    const rc = await ratecon.read(pages);
+    return fileRateCon(site, rc, opts);
+  }
+  return { readAndFileRateCon };
 }

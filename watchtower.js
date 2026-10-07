@@ -275,6 +275,7 @@ function tripFacts(item, now) {
     gpsFresh: gpsAgeMin != null && gpsAgeMin <= 30,
     gpsAgeMin,
     instrPending: instr.filter((s) => !(checks[s] && checks[s].done)).length,
+    tasks: (item && item._tasks) || [],
     instrTotal: instr.length,
   };
 }
@@ -397,6 +398,17 @@ const RULES = [
       code: 'appt-passed', severity: 'warning', key: st.key,
       title: `${due ? 'Due time' : 'Appointment'} passed at ${where} — ${fmtMin((ctx.now - st.apptMs) / MIN)} ago, not delivered`,
       detail: `Was ${due ? 'due' : 'set for'} ${fmtTime(st.apptMs)}${due ? ' (TruckMate due time)' : ''}.${r ? ` Truck ${Math.round(r.miles)} mi away, ETA ${fmtTime(r.etaMs)}.` : ''} Confirm a new appointment with the receiver/broker and update TruckMate.`,
+    };
+  },
+  // Something an email asked for that nobody has done yet (urgent ones only).
+  function emailTodo(f) {
+    const open = (f.tasks || []).filter((t) => !t.done && t.urgency === 'urgent');
+    if (!open.length) return null;
+    const t = open[0];
+    return {
+      code: 'email-todo', severity: t.kind === 'appointment_change' || t.kind === 'rate_change' ? 'critical' : 'warning', key: t.id,
+      title: `📧 ${t.title}${open.length > 1 ? ` (+${open.length - 1} more)` : ''}`,
+      detail: `From ${t.from || 'an email'}${t.subject ? ` — “${String(t.subject).slice(0, 80)}”` : ''}. ${t.detail || ''}${t.due ? ` Due: ${t.due}.` : ''} Check it off on the load when done.`,
     };
   },
   // "CALL ISRAEL 413-883-7695 1HR BEFORE ARRIVING" — raise it when the truck
