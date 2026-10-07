@@ -387,8 +387,8 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
         default_dynamic_variables: { greeting: GREETING, call_context: 'This is an incoming call. Find out who is calling and what load they mean.' },
         general_tools: tools(base, env.RETELL_TRANSFER_NUMBER ? e164(env.RETELL_TRANSFER_NUMBER) : null),
       };
-      // 1) instructions + tools → a version of the LLM
-      const llm = cfg.llmId ? await retell(`/update-retell-llm/${cfg.llmId}`, { method: 'PATCH', body: llmBody }) : await retell('/create-retell-llm', { body: llmBody });
+      // 1) instructions + tools → a fresh LLM every time (published ones are read-only in Retell)
+      const llm = await retell('/create-retell-llm', { body: llmBody });
       const agentBody = {
         agent_name: 'Jarvis — Florida Beauty Flora dispatch',
         // 2) the agent runs THAT exact version (never an older one)
@@ -398,7 +398,14 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
       };
       // keep the voice someone picked in Retell
       if (cfg.agentId && !env.RETELL_VOICE_ID) delete agentBody.voice_id;
-      const agent = cfg.agentId ? await retell(`/update-agent/${cfg.agentId}`, { method: 'PATCH', body: agentBody }) : await retell('/create-agent', { body: agentBody });
+      let agent;
+      if (!cfg.agentId) agent = await retell('/create-agent', { body: agentBody });
+      else {
+        // published versions are read-only → start a new draft from the current one, then edit that
+        const cur = await retell(`/get-agent/${cfg.agentId}`, { method: 'GET' });
+        if (cur.is_published) await retell(`/create-agent-version/${cfg.agentId}`, { body: { base_version: cur.version } });
+        agent = await retell(`/update-agent/${cfg.agentId}`, { method: 'PATCH', body: agentBody });
+      }
       // 3) publish it
       let published = null;
       if (agent.version != null) {
