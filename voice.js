@@ -25,6 +25,16 @@ import Retell from 'retell-sdk';
 import { contactsFor, billsOf } from './statusmail.js';
 
 const API = 'https://api.retellai.com';
+// Truck / trailer / trip / bill numbers are read digit by digit on the phone: "2026" → "2 0 2 6".
+export const digitByDigit = (v) => (v == null ? v : String(v).replace(/\s+/g, '').replace(/\d/g, ' $&').replace(/([A-Za-z])(?= \d)/g, '$1').trim());
+const SPELL_KEYS = new Set(['truck', 'trailer', 'trip', 'bill', 'billNumber']);
+export function spokenNumbers(x) {
+  if (Array.isArray(x)) return x.map(spokenNumbers);
+  if (!x || typeof x !== 'object') return x;
+  const out = {};
+  for (const [k, v] of Object.entries(x)) out[k] = SPELL_KEYS.has(k) && (typeof v === 'string' || typeof v === 'number') ? digitByDigit(v) : spokenNumbers(v);
+  return out;
+}
 const last10 = (p) => String(p || '').replace(/\D+/g, '').slice(-10);
 const e164 = (p) => { const d = last10(p); return d.length === 10 ? `+1${d}` : null; };
 const tripOf = (it) => (it && it.trip) || it || {};
@@ -46,7 +56,7 @@ Who you are: an automated assistant. If asked, say so plainly. You already said 
 How to help:
 - Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). If nothing is found, ask which city the delivery goes to and ask them to spell the business name, then call lookup_load again with customer_name (as spelled) and customer_city. If it returns did_you_mean, ask "Is that <name>?" and, if yes, look it up with that exact name. Names on the phone are often misheard — never tell the caller their name is wrong.
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
-- Only state facts lookup_load returns. For a customer or broker that is: where the truck is now, and THEIR delivery — ETA, boxes, cubes, appointment, delivered or not. Never mention any other stop, customer or city on the route (before or after theirs), and don't say you are leaving anything out; if they ask about the route, say the truck is on its way to them and give their ETA. Only the driver hears the full list of stops. Say times the way the tool gives them. Never guess a location or a time.
+- Only state facts lookup_load returns. For a customer or broker that is: where the truck is now, and THEIR delivery — ETA, boxes, cubes, appointment, delivered or not. Never mention any other stop, customer or city on the route (before or after theirs), and don't say you are leaving anything out; if they ask about the route, say the truck is on its way to them and give their ETA. Only the driver hears the full list of stops. Say times the way the tool gives them. Read truck, trailer, trip and bill numbers one digit at a time, exactly as the tool spaces them (truck 2 0 2 6 = "two zero two six", never "two thousand twenty-six"); in Spanish or Hebrew, say each digit in that language. Never guess a location or a time.
 - Drivers can tell you a stop is delivered (confirm_delivered) or report a problem — breakdown, delay, accident, reefer issue (report_problem). Repeat back the key details before saving.
 - Anything you can't answer, anything about rates, payments, detention, lumper, claims, appointments changes, or bank details: take a message with take_message (name, callback number, what they need) and say a dispatcher will call back. Never agree to change rates, payments, appointments or bank details.
 - If the caller asks for a person, is upset, or reports an accident or an emergency, transfer them to dispatch with transfer_to_dispatch (after report_problem for accidents). For a life-threatening emergency tell them to hang up and call 911.
@@ -360,7 +370,7 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
     const a = argsOf(req); const call = callOf(req);
     const reply = (j) => {
       if (call.call_id) callLookups.set(call.call_id, [...(callLookups.get(call.call_id) || []), { at: new Date().toISOString(), asked: a, answer: JSON.stringify(j).slice(0, 2500) }].slice(-6));
-      return res.json(j);
+      return res.json(spokenNumbers(j));
     };
     try {
       const meta = call.metadata || {};
@@ -589,7 +599,7 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
       const call = await retell('/v2/create-phone-call', { body: {
         from_number: e164(env.RETELL_FROM_NUMBER), to_number: to, override_agent_id: cfg.agentId,
         metadata: { trip, purpose, which, by: who(req) },
-        retell_llm_dynamic_variables: { greeting: `Hi${d.name ? ` ${String(d.name).split(' ')[0]}` : ''}, this is Jarvis, the automated assistant from Florida Beauty Flora dispatch, calling about trip ${trip}. This call may be recorded.`, call_context: context },
+        retell_llm_dynamic_variables: { greeting: `Hi${d.name ? ` ${String(d.name).split(' ')[0]}` : ''}, this is Jarvis, the automated assistant from Florida Beauty Flora dispatch, calling about trip ${digitByDigit(trip)}. This call may be recorded.`, call_context: context },
       } });
       await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: to, trip, purpose, by: who(req), status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
       res.json({ ok: true, callId: call.call_id, to });

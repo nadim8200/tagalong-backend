@@ -75,7 +75,7 @@ test('only Retell (valid signature) can use the tools', async () => {
   const v = setup();
   assert.equal((await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '624393' }, call: {} }, { sign: false })).code, 401);
   const ok = await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '624393' }, call: { call_id: 'c1', direction: 'inbound', from_number: '+13125550000' } });
-  assert.equal(ok.out.found, true); assert.equal(ok.out.trip, '624393'); assert.equal(ok.out.stops_remaining, undefined);
+  assert.equal(ok.out.found, true); assert.equal(ok.out.trip, '6 2 4 3 9 3');            // read digit by digit assert.equal(ok.out.stops_remaining, undefined);
 });
 
 test('driver confirms a delivery by phone; a stranger cannot', async () => {
@@ -274,4 +274,12 @@ test('a caller who found their stop before is recognized by phone next time', as
   const again = await ask({}, 'b');                                                // next call, says nothing yet
   assert.equal(again.found, true); assert.match(again.confirm, /Is this Bokhary Farms\?/);
   assert.equal(again.loads[0].deliveries[0].city, 'WALTHAM, MA');
+});
+
+import { digitByDigit } from '../voice.js';
+test('truck, trailer, trip and bill numbers are spoken digit by digit', () => {
+  assert.equal(digitByDigit('2026'), '2 0 2 6');
+  assert.equal(digitByDigit(2029), '2 0 2 9');
+  assert.equal(digitByDigit('M5038379'), 'M 5 0 3 8 3 7 9');
+  assert.match(PROMPT, /one digit at a time/);
 });
