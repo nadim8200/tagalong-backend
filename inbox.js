@@ -41,7 +41,9 @@ export function loadKeys(item) {
   const trip = String(t.tripNumber || (item && item._id) || '');
   const bills = ((item && (item.freightBills || item.orders)) || t.freightBills || []).map((b) => String((b && (b.billNumber || b.id)) || '')).filter(Boolean);
   const rc = (item && item._ratecon && (item._ratecon.data || item._ratecon)) || {};
-  const refs = [rc.loadNumber, ...(rc.referenceNumbers || [])].map((x) => String(x || '').trim()).filter((x) => x.replace(/\D/g, '').length >= 4);
+  const refs0 = [rc.loadNumber, ...(rc.referenceNumbers || [])].map((x) => String(x || '').trim()).filter((x) => x.replace(/\D/g, '').length >= 4);
+  // "LZ24261611" is also written "24261611" in broker emails
+  const refs = [...new Set([...refs0, ...refs0.map((x) => x.replace(/^[A-Za-z]+[-#\s]*/, '')).filter((x) => /^\d{5,}$/.test(x))])];
   const units = [t.powerUnit, item && item._oc && item._oc.truck].map(norm).filter((x) => x.length >= 3);
   const trailers = [t.trailer, t.trailer2, item && item._oc && item._oc.trailer].map(norm).filter((x) => x.length >= 3);
   return { trip, strong: [trip, ...bills, ...refs].filter((x) => x && x.length >= 4), units, trailers };

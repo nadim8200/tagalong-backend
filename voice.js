@@ -44,7 +44,7 @@ Who you are: an automated assistant. If asked, say so plainly. You already said 
 {{call_context}}
 
 How to help:
-- To answer anything about a load, call lookup_load first. It searches by trip number, bill number (like B0180251), PO / BOL / broker load number, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
+- To answer anything about a load, call lookup_load first. It searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Only state facts lookup_load returns: status, current city and state, next stop, estimated arrival, appointments, which stops are delivered. Say times the way the tool gives them. Never guess a location or a time.
 - Drivers can tell you a stop is delivered (confirm_delivered) or report a problem — breakdown, delay, accident, reefer issue (report_problem). Repeat back the key details before saving.
 - Anything you can't answer, anything about rates, payments, detention, lumper, claims, appointments changes, or bank details: take a message with take_message (name, callback number, what they need) and say a dispatcher will call back. Never agree to change rates, payments, appointments or bank details.
@@ -66,7 +66,8 @@ function tools(base, transferNumber) {
   const list = [
     fn('lookup_load', 'Find the caller\'s load and its live status by trip, bill, truck or trailer number (any one is enough). With none, the caller\'s phone number is used.', {
       trip_number: { type: 'string', description: 'Florida Beauty trip number, usually 6 digits, e.g. 624393' },
-      bill_number: { type: 'string', description: 'Bill number (e.g. B0180251), PO, BOL, broker load or reference number' },
+      bill_number: { type: 'string', description: 'FBF bill number (e.g. B180354), PO, BOL or reference number' },
+      broker_load_number: { type: 'string', description: 'The broker\'s own load number from their rate confirmation (e.g. RXO 24261611, Red Lab 131963433) — brokers usually call with this' },
       truck_number: { type: 'string', description: 'Truck / tractor / unit number, e.g. 2607' },
       trailer_number: { type: 'string', description: 'Trailer number, e.g. 7131' },
     }),
@@ -117,6 +118,8 @@ export function voiceFacts(item, eta) {
     status: statusWords[String(t.status || '').toUpperCase()] || String(t.statusDesc || t.status || '').toLowerCase(),
     truck: t.powerUnit || null,
     trailer: t.trailer || (item._oc && item._oc.trailer) || null,
+    broker: (item._ratecon && (item._ratecon.broker || (item._ratecon.data || {}).broker)) || null,
+    broker_load_number: (item._ratecon && (item._ratecon.loadNumber || (item._ratecon.data || {}).loadNumber)) || null,
     breakdown: !!(item._breakdown && item._breakdown.on),
     current_location: s.location ? cityOf(String(s.location).split(',').slice(-3).join(',')) : null,
     location_time: s.gpsAt ? fmt(Date.parse(s.gpsAt)) : null,
@@ -138,7 +141,12 @@ const roleOf = (it, P) => (P.length !== 10 ? null : driverPhones(it).includes(P)
 function refsOf(it) {
   const out = new Set(billsOf(it).map((b) => norm(b.billNumber)).filter(Boolean));
   const rc = (it._ratecon && (it._ratecon.data || it._ratecon)) || {};
-  [rc.loadNumber, ...(rc.referenceNumbers || [])].forEach((x) => { const n = norm(x); if (n.length >= 4) out.add(n); });
+  [rc.loadNumber, ...(rc.referenceNumbers || [])].forEach((x) => {
+    const n = norm(x); if (n.length < 4) return;
+    out.add(n);
+    const digits = n.replace(/^[A-Z]+/, '').replace(/^0+/, '');
+    if (digits.length >= 5 && /^\d+$/.test(digits)) out.add(digits);
+  });
   for (const st of (it._manifest && it._manifest.stops) || []) {
     for (const r of st.references || []) String(r).toUpperCase().split(/[^A-Z0-9]+/).forEach((tok) => { if (tok.length >= 5 && /\d/.test(tok)) out.add(tok); });
   }
@@ -148,12 +156,13 @@ const ROLLING = /^(DEPSHIP|ARRCONS|DEPCONS|ARRSHIP)/i;
 // Several loads with the same truck / trailer: the one on the road, else the next one.
 const pick = (hits) => (hits.length === 1 ? hits[0] : hits.find((it) => ROLLING.test(String(tripOf(it).status))) || null);
 
-export function findLoad(items, { trip, bill, truck, trailer, phone }) {
-  const T = norm(trip); const Bn = norm(bill); const U = norm(truck).replace(/^(TRUCK|UNIT|TK)/, ''); const L = norm(trailer).replace(/^(TRAILER|TRL|TL)/, ''); const P = last10(phone);
+export function findLoad(items, { trip, bill, loadNumber, truck, trailer, phone }) {
+  const T = norm(trip); const Bn = norm(bill) || norm(loadNumber); const U = norm(truck).replace(/^(TRUCK|UNIT|TK)/, ''); const L = norm(trailer).replace(/^(TRAILER|TRL|TL)/, ''); const P = last10(phone);
   const out = (item, by) => ({ item, by, role: roleOf(item, P) });
   for (const it of items) if (T && norm(tripNo(it)) === T) return out(it, 'trip number');
   if (Bn) {
-    const exact = items.filter((it) => refsOf(it).has(Bn));
+    const BnDigits = Bn.replace(/^[A-Z]+/, '').replace(/^0+/, '');
+    const exact = items.filter((it) => { const r = refsOf(it); return r.has(Bn) || (BnDigits.length >= 5 && r.has(BnDigits)); });
     if (exact.length) return out(pick(exact) || exact[0], 'bill / reference number');
     const tail = Bn.length >= 5 ? items.filter((it) => [...refsOf(it)].some((r) => r.endsWith(Bn))) : [];
     if (tail.length === 1) return out(tail[0], 'bill / reference number');
@@ -220,7 +229,7 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
     try {
       const a = argsOf(req); const call = callOf(req);
       const meta = call.metadata || {};
-      const hit = findLoad(await items(), { trip: a.trip_number || meta.trip, bill: a.bill_number, truck: a.truck_number, trailer: a.trailer_number, phone: callerPhone(call) });
+      const hit = findLoad(await items(), { trip: a.trip_number || meta.trip, bill: a.bill_number || a.broker_load_number, loadNumber: a.broker_load_number, truck: a.truck_number, trailer: a.trailer_number, phone: callerPhone(call) });
       if (!hit) return res.json({ found: false, say: 'No active load matched. Ask the caller for the trip number or bill number, or take a message.' });
       const trip = tripNo(hit.item);
       if (call.call_id) callTrip.set(call.call_id, trip);

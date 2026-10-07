@@ -50,6 +50,9 @@ test('finds the load by trip, bill, truck, or the caller\'s phone (driver or con
   assert.equal(findLoad(board, { bill: 'LD-425397' }).item.trip.tripNumber, '624393');
   assert.equal(findLoad(board, { bill: 'M5038497' }).item.trip.tripNumber, '624393');
   assert.equal(findLoad(board, { bill: '0190001' }).item.trip.tripNumber, '624500');
+  // broker load number, with or without the broker's letters
+  assert.equal(findLoad(board, { loadNumber: 'LD-425397' }).item.trip.tripNumber, '624393');
+  assert.equal(findLoad(board, { bill: '425397' }).item.trip.tripNumber, '624393');
   assert.equal(findLoad(board, { phone: '+17864394668' }).role, 'driver');
   assert.equal(findLoad(board, { phone: '6305550101' }).role, 'contact');
   assert.equal(findLoad(board, { phone: '3055559999' }), null);

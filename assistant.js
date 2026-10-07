@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------
 import { timingSafeEqual } from 'crypto';
 import { compareWithTruckMate } from './manifest.js';
+import { findLoad } from './voice.js';
 
 const PHONE = /(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
 const EMAIL = /\b([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g;
@@ -107,6 +108,18 @@ export function initAssistant(app, { db, env = process.env, buildBoard }) {
       const item = slimItem(it, open(w).filter((a) => a.trip === n));
       if (it._manifest) item.sheetVsTruckMate = compareWithTruckMate(it._manifest, it).map((d) => d.msg);
       send(res, item);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Any number a person might give: trip, FBF bill, broker load #, PO, truck, trailer.
+  app.get('/assistant/find/:q', guard, async (req, res) => {
+    try {
+      const s = site(req); const q = String(req.params.q);
+      const [b, w] = await Promise.all([buildBoard(s), watch(s)]);
+      const hit = findLoad(b.trips || [], { trip: q, bill: q, loadNumber: q, truck: q, trailer: q });
+      if (!hit) return res.status(404).json({ error: `No active load matches ${q}.` });
+      const n = tripNo(hit.item);
+      send(res, { matchedBy: hit.by, ...slimItem(hit.item, open(w).filter((a) => a.trip === n)) });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
