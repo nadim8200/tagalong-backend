@@ -233,6 +233,8 @@ test('customers never hear the other stops; the name said earlier in the call pi
   const byName = await ask({ customer_name: 'Bokori Farms' });              // misheard "Bokhary"
   assert.equal(byName.found, true);
   assert.equal(byName.loads[0].deliveries[0].customer, 'BOKHARY FARMS LLC *');
+  assert.equal(byName.speaking_with, 'Bokhary Farms');                     // the real name, not the misheard one
+  assert.match(byName.say, /anything else I can help you with.*feel free to hang up/);
   const byTrailer = await ask({ trailer_number: '2029' });                 // same call, now by trailer
   const text = JSON.stringify(byTrailer);
   assert.ok(!/KINSTON|ALCOCK|next_stop|stops_remaining/.test(text), text);
@@ -288,4 +290,45 @@ import { ETA_DISCLAIMER, CUSTOMER_RULE } from '../voice.js';
 test('every customer ETA ends with the estimated-time disclaimer', () => {
   assert.match(ETA_DISCLAIMER, /estimated time of arrival.*may change.*keep you updated/);
   assert.ok(PROMPT.includes(ETA_DISCLAIMER) && CUSTOMER_RULE.includes(ETA_DISCLAIMER));
+});
+
+import { brokerView } from '../voice.js';
+test('brokers get their whole load by load number or company name — not "which business is yours"', async () => {
+  const items = [{ trip: { tripNumber: '623869', powerUnit: '2008', trailer: '7141', status: 'DEPSHIP', origZoneDesc: 'WEST PALM BEACH, FL, 33404' },
+    freightBills: [{ billNumber: 'B180400', endZoneDescription: 'BLOOMFIELD, CT, 06002' }, { billNumber: 'B180401', endZoneDescription: 'HARTFORD, CT, 06101' }],
+    _ratecon: { data: { broker: 'RXO Capacity Solutions', loadNumber: 'RXO 24261611', deliveries: [{ name: 'ACME DC', city: 'Bloomfield', state: 'CT', date: '10/08', time: '06:00' }, { name: 'BETA', city: 'Hartford', state: 'CT' }] } },
+    _samsara: { location: 'New Jersey Turnpike, East Windsor Township, NJ, 08520', gpsAt: '2026-10-07T12:00:00Z', speedMph: 64 } }];
+  const v = brokerView(items[0], { stops: [{ label: 'BLOOMFIELD, CT, 06002', etaMs: Date.parse('2026-10-07T17:00:00Z') }, { label: 'HARTFORD, CT, 06101', etaMs: Date.parse('2026-10-07T18:00:00Z') }] });
+  assert.equal(v.pickup, 'West Palm Beach, Florida'); assert.equal(v.deliveries.length, 2);
+  assert.match(v.deliveries[0].estimated_arrival, /Eastern$/); assert.equal(v.deliveries[0].appointment, '10/08 06:00');
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
+  initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY, RETELL_AUTO_KEYWORDS: 'off' } });
+  const ask = async (args, id) => {
+    const body = { args, call: { call_id: id, direction: 'inbound', from_number: '+16305550100' } };
+    const raw = JSON.stringify(body); const sig = await Retell.sign(raw, KEY);
+    let out; const res = { status() { return this; }, json(j) { out = j; } };
+    const [guard, handler] = routes['POST /retell/fn/lookup_load'];
+    await guard({ body, rawBody: raw, get: () => sig }, res, () => handler({ body, rawBody: raw, get: () => sig }, res));
+    return out;
+  };
+  const byLoad = await ask({ broker_load_number: '24261611' }, 'r1');
+  assert.equal(byLoad.found, true); assert.equal(byLoad.deliveries.length, 2); assert.equal(byLoad.speaking_with, 'RXO Capacity Solutions');
+  assert.match(byLoad.say, /broker on this load/); assert.equal(byLoad.ask, undefined);
+  const byName = await ask({ customer_name: 'RXO' }, 'r2');
+  assert.equal(byName.matched_by, 'broker name'); assert.equal(byName.truck, '2 0 0 8');
+  const byTrailer = await ask({ trailer_number: '7141' }, 'r3');                 // trailer alone: not the full broker view
+  assert.equal(byTrailer.deliveries, undefined); assert.match(byTrailer.ask, /several deliveries/);
+  assert.equal(byTrailer.coming_from, 'West Palm Beach, Florida');
+});
+
+import { originOf, customerView } from '../voice.js';
+test('customers hear whether their truck left from Ventura, California or Miami, Florida', () => {
+  assert.equal(originOf({ trip: { origZoneDesc: 'VENTURA TERMINAL' } }), 'Ventura, California');
+  assert.equal(originOf({ trip: { origZoneDesc: 'MIAMI TERMINAL' } }), 'Miami, Florida');
+  assert.equal(originOf({ trip: { origZoneDesc: 'YARD' }, _ratecon: { data: { pickups: [{ city: 'VENTURA', state: 'CA' }] } } }), 'Ventura, California');   // live load per the rate con
+  assert.equal(originOf({ trip: { origZoneDesc: 'YARD' } }), null);                              // unknown → say nothing, never "Miami"
+  const v = customerView({ trip: { tripNumber: '1', status: 'ARRSHIP', origZoneDesc: 'VENTURA TERMINAL' }, freightBills: [{ endZoneDescription: 'DENVER, CO, 80216' }] }, null);
+  assert.equal(v.coming_from, 'Ventura, California'); assert.equal(v.status, 'being loaded in Ventura, California');
 });
