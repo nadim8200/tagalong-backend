@@ -75,7 +75,7 @@ test('only Retell (valid signature) can use the tools', async () => {
   const v = setup();
   assert.equal((await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '624393' }, call: {} }, { sign: false })).code, 401);
   const ok = await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '624393' }, call: { call_id: 'c1', direction: 'inbound', from_number: '+13125550000' } });
-  assert.equal(ok.out.found, true); assert.equal(ok.out.trip, '624393'); assert.equal(ok.out.ok_to_share, true);
+  assert.equal(ok.out.found, true); assert.equal(ok.out.trip, '624393'); assert.equal(ok.out.stops_remaining, undefined);
 });
 
 test('driver confirms a delivery by phone; a stranger cannot', async () => {
@@ -110,6 +110,7 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   assert.match(llm.general_prompt, /English, Spanish or Hebrew/);
   assert.equal(llm.default_dynamic_variables.greeting, "Hi, this is Jarvis, Florida Beauty Flora's assistant. This call may be recorded. How can I help you?");
   assert.equal(agent.webhook_url, 'https://tagalong-backend-fdzx.onrender.com/retell/webhook');
+  assert.equal(agent.stt_mode, 'accurate'); assert.ok(agent.boosted_keywords.includes('Florida Beauty Flora'));
   assert.equal(v.retellCalls[0].auth, `Bearer ${KEY}`);
   // the agent runs the exact new LLM version, that version is published, the number answers with it
   assert.deepEqual(agent.response_engine, { type: 'retell-llm', llm_id: 'llm_1', version: 0 });
@@ -162,7 +163,7 @@ test('flower customers by name: their own stop only — boxes, cubes, stop numbe
   const etas = { 624297: { stops: [{ label: 'SPRINGFIELD, MA, 01104', zip: '01104', etaMs: Date.parse('2026-10-07T14:00:00Z'), miles: 300 }] } };
   const r = customerStops(items, 'Springfield Florist', etas);
   assert.equal(r.length, 1);
-  assert.deepEqual({ trip: r[0].trip, truck: r[0].truck, stop: r[0].stop, boxes: r[0].boxes, cubes: r[0].cubes, delivered: r[0].delivered }, { trip: '624297', truck: '4504', stop: 'delivery 5 of 6', boxes: '139 BOXES', cubes: 187.71, delivered: false });
+  assert.deepEqual({ trip: r[0].trip, truck: r[0].truck, stop: r[0].stop, boxes: r[0].boxes, cubes: r[0].cubes, delivered: r[0].delivered }, { trip: '624297', truck: '4504', stop: undefined, boxes: '139 BOXES', cubes: 187.71, delivered: false });
   assert.match(r[0].estimated_arrival, /Eastern$/);
   const j = customerStops(items, "Johnson's Wholesale", etas)[0];
   assert.equal(j.delivered, true); assert.equal(j.boxes, '72 boxes'); assert.equal(j.estimated_arrival, null);
@@ -183,7 +184,7 @@ test('a business name in the wrong box still searches trip-sheet customers', asy
   const [guard, handler] = routes['POST /retell/fn/lookup_load'];
   await guard(req, res, () => handler(req, res));
   assert.equal(out.found, true); assert.equal(out.matched_by, 'customer name');
-  assert.equal(out.deliveries[0].boxes, '139 boxes'); assert.equal(out.deliveries[0].cubes, 187.71);
+  assert.equal(out.loads[0].deliveries[0].boxes, '139 boxes'); assert.equal(out.loads[0].deliveries[0].cubes, 187.71);
 });
 
 test('a customer name together with a trip number answers for THAT customer stop, not the whole load', async () => {
@@ -198,7 +199,7 @@ test('a customer name together with a trip number answers for THAT customer stop
   const req = { body, rawBody: raw, get: () => sig };
   const [guard, handler] = routes['POST /retell/fn/lookup_load'];
   await guard(req, res, () => handler(req, res));
-  assert.equal(out.found, true); assert.match(out.matched_by, /^customer name on trip number/);
+  assert.equal(out.found, true); assert.equal(out.matched_by, 'trip number + customer name');
   assert.equal(out.deliveries.length, 1);
   assert.equal(out.deliveries[0].customer, 'MAIN WHOLESALE FLORIST PENNSAUKEN LLC.');
   assert.equal(out.deliveries[0].boxes, '135 boxes');
@@ -209,4 +210,68 @@ test('no ETA → Jarvis is told not to guess one', () => {
   const r = customerStops(items, 'Riccardi', {})[0];
   assert.equal(r.estimated_arrival, null);
   assert.match(r.eta_note, /do NOT estimate or guess/);
+});
+
+// A customer calling about trailer 2029 (trip 624481, 8 deliveries) hears where the truck is and THEIR stop — nothing else.
+test('customers never hear the other stops; the name said earlier in the call picks their stop', async () => {
+  const items = [{ trip: { tripNumber: '624481', powerUnit: '2618', trailer: '2029', status: 'DEPSHIP' },
+    freightBills: [{ billNumber: 'M1', billToName: 'ALCOCK WHOLESALE FLOWERS', endZoneDescription: 'KINSTON, NC, 28501' }, { billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }],
+    _manifest: { stops: [{ stopNumber: 2, action: 'DELIVER', customer: 'ALCOCK WHOLESALE FLOWERS', city: 'KINSTON', state: 'NC' }, { stopNumber: 9, action: 'DELIVER', customer: 'BOKHARY FARMS LLC *', city: 'WALTHAM', state: 'MA', piecesText: '4 PALLETS', cubes: 400 }] },
+    _samsara: { location: '3315 NW 70th Ave, Miami, FL, 33122', gpsAt: '2026-10-07T02:33:12Z', speedMph: 0 } }];
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
+  initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY } });
+  const ask = async (args) => {
+    const body = { args, call: { call_id: 'bk1', direction: 'inbound', from_number: '+17815550000' } };
+    const raw = JSON.stringify(body); const sig = await Retell.sign(raw, KEY);
+    let out; const res = { status() { return this; }, json(j) { out = j; } };
+    const [guard, handler] = routes['POST /retell/fn/lookup_load'];
+    await guard({ body, rawBody: raw, get: () => sig }, res, () => handler({ body, rawBody: raw, get: () => sig }, res));
+    return out;
+  };
+  const byName = await ask({ customer_name: 'Bokori Farms' });              // misheard "Bokhary"
+  assert.equal(byName.found, true);
+  assert.equal(byName.loads[0].deliveries[0].customer, 'BOKHARY FARMS LLC *');
+  const byTrailer = await ask({ trailer_number: '2029' });                 // same call, now by trailer
+  const text = JSON.stringify(byTrailer);
+  assert.ok(!/KINSTON|ALCOCK|next_stop|stops_remaining/.test(text), text);
+  assert.equal(byTrailer.deliveries[0].city, 'WALTHAM, MA');
+  assert.match(byTrailer.truck_now, /Miami/);
+  assert.match(byTrailer.say, /Never mention other stops/);
+});
+
+import { spokenName, customerKeywords, nameCandidates } from '../voice.js';
+test('customer names the way people say them, fed to the transcriber', () => {
+  assert.equal(spokenName('CHELSEA MARKET - RICCARDI WHOLESALE'), 'Riccardi Wholesale');
+  assert.equal(spokenName('BOKHARY FARMS LLC *'), 'Bokhary Farms');
+  assert.equal(spokenName('JEWETT CITY C/O CARBONE CRANSTON'), 'Jewett City');
+  assert.equal(spokenName('CARBONE -DERRY BILLING'), 'Carbone Derry');
+  const items = [{ trip: { tripNumber: '1' }, freightBills: [{ billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }, { billToName: 'RICCARDI WHOLESALE', endZoneDescription: 'CHELSEA, MA, 02150' }, { billToName: 'RICCARDI WHOLESALE', endZoneDescription: 'CHELSEA, MA, 02150' }] }];
+  const k = customerKeywords(items);
+  assert.ok(k.includes('Bokhary Farms') && k.includes('Riccardi Wholesale') && k.includes('Waltham'));
+  // misheard name + their town → offer the real names in THAT town only
+  assert.deepEqual(nameCandidates(items, 'Bokori Farm', 'Waltham'), ['Bokhary Farms']);
+  assert.deepEqual(nameCandidates(items, 'Bokori Farm', ''), []);                  // no town → no list read out
+  assert.ok(!nameCandidates(items, 'Ricardo', 'Chelsea').includes('Bokhary Farms'));
+});
+
+test('a caller who found their stop before is recognized by phone next time', async () => {
+  const items = [{ trip: { tripNumber: '624481', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }], _manifest: { stops: [{ stopNumber: 9, action: 'DELIVER', customer: 'BOKHARY FARMS LLC *', city: 'WALTHAM', state: 'MA' }] } }];
+  const routes = {}; const m = new Map();
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
+  initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY, RETELL_AUTO_KEYWORDS: 'off' } });
+  const ask = async (args, id) => {
+    const body = { args, call: { call_id: id, direction: 'inbound', from_number: '+17815550123' } };
+    const raw = JSON.stringify(body); const sig = await Retell.sign(raw, KEY);
+    let out; const res = { status() { return this; }, json(j) { out = j; } };
+    const [guard, handler] = routes['POST /retell/fn/lookup_load'];
+    await guard({ body, rawBody: raw, get: () => sig }, res, () => handler({ body, rawBody: raw, get: () => sig }, res));
+    return out;
+  };
+  assert.equal((await ask({ customer_name: 'Bokhary Farms' }, 'a')).found, true);
+  const again = await ask({}, 'b');                                                // next call, says nothing yet
+  assert.equal(again.found, true); assert.match(again.confirm, /Is this Bokhary Farms\?/);
+  assert.equal(again.loads[0].deliveries[0].city, 'WALTHAM, MA');
 });

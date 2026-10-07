@@ -274,6 +274,8 @@ function tripFacts(item, now) {
     stops,
     live,
     gpsFresh: gpsAgeMin != null && gpsAgeMin <= 30,
+    // a parked truck (e.g. at the Miami terminal) reports rarely — its last fix is still where it is
+    etaGpsOk: gpsAgeMin != null && (gpsAgeMin <= 30 || (gpsAgeMin <= 360 && live && live.speedMph != null && live.speedMph <= 2)),
     gpsAgeMin,
     instrPending: instr.filter((s) => !(checks[s] && checks[s].done)).length,
     tasks: (item && item._tasks) || [],
@@ -327,7 +329,7 @@ export function stopDwellMin(st) {
 const teamStopsH = (miles) => Math.floor(miles / CRUISE_MPH / 8) * 0.25;
 
 function routeEtas(f, ctx) {
-  if (notStartedCode(f.status) || !f.live || !f.gpsFresh || f.live.lat == null) return null;
+  if (notStartedCode(f.status) || !f.live || !f.etaGpsOk || f.live.lat == null) return null;
   // trip sheet says the team leaves later ("drivers will leave at 20:30") → the clock starts then
   const start = f.pickupAtMs && f.pickupAtMs > ctx.now ? f.pickupAtMs : ctx.now;
   const open = f.stops.filter((st) => !st.delivered);
