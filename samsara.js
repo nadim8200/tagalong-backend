@@ -71,6 +71,7 @@ export async function vehicleGpsHistory(token, vehicleId, startIso, endIso) {
       pts.push({
         t: g.time || null, lat: g.latitude, lng: g.longitude,
         mph: g.speedMilesPerHour != null ? Math.round(g.speedMilesPerHour) : null,
+        place: (g.reverseGeo && g.reverseGeo.formattedLocation) || null,
       });
     }
   }

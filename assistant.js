@@ -62,7 +62,7 @@ export function slimItem(it, alerts = []) {
   };
 }
 
-export function initAssistant(app, { db, env = process.env, buildBoard, voice = null }) {
+export function initAssistant(app, { db, env = process.env, buildBoard, voice = null, outbound = null }) {
   const secret = () => String(env.ASSISTANT_READ_KEY || '').trim();   // a pasted trailing newline must not break it
   const enabled = () => secret().length >= 24;
   const site = (req) => String(req.query.site || 'florida-beauty');
@@ -123,6 +123,16 @@ export function initAssistant(app, { db, env = process.env, buildBoard, voice = 
       if (!hit) return res.status(404).json({ error: `No active load matches ${q}.` });
       const n = tripNo(hit.item);
       send(res, { matchedBy: hit.by, ...slimItem(hit.item, open(w).filter((a) => a.trip === n)) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // The morning outbound report as it would go out (rows + unscheduled stops). ?date=YYYY-MM-DD, default yesterday.
+  app.get('/assistant/outbound', guard, async (req, res) => {
+    if (!outbound) return res.status(503).json({ error: 'Outbound report not set up.' });
+    try {
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || '')) ? req.query.date : new Date(Date.now() - 86400000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const rows = await outbound.make(date);
+      send(res, { date, rows: rows.map(({ stops, ...r }) => ({ ...r, stops: stops.map((x) => ({ minutes: x.minutes, place: x.place, ongoing: x.ongoing })) })) });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

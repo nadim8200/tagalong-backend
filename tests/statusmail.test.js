@@ -126,7 +126,7 @@ test('breakdown switch emails + texts everyone on the load, pauses location emai
 
 test('stopped alert: on duty and parked 45+ min alerts; resting (sleeper) does not', () => {
   const now = Date.parse('2026-10-05T16:00:00Z');
-  const item = (status) => ({ trip: { tripNumber: '1', status: 'DEPSHIP', powerUnit: '2403' }, freightBills: [{ billNumber: 'B1', endZoneDescription: 'LYONS, GA, 30436' }], _samsara: { lat: 29.5, lng: -82.3, gpsAt: '2026-10-05T15:58:00Z', speedMph: 0, location: 'Gainesville, FL', hos: { status, driveLeftMin: 400, shiftLeftMin: 500 } } });
+  const item = (status) => ({ trip: { tripNumber: '1', status: 'DEPSHIP', powerUnit: '2403' }, freightBills: [{ billNumber: 'B1', endZoneDescription: 'LYONS, GA, 30436' }], _samsara: { lat: 32.84, lng: -83.63, gpsAt: '2026-10-05T15:58:00Z', speedMph: 0, location: 'Macon, GA', hos: { status, driveLeftMin: 400, shiftLeftMin: 500 } } });
   const ctx = (mins) => ({ now, geo: () => null, unitState: () => ({ stoppedSince: now - mins * 60000 }) });
   const find = (b, c) => evaluateBoard({ trips: [b] }, c).find((a) => a.code === 'stopped');
   assert.match(find(item('onDuty'), ctx(50)).title, /Stopped 50m and not resting/);

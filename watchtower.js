@@ -554,6 +554,7 @@ const RULES = [
     const l = f.live;
     if (!isRolling(f.status) || !l || !f.gpsFresh || !f.stoppedMin || notStarted(f.status, f, ctx.now)) return null;
     const mins = f.stoppedMin;
+    if (inFlorida(l) && mins >= 20) return null;                 // stops in Florida: unscheduledStop covers them
     // Resting = the ELD says off duty / sleeper (or the driver is out of hours).
     // Not resting = on duty or "driving" while parked — that's the one to chase.
     const duty = String((l.hos && l.hos.status) || '');
@@ -583,6 +584,27 @@ const RULES = [
       code: 'stopped', severity: mins >= 90 || codes ? 'critical' : 'warning',
       title: codes ? `Possible breakdown — stopped ${fmtMin(mins)} with ${codes} engine code${codes === 1 ? '' : 's'}` : `Stopped ${fmtMin(mins)} and not resting`,
       detail: `${l.location || 'Unknown location'} · ${dutyLabel} · drive left ${fmtMin(left)}. Call the driver. If it's a breakdown, arrange road service and turn on Breakdown on the load to notify the customers.`,
+    };
+  },
+  // Leaving Florida, the trip rules say no unauthorized stops ("do not go home or make
+  // any unauthorized stops"). A truck stopped 20+ minutes in Florida after leaving the
+  // yard — not at the yard and not at a stop on its trip — is flagged, rest or not.
+  function unscheduledStop(f, ctx) {
+    if (f.oc) return null;
+    const l = f.live;
+    if (!isRolling(f.status) || !l || !f.gpsFresh || l.lat == null || !f.stoppedMin || f.stoppedMin < 20) return null;
+    if (!inFlorida(l)) return null;
+    const o = ctx.origin;
+    if (haversineMi(l.lat, l.lng, o.lat, o.lng) <= 1) return null;                    // still in the yard
+    const nearStop = f.stops.some((s2) => { if (s2.delivered || !s2.zip) return false; const g = ctx.geo(s2.zip); return g && haversineMi(l.lat, l.lng, g.lat, g.lng) < 5; });
+    if (nearStop) return null;
+    const mins = f.stoppedMin;
+    const duty = { onDuty: 'on duty', driving: 'driving status', yardMove: 'yard move', offDuty: 'off duty', sleeperBerth: 'sleeper berth', personalConveyance: 'personal conveyance' }[String((l.hos && l.hos.status) || '')] || 'duty unknown';
+    const codes = (l.dtcCodes || []).length;
+    return {
+      code: 'unscheduled-stop', severity: mins >= 60 ? 'critical' : 'warning',
+      title: `Unscheduled stop leaving Florida — ${fmtMin(mins)}`,
+      detail: `${l.location || 'Unknown location'} · ${duty}. Not the yard or a stop on this trip (trip rules: no unauthorized stops). Call the driver${codes ? ` — ${codes} engine code${codes === 1 ? '' : 's'} on the truck, could be a breakdown` : ''}.`,
     };
   },
   function checkEngine(f) {
@@ -623,6 +645,8 @@ const RULES = [
 
 // Florida Beauty's Miami terminal — where the outbound trips load.
 export const MIAMI_TERMINAL = { lat: 25.795, lng: -80.33 };
+// Inside Florida (rough border: Georgia line ~30.7°N, Alabama line 31°N west of the Apalachicola).
+export const inFlorida = (p) => !!p && p.lat != null && p.lng > -87.65 && p.lng < -79.8 && (p.lat < 30.71 || (p.lat < 31.0 && p.lng < -85.0));
 
 export function evaluateBoard(board, ctxIn) {
   const ctx = { origin: MIAMI_TERMINAL, unitState: () => null, ...ctxIn };

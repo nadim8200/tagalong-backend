@@ -34,6 +34,7 @@ import { initCarriers } from './carriers.js';
 import { initDriverLinks } from './driverlink.js';
 import { initComms } from './comms.js';
 import { initRundowns } from './rundown.js';
+import { initOutbound } from './outbound.js';
 import { initInbox } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
@@ -681,7 +682,8 @@ manifestsApi = initManifests(app, { requireAuth, db, env: process.env, buildBoar
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
 const voice = initVoice(app, { requireAuth, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
-initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice });
+const outbound = initOutbound(app, { requireAuth, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound });
 initWatchtower(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await statusMail.process(site, board, ctx); } });
 initCarChat(app, { requireAuth, env: process.env });
 
