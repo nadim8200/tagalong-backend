@@ -185,3 +185,21 @@ test('a business name in the wrong box still searches trip-sheet customers', asy
   assert.equal(out.found, true); assert.equal(out.matched_by, 'customer name');
   assert.equal(out.deliveries[0].boxes, '139 boxes'); assert.equal(out.deliveries[0].cubes, 187.71);
 });
+
+test('a customer name together with a trip number answers for THAT customer stop, not the whole load', async () => {
+  const items = [{ trip: { tripNumber: '624399', powerUnit: '724', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M1', endZoneDescription: 'GWYNN OAK, MD, 21207' }, { billNumber: 'M2', endZoneDescription: 'MERCHANTVILLE, NJ, 08109' }], _manifest: { stops: [{ stopNumber: 2, action: 'DELIVER', customer: 'DBG - BALTIMORE', city: 'WOODLAWN', state: 'MD', tmPlace: 'GWYNN OAK, MD' }, { stopNumber: 3, action: 'DELIVER', customer: 'MAIN WHOLESALE FLORIST PENNSAUKEN LLC.', city: 'PENNSAUKEN', state: 'NJ', tmPlace: 'MERCHANTVILLE, NJ', pieces: 135, cubes: 168.85 }] } }];
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
+  initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY } });
+  const body = { args: { trip_number: '624399', customer_name: 'Main Wholesale' }, call: { direction: 'inbound', from_number: '+18565550000' } };
+  const raw = JSON.stringify(body); const sig = await Retell.sign(raw, KEY);
+  let out; const res = { status() { return this; }, json(j) { out = j; } };
+  const req = { body, rawBody: raw, get: () => sig };
+  const [guard, handler] = routes['POST /retell/fn/lookup_load'];
+  await guard(req, res, () => handler(req, res));
+  assert.equal(out.found, true); assert.match(out.matched_by, /^customer name on trip number/);
+  assert.equal(out.deliveries.length, 1);
+  assert.equal(out.deliveries[0].customer, 'MAIN WHOLESALE FLORIST PENNSAUKEN LLC.');
+  assert.equal(out.deliveries[0].boxes, '135 boxes');
+});

@@ -292,6 +292,30 @@ function atConsigneeKey(f, route) {
   return open.length ? open[0].key : null;
 }
 
+// How many of the first stops (in trip-sheet order) the truck has already driven
+// past, even if TruckMate hasn't marked them delivered. A stop counts as passed
+// when the truck is well away from it AND clearly closer to the next stop than
+// that stop is — e.g. on the NJ Turnpike north of Pennsauken, the Maryland and
+// Pennsauken stops are behind it. Only trusted along the trip sheet's order. Pure.
+export function passedCount(ordered, pts, at, { awayMi = 15, marginMi = 10 } = {}) {
+  // stops in the same town (e.g. two Cranston stops) move together
+  const groups = [];
+  for (const st of ordered) {
+    if (st.seq == null || st.seq >= 999) break;
+    const g = pts.get(st.key); const last = groups[groups.length - 1];
+    if (last && haversineMi(last.g.lat, last.g.lng, g.lat, g.lng) < marginMi) last.n += 1; else groups.push({ g, n: 1 });
+  }
+  let k = 0;
+  for (let i = 0; i < groups.length - 1; i++) {
+    const A = groups[i].g; const B = groups[i + 1].g;
+    const leg = haversineMi(A.lat, A.lng, B.lat, B.lng);
+    const fromA = haversineMi(at.lat, at.lng, A.lat, A.lng);
+    const toB = haversineMi(at.lat, at.lng, B.lat, B.lng);
+    if (fromA > awayMi && toB < leg - marginMi) k += groups[i].n; else break;
+  }
+  return k;
+}
+
 function routeEtas(f, ctx) {
   if (notStarted(f.status, f, ctx.now) || !f.live || !f.gpsFresh || f.live.lat == null) return null;
   const open = f.stops.filter((st) => !st.delivered);
@@ -304,7 +328,11 @@ function routeEtas(f, ctx) {
   }
   const o = ctx.origin;
   const fromOrigin = (st) => haversineMi(o.lat, o.lng, pts.get(st.key).lat, pts.get(st.key).lng);
-  const ordered = [...open].sort((a, b) => ((a.seq != null ? a.seq : 999) - (b.seq != null ? b.seq : 999)) || (fromOrigin(a) - fromOrigin(b)));
+  const sorted = [...open].sort((a, b) => ((a.seq != null ? a.seq : 999) - (b.seq != null ? b.seq : 999)) || (fromOrigin(a) - fromOrigin(b)));
+  // stops the truck already drove past → most likely delivered; never route back to them
+  const nPassed = (isRolling(f.status) || /^arrcons/i.test(String(f.status || ''))) ? passedCount(sorted, pts, { lat: f.live.lat, lng: f.live.lng }) : 0;
+  const passed = sorted.slice(0, nPassed);
+  const ordered = sorted.slice(nPassed);
   const hos = f.live.hos || {};
   const restDoneMin = (hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stoppedMin) ? f.stoppedMin : 0;
   const out = [];
@@ -318,6 +346,7 @@ function routeEtas(f, ctx) {
     out.push({ stop: st, miles, etaMs: (eta || ctx.now) + i * 30 * MIN, stopsBefore: i });
   });
   out.guess = hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stopStartUnknown;
+  out.passed = passed;
   return out;
 }
 
@@ -387,7 +416,8 @@ const RULES = [
     if (notStarted(f.status, f, ctx.now) && !isRolling(f.status)) return null;
     const route = routeEtas(f, ctx);
     const atStop = atConsigneeKey(f, route);
-    const open = f.stops.filter((st) => !st.delivered && st.apptMs != null && st.key !== atStop && st.apptMs < ctx.now - 30 * MIN && st.apptMs > ctx.now - 48 * 60 * MIN);
+    const behind = new Set(((route && route.passed) || []).map((st) => st.key));   // truck already drove past it
+    const open = f.stops.filter((st) => !st.delivered && !behind.has(st.key) && st.apptMs != null && st.key !== atStop && st.apptMs < ctx.now - 30 * MIN && st.apptMs > ctx.now - 48 * 60 * MIN);
     if (!open.length) return null;
     const st = open.sort((a, b) => a.apptMs - b.apptMs)[0];
     const r = route ? route.find((x) => x.stop.key === st.key) : null;
@@ -624,6 +654,7 @@ export function boardEtas(board, ctxIn) {
     out[f.trip] = {
       at: ctx.now, team: f.team, guess: !!route.guess,
       stops: route.map((r) => ({ key: r.stop.key, zip: r.stop.zip || null, label: r.stop.label, miles: Math.round(r.miles), etaMs: r.etaMs, apptMs: r.stop.apptMs ?? null, apptFrom: r.stop.apptFrom || null })),
+      passed: (route.passed || []).map((st) => ({ key: st.key, zip: st.zip || null, label: st.label })),
     };
   }
   return out;

@@ -112,8 +112,16 @@ export function voiceFacts(item, eta) {
     if (!st) { st = { place: label, customer: b.billToName || null, delivered: true }; stops.push(st); }
     if (!b.actualDelivery) st.delivered = false;
   }
-  const next = stops.find((x) => !x.delivered) || null;
-  const leg = eta && eta.stops && next ? (eta.stops.find((x) => cityOf(x.label) === next.place) || eta.stops[0]) : null;
+  // trip-sheet order, and stops the truck already drove past (not yet confirmed in TruckMate)
+  const sheet = (item._manifest && item._manifest.stops) || [];
+  const town = (x) => String(x || '').split(',')[0].trim().toUpperCase();
+  const seqOf = (place) => { const h = sheet.find((x) => town(x.tmPlace) === town(place) || town(x.city) === town(place)); return h && h.stopNumber != null ? Number(h.stopNumber) : 999; };
+  stops.sort((a, b) => seqOf(a.place) - seqOf(b.place));
+  const behind = new Set(((eta && eta.passed) || []).map((x) => town(cityOf(x.label))));
+  for (const st of stops) st.passed = !st.delivered && behind.has(town(st.place));
+  const ahead = eta && eta.stops && eta.stops[0] ? town(cityOf(eta.stops[0].label)) : null;
+  const next = (ahead && stops.find((x) => town(x.place) === ahead && !x.delivered)) || stops.find((x) => !x.delivered && !x.passed) || null;
+  const leg = eta && eta.stops && next ? (eta.stops.find((x) => town(cityOf(x.label)) === town(next.place)) || null) : null;
   const statusWords = { DISP: 'dispatched, not picked up yet', ASSGN: 'assigned, not picked up yet', ARRSHIP: 'at the shipper', DEPSHIP: 'picked up and on the way', ARRCONS: 'at a receiver', DEPCONS: 'left a receiver, on the way to the next stop' };
   return {
     trip: String(t.tripNumber || ''),
@@ -131,7 +139,9 @@ export function voiceFacts(item, eta) {
     miles_to_next_stop: leg ? leg.miles : null,
     appointment_next_stop: leg && leg.apptMs ? `${fmt(leg.apptMs)}${leg.apptFrom === 'truckmate-due' ? ' (due time, not a confirmed appointment)' : ''}` : null,
     stops_delivered: stops.filter((x) => x.delivered).map((x) => x.place),
-    stops_remaining: stops.filter((x) => !x.delivered).map((x) => x.place),
+    stops_already_passed: stops.filter((x) => x.passed).map((x) => x.place),
+    stops_remaining: stops.filter((x) => !x.delivered && !x.passed).map((x) => x.place),
+    stops_note: stops.some((x) => x.passed) ? 'stops_already_passed = the truck already drove past them, so they were most likely delivered (paperwork not confirmed yet). Never say the truck will go back to them.' : undefined,
     total_stops: stops.length,
   };
 }
@@ -214,11 +224,15 @@ export function customerStops(items, name, etasByTrip = {}) {
       const score = nameScore(name, st.customer);
       if (score < 0.75) continue;
       const city = cityOf(`${st.city || ''}, ${st.state || ''}`);
-      const leg = eta && eta.stops ? eta.stops.find((x) => (st.zip && x.zip === String(st.zip)) || cityOf(x.label).toUpperCase().startsWith(String(st.city || '').toUpperCase())) : null;
-      const bills = billsOf(it).filter((b) => cityOf(b.endZoneDescription).toUpperCase().startsWith(String(st.city || '').toUpperCase()));
+      // the sheet's town can differ from TruckMate's (Pennsauken vs Merchantville) — tmPlace bridges them
+      const towns = [st.city, st.tmPlace].filter(Boolean).map((c) => String(c).split(',')[0].trim().toUpperCase());
+      const sameTown = (label) => towns.some((c) => cityOf(label).toUpperCase().startsWith(c));
+      const leg = eta && eta.stops ? eta.stops.find((x) => (st.zip && x.zip === String(st.zip)) || sameTown(x.label)) : null;
+      const bills = billsOf(it).filter((b) => sameTown(b.endZoneDescription));
       const delivered = bills.length ? bills.every((b) => b.actualDelivery) : false;
-      seen.add(`${st.city}|${st.customer}`);
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, stop: st.stopNumber != null ? `delivery ${st.stopNumber - 1}${lastStop ? ` of ${lastStop - 1}` : ''}` : null, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, estimated_arrival: !delivered && leg ? fmt(leg.etaMs) : null, from: 'trip sheet' });
+      const passed = !delivered && !!(eta && eta.passed) && eta.passed.some((x) => (st.zip && x.zip === String(st.zip)) || sameTown(x.label));
+      towns.forEach((c) => seen.add(`${c}|${st.customer}`));
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, stop: st.stopNumber != null ? `delivery ${st.stopNumber - 1}${lastStop ? ` of ${lastStop - 1}` : ''}` : null, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmt(leg.etaMs) : null, from: 'trip sheet' });
     }
     // TruckMate bills (no trip sheet, or names the sheet didn't have)
     for (const b of billsOf(it)) {
@@ -228,7 +242,8 @@ export function customerStops(items, name, etasByTrip = {}) {
       const city = cityOf(b.endZoneDescription);
       if ([...seen].some((k) => k.toUpperCase().startsWith(String(city.split(',')[0]).toUpperCase()))) continue;
       const leg = eta && eta.stops ? eta.stops.find((x) => cityOf(x.label) === city) : null;
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: b.pieces != null ? `${b.pieces} boxes` : null, cubes: b.cubes != null ? b.cubes : null, appointment: null, delivered: !!b.actualDelivery, estimated_arrival: !b.actualDelivery && leg ? fmt(leg.etaMs) : null, from: 'TruckMate' });
+      const passed = !b.actualDelivery && !!(eta && eta.passed) && eta.passed.some((x) => cityOf(x.label) === city);
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: b.pieces != null ? `${b.pieces} boxes` : null, cubes: b.cubes != null ? b.cubes : null, appointment: null, delivered: !!b.actualDelivery, ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !b.actualDelivery && !passed && leg ? fmt(leg.etaMs) : null, from: 'TruckMate' });
     }
   }
   return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 4).map(({ score, ...x }) => x);
@@ -280,11 +295,24 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
       // a business name put in any box is still a name (e.g. "Springfield Florist" as bill_number)
       const isName = (v) => v && /[A-Za-z]{3,}/.test(String(v)) && !/\d{3,}/.test(String(v));
       const name = a.customer_name || [a.bill_number, a.broker_load_number, a.trip_number, a.truck_number, a.trailer_number].find(isName) || null;
-      if (name && ![a.trip_number, a.bill_number, a.broker_load_number, a.truck_number, a.trailer_number].some((v) => v && !isName(v))) {
+      const numbers = [a.trip_number, a.bill_number, a.broker_load_number, a.truck_number, a.trailer_number].some((v) => v && !isName(v));
+      if (name && numbers) {
+        // a name AND a number (e.g. "Main Wholesale on trip 624399"): answer for THEIR stop on that load
+        const hit = findLoad(await items(), { trip: a.trip_number, bill: a.bill_number || a.broker_load_number, loadNumber: a.broker_load_number, truck: a.truck_number, trailer: a.trailer_number });
+        if (hit) {
+          const trip = tripNo(hit.item);
+          const stops = customerStops([hit.item], name, { [trip]: await etaFor(trip) });
+          if (stops.length) {
+            if (call.call_id) callTrip.set(call.call_id, trip);
+            return res.json({ found: true, matched_by: `customer name on ${hit.by}`, share_only_these_stops: true, deliveries: stops, say: 'Tell the caller about THEIR stop only (boxes, cubes, ETA, delivered or not). Never read other stops. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.' });
+          }
+        }
+      }
+      if (name && !numbers) {
         const etas = ((await db.get(`taWatch:${site}`, {})).etas) || {};
         const stops = customerStops(await items(), name, etas);
         if (!stops.length) return res.json({ found: false, say: `No active delivery found for "${name}". Ask for the exact business name on their order, their city, or a bill / PO number — or take a message.` });
-        return res.json({ found: true, matched_by: 'customer name', share_only_these_stops: true, deliveries: stops, say: 'Tell the caller about THEIR stop only (boxes, cubes, ETA, delivered or not). Never read other stops.' });
+        return res.json({ found: true, matched_by: 'customer name', share_only_these_stops: true, deliveries: stops, say: 'Tell the caller about THEIR stop only (boxes, cubes, ETA, delivered or not). Never read other stops. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.' });
       }
       const hit = findLoad(await items(), { trip: a.trip_number || meta.trip, bill: a.bill_number || a.broker_load_number, loadNumber: a.broker_load_number, truck: a.truck_number, trailer: a.trailer_number, phone: callerPhone(call) });
       if (!hit) return res.json({ found: false, say: 'No active load matched. Ask the caller for the trip number or bill number, or take a message.' });

@@ -7,6 +7,7 @@
 // browser, and is verified against the live endpoint before it replaces a
 // working config.
 // ---------------------------------------------------------------
+import { initFinished } from './finished.js';
 import { compareWithTruckMate, keyStops, linkSheetStops } from './manifest.js';
 import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit, trailerLocations } from './samsara.js';
 import { buildFleet, updateStill, withStill } from './fleetmap.js';
@@ -470,6 +471,21 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   // upserted by id (freshest wins); a trip flagged delivered is removed; trips we
   // haven't heard about in ACTIVE_TTL are aged out (covers a trip that closes
   // without us catching its delivered event). Returns the resulting board size.
+  // a load that finished without TruckMate saying so → Delivered tab (with the reason)
+  async function recordFinished(site, item, reason) {
+    if (!(db && db.enabled) || !item) return;
+    const t = (item && item.trip) || item || {};
+    const n = String(t.tripNumber || (item && item._id) || '');
+    await db.update(`taTruckMateDelivered:${site}`, (cur) => {
+      const s = { items: [], seen: {}, ...(cur || {}) };
+      if ((s.items || []).some((x) => String(x.tripNumber) === n)) return s;
+      s.items = [{ tripNumber: n, status: t.status || '', billNumbers: billNumbersOf(item), destinationZone: t.destZoneDesc || '', driver: t.driver || '', deliveredAt: new Date().toISOString(), acknowledged: false, reason }, ...(s.items || [])].slice(0, 500);
+      s.seen = { ...(s.seen || {}), [n]: Date.now() };
+      return s;
+    }, { items: [], seen: {} });
+  }
+  const finished = initFinished(app, { requireAuth, db, onFinished, recordFinished });
+
   const ACTIVE_TTL_MS = 36 * 60 * 60 * 1000;
   async function updateActiveBoard(site, trips) {
     if (!(db && db.enabled)) return 0;
@@ -616,6 +632,8 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     for (const fn of overlays) {
       try { await fn(site, trips); } catch (e) { console.warn('[truckmate] overlay:', e.message); } // eslint-disable-line no-await-in-loop
     }
+    // finished loads (delivered, every / last stop visited, truck moved on, or marked by a dispatcher) leave the board
+    try { await finished.sweep(site, trips, store.trips || {}); } catch (e) { console.warn('[truckmate] finished:', e.message); }
     // Detect NEW truck→load assignments: a truck's power unit appearing on an
     // active trip it wasn't on before. Each is announced once (state persists),
     // so the dispatcher gets a single pop-up and AI dispatching "starts now".
