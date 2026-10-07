@@ -120,7 +120,8 @@ export function initAssistant(app, { db, env = process.env, buildBoard }) {
         return { trip: m.tripNumber, uploadedAt: m.uploadedAt, uploadedBy: m.uploadedBy, truck: m.truck, trailer: m.trailer, onBoard: !!it, stops: (m.stops || []).filter((x) => /DELIVER/i.test(x.action || '')).length, appointments: (m.stops || []).filter((x) => x.apptDate).length, unreadable: m.unreadable || [], notes: it ? compareWithTruckMate(m, it).map((d) => d.msg) : ['not on the TruckMate board'] };
       });
       const pending = (packets.__unmatched || []).map((p) => ({ page: p.page, type: p.type, summary: p.summary, uploadedAt: p.uploadedAt }));
-      send(res, { count: sheets.length, sheets, pendingPages: pending });
+      const rcPending = ((await db.get(`taRateConPending:${s}`, [])) || []).map(({ id, record: r }) => ({ id, broker: r.broker, loadNumber: r.loadNumber, bill: r.fbfBillNumber, truck: r.truckNumber, summary: r.summary, filename: r.filename, uploadedAt: r.uploadedAt }));
+      send(res, { count: sheets.length, sheets, pendingPages: pending, rateConsNotMatched: rcPending });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

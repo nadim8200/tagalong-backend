@@ -550,8 +550,12 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       const c = sorted.get(u.key) || {};
       const cur = groups[groups.length - 1];
       const same = (a, b) => a && b && norm(a) === norm(b);
-      const cont = cur && u.file === cur.file && u.page === cur.last + 1 && c.pageOf !== 1
-        && ((c.pageOf && c.pageOf > 1) || same(c.docKey, cur.docKey));
+      // a different RC- label or a different broker is always a new rate con
+      const broker = (k) => norm(String(k || '').split(/\s+/)[0]);
+      const newLabel = cur && c.rcBill && cur.rcBill && billKey(c.rcBill) !== billKey(cur.rcBill);
+      const newBroker = cur && c.docKey && cur.docKey && broker(c.docKey) !== broker(cur.docKey);
+      const cont = cur && !newLabel && !newBroker && u.file === cur.file && u.page === cur.last + 1 && c.pageOf !== 1
+        && (c.continuation || (c.pageOf && c.pageOf > 1) || same(c.docKey, cur.docKey));
       if (cont) { cur.units.push(u); cur.last = u.page; if (!cur.rcBill && c.rcBill) cur.rcBill = c.rcBill; }
       else groups.push({ file: u.file, last: u.page, units: [u], docKey: c.docKey || null, rcBill: c.rcBill || null });
     }
@@ -639,7 +643,20 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       // 2) quick look at every page: is it a trip sheet? (cheap model, small answer)
       const sorted = await classifyPages(units);
       const sheetUnits = units.filter((u) => SHEET_TYPES.has((sorted.get(u.key) || {}).type));
-      const rcUnits = units.filter((u) => (sorted.get(u.key) || {}).type === 'rate_confirmation');
+      // Rate cons: "rate_confirmation" or "carrier_confirmation" pages, plus pages
+      // right after one that are still inside its "Page N of M" (terms pages).
+      const RC_TYPES = new Set(['rate_confirmation', 'carrier_confirmation']);
+      const rcUnits = [];
+      let open = null;
+      for (const u of units) {
+        const c = sorted.get(u.key) || {};
+        if (RC_TYPES.has(c.type)) { c.type = 'rate_confirmation'; rcUnits.push(u); open = { file: u.file, page: u.page, left: c.pageTotal && c.pageOf ? c.pageTotal - c.pageOf : 0, key: c.docKey }; continue; }
+        if (open && u.file === open.file && u.page === open.page + 1 && open.left > 0 && !SHEET_TYPES.has(c.type) && c.type !== 'driver_id') {
+          sorted.set(u.key, { ...c, type: 'rate_confirmation', pageOf: null, docKey: open.key, continuation: true });
+          rcUnits.push(u); open = { ...open, page: u.page, left: open.left - 1 }; continue;
+        }
+        open = null;
+      }
       if (!sheetUnits.length && !rcUnits.length) return res.status(422).json({ error: `No trip sheets or rate confirmations found in these ${units.length} page${units.length === 1 ? '' : 's'}.` });
       // 3) full read of the trip-sheet pages only, a few trips per call, in parallel
       const groups = [];
@@ -693,7 +710,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       const sheetDocIds = new Set(trips.flatMap((t) => t.docIds));
       const rcDocIds = new Set(rcUnits.map((u) => docOf(u.file, u.page)).filter(Boolean));
       const pagesOut = allPages.filter((pg) => keepPage(pg, sheetDocIds));
-      const skipped = allPages.filter((pg) => !keepPage(pg, sheetDocIds) && pg.type !== 'rate_confirmation');
+      const skipped = allPages.filter((pg) => !keepPage(pg, sheetDocIds) && !rcDocIds.has(String(pg.docId)) && pg.type !== 'rate_confirmation');
       let rateCons = [];
       if (rcUnits.length && ratecon && ratecon.enabled) {
         try { rateCons = await readRateConPackets(site, rcUnits, sorted, board, docOf, who(req), [...trips, ...Object.values(prevAll)]); } catch (e) { console.warn('[manifest] rate cons:', e.message); }

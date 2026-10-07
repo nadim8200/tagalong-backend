@@ -76,3 +76,53 @@ test('rate con contacts become load contacts (and reach Jarvis)', () => {
   assert.ok(r.contacts.find((c) => c.email === 'brian.karch@rxo.com' && c.role === 'broker' && c.company === 'RXO'));
   assert.ok(r.contacts.find((c) => c.phone === '8776269683'));
 });
+
+test('"carrier confirmation" pages count as rate cons; terms pages inside "Page N of M" stay with it', async () => {
+  const doc = await PDFDocument.create();
+  for (let i = 0; i < 4; i++) doc.addPage([200, 200]);
+  const pdf = Buffer.from(await doc.save()).toString('base64');
+  const S = { 1: { type: 'carrier_confirmation', pageOf: 1, pageTotal: 3, docKey: 'CW Carriers 0449890', rcBill: 'B180400' }, 2: { type: 'other', pageOf: null }, 3: { type: 'other' }, 4: { type: 'bill_of_lading' } };
+  const anthropic = { messages: { create: async ({ messages }) => ({ content: [{ type: 'text', text: JSON.stringify({ pages: messages[0].content.filter((c) => c.type === 'text' && c.text.startsWith('---')).map((c) => { const [, f, pg] = c.text.match(/File (\d+) · page (\d+)/); return { file: +f, page: +pg, summary: 'x', checkins: [], ...S[+pg] }; }) }) }] }) } };
+  const reads = []; const saved = {};
+  const ratecon = { enabled: true, read: async (pages) => { reads.push(pages.length); return { broker: 'CW Carriers', fbfBillNumber: 'B180400', specialInstructions: [] }; }, save: async (s2, trip, rec) => { saved[trip] = rec; } };
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
+  const deleted = [];
+  const docs = { enabled: true, linkDocs: async () => {}, markDocs: async () => {}, deleteDocs: async ({ ids }) => { deleted.push(...ids); }, retypeDocs: async () => 1 };
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put() {}, delete() {} };
+  initManifests(app, { requireAuth: () => {}, db, env: { NODE_ENV: 'test', ANTHROPIC_API_KEY: 'x' }, buildBoard: async () => ({ trips: [{ trip: { tripNumber: '624417', powerUnit: '2402' }, freightBills: [{ billNumber: 'B180400' }] }] }), docs, anthropic, ratecon });
+  let out;
+  await routes['POST /truckmate/manifests']({ query: {}, body: { pages: [{ filename: '3440_001.pdf', mediaType: 'application/pdf', dataBase64: pdf }], originalIds: [['501', '502', '503', '504']], batchId: 'b1' }, user: { name: 'Ana' } }, { json: (j) => { out = j; }, status() { return this; } });
+  assert.deepEqual(reads, [3], 'pages 1-3 read together as one rate con');
+  assert.equal(out.rateCons[0].trip, '624417');
+  assert.deepEqual(out.skipped.map((p) => p.type), ['bill_of_lading']);
+  assert.deepEqual(deleted, ['504'], 'only the BOL page is dropped');
+});
+
+test('Legacy (2 pages) then Red Lab (RC-B180354, mis-read as "page 2"): two rate cons, each on its own trip', async () => {
+  const doc = await PDFDocument.create();
+  for (let i = 0; i < 4; i++) doc.addPage([200, 200]);
+  const pdf = Buffer.from(await doc.save()).toString('base64');
+  const S = {
+    1: { type: 'rate_confirmation', pageOf: 1, pageTotal: 2, docKey: 'Legacy 514001', rcBill: 'B180303' },
+    2: { type: 'rate_confirmation', pageOf: 2, pageTotal: 2, docKey: 'Legacy 514001' },
+    3: { type: 'rate_confirmation', pageOf: 2, pageTotal: 2, docKey: 'Red Lab 131963433', rcBill: 'B180354' },
+    4: { type: 'rate_confirmation', pageOf: 2, pageTotal: 2, docKey: 'Red Lab 131963433' },
+  };
+  const anthropic = { messages: { create: async ({ messages }) => ({ content: [{ type: 'text', text: JSON.stringify({ pages: messages[0].content.filter((c) => c.type === 'text' && c.text.startsWith('---')).map((c) => { const [, f, pg] = c.text.match(/File (\d+) · page (\d+)/); return { file: +f, page: +pg, summary: 'x', checkins: [], ...S[+pg] }; }) }) }] }) } };
+  const reads = []; const saved = {};
+  const ratecon = { enabled: true, read: async (pages) => { reads.push(pages.length); return reads.length === 1 ? { broker: 'Legacy', fbfBillNumber: 'B180303', truckNumber: '2212' } : { broker: 'Red Lab', fbfBillNumber: 'B180354', truckNumber: '2212' }; }, save: async (s2, trip, rec) => { saved[trip] = rec; } };
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
+  const docs = { enabled: true, linkDocs: async () => {}, markDocs: async () => {}, deleteDocs: async () => {}, retypeDocs: async () => 1 };
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put() {}, delete() {} };
+  const board = { trips: [{ trip: { tripNumber: '624086', powerUnit: '2212', status: 'ARRCONS' }, freightBills: [{ billNumber: 'B180303' }] }, { trip: { tripNumber: '624335', powerUnit: '2212', status: 'ARRCONS' }, freightBills: [{ billNumber: 'B180354' }] }] };
+  initManifests(app, { requireAuth: () => {}, db, env: { NODE_ENV: 'test', ANTHROPIC_API_KEY: 'x' }, buildBoard: async () => board, docs, anthropic, ratecon });
+  let out;
+  await routes['POST /truckmate/manifests']({ query: {}, body: { pages: [{ filename: '3440_001.pdf', mediaType: 'application/pdf', dataBase64: pdf }], originalIds: [['1', '2', '3', '4']], batchId: 'b' }, user: { name: 'Ana' } }, { json: (j) => { out = j; }, status() { return this; } });
+  assert.deepEqual(reads, [2, 2]);
+  assert.equal(saved['624086'].broker, 'Legacy');
+  assert.equal(saved['624335'].broker, 'Red Lab');
+});
