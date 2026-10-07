@@ -294,5 +294,18 @@ export function initDocuments(app, { requireAuth, db }) {
     return n;
   }
 
-  return { storeDocs, linkDocs, listDocs, markDocs, readDocs, deleteDocs, enabled };
+  // Packet pages that turned out to be a rate con: make them that trip's rate con (next version).
+  async function retypeDocs({ site, ids, kind, trip = null }) {
+    if (!enabled || !ids.length) return null;
+    await ensureTable();
+    let version = null;
+    if (trip) {
+      const { rows } = await pool.query('SELECT COALESCE(MAX(version), 0) AS v FROM ta_docs WHERE site = $1 AND kind = $2 AND $3 = ANY(trips)', [site, kind, String(trip)]);
+      version = Number(rows[0].v) + 1;
+    }
+    await pool.query('UPDATE ta_docs SET kind = $1, trips = $2, version = $3, packet_id = NULL WHERE site = $4 AND id = ANY($5::bigint[])', [kind, trip ? [String(trip)] : [], version, site, ids.map(Number)]);
+    return version;
+  }
+
+  return { storeDocs, linkDocs, listDocs, markDocs, readDocs, deleteDocs, retypeDocs, enabled };
 }

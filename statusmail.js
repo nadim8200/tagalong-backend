@@ -88,6 +88,8 @@ export function contactsFor(item, { customers = {}, edit = null, prefixes = DEFA
   }
   const rc = (item && item._ratecon && (item._ratecon.data || item._ratecon)) || {};
   if (rc.brokerEmail || rc.brokerPhone) add({ role: 'broker', company: rc.broker, email: rc.brokerEmail, phone: rc.brokerPhone }, 'rate con');
+  const RC_ROLE = { broker_rep: 'broker', after_hours: 'broker', dispatch: 'broker', tracking: 'broker', billing: 'other', shipper: 'shipper', receiver: 'receiver', other: 'other' };
+  for (const c of rc.contacts || []) if (c && (c.email || c.phone)) add({ role: RC_ROLE[c.role] || 'other', company: c.company || (RC_ROLE[c.role] === 'broker' ? rc.broker : null), name: c.name, email: c.email, phone: c.phone }, 'rate con');
   // trip sheet vs TruckMate
   for (const c of list) {
     c.verified = c.sources.includes('trip sheet') && c.sources.includes('TruckMate');

@@ -673,7 +673,8 @@ truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL,
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
-initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, docs, carriers });
+const ratecon = initRateCon(app, { requireAuth, db, env: process.env, docs });
+initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, docs, carriers, ratecon });
 
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
@@ -691,7 +692,6 @@ initNotify(app, { requireAuth, db, pool: db.pool, env: process.env, ringcentral:
 initDbpo(app, { db });
 
 // AI dispatcher — read uploaded rate confirmations (broker instructions).
-initRateCon(app, { requireAuth, db, env: process.env, docs });
 
 app.get('/', (_req, res) => res.send('TagAlong backend is running.'));
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));
