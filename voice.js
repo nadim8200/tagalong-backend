@@ -387,24 +387,29 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
         default_dynamic_variables: { greeting: GREETING, call_context: 'This is an incoming call. Find out who is calling and what load they mean.' },
         general_tools: tools(base, env.RETELL_TRANSFER_NUMBER ? e164(env.RETELL_TRANSFER_NUMBER) : null),
       };
-      // 1) instructions + tools → a fresh LLM every time (published ones are read-only in Retell)
-      const llm = await retell('/create-retell-llm', { body: llmBody });
       const agentBody = {
         agent_name: 'Jarvis — Florida Beauty Flora dispatch',
-        // 2) the agent runs THAT exact version (never an older one)
-        response_engine: { type: 'retell-llm', llm_id: llm.llm_id, ...(llm.version != null ? { version: llm.version } : {}) },
         voice_id: env.RETELL_VOICE_ID || 'retell-Cimo', language: languages(),
         webhook_url: `${base}/retell/webhook`, max_call_duration_ms: 15 * 60000, end_call_after_silence_ms: 30000,
       };
-      // keep the voice someone picked in Retell
-      if (cfg.agentId && !env.RETELL_VOICE_ID) delete agentBody.voice_id;
-      let agent;
-      if (!cfg.agentId) agent = await retell('/create-agent', { body: agentBody });
-      else {
-        // published versions are read-only → start a new draft from the current one, then edit that
-        const cur = await retell(`/get-agent/${cfg.agentId}`, { method: 'GET' });
-        if (cur.is_published) await retell(`/create-agent-version/${cfg.agentId}`, { body: { base_version: cur.version } });
+      let agent; let llm;
+      if (!cfg.agentId) {
+        llm = await retell('/create-retell-llm', { body: llmBody });
+        agent = await retell('/create-agent', { body: { ...agentBody, response_engine: { type: 'retell-llm', llm_id: llm.llm_id, ...(llm.version != null ? { version: llm.version } : {}) } } });
+      } else {
+        // Retell: published versions are read-only, and agent version N always uses
+        // instruction (LLM) version N. So: new draft from the published one (Retell copies
+        // the instructions into the matching draft), edit THAT copy, then publish.
+        let draft = await retell(`/get-agent/${cfg.agentId}`, { method: 'GET' });
+        if (draft.is_published) draft = await retell(`/create-agent-version/${cfg.agentId}`, { body: { base_version: draft.version } });
+        const re = draft.response_engine || {};
+        const llmId = re.llm_id || cfg.llmId;
+        const ver = re.version != null ? re.version : draft.version;
+        llm = await retell(`/update-retell-llm/${llmId}${ver != null ? `?version=${ver}` : ''}`, { method: 'PATCH', body: llmBody });
+        if (!env.RETELL_VOICE_ID) delete agentBody.voice_id;     // keep the voice someone picked in Retell
         agent = await retell(`/update-agent/${cfg.agentId}`, { method: 'PATCH', body: agentBody });
+        if (agent.version == null) agent.version = draft.version;
+        if (!llm.llm_id) llm.llm_id = llmId;
       }
       // 3) publish it
       let published = null;

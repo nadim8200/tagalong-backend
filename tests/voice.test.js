@@ -20,12 +20,13 @@ function setup(extraEnv = {}) {
   const db = memDb();
   const fetchFn = async (url, opts) => {
     retellCalls.push({ url, method: opts.method, body: opts.body ? JSON.parse(opts.body) : null, auth: opts.headers.Authorization });
-    const nLlm = retellCalls.filter((c) => c.url.includes('create-retell-llm')).length;
-    const body = url.includes('create-retell-llm') ? { llm_id: `llm_${nLlm}`, version: 0 }
-      : url.includes('/get-agent/') ? { agent_id: 'agent_1', version: 4, is_published: true }
-      : url.includes('/create-agent-version/') ? { agent_id: 'agent_1', version: 5 }
-      : /\/update-agent\//.test(url) ? { agent_id: 'agent_1', version: retellCalls.some((c) => c.url.includes('/create-agent-version/')) ? 5 : 4 }
-      : url.includes('/create-agent') ? { agent_id: 'agent_1', version: 4 }
+    const drafted = retellCalls.some((c) => c.url.includes('/create-agent-version/'));
+    const body = url.includes('create-retell-llm') ? { llm_id: 'llm_1', version: 0 }
+      : url.includes('update-retell-llm') ? { llm_id: 'llm_1', version: 5 }
+      : url.includes('/get-agent/') ? { agent_id: 'agent_1', version: 4, is_published: true, response_engine: { type: 'retell-llm', llm_id: 'llm_1', version: 4 } }
+      : url.includes('/create-agent-version/') ? { agent_id: 'agent_1', version: 5, is_published: false, response_engine: { type: 'retell-llm', llm_id: 'llm_1', version: 5 } }
+      : /\/update-agent\//.test(url) ? { agent_id: 'agent_1', version: drafted ? 5 : 4 }
+      : url.includes('/create-agent') ? { agent_id: 'agent_1', version: 0 }
       : url.includes('create-phone-call') ? { call_id: 'call_9', call_status: 'registered' } : {};
     return { ok: true, status: 201, json: async () => body };
   };
@@ -112,20 +113,21 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   assert.equal(v.retellCalls[0].auth, `Bearer ${KEY}`);
   // the agent runs the exact new LLM version, that version is published, the number answers with it
   assert.deepEqual(agent.response_engine, { type: 'retell-llm', llm_id: 'llm_1', version: 0 });
-  assert.deepEqual(v.retellCalls.find((c) => c.url.includes('/publish-agent-version/agent_1')).body.version, 4);
+  assert.deepEqual(v.retellCalls.find((c) => c.url.includes('/publish-agent-version/agent_1')).body.version, 0);
   const num = v.retellCalls.find((c) => c.url.includes('/update-phone-number/'));
   assert.ok(num.url.endsWith('%2B13055550000'));
   assert.deepEqual(num.body.inbound_agents, [{ agent_id: 'agent_1', agent_version: 'latest_published', weight: 1 }]);
-  assert.equal(r.out.published, 4);
+  assert.equal(r.out.published, 0);
   // second update: same agent/LLM, voice picked in Retell is kept
   await v.hit('POST /voice/setup', {});
   const upd = v.retellCalls.filter((c) => c.url.includes('/update-agent/agent_1')).at(-1);
   assert.equal(upd.method, 'PATCH'); assert.equal(upd.body.voice_id, undefined);
   // published → a new draft from it (base 4), fresh instructions, then publish the new version 5
   assert.deepEqual(v.retellCalls.find((c) => c.url.includes('/create-agent-version/agent_1')).body, { base_version: 4 });
-  assert.equal(upd.body.response_engine.llm_id, 'llm_2');
+  assert.equal(upd.body.response_engine, undefined, 'agent keeps its own matching instruction version');
+  const llmEdit = v.retellCalls.find((c) => c.url.includes('update-retell-llm'));
+  assert.ok(llmEdit.url.endsWith('/update-retell-llm/llm_1?version=5'), 'edits the DRAFT copy (v5), never the published v4');
   assert.equal(v.retellCalls.filter((c) => c.url.includes('/publish-agent-version/')).at(-1).body.version, 5);
-  assert.ok(!v.retellCalls.some((c) => c.url.includes('update-retell-llm')), 'never edits a published LLM');
 });
 
 test('Jarvis calls a driver only with consent, never after STOP, not twice in 30 min', async () => {
