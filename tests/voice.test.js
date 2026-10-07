@@ -122,3 +122,25 @@ test('Jarvis calls a driver only with consent, never after STOP, not twice in 30
   assert.match(body.retell_llm_dynamic_variables.call_context, /confirm whether Native Chicago, LOMBARD, IL was delivered/);
   assert.equal((await call()).code, 429);
 });
+
+import { customerStops, nameScore } from '../voice.js';
+test('flower customers by name: their own stop only — boxes, cubes, stop number, ETA', () => {
+  assert.equal(nameScore("Johnson's Wholesale Florist", "JOHNSON'S WHOLESALE FLORIST LLC"), 1);
+  assert.ok(nameScore('Springfield Florist', 'SPRINGFIELD FLORIST') === 1);
+  assert.ok(nameScore('Springfield Florist', 'FALL RIVER FLORIST SUPPLY') < 0.75);
+  const items = [{ trip: { tripNumber: '624297', powerUnit: '4504', status: 'DEPSHIP' },
+    freightBills: [{ billNumber: 'B1', endZoneDescription: 'SPRINGFIELD, MA, 01104', actualDelivery: null }, { billNumber: 'B2', endZoneDescription: 'LYONS, GA, 30436', actualDelivery: '2026-10-05T10:00:00' }],
+    _manifest: { stops: [
+      { stopNumber: 2, action: 'DELIVER', customer: "JOHNSON'S WHOLESALE FLORIST LLC", city: 'LYONS', state: 'GA', pieces: 72, cubes: 107.09 },
+      { stopNumber: 6, action: 'DELIVER', customer: 'SPRINGFIELD FLORIST', city: 'SPRINGFIELD', state: 'MA', zip: '01104', pieces: 139, piecesText: '139 BOXES', cubes: 187.71 },
+      { stopNumber: 7, action: 'DELIVER', customer: 'BIG Y APPOINTMENT', city: 'SPRINGFIELD', state: 'MA', pieces: 87, cubes: 93.87 },
+    ] } }];
+  const etas = { 624297: { stops: [{ label: 'SPRINGFIELD, MA, 01104', zip: '01104', etaMs: Date.parse('2026-10-07T14:00:00Z'), miles: 300 }] } };
+  const r = customerStops(items, 'Springfield Florist', etas);
+  assert.equal(r.length, 1);
+  assert.deepEqual({ trip: r[0].trip, truck: r[0].truck, stop: r[0].stop, boxes: r[0].boxes, cubes: r[0].cubes, delivered: r[0].delivered }, { trip: '624297', truck: '4504', stop: 'delivery 5 of 6', boxes: '139 BOXES', cubes: 187.71, delivered: false });
+  assert.match(r[0].estimated_arrival, /Eastern$/);
+  const j = customerStops(items, "Johnson's Wholesale", etas)[0];
+  assert.equal(j.delivered, true); assert.equal(j.boxes, '72 boxes'); assert.equal(j.estimated_arrival, null);
+  assert.ok(!JSON.stringify(r).includes('BIG Y'), 'never other customers');
+});

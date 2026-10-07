@@ -44,7 +44,7 @@ Who you are: an automated assistant. If asked, say so plainly. You already said 
 {{call_context}}
 
 How to help:
-- To answer anything about a load, call lookup_load first. It searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
+- To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Only state facts lookup_load returns: status, current city and state, next stop, estimated arrival, appointments, which stops are delivered. Say times the way the tool gives them. Never guess a location or a time.
 - Drivers can tell you a stop is delivered (confirm_delivered) or report a problem — breakdown, delay, accident, reefer issue (report_problem). Repeat back the key details before saving.
 - Anything you can't answer, anything about rates, payments, detention, lumper, claims, appointments changes, or bank details: take a message with take_message (name, callback number, what they need) and say a dispatcher will call back. Never agree to change rates, payments, appointments or bank details.
@@ -70,6 +70,7 @@ function tools(base, transferNumber) {
       broker_load_number: { type: 'string', description: 'The broker\'s own load number from their rate confirmation (e.g. RXO 24261611, Red Lab 131963433) — brokers usually call with this' },
       truck_number: { type: 'string', description: 'Truck / tractor / unit number, e.g. 2607' },
       trailer_number: { type: 'string', description: 'Trailer number, e.g. 7131' },
+      customer_name: { type: 'string', description: 'A flower customer / receiver calling about THEIR delivery by business name, e.g. "Springfield Florist", "Johnson\'s Wholesale Florist"' },
     }),
     fn('take_message', 'Save a message for a human dispatcher (shows on the load and alerts dispatch).', {
       message: { type: 'string', description: 'What the caller needs, in English, one or two sentences' },
@@ -186,6 +187,52 @@ export function findLoad(items, { trip, bill, loadNumber, truck, trailer, phone 
   return null;
 }
 
+// ---- flower customers calling by name ----
+const STOPWORDS = new Set(['INC', 'LLC', 'LTD', 'CORP', 'CO', 'COMPANY', 'THE', 'AND', 'OF', 'DBA', 'C', 'O']);
+const nameWords = (x) => String(x || '').toUpperCase().replace(/&/g, ' AND ').replace(/[^A-Z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 1 && !STOPWORDS.has(w));
+// 0..1: how well a caller's name fits a customer name on a stop
+export function nameScore(said, onSheet) {
+  const a = nameWords(said); const b = nameWords(onSheet);
+  if (!a.length || !b.length) return 0;
+  const hit = a.filter((w) => b.some((x) => x === w || (w.length >= 4 && (x.startsWith(w) || w.startsWith(x))))).length;
+  return hit / a.length;
+}
+// Every stop on the board whose customer matches the name — with boxes, cubes and ETA for that stop only. Pure.
+export function customerStops(items, name, etasByTrip = {}) {
+  const out = [];
+  for (const it of items) {
+    const t = tripOf(it);
+    const trip = tripNo(it);
+    const eta = etasByTrip[trip];
+    const sheetStops = ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || ''));
+    // the sheet's STOP 1 is the LOAD at the terminal → delivery N = stop N - 1
+    const nums = ((it._manifest && it._manifest.stops) || []).map((x) => Number(x.stopNumber)).filter((n) => n > 0);
+    const lastStop = nums.length ? Math.max(...nums) : null;
+    const seen = new Set();
+    for (const st of sheetStops) {
+      const score = nameScore(name, st.customer);
+      if (score < 0.75) continue;
+      const city = cityOf(`${st.city || ''}, ${st.state || ''}`);
+      const leg = eta && eta.stops ? eta.stops.find((x) => (st.zip && x.zip === String(st.zip)) || cityOf(x.label).toUpperCase().startsWith(String(st.city || '').toUpperCase())) : null;
+      const bills = billsOf(it).filter((b) => cityOf(b.endZoneDescription).toUpperCase().startsWith(String(st.city || '').toUpperCase()));
+      const delivered = bills.length ? bills.every((b) => b.actualDelivery) : false;
+      seen.add(`${st.city}|${st.customer}`);
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, stop: st.stopNumber != null ? `delivery ${st.stopNumber - 1}${lastStop ? ` of ${lastStop - 1}` : ''}` : null, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, estimated_arrival: !delivered && leg ? fmt(leg.etaMs) : null, from: 'trip sheet' });
+    }
+    // TruckMate bills (no trip sheet, or names the sheet didn't have)
+    for (const b of billsOf(it)) {
+      const nm = (b.consignee && (b.consignee.name || b.consignee.clientName)) || b.billToName;
+      const score = Math.max(nameScore(name, nm), nameScore(name, b.billToName));
+      if (score < 0.75) continue;
+      const city = cityOf(b.endZoneDescription);
+      if ([...seen].some((k) => k.toUpperCase().startsWith(String(city.split(',')[0]).toUpperCase()))) continue;
+      const leg = eta && eta.stops ? eta.stops.find((x) => cityOf(x.label) === city) : null;
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: b.pieces != null ? `${b.pieces} boxes` : null, cubes: b.cubes != null ? b.cubes : null, appointment: null, delivered: !!b.actualDelivery, estimated_arrival: !b.actualDelivery && leg ? fmt(leg.etaMs) : null, from: 'TruckMate' });
+    }
+  }
+  return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 4).map(({ score, ...x }) => x);
+}
+
 export function initVoice(app, { requireAuth, db, comms = null, carriers = null, getBoard = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
@@ -229,6 +276,12 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
     try {
       const a = argsOf(req); const call = callOf(req);
       const meta = call.metadata || {};
+      if (a.customer_name && !a.trip_number && !a.bill_number && !a.broker_load_number && !a.truck_number && !a.trailer_number) {
+        const etas = ((await db.get(`taWatch:${site}`, {})).etas) || {};
+        const stops = customerStops(await items(), a.customer_name, etas);
+        if (!stops.length) return res.json({ found: false, say: `No active delivery found for "${a.customer_name}". Ask for the exact business name on their order, their city, or a bill / PO number — or take a message.` });
+        return res.json({ found: true, matched_by: 'customer name', share_only_these_stops: true, deliveries: stops, say: 'Tell the caller about THEIR stop only (boxes, cubes, ETA, delivered or not). Never read other stops.' });
+      }
       const hit = findLoad(await items(), { trip: a.trip_number || meta.trip, bill: a.bill_number || a.broker_load_number, loadNumber: a.broker_load_number, truck: a.truck_number, trailer: a.trailer_number, phone: callerPhone(call) });
       if (!hit) return res.json({ found: false, say: 'No active load matched. Ask the caller for the trip number or bill number, or take a message.' });
       const trip = tripNo(hit.item);
