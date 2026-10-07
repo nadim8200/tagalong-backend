@@ -62,7 +62,7 @@ export function slimItem(it, alerts = []) {
   };
 }
 
-export function initAssistant(app, { db, env = process.env, buildBoard, voice = null, outbound = null }) {
+export function initAssistant(app, { db, env = process.env, buildBoard, voice = null, outbound = null, flowerReport = null }) {
   const secret = () => String(env.ASSISTANT_READ_KEY || '').trim();   // a pasted trailing newline must not break it
   const enabled = () => secret().length >= 24;
   const site = (req) => String(req.query.site || 'florida-beauty');
@@ -134,6 +134,12 @@ export function initAssistant(app, { db, env = process.env, buildBoard, voice = 
       const rows = await outbound.make(date);
       send(res, { date, rows: rows.map(({ stops, ...r }) => ({ ...r, stops: stops.map((x) => ({ minutes: x.minutes, place: x.place, ongoing: x.ongoing })) })) });
     } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // The flower loads update as it would be emailed right now (rows only).
+  app.get('/assistant/flowers', guard, async (req, res) => {
+    if (!flowerReport) return res.status(503).json({ error: 'Flower report not set up.' });
+    try { const r = await flowerReport.make(); send(res, { subject: r.subject, counts: r.counts, rows: r.rows }); } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   // Recent Jarvis calls: who/which load, summary, and exactly what each lookup answered.
