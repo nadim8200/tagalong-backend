@@ -71,3 +71,31 @@ test('Jarvis: "Main Wholesale Pennsauken" caller hears the truck already passed 
   const c = customerStops([it], 'Main Wholesale Clifton', e)[0];
   assert.ok(!c.truck_already_passed && c.estimated_arrival, 'Clifton is still ahead with an ETA');
 });
+
+// Trip 624481: team leaving Miami for Kinston NC → South Windsor CT → Cranston RI → Rockland MA → Chelsea Market (5 shops).
+import { stopDwellMin } from '../watchtower.js';
+test('team out of Miami reaches Chelsea Thursday morning, not Wednesday afternoon', () => {
+  const G2 = { 28501: [35.26, -77.58], '06074': [41.83, -72.56], '02920': [41.77, -71.46], '02370': [42.13, -70.91], '02150': [42.39, -71.03] };
+  const now = Date.parse('2026-10-07T02:54:00Z');                     // Tue 10:54 PM Eastern
+  const b = (n, zone, pieces, who) => ({ billNumber: n, billToName: who, endZoneDescription: zone, pieces });
+  const it = { trip: { tripNumber: '624481', status: 'DEPSHIP', powerUnit: '2618', driver2: '7344' },
+    freightBills: [b('1', 'KINSTON, NC, 28501', 83, 'ALCOCK'), b('2', 'SOUTH WINDSOR, CT, 06074', 100, 'TERRA'), b('3', 'CRANSTON, RI, 02920', 230, 'CARBONE'), b('4', 'ROCKLAND, MA, 02370', 70, 'NEFM'),
+      ...['CARBONE CHELSEA', 'CUPP', 'DIRECT', 'KELLEY', 'RICCARDI'].map((w, i) => b(`5${i}`, 'CHELSEA, MA, 02150', 14, w))],
+    _samsara: { gpsAt: '2026-10-07T02:50:00Z', speedMph: 0, lat: 25.80, lng: -80.31, hos: { driveLeftMin: 555, shiftLeftMin: 700 } } };
+  const e = boardEtas({ trips: [it] }, { now, geo: (z) => (G2[z] ? { lat: G2[z][0], lng: G2[z][1] } : null), unitState: () => ({}) })['624481'];
+  const chelsea = e.stops.find((s) => s.zip === '02150');
+  const h = (chelsea.etaMs - now) / 3600000;
+  assert.ok(h > 30 && h < 33, `Chelsea in ${h.toFixed(1)} h (Thu ~5-7 AM)`);
+  assert.ok(stopDwellMin({ consignees: ['a', 'b', 'c', 'd', 'e'], pieces: 70 }) > stopDwellMin({ consignees: ['a'], pieces: 70 }), 'a 5-shop market takes longer');
+});
+
+test('trip sheet "drivers will leave at 20:30": ETAs start at departure, no late alert before it leaves', () => {
+  const now = Date.parse('2026-10-06T22:00:00Z');                     // 6 PM Eastern
+  const it = { trip: { tripNumber: '7', status: 'DEPSHIP', powerUnit: '1' }, freightBills: [{ billNumber: 'B', endZoneDescription: 'KINSTON, NC, 28501', pieces: 10, deliverBy: '2026-10-07T08:00:00', deliverByEnd: '2026-10-07T08:00:00', deliveryApptReq: 'True' }],
+    _manifest: { pickupAt: '2026-10-06T20:30', stops: [] }, _samsara: { gpsAt: '2026-10-06T21:59:00Z', speedMph: 0, lat: 25.80, lng: -80.31, hos: { driveLeftMin: 660, shiftLeftMin: 840 } } };
+  const c = { now, geo: () => ({ lat: 35.26, lng: -77.58 }), unitState: () => ({}) };
+  const e = boardEtas({ trips: [it] }, c)['7'];
+  assert.equal(e.leavesAt, Date.parse('2026-10-07T00:30:00Z'));
+  assert.ok(e.stops[0].etaMs - e.leavesAt > 13 * 3600000, 'clock starts at 20:30');
+  assert.deepEqual(evaluateBoard({ trips: [it] }, c).filter((a) => a.code === 'late-risk'), []);
+});

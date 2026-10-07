@@ -136,6 +136,8 @@ export function voiceFacts(item, eta) {
     moving: s.speedMph != null ? s.speedMph > 5 : null,
     next_stop: next ? `${next.customer ? `${next.customer}, ` : ''}${next.place}` : null,
     estimated_arrival_next_stop: leg ? fmt(leg.etaMs) : null,
+    eta_note: next && !leg ? 'No ETA available right now — do NOT estimate or guess a time. Say dispatch will call back with the ETA, and take a message.' : undefined,
+    truck_leaves_terminal_at: eta && eta.leavesAt ? fmt(eta.leavesAt) : undefined,
     miles_to_next_stop: leg ? leg.miles : null,
     appointment_next_stop: leg && leg.apptMs ? `${fmt(leg.apptMs)}${leg.apptFrom === 'truckmate-due' ? ' (due time, not a confirmed appointment)' : ''}` : null,
     stops_delivered: stops.filter((x) => x.delivered).map((x) => x.place),
@@ -246,7 +248,11 @@ export function customerStops(items, name, etasByTrip = {}) {
       out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: b.pieces != null ? `${b.pieces} boxes` : null, cubes: b.cubes != null ? b.cubes : null, appointment: null, delivered: !!b.actualDelivery, ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !b.actualDelivery && !passed && leg ? fmt(leg.etaMs) : null, from: 'TruckMate' });
     }
   }
-  return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 4).map(({ score, ...x }) => x);
+  return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 4).map(({ score, ...x }) => ({
+    ...x,
+    ...(!x.delivered && !x.truck_already_passed && !x.estimated_arrival ? { eta_note: 'No ETA available right now — do NOT estimate or guess a time. Say dispatch will call back with the ETA, and take a message.' } : {}),
+    ...(etasByTrip[x.trip] && etasByTrip[x.trip].leavesAt && !x.delivered ? { truck_leaves_terminal_at: fmt(etasByTrip[x.trip].leavesAt) } : {}),
+  }));
 }
 
 export function initVoice(app, { requireAuth, db, comms = null, carriers = null, getBoard = null, env = process.env, fetchFn = globalThis.fetch }) {
@@ -267,6 +273,7 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
   }
   const etaFor = async (trip) => { try { return ((await db.get(`taWatch:${site}`, {})).etas || {})[trip] || null; } catch { return null; } };
   const callTrip = new Map();   // call_id → trip found during the call
+  const callLookups = new Map(); // call_id → what lookup_load answered (kept on the call record)
 
   async function retell(path, { method = 'POST', body } = {}) {
     const r = await fetchFn(`${API}${path}`, { method, headers: { Authorization: `Bearer ${key()}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
@@ -291,6 +298,10 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
   app.post('/retell/fn/lookup_load', verified, async (req, res) => {
     try {
       const a = argsOf(req); const call = callOf(req);
+      const reply = (j) => {
+        if (call.call_id) callLookups.set(call.call_id, [...(callLookups.get(call.call_id) || []), { at: new Date().toISOString(), asked: a, answer: JSON.stringify(j).slice(0, 2500) }].slice(-6));
+        return res.json(j);
+      };
       const meta = call.metadata || {};
       // a business name put in any box is still a name (e.g. "Springfield Florist" as bill_number)
       const isName = (v) => v && /[A-Za-z]{3,}/.test(String(v)) && !/\d{3,}/.test(String(v));
@@ -304,24 +315,24 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
           const stops = customerStops([hit.item], name, { [trip]: await etaFor(trip) });
           if (stops.length) {
             if (call.call_id) callTrip.set(call.call_id, trip);
-            return res.json({ found: true, matched_by: `customer name on ${hit.by}`, share_only_these_stops: true, deliveries: stops, say: 'Tell the caller about THEIR stop only (boxes, cubes, ETA, delivered or not). Never read other stops. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.' });
+            return reply({ found: true, matched_by: `customer name on ${hit.by}`, share_only_these_stops: true, deliveries: stops, say: 'Tell the caller about THEIR stop only (boxes, cubes, ETA, delivered or not). Never read other stops. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.' });
           }
         }
       }
       if (name && !numbers) {
         const etas = ((await db.get(`taWatch:${site}`, {})).etas) || {};
         const stops = customerStops(await items(), name, etas);
-        if (!stops.length) return res.json({ found: false, say: `No active delivery found for "${name}". Ask for the exact business name on their order, their city, or a bill / PO number — or take a message.` });
-        return res.json({ found: true, matched_by: 'customer name', share_only_these_stops: true, deliveries: stops, say: 'Tell the caller about THEIR stop only (boxes, cubes, ETA, delivered or not). Never read other stops. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.' });
+        if (!stops.length) return reply({ found: false, say: `No active delivery found for "${name}". Ask for the exact business name on their order, their city, or a bill / PO number — or take a message.` });
+        return reply({ found: true, matched_by: 'customer name', share_only_these_stops: true, deliveries: stops, say: 'Tell the caller about THEIR stop only (boxes, cubes, ETA, delivered or not). Never read other stops. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.' });
       }
       const hit = findLoad(await items(), { trip: a.trip_number || meta.trip, bill: a.bill_number || a.broker_load_number, loadNumber: a.broker_load_number, truck: a.truck_number, trailer: a.trailer_number, phone: callerPhone(call) });
-      if (!hit) return res.json({ found: false, say: 'No active load matched. Ask the caller for the trip number or bill number, or take a message.' });
+      if (!hit) return reply({ found: false, say: 'No active load matched. Ask the caller for the trip number or bill number, or take a message.' });
       const trip = tripNo(hit.item);
       if (call.call_id) callTrip.set(call.call_id, trip);
       const facts = voiceFacts(hit.item, await etaFor(trip));
       const byNumber = /trip|bill|truck|trailer/.test(hit.by);
-      res.json({ found: true, matched_by: hit.by, caller_is: hit.role === 'driver' ? 'the driver of this load' : hit.role === 'contact' ? 'a contact listed on this load' : 'unknown — they gave a load number', ok_to_share: byNumber || !!hit.role, ...facts });
-    } catch (e) { res.json({ found: false, say: `Lookup failed (${e.message}). Take a message instead.` }); }
+      reply({ found: true, matched_by: hit.by, caller_is: hit.role === 'driver' ? 'the driver of this load' : hit.role === 'contact' ? 'a contact listed on this load' : 'unknown — they gave a load number', ok_to_share: byNumber || !!hit.role, ...facts });
+    } catch (e) { reply({ found: false, say: `Lookup failed (${e.message}). Take a message instead.` }); }
   });
 
   app.post('/retell/fn/take_message', verified, async (req, res) => {
@@ -385,6 +396,7 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
         summary: (call.call_analysis && call.call_analysis.call_summary) || null,
         transcript: String(call.transcript || '').slice(0, 6000),
         ended: call.disconnection_reason || null, by: (call.metadata && call.metadata.by) || null,
+        lookups: callLookups.get(call.call_id) || (done.find((c) => c.callId === call.call_id) || {}).lookups || [],
       };
       await db.update(callsKey, (cur) => [rec, ...(Array.isArray(cur) ? cur : []).filter((c) => c.callId !== rec.callId)].slice(0, 300), []);
       if (event === 'call_analyzed' || !done.some((c) => c.callId === rec.callId)) {
@@ -392,7 +404,7 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
         if (trip && comms && comms.log) await comms.log(site, trip, entry);
         else if (comms && comms.log && phone) await comms.log(site, null, entry);
       }
-      if (call.call_id) callTrip.delete(call.call_id);
+      if (call.call_id && event === 'call_analyzed') { callTrip.delete(call.call_id); callLookups.delete(call.call_id); }
     } catch (e) { console.warn('[voice] webhook:', e.message); }
   });
 

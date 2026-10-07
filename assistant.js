@@ -107,6 +107,9 @@ export function initAssistant(app, { db, env = process.env, buildBoard, voice = 
       }
       const item = slimItem(it, open(w).filter((a) => a.trip === n));
       if (it._manifest) item.sheetVsTruckMate = compareWithTruckMate(it._manifest, it).map((d) => d.msg);
+      const fmtEt = (ms) => (ms ? new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : null);
+      const e = (w.etas || {})[n];
+      item.etas = e ? { at: fmtEt(e.at), team: e.team, leavesAt: fmtEt(e.leavesAt), passed: (e.passed || []).map((x) => x.label), stops: (e.stops || []).map((x) => ({ stop: x.label, miles: x.miles, eta: fmtEt(x.etaMs) })) } : null;
       send(res, item);
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -120,6 +123,15 @@ export function initAssistant(app, { db, env = process.env, buildBoard, voice = 
       if (!hit) return res.status(404).json({ error: `No active load matches ${q}.` });
       const n = tripNo(hit.item);
       send(res, { matchedBy: hit.by, ...slimItem(hit.item, open(w).filter((a) => a.trip === n)) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Recent Jarvis calls: who/which load, summary, and exactly what each lookup answered.
+  app.get('/assistant/calls', guard, async (req, res) => {
+    try {
+      const calls = db && db.enabled ? await db.get(`taJarvisCalls:${site(req)}`, []) : [];
+      const n = Math.min(20, Number(req.query.n) || 5);
+      send(res, (Array.isArray(calls) ? calls : []).slice(0, n).map((c) => ({ ...c, transcript: String(c.transcript || '').slice(0, 3000) })));
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

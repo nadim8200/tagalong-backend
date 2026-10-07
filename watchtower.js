@@ -168,6 +168,7 @@ function tripFacts(item, now) {
     if (!key) continue;
     const st = stopMap.get(key) || { key, label, zip: zipOf(label) || zipOf(b.endZone), tz: STATE_TZ[stateOf(label)] || 'America/New_York', pieces: 0, bills: 0, delivered: true, apptMs: null, apptNeeded: false };
     st.pieces += num(b.pieces); st.bills += 1;
+    st.consignees = [...new Set([...(st.consignees || []), String(b.billToName || b.billNumber || '')])];
     if (!b.actualDelivery) st.delivered = false;
     // A REAL appointment is an exact time (deliverBy == deliverByEnd) or one
     // TruckMate flags as required/made. The default multi-day window on flower
@@ -316,8 +317,19 @@ export function passedCount(ordered, pts, at, { awayMi = 15, marginMi = 10 } = {
   return k;
 }
 
+// Time on the dock: unloading grows with boxes, and every extra consignee at the
+// same market (e.g. 5 shops at Chelsea Market) is another check-in and count.
+export function stopDwellMin(st) {
+  const extra = Math.max(0, ((st.customers && st.customers.length) || (st.consignees && st.consignees.length) || 1) - 1);
+  return Math.min(120, 15 + 10 * extra + Math.min(45, (Number(st.pieces) || 0) / 10));
+}
+// A team keeps rolling, but still stops for fuel and the driver swap: ~15 min every 8 hours of driving.
+const teamStopsH = (miles) => Math.floor(miles / CRUISE_MPH / 8) * 0.25;
+
 function routeEtas(f, ctx) {
-  if (notStarted(f.status, f, ctx.now) || !f.live || !f.gpsFresh || f.live.lat == null) return null;
+  if (notStartedCode(f.status) || !f.live || !f.gpsFresh || f.live.lat == null) return null;
+  // trip sheet says the team leaves later ("drivers will leave at 20:30") → the clock starts then
+  const start = f.pickupAtMs && f.pickupAtMs > ctx.now ? f.pickupAtMs : ctx.now;
   const open = f.stops.filter((st) => !st.delivered);
   if (!open.length) return null;
   const pts = new Map();
@@ -336,14 +348,16 @@ function routeEtas(f, ctx) {
   const hos = f.live.hos || {};
   const restDoneMin = (hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stoppedMin) ? f.stoppedMin : 0;
   const out = [];
-  let miles = 0; let at = { lat: f.live.lat, lng: f.live.lng };
+  let miles = 0; let dock = 0; let at = { lat: f.live.lat, lng: f.live.lng };
   ordered.forEach((st, i) => {
     const g = pts.get(st.key);
     const road = ctx.roadMiles ? ctx.roadMiles(at, g) : null;      // real driving miles when known
     miles += road != null ? road : haversineMi(at.lat, at.lng, g.lat, g.lng) * 1.2;
     at = g;
-    const eta = miles > 0 ? estimateArrival(miles, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, partner: f.live.hos2 || null, restDoneMin, now: ctx.now }) : ctx.now;
-    out.push({ stop: st, miles, etaMs: (eta || ctx.now) + i * 30 * MIN, stopsBefore: i });
+    const eta = miles > 0 ? estimateArrival(miles, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, partner: f.live.hos2 || null, restDoneMin, now: start }) : start;
+    const fuel = f.team ? teamStopsH(miles) * 60 * MIN : 0;
+    out.push({ stop: st, miles, etaMs: (eta || start) + fuel + dock * MIN, stopsBefore: i, leavesAt: start > ctx.now ? start : null });
+    dock += stopDwellMin(st);                                    // unloading here delays every later stop
   });
   out.guess = hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stopStartUnknown;
   out.passed = passed;
@@ -387,6 +401,7 @@ const RULES = [
     };
   },
   function lateRisk(f, ctx) {
+    if (notStarted(f.status, f, ctx.now)) return null;          // hasn't left yet — the ETA card still shows it
     const route = routeEtas(f, ctx);
     if (!route) return null;
     const hos = (f.live && f.live.hos) || {};
@@ -654,6 +669,7 @@ export function boardEtas(board, ctxIn) {
     out[f.trip] = {
       at: ctx.now, team: f.team, guess: !!route.guess,
       stops: route.map((r) => ({ key: r.stop.key, zip: r.stop.zip || null, label: r.stop.label, miles: Math.round(r.miles), etaMs: r.etaMs, apptMs: r.stop.apptMs ?? null, apptFrom: r.stop.apptFrom || null })),
+      leavesAt: route[0] ? route[0].leavesAt : null,
       passed: (route.passed || []).map((st) => ({ key: st.key, zip: st.zip || null, label: st.label })),
     };
   }

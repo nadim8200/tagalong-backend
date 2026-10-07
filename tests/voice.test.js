@@ -203,3 +203,10 @@ test('a customer name together with a trip number answers for THAT customer stop
   assert.equal(out.deliveries[0].customer, 'MAIN WHOLESALE FLORIST PENNSAUKEN LLC.');
   assert.equal(out.deliveries[0].boxes, '135 boxes');
 });
+
+test('no ETA → Jarvis is told not to guess one', () => {
+  const items = [{ trip: { tripNumber: '624481', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M1', endZoneDescription: 'CHELSEA, MA, 02150' }], _manifest: { stops: [{ stopNumber: 6, action: 'DELIVER', customer: 'CHELSEA MARKET - RICCARDI WHOLESALE', city: 'CHELSEA', state: 'MA', pieces: 10 }] } }];
+  const r = customerStops(items, 'Riccardi', {})[0];
+  assert.equal(r.estimated_arrival, null);
+  assert.match(r.eta_note, /do NOT estimate or guess/);
+});
