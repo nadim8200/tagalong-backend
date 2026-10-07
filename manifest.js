@@ -157,7 +157,7 @@ const SORT_SCHEMA = obj({
     file: { type: 'integer' }, page: { type: 'integer' },
     type: { type: 'string', enum: ['manifest', 'manifest_continuation', 'driver_instructions', 'loading_sheet', 'rate_confirmation', 'carrier_confirmation', 'email', 'bill_of_lading', 'packing_slip', 'shipping_ticket', 'proof_of_delivery', 'driver_id', 'invoice', 'shipment_notice', 'other'] },
     tripNumber: { ...str, description: 'Only for a manifest page: the TRIP NUMBER #.' },
-    rcBill: { ...str, description: 'Only for a rate confirmation page: the FBF barcode label text after "RC-" (e.g. label "RC-B180364" → "B180364"). Null if no label.' },
+    rcBill: { ...str, description: 'Only for a rate confirmation page: the FBF barcode sticker "RC-…" (often small, near a corner or printed sideways under a barcode, letters spaced like "R C - B 1 8 0 3 6 4"). Return what follows "RC-" with no spaces, e.g. "B180364". Null if no sticker.' },
     pageOf: { ...int, description: 'Only for a rate confirmation page: N from "Page N of M" if printed, else null.' },
     pageTotal: { ...int, description: 'Only for a rate confirmation page: M from "Page N of M" if printed, else null.' },
     docKey: { ...str, description: 'Only for a rate confirmation page: the broker name + its load / confirmation / pro number, e.g. "RXO 24261611" — the same on every page of one rate con.' },
@@ -561,25 +561,48 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     }
     return groups;
   }
-  // "B0180364" = "B180364"
-  const billKey = (x) => { const t = String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); const m = t.match(/^([A-Z]*)0*(\d+)$/); return m ? m[1] + m[2] : t; };
-  // Which load a rate con belongs to: FBF bill label, then broker load / refs on a trip sheet, then the truck.
-  function matchRateCon(rc, bill, board, sheets) {
-    const byBill = new Map();
-    for (const [trip, it] of board) for (const b of (it.freightBills || it.orders || (it.trip || {}).freightBills || [])) if (b && b.billNumber) byBill.set(billKey(b.billNumber), trip);
-    const bk = billKey(bill || rc.fbfBillNumber);
-    if (bk && byBill.has(bk)) return { trip: byBill.get(bk), matchedBy: `bill ${bill || rc.fbfBillNumber}` };
-    const refs = [rc.loadNumber, ...(rc.referenceNumbers || [])].map((x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '')).filter((x) => x.length >= 5);
+  // "RC-B0180364", "B 1 8 0 3 6 4", "B180364" → "B180364"
+  const billKey = (x) => { const t = String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/^RC(?=[A-Z]\d)/, ''); const m = t.match(/^([A-Z]*)0*(\d+)$/); return m ? m[1] + m[2] : t; };
+  const cityKey2 = (x) => norm(String(x || '').split(',')[0]).replace(/^SAINT /, 'ST ').replace(/^FORT /, 'FT ');
+  // Which load a rate con belongs to — the way a dispatcher would check it:
+  //  1. the FBF "RC-" label = the bill number (exact)
+  //  2. the broker's load / PO / reference numbers inside TruckMate's bills (trace numbers)
+  //  3. the truck number, narrowed by where it delivers / picks up
+  //  4. pickup city → delivery city when only one active load runs that lane
+  function matchRateCon(rc, labels, board, sheets) {
+    const items = [...board];
+    const billsOf2 = (it) => it.freightBills || it.orders || (it.trip || {}).freightBills || [];
+    for (const lab of labels.filter(Boolean)) {
+      const bk = billKey(lab);
+      const hit = items.find(([, it]) => billsOf2(it).some((b) => b && billKey(b.billNumber) === bk));
+      if (hit) return { trip: hit[0], matchedBy: `bill ${billsOf2(hit[1]).find((b) => b && billKey(b.billNumber) === bk).billNumber}` };
+    }
+    const stopRefs = [...(rc.pickups || []), ...(rc.deliveries || [])].map((x) => x && x.refs);
+    const refs = [...new Set([rc.loadNumber, ...(rc.referenceNumbers || []), ...stopRefs].flatMap((x) => String(x || '').toUpperCase().split(/[^A-Z0-9]+/)).filter((x) => x.length >= 5 && /\d{4}/.test(x)))];
     if (refs.length) {
+      const hits = items.filter(([, it]) => { const blob = ` ${JSON.stringify(billsOf2(it)).toUpperCase().replace(/[^A-Z0-9]+/g, ' ')} `; return refs.some((r) => blob.includes(` ${r} `)); });
+      if (hits.length === 1) return { trip: hits[0][0], matchedBy: `reference on the bill (${refs.find((r) => ` ${JSON.stringify(billsOf2(hits[0][1])).toUpperCase().replace(/[^A-Z0-9]+/g, ' ')} `.includes(` ${r} `))})` };
       for (const sh of sheets) {
-        const toks = JSON.stringify((sh.stops || []).map((x) => x.references || [])).toUpperCase().replace(/[^A-Z0-9]+/g, ' ');
-        if (refs.some((r) => toks.includes(` ${r} `) || toks.includes(r))) return { trip: String(sh.tripNumber), matchedBy: `reference ${rc.loadNumber || refs[0]}` };
+        const toks = ` ${JSON.stringify((sh.stops || []).map((x) => x.references || [])).toUpperCase().replace(/[^A-Z0-9]+/g, ' ')} `;
+        const r = refs.find((x) => toks.includes(` ${x} `));
+        if (r) return { trip: String(sh.tripNumber), matchedBy: `reference ${r} on the trip sheet` };
       }
     }
-    const truck = norm(rc.truckNumber);
+    const dropCities = (rc.deliveries || []).map((d) => cityKey2(d && d.city)).filter(Boolean);
+    const pickCities = (rc.pickups || []).map((d) => cityKey2(d && d.city)).filter(Boolean);
+    const tripCities = (it) => { const t = it.trip || it; return { to: new Set([cityKey2(t.destZoneDesc), ...billsOf2(it).map((b) => cityKey2(b.endZoneDescription))].filter(Boolean)), from: cityKey2(t.origZoneDesc) }; };
+    const fits = (it) => { const c = tripCities(it); return dropCities.some((x) => c.to.has(x)) || pickCities.includes(c.from); };
+    const active = items.filter(([, it]) => !/^(DELV|COMPL|CANC|VOID)/i.test(String((it.trip || it).status)));
+    const truck = norm(rc.truckNumber).replace(/^(TR|TRK|TRUCK|UNIT)/, '');
     if (truck) {
-      const hits = [...board].filter(([, it]) => norm((it.trip || it).powerUnit) === truck && !/^(DELV|COMPL|CANC)/i.test(String((it.trip || it).status)));
-      if (hits.length === 1) return { trip: hits[0][0], matchedBy: `truck ${rc.truckNumber}` };
+      const hits = active.filter(([, it]) => norm((it.trip || it).powerUnit) === truck);
+      const near = hits.filter(([, it]) => fits(it));
+      if (near.length === 1) return { trip: near[0][0], matchedBy: `truck ${truck} + route` };
+      if (hits.length === 1 && (!dropCities.length || fits(hits[0][1]))) return { trip: hits[0][0], matchedBy: `truck ${truck}` };
+    }
+    if (dropCities.length && pickCities.length) {
+      const lane = active.filter(([, it]) => { const c = tripCities(it); return dropCities.some((x) => c.to.has(x)) && pickCities.includes(c.from); });
+      if (lane.length === 1) return { trip: lane[0][0], matchedBy: 'route (pickup → delivery city)' };
     }
     return null;
   }
@@ -595,8 +618,8 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     const out = [];
     for (const { g, rc } of read) {
       const docIds = g.units.map((u) => docOf(u.file, u.page)).filter(Boolean);
-      const m = matchRateCon(rc, g.rcBill, board, sheets);
-      const record = { ...rc, fbfBillNumber: rc.fbfBillNumber || g.rcBill || null, filename: `${g.units[0].filename || 'packet'} · page${g.units.length > 1 ? 's' : ''} ${g.units[0].page}${g.units.length > 1 ? `–${g.units[g.units.length - 1].page}` : ''}`, pageCount: g.units.length, uploadedAt: now, uploadedBy: by, source: 'packet' };
+      const m = matchRateCon(rc, [g.rcBill, rc.fbfBillNumber], board, sheets);
+      const record = { ...rc, fbfBillNumber: (rc.fbfBillNumber || g.rcBill) ? billKey(rc.fbfBillNumber || g.rcBill) : null, filename: `${g.units[0].filename || 'packet'} · page${g.units.length > 1 ? 's' : ''} ${g.units[0].page}${g.units.length > 1 ? `–${g.units[g.units.length - 1].page}` : ''}`, pageCount: g.units.length, uploadedAt: now, uploadedBy: by, source: 'packet' };
       if (m) {
         if (docs && docs.enabled && docs.retypeDocs) { try { const v = await docs.retypeDocs({ site, ids: docIds, kind: 'ratecon', trip: m.trip }); record.docIds = docIds; record.version = v; } catch (e) { record.docError = e.message; } } // eslint-disable-line no-await-in-loop
         record.matchedBy = m.matchedBy;
@@ -612,7 +635,29 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     return out;
   }
 
+  // Waiting rate cons are re-checked against the current board (new matching
+  // rules, loads that appeared since) and attach themselves when one fits.
+  async function rematchRateCons(site) {
+    const list = (await db.get(pendingKey(site), [])) || [];
+    if (!list.length || !ratecon) return 0;
+    const board = await boardIndex(site);
+    const sheets = Object.values((await db.get(storeKey(site), {})) || {});
+    let n = 0;
+    for (const { id, record } of list) {
+      const m = matchRateCon(record, [record.fbfBillNumber], board, sheets);
+      if (!m) continue;
+      const rec = { ...record, matchedBy: m.matchedBy };
+      delete rec.pendingId;
+      if (docs && docs.enabled && docs.retypeDocs && (rec.docIds || []).length) rec.version = await docs.retypeDocs({ site, ids: rec.docIds, kind: 'ratecon', trip: m.trip }); // eslint-disable-line no-await-in-loop
+      await ratecon.save(site, m.trip, rec); // eslint-disable-line no-await-in-loop
+      await db.update(pendingKey(site), (cur) => (Array.isArray(cur) ? cur : []).filter((x) => x.id !== id), []); // eslint-disable-line no-await-in-loop
+      n += 1;
+    }
+    return n;
+  }
+
   app.get('/truckmate/ratecons/pending', requireAuth, async (req, res) => {
+    try { await rematchRateCons(siteOf(req)); } catch (e) { console.warn('[manifest] rematch rate cons:', e.message); }
     try { res.json(((await db.get(pendingKey(siteOf(req)), [])) || []).map(({ id, record }) => ({ id, broker: record.broker, loadNumber: record.loadNumber, bill: record.fbfBillNumber, truck: record.truckNumber, summary: record.summary, filename: record.filename, uploadedAt: record.uploadedAt }))); }
     catch (e) { res.status(500).json({ error: e.message }); }
   });

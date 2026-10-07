@@ -35,7 +35,7 @@ const PROMPT = [
   '  "summary": string',
   '}',
   '"contacts": EVERY person, phone and email on the document — the broker rep who booked it, after-hours / 24-7 lines, tracking and check-call contacts, billing / paperwork emails, and the shipper and receiver phones from the stop blocks. Copy numbers and emails exactly; never invent one. Skip Florida Beauty\'s own numbers (the carrier block).',
-  '"fbfBillNumber": FBF stamps a barcode label like "RC-B180364" or "RC-T085286" on its copy — return what follows "RC-" (e.g. "B180364"). Null if there is no RC- label.',
+  '"fbfBillNumber": FBF sticks a small barcode label "RC-…" on its copy (near a corner or sideways under a barcode; the letters may be spaced like "R C - B 1 8 0 3 6 4"). Return what follows "RC-" with no spaces, e.g. "B180364" or "T085286". Null if there is no RC- label.',
   '"truckNumber" / "trailerNumber": the carrier truck and trailer if printed or handwritten (FBF often writes the truck number, e.g. "2402", or "TR 2211", at the top). Null if absent.',
   '"specialInstructions": every must-follow requirement for the driver or dispatcher, from ALL sections — customer requirements, shipper / receiver / warehouse notes, lane messages, dispatch notes, freight requirements, tracking apps, appointment/FCFS rules, check-in steps, lumper/pallet exchange, temperature/continuous, load locks/bars, seals, PODs and paperwork, no-touch, detention, late/OTIF penalties, TONU. One instruction per item, quoting the document. Do not repeat the same rule twice.',
   '"handwrittenNotes": everything written by hand on the pages, transcribed (e.g. "$75 bonus for short trip", "No release", "P/U 10/6 @ 10AM", "Part #1", "-10F").',
