@@ -366,6 +366,13 @@ function routeEtas(f, ctx) {
   return out;
 }
 
+// A load out of the Miami yard headed out of state — the one the "no unauthorized
+// stops leaving Florida" rule is about (not Ocala → Mebane broker loads, not Pierson → Bartow).
+function leavingFlorida(f) {
+  if (!/MIAMI/i.test(String(f.origin || ''))) return false;
+  return f.stops.some((s2) => !s2.delivered && stateOf(s2.label) && stateOf(s2.label) !== 'FL');
+}
+
 // ---- the checks. Each returns an alert draft or null. ----
 // ctx: { now, geo(zip) → {lat,lng}|null|undefined, unitState }
 const RULES = [
@@ -554,7 +561,7 @@ const RULES = [
     const l = f.live;
     if (!isRolling(f.status) || !l || !f.gpsFresh || !f.stoppedMin || notStarted(f.status, f, ctx.now)) return null;
     const mins = f.stoppedMin;
-    if (inFlorida(l) && mins >= 20) return null;                 // stops in Florida: unscheduledStop covers them
+    if (leavingFlorida(f) && inFlorida(l) && mins >= 20) return null;   // Miami outbound still in Florida: unscheduledStop covers it
     // Resting = the ELD says off duty / sleeper (or the driver is out of hours).
     // Not resting = on duty or "driving" while parked — that's the one to chase.
     const duty = String((l.hos && l.hos.status) || '');
@@ -590,7 +597,7 @@ const RULES = [
   // any unauthorized stops"). A truck stopped 20+ minutes in Florida after leaving the
   // yard — not at the yard and not at a stop on its trip — is flagged, rest or not.
   function unscheduledStop(f, ctx) {
-    if (f.oc) return null;
+    if (f.oc || !leavingFlorida(f)) return null;
     const l = f.live;
     if (!isRolling(f.status) || !l || !f.gpsFresh || l.lat == null || !f.stoppedMin || f.stoppedMin < 20) return null;
     if (!inFlorida(l)) return null;
@@ -648,6 +655,7 @@ export const MIAMI_TERMINAL = { lat: 25.795, lng: -80.33 };
 // Inside Florida (rough border: Georgia line ~30.7°N, Alabama line 31°N west of the Apalachicola).
 export const inFlorida = (p) => !!p && p.lat != null && p.lng > -87.65 && p.lng < -79.8 && (p.lat < 30.71 || (p.lat < 31.0 && p.lng < -85.0));
 
+const TRUCK_CODES = new Set(['hos-low', 'stopped', 'unscheduled-stop', 'check-engine', 'tracking-lost', 'reefer-off', 'reefer-temp', 'reefer-setpoint']);
 export function evaluateBoard(board, ctxIn) {
   const ctx = { origin: MIAMI_TERMINAL, unitState: () => null, ...ctxIn };
   const out = [];
@@ -658,9 +666,22 @@ export function evaluateBoard(board, ctxIn) {
       detail: 'The board is not updating — check the TruckMate connector before trusting anything else.',
     });
   }
-  for (const item of (board && board.trips) || []) {
-    const f = tripFacts(item, ctx.now);
-    if (!f.trip || isDone(f.status)) continue;
+  // A truck still attached to old, unclosed loads in TruckMate (truck 930 on 624128,
+  // 624195 and 624500) would raise the same truck alert once per load. Truck/driver
+  // alerts go only on the truck's current load: the newest one that is rolling.
+  const facts = ((board && board.trips) || []).map((item) => tripFacts(item, ctx.now)).filter((f) => f.trip && !isDone(f.status));
+  const current = new Map();
+  const rank = (f) => [(isRolling(f.status) || /^arr(cons|ship)/i.test(String(f.status || ''))) ? 1 : 0, Number(String(f.trip).replace(/\D/g, '')) || 0];
+  for (const f of facts) {
+    const u = String(f.unit || '').trim().toUpperCase();
+    if (!u || f.oc) continue;
+    const cur = current.get(u);
+    const a = rank(f); const b = cur ? rank(cur) : null;
+    if (!cur || a[0] > b[0] || (a[0] === b[0] && a[1] > b[1])) current.set(u, f);
+  }
+  for (const f of facts) {
+    const u = String(f.unit || '').trim().toUpperCase();
+    const notCurrent = !!u && !f.oc && current.get(u) !== f;
     const us = ctx.unitState ? ctx.unitState(f.unit) : null;
     f.stoppedMin = us && us.stoppedSince ? (ctx.now - us.stoppedSince) / MIN : 0;
     f.stopStartUnknown = !!(us && us.stopStartUnknown);
@@ -668,6 +689,7 @@ export function evaluateBoard(board, ctxIn) {
       let a = null;
       try { a = rule(f, ctx); } catch { a = null; }
       if (!a) continue;
+      if (notCurrent && TRUCK_CODES.has(a.code)) continue;
       out.push({
         ...a,
         id: `${a.code}:${f.trip}${a.key ? `:${a.key}` : ''}`,

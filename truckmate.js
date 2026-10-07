@@ -8,6 +8,7 @@
 // working config.
 // ---------------------------------------------------------------
 import { initFinished } from './finished.js';
+import { sendMail, mailConfig } from './mailer.js';
 import { compareWithTruckMate, keyStops, linkSheetStops } from './manifest.js';
 import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit, trailerLocations } from './samsara.js';
 import { buildFleet, updateStill, withStill } from './fleetmap.js';
@@ -484,7 +485,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
       return s;
     }, { items: [], seen: {} });
   }
-  const finished = initFinished(app, { requireAuth, db, onFinished, recordFinished });
+  const finished = initFinished(app, { requireAuth, db, onFinished, recordFinished, env, mailer: { ready: () => mailConfig(env).ready, send: (m) => sendMail(m, { env }) } });
 
   const ACTIVE_TTL_MS = 36 * 60 * 60 * 1000;
   async function updateActiveBoard(site, trips) {
@@ -633,7 +634,9 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
       try { await fn(site, trips); } catch (e) { console.warn('[truckmate] overlay:', e.message); } // eslint-disable-line no-await-in-loop
     }
     // finished loads (delivered, every / last stop visited, truck moved on, or marked by a dispatcher) leave the board
-    try { await finished.sweep(site, trips, store.trips || {}); } catch (e) { console.warn('[truckmate] finished:', e.message); }
+    // …and loads whose truck / trailer already moved on to a newer load go to the "Not closed" list
+    let unclosed = [];
+    try { unclosed = (await finished.sweep(site, trips, store.trips || {})).unclosed || []; } catch (e) { console.warn('[truckmate] finished:', e.message); }
     // Detect NEW truck→load assignments: a truck's power unit appearing on an
     // active trip it wasn't on before. Each is announced once (state persists),
     // so the dispatcher gets a single pop-up and AI dispatching "starts now".
@@ -677,6 +680,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
       site,
       count: trips.length,
       trips,
+      unclosed,
       assignEvents,
       receivedAt: latest ? latest.receivedAt : null,
       ageMinutes: latest ? Math.round((Date.now() - Date.parse(latest.receivedAt)) / 60000) : null,

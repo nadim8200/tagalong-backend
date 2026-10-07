@@ -92,7 +92,7 @@ export function initAssistant(app, { db, env = process.env, buildBoard, voice = 
         const t = tripOf(it); const n = tripNo(it); const mine = al.filter((a) => a.trip === n);
         return { trip: n, status: t.status, truck: t.powerUnit, trailer: t.trailer, from: t.origZoneDesc, to: t.destZoneDesc, oc: !!it._oc, sheet: !!it._manifest, rateCon: !!it._ratecon, breakdown: !!(it._breakdown && it._breakdown.on), location: (it._samsara && it._samsara.location) || null, critical: mine.filter((a) => a.severity === 'critical').length, warnings: mine.filter((a) => a.severity !== 'critical').length };
       });
-      send(res, { receivedAt: b.receivedAt || null, ageMinutes: b.ageMinutes ?? null, count: trips.length, critical: al.filter((a) => a.severity === 'critical').length, warnings: al.filter((a) => a.severity !== 'critical').length, trips });
+      send(res, { receivedAt: b.receivedAt || null, ageMinutes: b.ageMinutes ?? null, count: trips.length, critical: al.filter((a) => a.severity === 'critical').length, warnings: al.filter((a) => a.severity !== 'critical').length, trips, notClosed: (b.unclosed || []).map((u) => ({ trip: u.trip, by: u.by, unit: u.unit, newTrip: u.newTrip, lane: u.lane, since: u.since, emailed: u.noticeAt || null })) });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

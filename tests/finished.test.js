@@ -17,17 +17,17 @@ test('finished on facts: TruckMate delivered, every bill, every / last stop geof
   assert.equal(finishReason(T('9', 'DEPSHIP', { unit: 'OC1016', more: { _oc: {} } }), [T('9', 'DEPSHIP', { unit: 'OC1016' }), T('99', 'DEPSHIP', { unit: 'OC1016' })]), null, 'never for outside-carrier codes');
 });
 
-test('sweep: sure ones leave the board (+ Delivered + rundown), hints stay with a suggestion; mark / reopen', async () => {
+test('sweep: sure ones leave the board (+ Delivered + rundown), moved-on loads go to Not closed; mark / reopen', async () => {
   const m = new Map();
   const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
   const done = []; const recorded = [];
   const routes = {};
-  const app = { post: (p, ...h) => { routes[p] = h.at(-1); } };
+  const app = { post: (p, ...h) => { routes[p] = h.at(-1); }, get: () => {}, put: () => {} };
   const f = initFinished(app, { requireAuth: () => {}, db, onFinished: (site, rec, reason) => done.push(reason), recordFinished: async (site, it, reason) => recorded.push(reason) });
   const items = [T('1', 'DELVD'), T('624326', 'DEPSHIP'), T('624407', 'DEPSHIP'), T('5', 'DEPSHIP', { unit: '9' })];
-  await f.sweep('fb', items);
-  assert.deepEqual(items.map((i) => i.trip.tripNumber), ['624326', '624407', '5']);
-  assert.equal(items[0]._finishHint, 'Probably finished — truck 2401 moved on to trip 624407');
+  const r1 = await f.sweep('fb', items);
+  assert.deepEqual(items.map((i) => i.trip.tripNumber), ['624407', '5']);
+  assert.deepEqual(r1.unclosed.map((u) => [u.trip, u.by, u.unit, u.newTrip]), [['624326', 'truck', '2401', '624407']]);
   assert.deepEqual(done, ['TruckMate: delivered']); assert.deepEqual(recorded, ['TruckMate: delivered']);
   const res = { json() {}, status() { return this; } };
   await routes['/truckmate/trips/:trip/finish']({ params: { trip: '5' }, body: { reason: 'carrier confirmed by phone' }, query: { site: 'fb' }, user: { name: 'Ana' } }, res);
@@ -38,4 +38,38 @@ test('sweep: sure ones leave the board (+ Delivered + rundown), hints stay with 
   const back = [T('1', 'DELVD')];
   await f.sweep('fb', back);
   assert.equal(back.length, 1, 'reopened by a person → not auto-finished again');
+});
+
+import { movedOn } from '../finished.js';
+test('not closed: truck or trailer on a newer load; emails dispatch once, then a daily reminder; drops off when TruckMate closes it', async () => {
+  const L = (n, status, unit, trailer) => ({ trip: { tripNumber: n, status, powerUnit: unit, trailer, origZoneDesc: 'BEDFORD, NH, 03110', destZoneDesc: 'HIALEAH, FL, 33018' }, freightBills: [{ billNumber: `B${n}`, endZoneDescription: 'HIALEAH, FL, 33018' }] });
+  assert.equal(movedOn(L('624195', 'DEPSHIP', '930', '7317'), [L('624195', 'DEPSHIP', '930', '7317'), L('624500', 'DISP', '930', '7400')]), null, 'only assigned, not picked up yet');
+  assert.equal(movedOn(L('624195', 'DEPSHIP', '', '7317'), [L('624195', 'DEPSHIP', '', '7317'), L('624500', 'ARRSHIP', '931', '7317')]).by, 'trailer');
+  assert.equal(movedOn(L('624494', 'DEPSHIP', '2206', '7296'), [L('624494', 'DEPSHIP', '2206', '7296'), L('624496', 'DEPSHIP', '2619', '7296')]), null, 'its truck is still on it — a trailer swap, not a forgotten load');
+  const at = (L0, iso) => ({ ...L0, _times: { statusHistory: [{ status: 'DEPSHIP', at: iso }] } });
+  const a = at(L('624188', 'ARRCONS', '2208', '7001'), '2026-10-06T22:00:00Z'); const b = at(L('624190', 'ARRCONS', '2208', '7001'), '2026-10-06T23:00:00Z');
+  assert.equal(movedOn(a, [a, b]), null, 'two trips picked up together ride the same truck');
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const mails = [];
+  let clock = Date.parse('2026-10-07T13:00:00Z');                              // 9 AM Eastern
+  const app = { post: () => {}, get: () => {}, put: () => {} };
+  const f = initFinished(app, { requireAuth: () => {}, db, mailer: { ready: () => true, send: async (x) => mails.push(x) }, env: { UNCLOSED_EMAILS: 'off' }, now: () => clock });
+  await db.set('taUnclosedCfg', { to: ['dispatch@floridabeauty.us'], time: '08:00' });
+  const board = () => [L('624128', 'DEPSHIP', '930', '7309'), L('624195', 'DEPSHIP', '930', '7317'), L('624600', 'DEPSHIP', '930', '7320')];
+  const items = board();
+  const r = await f.sweep('florida-beauty', items, { 624128: {}, 624195: {}, 624600: {} });
+  assert.deepEqual(items.map((i) => i.trip.tripNumber), ['624600'], 'only the current load stays on the board');
+  assert.equal(r.unclosed.length, 2);
+  await f.notify('florida-beauty');
+  assert.equal(mails.length, 1); assert.match(mails[0].subject, /2 loads not closed in TruckMate/);
+  assert.match(mails[0].html, /truck 930 is now on trip 624600, but trip 624128 .* is still open in TruckMate/);
+  await f.notify('florida-beauty');
+  assert.equal(mails.length, 1, 'no repeat the same day');
+  clock += 24 * 3600000;                                                       // next morning
+  await f.notify('florida-beauty');
+  assert.equal(mails.length, 2); assert.match(mails[1].subject, /^Reminder: 2 loads still not closed/);
+  // TruckMate closes 624128 → it leaves the list
+  await f.sweep('florida-beauty', [L('624195', 'DEPSHIP', '930', '7317'), L('624600', 'DEPSHIP', '930', '7320')], { 624195: {}, 624600: {} });
+  assert.deepEqual(Object.keys(await db.get('taUnclosed:florida-beauty', {})), ['624195']);
 });

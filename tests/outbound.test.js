@@ -62,3 +62,21 @@ test('live alert: stopped 20+ min in Florida after leaving the yard, not a trip 
   assert.equal(run(25, { lat: 25.796, lng: -80.331 }).find((x) => x.code === 'unscheduled-stop'), undefined);   // still in the yard
   assert.equal(run(65).filter((x) => x.code === 'stopped').length, 0);                                         // no double alert
 });
+
+test('no Florida-stop alert for loads that are not Miami outbound (Ocala → Mebane, Pierson → Bartow)', () => {
+  const now = at('2026-10-07T02:00:00Z');
+  const live = { lat: 28.06, lng: -82.30, gpsAt: '2026-10-07T01:59:00Z', speedMph: 0, location: 'Thonotosassa, FL', hos: { status: 'offDuty', driveLeftMin: 600 } };
+  const trip = (n, orig, dest) => ({ trip: { tripNumber: n, status: 'DEPSHIP', powerUnit: n, origZoneDesc: orig }, freightBills: [{ billNumber: `B${n}`, endZoneDescription: dest }], _samsara: live });
+  const alerts = evaluateBoard({ trips: [trip('624449', 'OCALA, FL, 34470', 'MEBANE, NC, 27302'), trip('624455', 'PIERSON, FL, 32180', 'BARTOW, FL, 33830')] }, { now, geo: () => null, unitState: () => ({ stoppedSince: now - 325 * 60000 }) });
+  assert.equal(alerts.filter((a) => a.code === 'unscheduled-stop').length, 0);
+});
+
+test('a truck on several unclosed loads gets its truck alerts once — on its current load', () => {
+  const now = at('2026-10-07T02:00:00Z');
+  const live = { lat: 35.8, lng: -77.0, gpsAt: '2026-10-07T01:59:00Z', speedMph: 12, location: 'Robersonville, NC', hos: { status: 'driving', driveLeftMin: 0, shiftLeftMin: 0 } };
+  const trip = (n, status, dest) => ({ trip: { tripNumber: n, status, powerUnit: '930' }, freightBills: [{ billNumber: `B${n}`, endZoneDescription: dest }], _samsara: live });
+  const alerts = evaluateBoard({ trips: [trip('624128', 'DEPSHIP', 'MIAMI, FL, 33122'), trip('624195', 'DEPSHIP', 'HIALEAH, FL, 33018'), trip('624500', 'DISP', 'MIAMI, FL, 33122')] }, { now, geo: () => null, unitState: () => ({}) });
+  const hos = alerts.filter((a) => a.code === 'hos-low');
+  assert.equal(hos.length, 1);
+  assert.equal(hos[0].trip, '624195');                                           // newest rolling load
+});
