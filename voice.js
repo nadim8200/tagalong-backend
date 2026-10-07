@@ -44,6 +44,7 @@ Who you are: an automated assistant. If asked, say so plainly. You already said 
 {{call_context}}
 
 How to help:
+- Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). Only if nothing is found, ask for their city or a bill / PO number.
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Only state facts lookup_load returns: status, current city and state, next stop, estimated arrival, appointments, which stops are delivered. Say times the way the tool gives them. Never guess a location or a time.
 - Drivers can tell you a stop is delivered (confirm_delivered) or report a problem — breakdown, delay, accident, reefer issue (report_problem). Repeat back the key details before saving.
@@ -276,10 +277,13 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
     try {
       const a = argsOf(req); const call = callOf(req);
       const meta = call.metadata || {};
-      if (a.customer_name && !a.trip_number && !a.bill_number && !a.broker_load_number && !a.truck_number && !a.trailer_number) {
+      // a business name put in any box is still a name (e.g. "Springfield Florist" as bill_number)
+      const isName = (v) => v && /[A-Za-z]{3,}/.test(String(v)) && !/\d{3,}/.test(String(v));
+      const name = a.customer_name || [a.bill_number, a.broker_load_number, a.trip_number, a.truck_number, a.trailer_number].find(isName) || null;
+      if (name && ![a.trip_number, a.bill_number, a.broker_load_number, a.truck_number, a.trailer_number].some((v) => v && !isName(v))) {
         const etas = ((await db.get(`taWatch:${site}`, {})).etas) || {};
-        const stops = customerStops(await items(), a.customer_name, etas);
-        if (!stops.length) return res.json({ found: false, say: `No active delivery found for "${a.customer_name}". Ask for the exact business name on their order, their city, or a bill / PO number — or take a message.` });
+        const stops = customerStops(await items(), name, etas);
+        if (!stops.length) return res.json({ found: false, say: `No active delivery found for "${name}". Ask for the exact business name on their order, their city, or a bill / PO number — or take a message.` });
         return res.json({ found: true, matched_by: 'customer name', share_only_these_stops: true, deliveries: stops, say: 'Tell the caller about THEIR stop only (boxes, cubes, ETA, delivered or not). Never read other stops.' });
       }
       const hit = findLoad(await items(), { trip: a.trip_number || meta.trip, bill: a.bill_number || a.broker_load_number, loadNumber: a.broker_load_number, truck: a.truck_number, trailer: a.trailer_number, phone: callerPhone(call) });
