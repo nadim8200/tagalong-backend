@@ -283,3 +283,9 @@ test('truck, trailer, trip and bill numbers are spoken digit by digit', () => {
   assert.equal(digitByDigit('M5038379'), 'M 5 0 3 8 3 7 9');
   assert.match(PROMPT, /one digit at a time/);
 });
+
+import { ETA_DISCLAIMER, CUSTOMER_RULE } from '../voice.js';
+test('every customer ETA ends with the estimated-time disclaimer', () => {
+  assert.match(ETA_DISCLAIMER, /estimated time of arrival.*may change.*keep you updated/);
+  assert.ok(PROMPT.includes(ETA_DISCLAIMER) && CUSTOMER_RULE.includes(ETA_DISCLAIMER));
+});
