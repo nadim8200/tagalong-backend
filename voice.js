@@ -383,14 +383,32 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
         default_dynamic_variables: { greeting: GREETING, call_context: 'This is an incoming call. Find out who is calling and what load they mean.' },
         general_tools: tools(base, env.RETELL_TRANSFER_NUMBER ? e164(env.RETELL_TRANSFER_NUMBER) : null),
       };
+      // 1) instructions + tools → a version of the LLM
       const llm = cfg.llmId ? await retell(`/update-retell-llm/${cfg.llmId}`, { method: 'PATCH', body: llmBody }) : await retell('/create-retell-llm', { body: llmBody });
       const agentBody = {
-        agent_name: 'Jarvis — Florida Beauty Flora dispatch', response_engine: { type: 'retell-llm', llm_id: llm.llm_id },
+        agent_name: 'Jarvis — Florida Beauty Flora dispatch',
+        // 2) the agent runs THAT exact version (never an older one)
+        response_engine: { type: 'retell-llm', llm_id: llm.llm_id, ...(llm.version != null ? { version: llm.version } : {}) },
         voice_id: env.RETELL_VOICE_ID || 'retell-Cimo', language: languages(),
         webhook_url: `${base}/retell/webhook`, max_call_duration_ms: 15 * 60000, end_call_after_silence_ms: 30000,
       };
+      // keep the voice someone picked in Retell
+      if (cfg.agentId && !env.RETELL_VOICE_ID) delete agentBody.voice_id;
       const agent = cfg.agentId ? await retell(`/update-agent/${cfg.agentId}`, { method: 'PATCH', body: agentBody }) : await retell('/create-agent', { body: agentBody });
-      const next = { llmId: llm.llm_id, agentId: agent.agent_id, at: new Date().toISOString(), by: who(req) };
+      // 3) publish it
+      let published = null;
+      if (agent.version != null) {
+        try { await retell(`/publish-agent-version/${agent.agent_id}`, { body: { version: agent.version, version_title: `Jarvis update ${new Date().toISOString().slice(0, 16)}` } }); published = agent.version; }
+        catch (e) { console.warn('[voice] publish:', e.message); }
+      }
+      // 4) the phone number always answers with the latest PUBLISHED Jarvis
+      let phone = null;
+      if (env.RETELL_FROM_NUMBER && published != null) {
+        const ag = [{ agent_id: agent.agent_id, agent_version: 'latest_published', weight: 1 }];
+        try { await retell(`/update-phone-number/${encodeURIComponent(e164(env.RETELL_FROM_NUMBER))}`, { method: 'PATCH', body: { inbound_agents: ag, outbound_agents: ag } }); phone = 'latest_published'; }
+        catch (e) { console.warn('[voice] phone number:', e.message); phone = `not updated: ${e.message}`; }
+      }
+      const next = { llmId: llm.llm_id, agentId: agent.agent_id, llmVersion: llm.version ?? null, agentVersion: agent.version ?? null, published, phone, at: new Date().toISOString(), by: who(req) };
       await db.set(cfgKey, next);
       res.json(next);
     } catch (e) { res.status(502).json({ error: e.message }); }
@@ -436,6 +454,23 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
 
+  async function live() {
+    const cfg = await db.get(cfgKey, {});
+    if (!key() || !cfg.agentId) return { setup: false };
+    const agent = await retell(`/get-agent/${cfg.agentId}`, { method: 'GET' });
+    const re = agent.response_engine || {};
+    const llm = re.llm_id ? await retell(`/get-retell-llm/${re.llm_id}${re.version != null ? `?version=${re.version}` : ''}`, { method: 'GET' }) : {};
+    let number = null;
+    if (env.RETELL_FROM_NUMBER) { try { const n = await retell(`/get-phone-number/${encodeURIComponent(e164(env.RETELL_FROM_NUMBER))}`, { method: 'GET' }); number = { inbound: n.inbound_agents || n.inbound_agent_id || null, outbound: n.outbound_agents || n.outbound_agent_id || null }; } catch (e) { number = { error: e.message }; } }
+    return {
+      setup: true, ourSetup: cfg,
+      agent: { version: agent.version ?? null, published: agent.is_published ?? null, language: agent.language, voice: agent.voice_id, llmVersion: re.version ?? null },
+      llm: { version: llm.version ?? null, model: llm.model, greeting: (llm.default_dynamic_variables || {}).greeting || llm.begin_message, tools: (llm.general_tools || []).map((t) => t.name), lookupParams: Object.keys((((llm.general_tools || []).find((t) => t.name === 'lookup_load') || {}).parameters || {}).properties || {}) },
+      number,
+    };
+  }
+  app.get('/voice/live', requireAuth, async (req, res) => { try { res.json(await live()); } catch (e) { res.status(502).json({ error: e.message }); } });
+
   app.get('/voice/calls', requireAuth, async (req, res) => {
     try {
       const [calls, msgs] = await Promise.all([db.get(callsKey, []), db.get(`taJarvisMessages:${site}`, [])]);
@@ -444,5 +479,5 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
   });
 
   console.log(`[voice] Jarvis voice ${key() ? 'ready (Retell key set)' : 'off — needs RETELL_API_KEY'}`);
-  return { findLoad };
+  return { findLoad, live };
 }

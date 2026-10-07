@@ -62,7 +62,7 @@ export function slimItem(it, alerts = []) {
   };
 }
 
-export function initAssistant(app, { db, env = process.env, buildBoard }) {
+export function initAssistant(app, { db, env = process.env, buildBoard, voice = null }) {
   const secret = () => String(env.ASSISTANT_READ_KEY || '').trim();   // a pasted trailing newline must not break it
   const enabled = () => secret().length >= 24;
   const site = (req) => String(req.query.site || 'florida-beauty');
@@ -121,6 +121,11 @@ export function initAssistant(app, { db, env = process.env, buildBoard }) {
       const n = tripNo(hit.item);
       send(res, { matchedBy: hit.by, ...slimItem(hit.item, open(w).filter((a) => a.trip === n)) });
     } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get('/assistant/voice', guard, async (req, res) => {
+    if (!voice || !voice.live) return res.status(503).json({ error: 'Voice not set up.' });
+    try { send(res, await voice.live()); } catch (e) { res.status(502).json({ error: e.message }); }
   });
 
   app.get('/assistant/sheets', guard, async (req, res) => {

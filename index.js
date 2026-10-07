@@ -680,8 +680,8 @@ manifestsApi = initManifests(app, { requireAuth, db, env: process.env, buildBoar
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
-initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard });
-initVoice(app, { requireAuth, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const voice = initVoice(app, { requireAuth, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice });
 initWatchtower(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await statusMail.process(site, board, ctx); } });
 initCarChat(app, { requireAuth, env: process.env });
 
