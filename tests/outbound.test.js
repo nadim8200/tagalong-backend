@@ -115,3 +115,25 @@ test('truck 2618 on 10/07: out to Doral and back before the real departure — t
   assert.equal(new Date(a.departedMs).toISOString(), '2026-10-08T03:10:00.000Z');       // 11:10 pm Eastern
   assert.deepEqual(a.stops, [], 'the Doral run before departure is not a stop on the trip');
 });
+
+import { labelStops } from '../outbound.js';
+test('each unscheduled stop says what the drivers were doing: break, sleeper, on duty (fuel), personal conveyance', () => {
+  const at = (h, m) => Date.parse(`2026-10-08T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00Z`);
+  const stops = [
+    { fromMs: at(5, 0), toMs: at(5, 57), minutes: 57, place: 'I 10, Madison County, FL' },
+    { fromMs: at(8, 0), toMs: at(8, 25), minutes: 25, place: 'Pilot, Tallahassee' },
+    { fromMs: at(10, 0), toMs: at(10, 40), minutes: 40, place: 'Somewhere, FL' },
+    { fromMs: at(12, 0), toMs: at(12, 20), minutes: 20, place: 'Unknown' },
+  ];
+  const logs = [
+    { status: 'offDuty', from: at(4, 58), to: at(5, 40) }, { status: 'sleeperBerth', from: at(4, 0), to: at(9, 0), driverId: 'd2' },
+    { status: 'onDuty', from: at(8, 0), to: at(8, 30) },
+    { status: 'personalConveyance', from: at(10, 0), to: at(10, 35) },
+  ];
+  const out = labelStops(stops, logs);
+  // team: driver 1 off duty while driver 2 sleeps = a break; driver 1 on duty (fuel) while driver 2 sleeps = on duty
+  const team = labelStops(stops, logs.map((l) => ({ driverId: l.driverId || 'd1', ...l })));
+  assert.deepEqual(team.map((s) => s.duty), ['break', 'on duty', 'personal conveyance', 'unknown']);
+  const solo = labelStops(stops.slice(0, 2), logs.filter((l) => l.driverId !== 'd2'));
+  assert.deepEqual(solo.map((s) => s.duty), ['break', 'on duty']);
+});

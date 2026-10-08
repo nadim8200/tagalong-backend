@@ -11,7 +11,7 @@
 // dispatcher reviews it and clicks Send (or auto-send when turned on). It goes
 // out from the Jarvis mailbox once Outlook is connected.
 import { sendMail, mailConfig } from './mailer.js';
-import { samsaraTokenFrom, getLiveIndex, vehicleForUnit, vehicleGpsHistory } from './samsara.js';
+import { samsaraTokenFrom, getLiveIndex, vehicleForUnit, vehicleGpsHistory, driverHosLogs } from './samsara.js';
 import { haversineMi, MIAMI_YARDS, inFlorida } from './watchtower.js';
 
 const MIN = 60000;
@@ -101,6 +101,36 @@ export function trackAnalysis(points, { yards = MIAMI_YARDS, stopPts = [], stopC
   return out;
 }
 
+// What the drivers were doing during each stop, from their duty-status logs. Pure.
+//   any driver off duty / sleeper most of the stop → a legal break; on duty / yard move → fuel or work;
+//   personal conveyance → worth a look; no log → unknown.
+const DUTY = { offDuty: 'break', sleeperBerth: 'sleeper', onDuty: 'on duty', yardMove: 'on duty', driving: 'on duty', personalConveyance: 'personal conveyance' };
+export function labelStops(stops, logs = []) {
+  return (stops || []).map((s) => {
+    const span = Math.max(1, s.toMs - s.fromMs);
+    // per driver: how much of the stop in each status (a team's co-driver is in the sleeper anyway,
+    // so it's only a break when EVERY driver is resting)
+    const per = {};
+    for (const l of logs) {
+      const overlap = Math.min(s.toMs, l.to) - Math.max(s.fromMs, l.from);
+      if (overlap <= 0) continue;
+      const d = (per[l.driverId || 'driver'] = per[l.driverId || 'driver'] || {});
+      d[l.status] = (d[l.status] || 0) + overlap;
+    }
+    const drivers = Object.values(per);
+    let duty = 'unknown';
+    if (drivers.length) {
+      const resting = (d) => ((d.offDuty || 0) + (d.sleeperBerth || 0)) / span >= 0.5;
+      const total = (k) => drivers.reduce((x, d) => x + (d[k] || 0), 0);
+      if (drivers.every(resting)) duty = drivers.some((d) => (d.offDuty || 0) / span >= 0.5) ? 'break' : 'sleeper';
+      else if (total('personalConveyance') / span >= 0.3) duty = 'personal conveyance';
+      else duty = 'on duty';
+    }
+    return { ...s, duty };
+  });
+}
+const DUTY_LABEL = { break: 'off duty — break', sleeper: 'sleeper — rest', 'on duty': 'on duty — fuel / work', 'personal conveyance': 'personal conveyance', unknown: 'no duty status' };
+
 const cityState = (loc) => {
   const parts = String(loc || '').split(',').map((x) => x.trim()).filter(Boolean).filter((x) => !/^\d{5}/.test(x));
   return parts.slice(-2).join(', ') || null;
@@ -147,9 +177,9 @@ export function buildReport(rows, date, { note = '' } = {}) {
 <tr><td colspan="10" style="text-align:center;font-size:11px;padding:4px">OUTBOUND ${n} TRIP SHEETS ${date.slice(5, 7)}/${date.slice(8, 10)}/${date.slice(0, 4)}</td></tr>
 <tr>${['TRIP', 'TRUCKS', 'TRAILERS', 'DRIVERS', 'LOCATION', 'DESTINATION', 'PU APPT', 'TIME OF DISPATCH', 'TIME OF DEPARTURE', 'UNSCHEDULED STOPS'].map(th).join('')}</tr>
 <tr><td colspan="10" style="text-align:center;font-size:11px;background:#ddd;padding:2px">FLOWERS (FLORIDA)</td></tr>
-${rows.map((r) => `<tr style="${r.slow ? 'background:#ffff66' : ''}">${[r.trip, r.truck, r.trailer, r.drivers, r.location, r.destination, r.puAppt, r.dispatch, r.departure, r.stops.length ? `${r.stops.length} (${r.stops.reduce((a, s) => a + s.minutes, 0)} min)` : ''].map(td).join('')}</tr>`).join('\n')}
+${rows.map((r) => { const brk = r.stops.filter((s) => s.duty === 'break' || s.duty === 'sleeper').length; return `<tr style="${r.slow ? 'background:#ffff66' : ''}">${[r.trip, r.truck, r.trailer, r.drivers, r.location, r.destination, r.puAppt, r.dispatch, r.departure, r.stops.length ? `${r.stops.length} (${r.stops.reduce((a, s) => a + s.minutes, 0)} min${brk ? `, ${brk} break${brk === 1 ? '' : 's'}` : ''})` : ''].map(td).join('')}</tr>`; }).join('\n')}
 </table>`;
-  const stopsHtml = withStops.length ? `<p><b>Unscheduled stops leaving Florida</b> (${STOP_MIN}+ minutes, not the yard or a trip stop):</p><ul>${withStops.map((r) => `<li>Trip ${esc(r.trip)} · truck ${esc(r.truck)}: ${r.stops.map((s) => `${esc(clock(s.fromMs))}${s.ongoing ? ' (still stopped)' : `–${esc(clock(s.toMs))}`} ${s.minutes} min${s.place ? ` at ${esc(s.place)}` : ''}`).join('; ')}</li>`).join('')}</ul>` : '';
+  const stopsHtml = withStops.length ? `<p><b>Unscheduled stops leaving Florida</b> (${STOP_MIN}+ minutes, not the yard or a trip stop):</p><ul>${withStops.map((r) => `<li>Trip ${esc(r.trip)} · truck ${esc(r.truck)}: ${r.stops.map((s) => `${esc(clock(s.fromMs))}${s.ongoing ? ' (still stopped)' : `–${esc(clock(s.toMs))}`} ${s.minutes} min${s.place ? ` at ${esc(s.place)}` : ''}${s.duty ? ` <i>(${esc(DUTY_LABEL[s.duty] || s.duty)})</i>` : ''}`).join('; ')}</li>`).join('')}</ul><p style="font-size:12px;color:#666">Duty status from the drivers' ELD logs: a break / sleeper is a legal rest; "on duty" is usually fuel or paperwork; "personal conveyance" or "no duty status" are the ones to ask about.</p>` : '';
   const html = `<div style="font-family:Arial,sans-serif;font-size:14px">
 <p>Good day,</p>
 <p>Please be advised.<br>${dayName(date)} Trip sheets.</p>
@@ -183,7 +213,14 @@ export function initOutbound(app, { requireAuth, db, getBoard, env = process.env
       const pts = await vehicleGpsHistory(token, veh.id, new Date(startMs).toISOString(), new Date(now()).toISOString());
       const flStops = ((manifestOf(it) && manifestOf(it).stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && /^FL$/i.test(x.state || ''));
       const stopPts = geo ? flStops.map((x) => geo(x.zip)).filter(Boolean) : [];
-      return trackAnalysis(pts, { stopPts, stopCities: flStops.map((x) => x.city) });
+      const a = trackAnalysis(pts, { stopPts, stopCities: flStops.map((x) => x.city) });
+      // what the drivers were doing at each stop (duty-status logs)
+      if (a.stops.length) {
+        const norm = (x) => String(x == null ? '' : x).trim().toLowerCase().replace(/^0+(?=\d)/, '');   // same keys as Samsara's driver index
+        const ids = [tripOf(it).driver, tripOf(it).driver2].map((c) => idx.driversByCode && idx.driversByCode[norm(c)]).filter(Boolean).map((d) => d.id);
+        try { a.stops = labelStops(a.stops, await driverHosLogs(token, ids, new Date(startMs).toISOString(), new Date(now()).toISOString())); } catch (e) { a.stops = labelStops(a.stops, []); }
+      }
+      return a;
     } catch (e) { console.warn('[outbound] gps:', e.message); return null; }
   }
 

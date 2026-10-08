@@ -79,6 +79,24 @@ export async function vehicleGpsHistory(token, vehicleId, startIso, endIso) {
   return pts;
 }
 
+// Drivers' duty-status logs (off duty / sleeper / driving / on duty / yard move / personal
+// conveyance) over [startIso, endIso] → [{ driverId, status, from, to }] (times in ms).
+export async function driverHosLogs(token, driverIds, startIso, endIso) {
+  const ids = [...new Set((driverIds || []).filter(Boolean).map(String))];
+  if (!ids.length) return [];
+  const data = await sGet(token, `/fleet/hos/logs?driverIds=${encodeURIComponent(ids.join(','))}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}`, { maxPages: 10 });
+  const out = [];
+  for (const d of arr(data)) {
+    const driverId = String((d.driver && d.driver.id) || d.driverId || '');
+    for (const l of arr(d.hosLogs || d.logs)) {
+      const from = Date.parse(l.logStartTime || l.startTime || '');
+      const to = l.logEndTime || l.endTime ? Date.parse(l.logEndTime || l.endTime) : Date.parse(endIso);
+      if (!Number.isNaN(from)) out.push({ driverId, status: String(l.hosStatusType || l.status || ''), from, to: Number.isNaN(to) ? Date.parse(endIso) : to });
+    }
+  }
+  return out;
+}
+
 // Resolve a TruckMate power-unit number to its Samsara vehicle {id, name, …}.
 export function vehicleForUnit(idx, unit) {
   return (idx && idx.vehByUnit && idx.vehByUnit[norm(unit)]) || null;
