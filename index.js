@@ -34,6 +34,7 @@ import { initCarriers } from './carriers.js';
 import { initDispatchers } from './dispatchers.js';
 import { initJarvisChat } from './jarvischat.js';
 import { initHelpdesk } from './helpdesk.js';
+import { initProfiles } from './profiles.js';
 import { initDriverLinks } from './driverlink.js';
 import { initComms } from './comms.js';
 import { initRundowns } from './rundown.js';
@@ -691,9 +692,11 @@ const driverHooks = { text: async (site, trip, message, by) => { const a = await
 const inbox = initInbox(app, { help, requireAuth: requireDispatch, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []), packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   // our staff can ask Jarvis (by email) to text or call a driver — same consent / STOP rules
   driver: driverHooks });
+// customer & broker profiles (Customers tab): built from the loads, edited / verified by dispatch
+const profiles = initProfiles(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
 let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers overlay)
-truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
+truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
@@ -703,7 +706,7 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
-const voice = initVoice(app, { help, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const voice = initVoice(app, { help, profiles, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });

@@ -363,3 +363,25 @@ test('a caller leaves a message with Jarvis → a callback request goes to the r
   assert.equal(out.saved, true);
   assert.deepEqual({ source: raised[0].source, role: raised[0].role, trip: raised[0].trip, name: raised[0].from.name, phone: raised[0].from.phone }, { source: 'call', role: 'customer', trip: '624481', name: 'Sam at Bokhary Farms', phone: '781-555-0123' });
 });
+
+test('authorized numbers only: an unknown phone asking about a customer gets no details — offered a callback', async () => {
+  const items = [{ trip: { tripNumber: '624481', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }], _manifest: { stops: [{ stopNumber: 9, action: 'DELIVER', customer: 'BOKHARY FARMS LLC *', city: 'WALTHAM', state: 'MA' }] } }];
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
+  const profiles = { allowed: async ({ phone }) => ({ ok: String(phone).endsWith('5550123') }), anyLoad: async () => false };
+  initVoice(app, { requireAuth: (q, r, n) => n(), db, profiles, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY, RETELL_AUTO_KEYWORDS: 'off' } });
+  const ask = async (from) => {
+    const body = { args: { customer_name: 'Bokhary Farms' }, call: { call_id: `c${from}`, direction: 'inbound', from_number: from } };
+    const raw = JSON.stringify(body); const sig = await Retell.sign(raw, KEY);
+    let out; const res = { status() { return this; }, json(j) { out = j; } };
+    const [guard, handler] = routes['POST /retell/fn/lookup_load'];
+    await guard({ body, rawBody: raw, get: () => sig }, res, () => handler({ body, rawBody: raw, get: () => sig }, res));
+    return out;
+  };
+  const stranger = await ask('+17865550000');
+  assert.equal(stranger.found, false); assert.equal(stranger.private, true); assert.match(stranger.say, /only go to the phone numbers they authorized/);
+  assert.equal(JSON.stringify(stranger).includes('WALTHAM'), false, 'nothing about the load');
+  const owner = await ask('+17815550123');
+  assert.equal(owner.found, true);
+});

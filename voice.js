@@ -395,7 +395,7 @@ export function brokerView(item, eta) {
   };
 }
 
-export function initVoice(app, { requireAuth, db, comms = null, carriers = null, getBoard = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initVoice(app, { requireAuth, db, comms = null, carriers = null, getBoard = null, help = null, profiles = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taRetellCfg';
@@ -473,6 +473,11 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
         }
         const biz = spokenName(stops[0].customer);                        // the real name, not what was misheard
         if (call.call_id) callName.set(call.call_id, stops[0].customer);
+        // only the customer's authorized numbers (when that rule is on) — owners' numbers get anything
+        if (profiles && profiles.allowed) {
+          const ok = await profiles.allowed({ customerName: stops[0].customer, phone: callerPhone(call) });
+          if (!ok.ok) return reply({ found: false, private: true, say: `For privacy, updates on ${spokenName(stops[0].customer)} deliveries only go to the phone numbers they authorized. Do not share any details of the load. Offer to take a message (take_message with their name and callback number) so customer service calls them back on an authorized number.` });
+        }
         await remember(callerPhone(call), stops[0].customer);
         const trips = [...new Set(stops.map((x) => x.trip))];
         const loads = trips.map((n) => customerView(all.find((it) => tripNo(it) === n), etas[n], stops.filter((x) => x.trip === n)));
@@ -483,8 +488,8 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
       const trip = tripNo(hit.item);
       if (call.call_id) callTrip.set(call.call_id, trip);
       const eta = await etaFor(trip);
-      // the driver (or Jarvis calling the driver) gets the full route
-      if (hit.role === 'driver' || (meta.trip && call.direction === 'outbound')) {
+      // the driver (or Jarvis calling the driver), or a number authorized for every load, gets the full route
+      if (hit.role === 'driver' || (meta.trip && call.direction === 'outbound') || (profiles && profiles.anyLoad && await profiles.anyLoad(callerPhone(call)))) {
         return reply({ found: true, matched_by: hit.by, caller_is: 'the driver of this load', ...voiceFacts(hit.item, eta) });
       }
       // a broker load (rate con on file) asked about by its number or the broker's name → the broker gets the whole load
@@ -494,6 +499,10 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
       if (isBroker) return reply({ found: true, matched_by: hit.by, ...(rc.broker ? { speaking_with: spokenName(rc.broker) } : {}), ...brokerView(hit.item, eta), say: BROKER_RULE });
       // everyone else: where the truck is + their own stop
       const mine = name ? customerStops([hit.item], name, { [trip]: eta }) : [];
+      if (mine.length && profiles && profiles.allowed) {
+        const ok = await profiles.allowed({ customerName: mine[0].customer, phone: callerPhone(call) });
+        if (!ok.ok) return reply({ found: false, private: true, say: `For privacy, updates on ${spokenName(mine[0].customer)} deliveries only go to the phone numbers they authorized. Do not share any details of the load. Offer to take a message so customer service calls them back on an authorized number.` });
+      }
       if (mine.length && said) await remember(callerPhone(call), mine[0].customer);
       return reply({ found: true, matched_by: mine.length ? `${hit.by} + customer name` : hit.by, ...(mine.length ? { speaking_with: spokenName(mine[0].customer) } : {}), ...customerView(hit.item, eta, mine), say: CUSTOMER_RULE });
     } catch (e) { reply({ found: false, say: `Lookup failed (${e.message}). Take a message instead.` }); }

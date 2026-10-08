@@ -30,7 +30,7 @@ export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, us
 const MAX_PER_DAY = 15;
 
 const tripOf = (item) => (item && item.trip) || item || {};
-const custKey = (name) => String(name || '').trim().toUpperCase().replace(/\s+/g, ' ');
+export const custKey = (name) => String(name || '').trim().toUpperCase().replace(/\s+/g, ' ');
 const zipOf = (s) => { const m = String(s || '').match(/\b(\d{5})(?:-\d{4})?\b/); return m ? m[1] : null; };
 const cityOf = (s) => String(s || '').replace(/,?\s*\d{5}(-\d{4})?\s*$/, '').trim();
 export const emailList = (v) => [...new Set((Array.isArray(v) ? v : String(v || '').split(/[,;\s]+/)).map((x) => String(x).trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)))];
@@ -40,7 +40,7 @@ const fmtPhone = (d) => (d ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`
 
 // Pull email / phone out of a TruckMate client record (bill-to, caller,
 // consignee) without knowing its exact field names.
-function tmContact(rec) {
+export function tmContact(rec) {
   if (!rec || typeof rec !== 'object') return null;
   let email = null; let phone = null; let name = null;
   for (const [k, v] of Object.entries(rec)) {
@@ -91,6 +91,8 @@ export function contactsFor(item, { customers = {}, edit = null, prefixes = DEFA
   if (rc.brokerEmail || rc.brokerPhone) add({ role: 'broker', company: rc.broker, email: rc.brokerEmail, phone: rc.brokerPhone }, 'rate con');
   const RC_ROLE = { broker_rep: 'broker', after_hours: 'broker', dispatch: 'broker', tracking: 'broker', billing: 'other', shipper: 'shipper', receiver: 'receiver', other: 'other' };
   for (const c of rc.contacts || []) if (c && (c.email || c.phone)) add({ role: RC_ROLE[c.role] || 'other', company: c.company || (RC_ROLE[c.role] === 'broker' ? rc.broker : null), name: c.name, email: c.email, phone: c.phone }, 'rate con');
+  // customer / broker profiles (Customers tab): contacts marked "Status emails"
+  for (const pr of (item && item._profiles) || []) for (const c of pr.contacts || []) if (c.statusEmails && (c.email || c.phone)) add({ role: pr.type === 'broker' ? 'broker' : 'customer', company: pr.name, name: c.name, email: c.email, phone: c.phone }, 'customer profile');
   // trip sheet vs TruckMate
   for (const c of list) {
     c.verified = c.sources.includes('trip sheet') && c.sources.includes('TruckMate');
