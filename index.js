@@ -18,6 +18,7 @@
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import compression from 'compression';
 import jwt from 'jsonwebtoken';
 import Stripe from 'stripe';
 import { scryptSync, randomBytes, timingSafeEqual } from 'crypto';
@@ -84,6 +85,8 @@ const origins = ALLOWED_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean);
 const app = express();
 // keep the raw body for Retell (its signature is over the exact bytes)
 app.use(express.json({ limit: '15mb', verify: (req, _res, buf) => { if (req.url && req.url.startsWith('/retell/')) req.rawBody = buf.toString('utf8'); } }));
+// gzip: the trip board is ~4 MB of JSON — ~10x smaller on the wire (phones especially)
+app.use(compression({ threshold: 2048 }));
 app.use(cookieParser());
 app.use(cors({ origin: origins, credentials: true }));
 
