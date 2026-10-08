@@ -31,6 +31,8 @@ import { initWatchtower } from './watchtower.js';
 import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
 import { initCarriers } from './carriers.js';
+import { initDispatchers } from './dispatchers.js';
+import { initJarvisChat } from './jarvischat.js';
 import { initDriverLinks } from './driverlink.js';
 import { initComms } from './comms.js';
 import { initRundowns } from './rundown.js';
@@ -50,6 +52,7 @@ import { initTruckMate } from './truckmate.js';
 import { initCarChat } from './carChat.js';
 import { initDbpo } from './dbpo.js';
 import { initRateCon } from './ratecon.js';
+import { sendMail, mailConfig } from './mailer.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -658,41 +661,51 @@ initFleet(app, { requireAuth, db, env: process.env });
 // so "was this customer actually called?" comes from records, not memory.
 const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.env });
 // Original uploaded documents (rate cons, trip sheets) kept privately in Postgres.
-const docs = initDocuments(app, { requireAuth, db });
+// Dispatch side (console, Jarvis, loads, emails, calls): admins and active dispatcher accounts only —
+// a TagAlong customer login can't reach it.
+const { requireDispatch } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }) });
+const docs = initDocuments(app, { requireAuth: requireDispatch, db });
 // Geofence stop tracking (validated Samsara address boundaries only).
 const stopVisits = initStopVisits({ db, env: process.env, listAddresses, tokenFrom: samsaraTokenFrom });
 // Outside carriers (OC): carrier list, OC marks, check calls / email check-ins.
-const carriers = initCarriers(app, { requireAuth, db });
+const carriers = initCarriers(app, { requireAuth: requireDispatch, db });
 // OC driver tracking links (TagAlong app / browser) — positions overlay the board.
 // load rundown PDF + Outlook email when a load finishes
-const rundowns = initRundowns(app, { requireAuth, db, docs, env: process.env });
+const rundowns = initRundowns(app, { requireAuth: requireDispatch, db, docs, env: process.env });
 let truckmate;
-const driverLinks = initDriverLinks(app, { requireAuth, db, carriers, ringcentral: rc, docs, push, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const driverLinks = initDriverLinks(app, { requireAuth: requireDispatch, db, carriers, ringcentral: rc, docs, push, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // driver calls / texts on a load, and their replies (RingCentral)
-const comms = initComms(app, { requireAuth, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const comms = initComms(app, { requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
-const statusMail = initStatusMail(app, { requireAuth, db, comms, ringcentral: rc, env: process.env });
+const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, comms, ringcentral: rc, env: process.env });
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
-const inbox = initInbox(app, { requireAuth, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []), packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
+// Jarvis reaching a driver (asked by staff in an email or in the chat): the TagAlong app first (OC drivers), else a text — consent / STOP rules apply
+const driverHooks = { text: async (site, trip, message, by) => { const a = await driverLinks.messageDriver(site, trip, message, by).catch(() => ({ skipped: true })); return a && a.sent ? a : comms.textDriverAuto(site, trip, message, by); }, call: async (site, trip, by) => { try { return { called: true, ...(await voice.placeCall(String(trip), { purpose: 'check', by })) }; } catch (e) { return { skipped: e.message }; } } };
+const inbox = initInbox(app, { requireAuth: requireDispatch, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []), packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   // our staff can ask Jarvis (by email) to text or call a driver — same consent / STOP rules
-  driver: { text: async (site, trip, message, by) => { const a = await driverLinks.messageDriver(site, trip, message, by).catch(() => ({ skipped: true })); return a && a.sent ? a : comms.textDriverAuto(site, trip, message, by); }, call: async (site, trip, by) => { try { return { called: true, ...(await voice.placeCall(String(trip), { purpose: 'check', by })) }; } catch (e) { return { skipped: e.message }; } } } });
+  driver: driverHooks });
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
-truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
+let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers overlay)
+truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
-const ratecon = initRateCon(app, { requireAuth, db, env: process.env, docs });
-manifestsApi = initManifests(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, docs, carriers, ratecon });
+const ratecon = initRateCon(app, { requireAuth: requireDispatch, db, env: process.env, docs });
+manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, docs, carriers, ratecon });
 
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
-const voice = initVoice(app, { requireAuth, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
-const outbound = initOutbound(app, { requireAuth, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
-pickupFollow = initPickupFollow(app, { requireAuth, db, ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
-const flowerReport = initFlowerReport(app, { requireAuth, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const voice = initVoice(app, { requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+pickupFollow = initPickupFollow(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
-initWatchtower(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await statusMail.process(site, board, ctx); } });
+jarvisChat = initJarvisChat(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks,
+  packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
+  reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
+  mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });
+initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await statusMail.process(site, board, ctx); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
