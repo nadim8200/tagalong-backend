@@ -19,6 +19,7 @@
 // ---------------------------------------------------------------
 import { sendMail, mailConfig } from './mailer.js';
 import { haversineMi, estimateArrival, MIAMI_TERMINAL } from './watchtower.js';
+import { fmtLocal } from './localtime.js';
 
 const H = 3600000;
 const PICKED = /^(depship|depshp|loaded|pickd|intran|enroute|enrt|arrcons|arrcon|depcons|depcon|delvd|deliv|cmplt|complete)/i;
@@ -237,19 +238,19 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
       ? (() => { const m = haversineMi(here.lat, here.lng, pickupGeo.lat, pickupGeo.lng) * 1.2; return m < 3 ? { here: true } : { miles: Math.round(m), atMs: estimateArrival(m, { now }) }; })()
       : etaTo(item, here, pz, { geo, now });
     row('Pickup', cityOf(t.origZoneDesc) || null);
-    row('ETA to pickup', eta ? (eta.here ? 'At the pickup now' : `${fmtTime(eta.atMs)} (~${eta.miles} mi)`) : 'To follow');
+    row('ETA to pickup', eta ? (eta.here ? 'At the pickup now' : `${fmtLocal(eta.atMs, t.origZoneDesc)} (~${eta.miles} mi)`) : 'To follow');
   } else if (ev.kind === 'picked-up') {
     title = 'Load picked up — driver departed shipper';
     lead = 'Your load has been picked up and the driver has departed the shipper.';
     row('Truck / trailer', `${truck} / ${trailer}`);
     row('Current location', loc);
-    if (next) { const e = etaTo(item, here, next.zip, { geo, now }); row(`Next stop (${next.number} of ${stops.length})`, stopName(next)); row('ETA', e ? (e.here ? 'Arriving now' : `${fmtTime(e.atMs)} (~${e.miles} mi)`) : 'To follow'); }
+    if (next) { const e = etaTo(item, here, next.zip, { geo, now }); row(`Next stop (${next.number} of ${stops.length})`, stopName(next)); row('ETA', e ? (e.here ? 'Arriving now' : `${fmtLocal(e.atMs, next.key || next.place)} (~${e.miles} mi)`) : 'To follow'); }
   } else if (ev.kind === 'location') {
     title = 'Location update';
     lead = 'Here is the current location of your load.';
     row('Current location', loc);
     if (here && here.mph != null) row('Status', here.mph > 5 ? `Moving · ${Math.round(here.mph)} mph` : 'Stopped');
-    if (next) { const e = etaTo(item, here, next.zip, { geo, now }); row(`Next stop (${next.number} of ${stops.length})`, stopName(next)); row('ETA', e ? (e.here ? 'Arriving now' : `${fmtTime(e.atMs)} (~${e.miles} mi)`) : 'To follow'); }
+    if (next) { const e = etaTo(item, here, next.zip, { geo, now }); row(`Next stop (${next.number} of ${stops.length})`, stopName(next)); row('ETA', e ? (e.here ? 'Arriving now' : `${fmtLocal(e.atMs, next.key || next.place)} (~${e.miles} mi)`) : 'To follow'); }
     row('Truck / trailer', `${truck} / ${trailer}`);
   } else if (ev.kind === 'arrived') {
     const st = stops.find((s) => s.key === ev.stop) || { place: ev.stop, number: ev.number };
@@ -277,7 +278,7 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
     lead = 'The truck carrying your load has been repaired and is back on the road. Thank you for your patience.';
     if (ev.note) row('Update', ev.note);
     row('Current location', loc);
-    if (next) { const e = etaTo(item, here, next.zip, { geo, now }); row(`Next stop (${next.number} of ${stops.length})`, stopName(next)); row('New ETA', e ? (e.here ? 'Arriving now' : `${fmtTime(e.atMs)} (~${e.miles} mi)`) : 'To follow shortly'); }
+    if (next) { const e = etaTo(item, here, next.zip, { geo, now }); row(`Next stop (${next.number} of ${stops.length})`, stopName(next)); row('New ETA', e ? (e.here ? 'Arriving now' : `${fmtLocal(e.atMs, next.key || next.place)} (~${e.miles} mi)`) : 'To follow shortly'); }
     row('Truck / trailer', `${truck} / ${trailer}`);
   } else return null;
   const subject = `${title} — ${head}`;

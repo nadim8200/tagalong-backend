@@ -65,7 +65,7 @@ test('finds the load by trip, bill, truck, or the caller\'s phone (driver or con
   assert.equal(findLoad(board, { phone: '3055559999' }), null);
   const f = voiceFacts(board[0], { stops: [{ label: 'LOMBARD, IL, 60148', etaMs: Date.parse('2026-10-07T03:00:00Z'), miles: 212, apptMs: null }] });
   assert.equal(f.next_stop, 'Native Chicago, LOMBARD, IL');
-  assert.match(f.estimated_arrival_next_stop, /Eastern$/);
+  assert.match(f.estimated_arrival_next_stop, /Central \(local time\)$/);
   assert.deepEqual(f.stops_delivered, ['EDWARDSVILLE, IL']);
   assert.ok(!JSON.stringify(f).includes('4394668'), 'no driver phone in the facts');
   assert.match(PROMPT, /Never give out a driver's phone number/);
@@ -331,4 +331,19 @@ test('customers hear whether their truck left from Ventura, California or Miami,
   assert.equal(originOf({ trip: { origZoneDesc: 'YARD' } }), null);                              // unknown → say nothing, never "Miami"
   const v = customerView({ trip: { tripNumber: '1', status: 'ARRSHIP', origZoneDesc: 'VENTURA TERMINAL' }, freightBills: [{ endZoneDescription: 'DENVER, CO, 80216' }] }, null);
   assert.equal(v.coming_from, 'Ventura, California'); assert.equal(v.status, 'being loaded in Ventura, California');
+});
+
+import { fmtLocal, fmtLocalShort, tzOf } from '../localtime.js';
+test('ETAs in the delivery\'s local time: 4:00 AM in Miami is 1:00 AM in California', async () => {
+  const t = Date.parse('2026-10-08T08:00:00Z');                                 // 4:00 AM Eastern
+  assert.equal(fmtLocal(t, 'VENTURA, CA, 93003'), 'Thu, Oct 8, 1:00 AM Pacific (local time)');
+  assert.equal(fmtLocal(t, 'DALLAS, TX, 75201'), 'Thu, Oct 8, 3:00 AM Central (local time)');
+  assert.equal(fmtLocal(t, 'MIAMI, FL, 33122'), 'Thu, Oct 8, 4:00 AM Eastern');
+  assert.equal(fmtLocalShort(t, 'LOMBARD, IL, 60148'), 'Oct 8, 4:00 AM ET (3:00 AM CT local)');
+  assert.equal(tzOf('Oxnard, California'), 'America/Los_Angeles');
+  // a California customer calling Jarvis hears their own clock
+  const items = [{ trip: { tripNumber: '624426', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M1', endZoneDescription: 'CARPINTERIA, CA, 93013' }], _manifest: { stops: [{ stopNumber: 2, action: 'DELIVER', customer: 'WESTERLAY ORCHIDS', city: 'CARPINTERIA', state: 'CA' }] } }];
+  const r = customerStops(items, 'Westerlay Orchids', { 624426: { stops: [{ label: 'CARPINTERIA, CA, 93013', zip: '93013', etaMs: t }] } });
+  assert.equal(r[0].estimated_arrival, 'Thu, Oct 8, 1:00 AM Pacific (local time)');
+  assert.match(PROMPT, /delivery's LOCAL time, so always say the time zone/);
 });

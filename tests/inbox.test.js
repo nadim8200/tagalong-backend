@@ -189,3 +189,15 @@ test('our dispatcher emails "Jarvis, text the driver…" → Jarvis texts him (o
   await h2.inbox.poll();
   assert.equal(texts.length, 1, 'a broker cannot make Jarvis text the driver');
 });
+
+import { readableFile, isHeic } from '../heic.js';
+import fs from 'node:fs';
+test('iPhone HEIC photos become JPEGs (even when the email calls them a plain file)', async () => {
+  const buf = fs.readFileSync(new URL('./fixtures/sample.heic', import.meta.url));
+  assert.equal(isHeic('application/octet-stream', 'IMG_0042', buf), true);
+  const r = await readableFile({ dataBase64: buf.toString('base64'), mediaType: 'image/heic', filename: 'IMG_0042.HEIC' });
+  assert.equal(r.mediaType, 'image/jpeg'); assert.equal(r.filename, 'IMG_0042.jpg');
+  assert.equal(Buffer.from(r.dataBase64, 'base64').subarray(0, 3).toString('hex'), 'ffd8ff');
+  const pdf = { dataBase64: Buffer.from('%PDF-1.4').toString('base64'), mediaType: 'application/pdf', filename: 'rc.pdf' };
+  assert.equal(await readableFile(pdf), pdf, 'other files untouched');
+});

@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------
 import crypto from 'node:crypto';
 import { PDFDocument } from 'pdf-lib';
+import { readableFile } from './heic.js';
 
 const KINDS = new Set(['ratecon', 'tripsheet', 'packet', 'driverdoc', 'rundown', 'email']);   // email = attachment received by Jarvis   // rundown = the load's full PDF report   // driverdoc = POD / BOL sent by the driver
 const MAX_FILE_BYTES = 14 * 1024 * 1024;
@@ -128,7 +129,7 @@ export function initDocuments(app, { requireAuth, db }) {
     }
     const out = [];
     for (let i = 0; i < files.length; i++) {
-      const f = files[i] || {};
+      const f = await readableFile(files[i] || {}); // eslint-disable-line no-await-in-loop -- iPhone HEIC photos → JPEG
       const buf = Buffer.from(String(f.dataBase64 || ''), 'base64');
       if (!buf.length) throw new Error(`File ${i + 1} is empty.`);
       if (buf.length > MAX_FILE_BYTES) throw new Error(`${f.filename || `File ${i + 1}`} is larger than 14 MB.`);

@@ -7,6 +7,7 @@
 // numbers the console cards and Jarvis use.
 import { sendMail, mailConfig } from './mailer.js';
 import { originOf } from './voice.js';
+import { fmtLocal } from './localtime.js';
 
 const MIN = 60000;
 const TZ = 'America/New_York';
@@ -65,10 +66,10 @@ export function flowerRow(it, eta, alerts = [], now = Date.now()) {
     state, status: STATUS[code] || String(t.statusDesc || code || '').toLowerCase(),
     now: where ? `${where}${live.gpsAt ? ` (${ago(Date.parse(live.gpsAt), now)})` : ''}${live.speedMph != null ? (live.speedMph > 5 ? ` · ${Math.round(live.speedMph)} mph` : ' · stopped') : ''}` : 'No GPS',
     next: next ? `${nameAt(next.label) ? `${nameAt(next.label)}, ` : ''}${cityOf(next.label)}` : '—',
-    nextEta: next ? fmt(next.etaMs) : (state === 'NOT LEFT' ? 'not left yet' : '—'),
-    nextAppt: next && next.apptMs ? fmt(next.apptMs) : '',
+    nextEta: next ? fmtLocal(next.etaMs, next.label, { local: false }) : (state === 'NOT LEFT' ? 'not left yet' : '—'),   // the stop's local time
+    nextAppt: next && next.apptMs ? fmtLocal(next.apptMs, next.label, { local: false }) : '',
     final: last ? cityOf(last.label) : cityOf(t.destZoneDesc),
-    finalEta: last && last !== next ? fmt(last.etaMs) : '',
+    finalEta: last && last !== next ? fmtLocal(last.etaMs, last.label, { local: false }) : '',
     progress: total ? `${Math.min(done, total)} of ${total} stops done` : '',
     why, other,
   };
@@ -103,7 +104,7 @@ export function buildFlowerReport(rows, now = Date.now()) {
 <tr>${['', 'Trip', 'From / drivers', 'Truck now', 'Next stop · ETA', 'Last stop', 'Late / issues'].map(th).join('')}</tr>
 ${sorted.map(row).join('\n')}
 </table>
-<p style="color:#666;font-size:12px">ETAs are estimates (55 mph, drivers' hours, time at each stop) and may change with traffic, weather or road conditions. LATE = will miss or already missed an appointment; AT RISK = may miss a due time.</p>
+<p style="color:#666;font-size:12px">ETAs and appointments are in each delivery's local time. They are estimates (55 mph, drivers' hours, time at each stop) and may change with traffic, weather or road conditions. LATE = will miss or already missed an appointment; AT RISK = may miss a due time.</p>
 <p>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>`;
   return { subject, html, rows: sorted, counts: n, at: now };
 }

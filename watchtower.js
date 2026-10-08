@@ -21,6 +21,7 @@
 //   • Nothing is sent to drivers/customers from here — people stay in charge.
 //   • Silence is the goal: warnings stay on the board, only criticals push.
 // ---------------------------------------------------------------
+import { STATE_TZ, fmtLocalShort } from './localtime.js';
 
 const MIN = 60000;
 const CRUISE_MPH = 55;
@@ -34,12 +35,6 @@ const fmtTime = (ms) => new Date(ms).toLocaleString('en-US', { timeZone: 'Americ
 
 // TruckMate times carry no zone ("2026-10-03T06:00:00") — they are the
 // receiver's local wall clock. Read them in the stop's time zone (by state).
-const STATE_TZ = {
-  CT: 'America/New_York', DE: 'America/New_York', FL: 'America/New_York', GA: 'America/New_York', MA: 'America/New_York', MD: 'America/New_York', ME: 'America/New_York', MI: 'America/Detroit', NC: 'America/New_York', NH: 'America/New_York', NJ: 'America/New_York', NY: 'America/New_York', OH: 'America/New_York', PA: 'America/New_York', RI: 'America/New_York', SC: 'America/New_York', VA: 'America/New_York', VT: 'America/New_York', WV: 'America/New_York', DC: 'America/New_York', IN: 'America/Indiana/Indianapolis', KY: 'America/New_York',
-  AL: 'America/Chicago', AR: 'America/Chicago', IA: 'America/Chicago', IL: 'America/Chicago', KS: 'America/Chicago', LA: 'America/Chicago', MN: 'America/Chicago', MO: 'America/Chicago', MS: 'America/Chicago', NE: 'America/Chicago', ND: 'America/Chicago', OK: 'America/Chicago', SD: 'America/Chicago', TN: 'America/Chicago', TX: 'America/Chicago', WI: 'America/Chicago',
-  CO: 'America/Denver', ID: 'America/Boise', MT: 'America/Denver', NM: 'America/Denver', UT: 'America/Denver', WY: 'America/Denver', AZ: 'America/Phoenix',
-  CA: 'America/Los_Angeles', NV: 'America/Los_Angeles', OR: 'America/Los_Angeles', WA: 'America/Los_Angeles',
-};
 const stateOf = (s) => { const m = String(s || '').match(/,\s*([A-Z]{2})\b/); return m ? m[1] : ''; };
 function localToUtcMs(wall, tz) {
   const m = String(wall || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
@@ -432,7 +427,7 @@ const RULES = [
     return {
       code: 'late-risk', severity: worst.lateMin > 60 && !guess && !due ? 'critical' : 'warning', key: t.key,
       title: `${due ? 'May miss' : 'Will miss'} ${where} ${due ? 'due time' : 'appointment'} by ~${fmtMin(worst.lateMin)}`,
-      detail: `${Math.round(worst.miles)} mi${worst.stopsBefore ? ` with ${worst.stopsBefore} stop${worst.stopsBefore === 1 ? '' : 's'} first` : ''}. Projected ${fmtTime(worst.etaMs)} vs ${fmtTime(t.apptMs)}${src}${f.team ? ' (team)' : ` · drive left ${fmtMin(hos.driveLeftMin)}${hos.cycleLeftMin != null && hos.cycleLeftMin < 11 * 60 ? ` · 70-hr cycle left ${fmtMin(hos.cycleLeftMin)}` : ''}`}.${guess ? ' Break start unknown — confirm with the driver.' : ''} ${due ? 'Confirm the real appointment with the broker/receiver.' : 'Warn the broker/receiver or plan a rescue.'}`,
+      detail: `${Math.round(worst.miles)} mi${worst.stopsBefore ? ` with ${worst.stopsBefore} stop${worst.stopsBefore === 1 ? '' : 's'} first` : ''}. Projected ${fmtLocalShort(worst.etaMs, t.label)} vs ${fmtLocalShort(t.apptMs, t.label)}${src}${f.team ? ' (team)' : ` · drive left ${fmtMin(hos.driveLeftMin)}${hos.cycleLeftMin != null && hos.cycleLeftMin < 11 * 60 ? ` · 70-hr cycle left ${fmtMin(hos.cycleLeftMin)}` : ''}`}.${guess ? ' Break start unknown — confirm with the driver.' : ''} ${due ? 'Confirm the real appointment with the broker/receiver.' : 'Warn the broker/receiver or plan a rescue.'}`,
     };
   },
   // The appointment time has already gone by and the stop isn't delivered:
@@ -452,7 +447,7 @@ const RULES = [
     return {
       code: 'appt-passed', severity: 'warning', key: st.key,
       title: `${due ? 'Due time' : 'Appointment'} passed at ${where} — ${fmtMin((ctx.now - st.apptMs) / MIN)} ago, not delivered`,
-      detail: `Was ${due ? 'due' : 'set for'} ${fmtTime(st.apptMs)}${due ? ' (TruckMate due time)' : ''}.${r ? ` Truck ${Math.round(r.miles)} mi away, ETA ${fmtTime(r.etaMs)}.` : ''} Confirm a new appointment with the receiver/broker and update TruckMate.`,
+      detail: `Was ${due ? 'due' : 'set for'} ${fmtLocalShort(st.apptMs, st.label)}${due ? ' (TruckMate due time)' : ''}.${r ? ` Truck ${Math.round(r.miles)} mi away, ETA ${fmtLocalShort(r.etaMs, st.label)}.` : ''} Confirm a new appointment with the receiver/broker and update TruckMate.`,
     };
   },
   // Something an email asked for that nobody has done yet (urgent ones only).
@@ -633,12 +628,12 @@ const RULES = [
       const newAt = h.newPickupAt ? localToUtcMs(h.newPickupAt, 'America/New_York') : NaN;
       if (!Number.isNaN(newAt)) {
         const arrive = newAt + need - 60 * MIN;
-        plan = ` New pickup ${fmtTime(newAt)} → arrives ~${fmtTime(arrive)} at ${where} (appointment ${fmtTime(first.apptMs)})${arrive > first.apptMs ? ' — TOO LATE: warn the customer or send another driver' : ''}.`;
+        plan = ` New pickup ${fmtTime(newAt)} → arrives ~${fmtLocalShort(arrive, first.label)} at ${where} (appointment ${fmtLocalShort(first.apptMs, first.label)})${arrive > first.apptMs ? ' — TOO LATE: warn the customer or send another driver' : ''}.`;
         if (arrive > first.apptMs) sev = 'critical';
       } else {
         const teamLatest = f.team ? null : first.apptMs - (estimateArrival(miles, { team: true, now: 0 }) + 60 * MIN);
         const teamTip = teamLatest && ctx.now > latest ? (ctx.now <= teamLatest ? ` A team could still make it if it leaves by ${fmtTime(teamLatest)}.` : ' Even a team can no longer make it — tell the customer now.') : '';
-        plan = ` To make ${where} by ${fmtTime(first.apptMs)} (~${Math.round(miles)} mi${f.team ? ', team' : ', solo'}) it must leave by ${fmtTime(latest)}.${ctx.now > latest ? ` That time has PASSED — warn the customer or send another driver.${teamTip}` : ' Line up a backup driver if the pickup slips past that.'}`;
+        plan = ` To make ${where} by ${fmtLocalShort(first.apptMs, first.label)} (~${Math.round(miles)} mi${f.team ? ', team' : ', solo'}) it must leave by ${fmtTime(latest)}.${ctx.now > latest ? ` That time has PASSED — warn the customer or send another driver.${teamTip}` : ' Line up a backup driver if the pickup slips past that.'}`;
         if (ctx.now > latest - 3 * 60 * MIN) sev = 'critical';
       }
     }

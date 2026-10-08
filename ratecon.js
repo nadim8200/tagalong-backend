@@ -12,6 +12,7 @@
 //
 // Key lives server-side (ANTHROPIC_API_KEY); the file never leaves our backend.
 // ---------------------------------------------------------------
+import { readableFiles } from './heic.js';
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 
 const PROMPT = [
@@ -43,7 +44,8 @@ const PROMPT = [
 ].join('\n');
 
 // Read one rate con (one or more pages). pages: [{ dataBase64, mediaType, filename }].
-export async function readRateConPages(pages, { key, model, fetchFn = globalThis.fetch }) {
+export async function readRateConPages(pagesIn, { key, model, fetchFn = globalThis.fetch }) {
+  const pages = await readableFiles(pagesIn);                       // iPhone HEIC photos → JPEG
   const pageIsPdf = (p) => /pdf/i.test(p.mediaType || '') || /\.pdf$/i.test(p.filename || '');
   const content = [];
   pages.forEach((p, i) => {

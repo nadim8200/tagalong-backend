@@ -20,6 +20,7 @@
 // ---------------------------------------------------------------
 import Anthropic from '@anthropic-ai/sdk';
 import { PDFDocument } from 'pdf-lib';
+import { readableFiles } from './heic.js';
 
 const str = { type: ['string', 'null'] };
 const int = { type: ['integer', 'null'] };
@@ -692,7 +693,8 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
   // Read a batch of trip-sheet pages (a scanned nightly packet, photos…): sort every page,
   // read the trip sheets in full, read the rate cons, drop the rest. Used by the upload
   // screen and by trip-sheet emails. Throws {status, message} on a bad batch.
-  async function processPacket(site, { pages, originalIds = [], batchId = null, by = 'dispatcher' }) {
+  async function processPacket(site, { pages: pagesIn, originalIds = [], batchId = null, by = 'dispatcher' }) {
+    const pages = await readableFiles(pagesIn);                    // iPhone HEIC photos → JPEG
     {
       // 1) every page on its own (a 69-page packet → 69 single pages)
       const units = await splitPages(pages);
@@ -948,8 +950,9 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
   }
   // A trip sheet that came by email (attachment or a picture pasted in the body):
   // read it in full and save it on its trip, like an upload. pages: [{dataBase64, mediaType, filename}].
-  async function readAndFileSheets(site, pages, { docIds = [], by = 'Jarvis inbox', hintTrip = null } = {}) {
-    if (!client || !pages.length) return [];
+  async function readAndFileSheets(site, pagesIn, { docIds = [], by = 'Jarvis inbox', hintTrip = null } = {}) {
+    if (!client || !pagesIn.length) return [];
+    const pages = await readableFiles(pagesIn);
     const units = await splitPages(pages);
     const r = await readSheets(units);
     const board = await boardIndex(site);
@@ -977,8 +980,9 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
 
   // The nightly trip-sheet email: store the attached packet (split into pages) and run it
   // through the same reader as an upload. files: [{dataBase64, mediaType, filename}].
-  async function readPacketFromEmail(site, files, { by = 'Jarvis inbox' } = {}) {
-    if (!client || !files.length) return null;
+  async function readPacketFromEmail(site, filesIn, { by = 'Jarvis inbox' } = {}) {
+    if (!client || !filesIn.length) return null;
+    const files = await readableFiles(filesIn);
     const batchId = `email-${Date.now()}`;
     let originalIds = [];
     if (docs && docs.enabled && docs.storeDocs) {

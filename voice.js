@@ -23,6 +23,7 @@
 // ---------------------------------------------------------------
 import Retell from 'retell-sdk';
 import { contactsFor, billsOf } from './statusmail.js';
+import { fmtLocal } from './localtime.js';
 
 const API = 'https://api.retellai.com';
 // Truck / trailer / trip / bill numbers are read digit by digit on the phone: "2026" → "2 0 2 6".
@@ -59,7 +60,7 @@ How to help:
 - Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). If nothing is found, ask which city the delivery goes to and ask them to spell the business name, then call lookup_load again with customer_name (as spelled) and customer_city. If it returns did_you_mean, ask "Is that <name>?" and, if yes, look it up with that exact name. Names on the phone are often misheard — never tell the caller their name is wrong.
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Loads leave from Miami, Florida or Ventura, California (and some brokers' pickups elsewhere). When you tell a customer about their truck, say where it is coming from using coming_from (or pickup for brokers) — never assume Miami.
-- Only state facts lookup_load returns. For a customer or broker that is: where the truck is now, and THEIR delivery — ETA, boxes, cubes, appointment, delivered or not. Never mention any other stop, customer or city on the route (before or after theirs), and don't say you are leaving anything out; if they ask about the route, say the truck is on its way to them and give their ETA. Only the driver hears the full list of stops. Say times the way the tool gives them. Whenever you give a customer or broker an ETA, finish with this once, in their language: "${ETA_DISCLAIMER}" Read truck, trailer, trip and bill numbers one digit at a time, exactly as the tool spaces them (truck 2 0 2 6 = "two zero two six", never "two thousand twenty-six"); in Spanish or Hebrew, say each digit in that language. Never guess a location or a time.
+- Only state facts lookup_load returns. For a customer or broker that is: where the truck is now, and THEIR delivery — ETA, boxes, cubes, appointment, delivered or not. Never mention any other stop, customer or city on the route (before or after theirs), and don't say you are leaving anything out; if they ask about the route, say the truck is on its way to them and give their ETA. Only the driver hears the full list of stops. Say times the way the tool gives them — ETAs and appointments are already in the delivery's LOCAL time, so always say the time zone with them (e.g. "1:00 AM Pacific time"); never convert them to Miami / Eastern time. Whenever you give a customer or broker an ETA, finish with this once, in their language: "${ETA_DISCLAIMER}" Read truck, trailer, trip and bill numbers one digit at a time, exactly as the tool spaces them (truck 2 0 2 6 = "two zero two six", never "two thousand twenty-six"); in Spanish or Hebrew, say each digit in that language. Never guess a location or a time.
 - Drivers can tell you a stop is delivered (confirm_delivered) or report a problem — breakdown, delay, accident, reefer issue (report_problem). Repeat back the key details before saving.
 - Anything you can't answer, anything about rates, payments, detention, lumper, claims, appointments changes, or bank details: take a message with take_message (name, callback number, what they need) and say a dispatcher will call back. Never agree to change rates, payments, appointments or bank details.
 - If the caller asks for a person, is upset, or reports an accident or an emergency, transfer them to dispatch with transfer_to_dispatch (after report_problem for accidents). For a life-threatening emergency tell them to hang up and call 911.
@@ -151,11 +152,11 @@ export function voiceFacts(item, eta) {
     location_time: s.gpsAt ? fmt(Date.parse(s.gpsAt)) : null,
     moving: s.speedMph != null ? s.speedMph > 5 : null,
     next_stop: next ? `${next.customer ? `${next.customer}, ` : ''}${next.place}` : null,
-    estimated_arrival_next_stop: leg ? fmt(leg.etaMs) : null,
+    estimated_arrival_next_stop: leg ? fmtLocal(leg.etaMs, leg.label) : null,          // the stop's local time, zone named
     eta_note: next && !leg ? 'No ETA available right now — do NOT estimate or guess a time. Say dispatch will call back with the ETA, and take a message.' : undefined,
     truck_leaves_terminal_at: eta && eta.leavesAt ? fmt(eta.leavesAt) : undefined,
     miles_to_next_stop: leg ? leg.miles : null,
-    appointment_next_stop: leg && leg.apptMs ? `${fmt(leg.apptMs)}${leg.apptFrom === 'truckmate-due' ? ' (due time, not a confirmed appointment)' : ''}` : null,
+    appointment_next_stop: leg && leg.apptMs ? `${fmtLocal(leg.apptMs, leg.label)}${leg.apptFrom === 'truckmate-due' ? ' (due time, not a confirmed appointment)' : ''}` : null,
     stops_delivered: stops.filter((x) => x.delivered).map((x) => x.place),
     stops_already_passed: stops.filter((x) => x.passed).map((x) => x.place),
     stops_remaining: stops.filter((x) => !x.delivered && !x.passed).map((x) => x.place),
@@ -250,7 +251,7 @@ export function customerStops(items, name, etasByTrip = {}) {
       const delivered = bills.length ? bills.every((b) => b.actualDelivery) : false;
       const passed = !delivered && !!(eta && eta.passed) && eta.passed.some((x) => (st.zip && x.zip === String(st.zip)) || sameTown(x.label));
       towns.forEach((c) => seen.add(`${c}|${st.customer}`));
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmt(leg.etaMs) : null, from: 'trip sheet' });
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'trip sheet' });
     }
     // TruckMate bills (no trip sheet, or names the sheet didn't have)
     for (const b of billsOf(it)) {
@@ -261,7 +262,7 @@ export function customerStops(items, name, etasByTrip = {}) {
       if ([...seen].some((k) => k.toUpperCase().startsWith(String(city.split(',')[0]).toUpperCase()))) continue;
       const leg = eta && eta.stops ? eta.stops.find((x) => cityOf(x.label) === city) : null;
       const passed = !b.actualDelivery && !!(eta && eta.passed) && eta.passed.some((x) => cityOf(x.label) === city);
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: b.pieces != null ? `${b.pieces} boxes` : null, cubes: b.cubes != null ? b.cubes : null, appointment: null, delivered: !!b.actualDelivery, ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !b.actualDelivery && !passed && leg ? fmt(leg.etaMs) : null, from: 'TruckMate' });
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: b.pieces != null ? `${b.pieces} boxes` : null, cubes: b.cubes != null ? b.cubes : null, appointment: null, delivered: !!b.actualDelivery, ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !b.actualDelivery && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate' });
     }
   }
   return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 6).map(({ score, ...x }) => ({
@@ -389,7 +390,7 @@ export function brokerView(item, eta) {
       const leg = legOf(d.city);
       const delivered = done.has(town(d.city));
       const behind = !delivered && passed.has(town(d.city));
-      return { ...d, delivered, ...(behind ? { truck_already_passed: true } : {}), estimated_arrival: !delivered && !behind && leg ? fmt(leg.etaMs) : null, ...(!delivered && !behind && !leg ? { eta_note: 'No ETA right now — do NOT guess; offer a callback from dispatch.' } : {}) };
+      return { ...d, delivered, ...(behind ? { truck_already_passed: true } : {}), estimated_arrival: !delivered && !behind && leg ? fmtLocal(leg.etaMs, leg.label || d.city) : null, ...(!delivered && !behind && !leg ? { eta_note: 'No ETA right now — do NOT guess; offer a callback from dispatch.' } : {}) };
     }),
   };
 }

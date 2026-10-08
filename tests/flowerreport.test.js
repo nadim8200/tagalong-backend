@@ -20,7 +20,7 @@ test('each load: where the truck is, next stop + ETA, last stop, late and why', 
   assert.equal(r.state, 'LATE'); assert.match(r.why, /Will miss ALCOCK/);
   assert.equal(r.from, 'Miami, Florida'); assert.equal(r.drivers, 'Patrick Forbes & Wilmar Lozano');
   assert.match(r.now, /^Robeson County, NC \(5m ago\) · 66 mph$/);
-  assert.equal(r.next, 'ALCOCK WHOLESALE FLOWERS, KINSTON, NC'); assert.match(r.nextEta, /^Wed 10:00 AM$/);
+  assert.equal(r.next, 'ALCOCK WHOLESALE FLOWERS, KINSTON, NC'); assert.equal(r.nextEta, 'Wed, Oct 7, 10:00 AM Eastern');
   assert.equal(r.final, 'WALTHAM, MA'); assert.equal(r.progress, '0 of 2 stops done');
   assert.equal(flowerRow(load('2'), eta, [], NOW).state, 'ON TIME');
   assert.equal(flowerRow(load('3', { _breakdown: { on: true } }), eta, [], NOW).state, 'BREAKDOWN');
@@ -32,5 +32,5 @@ test('the email: late first, counts in the subject, estimate disclaimer', () => 
   const rep = buildFlowerReport(rows, NOW);
   assert.equal(rep.subject, 'Flower loads update — Wed, 10/07, 7:00 AM · 1 late, 1 at risk, 1 on time');
   assert.deepEqual(rep.rows.map((r) => r.trip), ['624481', '624482', '624480']);
-  assert.match(rep.html, /ETAs are estimates/);
+  assert.match(rep.html, /in each delivery's local time/);
 });
