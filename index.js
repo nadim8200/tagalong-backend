@@ -31,7 +31,7 @@ import { initWatchtower } from './watchtower.js';
 import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
 import { initCarriers } from './carriers.js';
-import { initDispatchers } from './dispatchers.js';
+import { initDispatchers, dispatcherMayUse } from './dispatchers.js';
 import { initJarvisChat } from './jarvischat.js';
 import { initHelpdesk } from './helpdesk.js';
 import { initProfiles } from './profiles.js';
@@ -85,6 +85,21 @@ const app = express();
 app.use(express.json({ limit: '15mb', verify: (req, _res, buf) => { if (req.url && req.url.startsWith('/retell/')) req.rawBody = buf.toString('utf8'); } }));
 app.use(cookieParser());
 app.use(cors({ origin: origins, credentials: true }));
+
+// Dispatcher logins: only the AI dispatcher console, and never its settings (see dispatchers.js).
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  let token = req.cookies && req.cookies.ta_session;
+  if (!token) { const h = req.headers.authorization || ''; if (h.startsWith('Bearer ')) token = h.slice(7); }
+  if (!token) return next();
+  let u = null;
+  try { u = jwt.verify(token, JWT_SECRET); } catch { return next(); }
+  if (!u || u.role !== 'dispatcher') return next();
+  const why = dispatcherMayUse(req.method, req.path);
+  if (why === 'outside') return res.status(403).json({ error: 'Dispatcher logins can only use the AI dispatcher console.' });
+  if (why === 'settings') return res.status(403).json({ error: 'Only an admin can change settings. Ask an admin.' });
+  return next();
+});
 
 const COOKIE = 'ta_session';
 const cookieOpts = {

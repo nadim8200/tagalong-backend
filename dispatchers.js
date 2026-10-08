@@ -14,6 +14,26 @@ const KEY = 'taDispatchers';
 const norm = (e) => String(e || '').toLowerCase().trim();
 const view = ({ pass, ...d }) => d;
 
+// What a dispatcher login may do. Dispatchers work loads: the AI dispatcher console
+// (loads, alerts, Jarvis chat, calls / texts to drivers, emails on a load). They can
+// read settings but never change them, and can't reach anything outside the console
+// (TagAlong accounts, the loads page, devices…). Pure.
+//   → null (allowed) | 'outside' | 'settings'
+const CONSOLE = /^\/(truckmate|watchtower|voice|jarvis)(\/|$)|^\/ringcentral\/(call|calls|sms|my-phone|numbers)(\/|$)|^\/auth\/(me|logout|dispatcher)(\/|$)|^\/push\/(register|unregister)$/;
+const ADMIN_ONLY = [
+  /\/settings\/?$/, /\/config\/?$/,                    // every settings / config screen
+  /^\/voice\/setup/,                                      // Jarvis voice agent in Retell
+  /^\/truckmate\/activity\/push/,                         // who gets call / text pushes
+  /^\/truckmate\/profiles(\/|$)/,                         // customer & broker profiles, authorized numbers
+  /^\/truckmate\/consent\/settings/,
+];
+export function dispatcherMayUse(method, path) {
+  const p = String(path || '').split('?')[0];
+  if (!CONSOLE.test(p)) return 'outside';
+  if (String(method).toUpperCase() !== 'GET' && String(method).toUpperCase() !== 'HEAD' && ADMIN_ONLY.some((re) => re.test(p))) return 'settings';
+  return null;
+}
+
 export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign, setCookie }) {
   const enabled = !!(db && db.enabled);
   let cache = { at: 0, list: [] };

@@ -351,8 +351,10 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
       // cap + drop tokens older than 60 days (stale installs)
       rec.tokens = rec.tokens.filter((t) => Date.now() - (t.ts || 0) < 60 * 24 * 3600 * 1000).slice(-10);
       rec.email = req.user.email; rec.role = req.user.role;
-      if (account) rec.account = String(account);
-      if (cid) rec.cid = String(cid);
+      // a dispatcher's phone gets dispatch pushes only — never a customer's vehicle alerts
+      if (account && req.user.role !== 'dispatcher') rec.account = String(account);
+      if (cid && req.user.role !== 'dispatcher') rec.cid = String(cid);
+      if (req.user.role === 'dispatcher') { delete rec.account; delete rec.cid; }
       store[uidKey] = rec;
       await writeStore(store);
       console.log(`[push] REGISTERED device — user ${uidKey}, account ${rec.account || '(none)'}, cid ${rec.cid || '(none)'}, tokens now ${rec.tokens.length}, apns ${enabled}`);

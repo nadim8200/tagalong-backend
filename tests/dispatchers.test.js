@@ -54,3 +54,13 @@ test('admins create dispatchers; dispatchers sign in and reach dispatch; custome
   await call('DELETE /admin/dispatchers/:id', { token: admin, params: { id: made.body.id } });
   assert.deepEqual((await call('GET /admin/dispatchers', { token: admin })).body, []);
 });
+
+test('dispatcher logins: console only, and never its settings', async () => {
+  const { dispatcherMayUse } = await import('../dispatchers.js');
+  // working loads — allowed
+  for (const [m, p] of [['GET', '/truckmate/active'], ['POST', '/truckmate/hold/624194'], ['PUT', '/truckmate/status-mail/624194'], ['POST', '/watchtower/ack'], ['POST', '/jarvis/chat'], ['POST', '/ringcentral/sms'], ['POST', '/ringcentral/call'], ['GET', '/truckmate/profiles'], ['GET', '/truckmate/outbound/settings'], ['POST', '/truckmate/outbound/send'], ['GET', '/auth/me'], ['POST', '/push/register']]) assert.equal(dispatcherMayUse(m, p), null, `${m} ${p}`);
+  // settings — admin only
+  for (const [m, p] of [['PUT', '/truckmate/outbound/settings'], ['PUT', '/watchtower/config'], ['POST', '/voice/setup'], ['PUT', '/truckmate/activity/push'], ['PUT', '/truckmate/profiles/abc'], ['POST', '/truckmate/profiles/import'], ['DELETE', '/truckmate/profiles/abc'], ['PUT', '/truckmate/milestones/settings'], ['PUT', '/truckmate/config']]) assert.equal(dispatcherMayUse(m, p), 'settings', `${m} ${p}`);
+  // outside the console
+  for (const [m, p] of [['GET', '/devices'], ['DELETE', '/account'], ['POST', '/loads'], ['POST', '/admin/dispatchers'], ['PUT', '/ringcentral/from-number'], ['PUT', '/ringcentral/config'], ['GET', '/assistant/board']]) assert.equal(dispatcherMayUse(m, p), 'outside', `${m} ${p}`);
+});
