@@ -681,7 +681,7 @@ const driverLinks = initDriverLinks(app, { help, requireAuth: requireDispatch, d
 // driver calls / texts on a load, and their replies (RingCentral)
 const comms = initComms(app, { help, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
-helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, getBoard: (site) => truckmate.buildBoard(site),
+helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) },
   sms: { live: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } }, send: (to, text) => rc.sendSms('__shared', { to, text }) } });
 const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, comms, ringcentral: rc, env: process.env });
@@ -708,7 +708,7 @@ const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: proc
 pickupFollow = initPickupFollow(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
-jarvisChat = initJarvisChat(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks,
+jarvisChat = initJarvisChat(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });

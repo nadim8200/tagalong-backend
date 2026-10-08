@@ -6,8 +6,8 @@ function memDb() { const m = new Map(); return { enabled: true, get: async (k, f
 const CFG = { customerService: { emails: ['cs@floridabeauty.us'], phones: ['3055551000'] }, dispatch: { emails: ['dispatch@floridabeauty.us'], phones: ['3055552000'] }, urgent: { emails: ['ronen@floridabeauty.us'], phones: ['3055553000'] } };
 
 test('who asks for help → who hears about it', () => {
-  assert.deepEqual(routeTo({ role: 'customer' }, CFG), { groups: ['customerService'], emails: ['cs@floridabeauty.us'], phones: ['3055551000'] });
-  assert.deepEqual(routeTo({ role: 'driver', urgent: true }, CFG).groups, ['dispatch', 'urgent']);
+  assert.deepEqual(routeTo({ role: 'customer' }, CFG), { groups: ['Customer service'], emails: ['cs@floridabeauty.us'], phones: ['3055551000'], calls: [] });   // an older setup becomes teams
+  assert.deepEqual(routeTo({ role: 'driver', urgent: true }, CFG).groups, ['Dispatch', 'Management']);
   assert.deepEqual(routeTo({ role: 'driver', urgent: true }, CFG).emails, ['dispatch@floridabeauty.us', 'ronen@floridabeauty.us']);
   assert.equal(wantsContact('Please call me back about my order'), true);
   assert.equal(wantsContact('Llámame cuando puedas'), true);
@@ -54,4 +54,46 @@ test('an email asking to be called raises a request (our own staff\'s emails nev
   await inbox.poll();
   assert.equal(raised.length, 1, 'staff email ignored');
   assert.deepEqual({ source: raised[0].source, role: raised[0].role, trip: raised[0].trip, urgent: raised[0].urgent, phone: raised[0].from.phone }, { source: 'email', role: 'broker', trip: '623869', urgent: true, phone: '312-555-0101' });
+});
+
+test('people choose how Jarvis reaches them: email, text, call — any mix — and which requests they get', async () => {
+  const cfg = { contacts: [
+    { name: 'Ronen Koubi', title: 'General Manager', email: 'ronen@floridabeauty.us', phone: '3055553000', channels: { email: true, call: true }, groups: ['urgent'] },
+    { name: 'Rosa Reategui', title: 'Dispatcher', email: 'rosa@floridabeauty.us', phone: '3055554000', channels: { email: true, text: true }, groups: ['dispatch', 'customerService'] },
+    { name: 'Andres Leon', title: 'Customer service', email: 'aleon@floridabeauty.us', phone: '5012321074', channels: { text: true }, groups: ['customerService'], active: false },
+  ] };
+  const plain = routeTo({ role: 'customer' }, cfg);
+  assert.deepEqual(plain, { groups: ['Customer service'], emails: ['rosa@floridabeauty.us'], phones: ['3055554000'], calls: [] });
+  const urgent = routeTo({ role: 'driver', urgent: true }, cfg);
+  assert.deepEqual([...urgent.emails].sort(), ['ronen@floridabeauty.us', 'rosa@floridabeauty.us']);
+  assert.deepEqual(urgent.phones, ['3055554000'], 'Ronen chose email + call, not text');
+  assert.deepEqual(urgent.calls, [{ phone: '3055553000', name: 'Ronen Koubi' }]);
+  // Jarvis calls the GM on an urgent request
+  const db = memDb(); await db.set('taHelpCfg', cfg);
+  const calls = [];
+  const h = initHelpdesk({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: () => {}, db, env: { NODE_ENV: 'test' }, mail: { ready: () => true, send: async () => {} }, sms: { live: async () => true, send: async () => {} }, caller: async (o) => { calls.push(o); return { called: true }; } });
+  const r = await h.raise({ source: 'call', ref: 'x1', role: 'driver', from: { name: 'Luis' }, trip: '624268', need: 'Accident on I-75, driver OK' });
+  assert.equal(calls[0].to, '3055553000'); assert.equal(calls[0].name, 'Ronen Koubi'); assert.match(calls[0].message, /^URGENT: Call back Luis/);
+  assert.deepEqual(r.sent.call, ['3055553000']);
+});
+
+import { blankTeam, pickTeams } from '../helpdesk.js';
+test('teams with context: Jarvis matches the request to the team whose context fits; a team can be asked for by name', async () => {
+  const teams = [
+    blankTeam({ id: 'cs', name: 'Customer service', gets: { customers: true }, members: [{ name: 'Andres', email: 'aleon@floridabeauty.us', channels: { email: true } }] }),
+    blankTeam({ id: 'acct', name: 'Accounting', when: 'Payments, invoices, rate questions, detention, lumper, TONU', email: 'accounting@floridabeauty.us', channels: { email: true }, members: [{ name: 'Gladys', phone: '3055556000', channels: { text: true, call: true } }] }),
+  ];
+  // deterministic: a broker → customer service only; Jarvis also matched accounting from its context
+  assert.deepEqual(pickTeams({ role: 'broker' }, teams).map((x) => x.name), ['Customer service']);
+  assert.deepEqual(pickTeams({ role: 'broker' }, teams, ['acct']).map((x) => x.name), ['Customer service', 'Accounting']);
+  assert.deepEqual(pickTeams({ role: 'unknown' }, teams, [], ['accounting']).map((x) => x.name), ['Customer service', 'Accounting'], 'asked for by name');
+  const db = memDb(); await db.set('taHelpCfg', { teams });
+  const mails = []; const texts = []; const calls = []; const asked = [];
+  const h = initHelpdesk({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: () => {}, db, env: { NODE_ENV: 'test' },
+    classify: async (req, ts) => { asked.push(ts.map((x) => x.id)); return /detention|invoice/i.test(req.need) ? ['acct'] : []; },
+    mail: { ready: () => true, send: async (m) => mails.push(m) }, sms: { live: async () => true, send: async (to) => texts.push(to) }, caller: async (o) => { calls.push(o.to); return { called: true }; } });
+  const r = await h.raise({ source: 'email', ref: 'e9', role: 'broker', from: { name: 'Kim (RXO)', email: 'ops@rxo.com' }, trip: '623869', need: 'Wants to talk about detention pay on 623869' });
+  assert.deepEqual(r.sent.teams, ['Customer service', 'Accounting']);
+  assert.deepEqual([...mails[0].to].sort(), ['accounting@floridabeauty.us', 'aleon@floridabeauty.us']);
+  assert.deepEqual(texts, ['3055556000']); assert.deepEqual(calls, ['3055556000']);
 });

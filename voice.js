@@ -736,5 +736,25 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
   });
 
   console.log(`[voice] Jarvis voice ${key() ? 'ready (Retell key set)' : 'off — needs RETELL_API_KEY'}`);
-  return { findLoad, live, placeCall, callsFor };
+  // Jarvis phones one of OUR people (a contact set up in the console) to read out a callback
+  // request. At most one call per number every 10 minutes.
+  async function callStaff({ to, name, message, trip = null, by = 'Jarvis (callback request)' }) {
+    if (!key() || !env.RETELL_FROM_NUMBER) return { skipped: 'Jarvis calls are not set up (Retell)' };
+    const cfg = await db.get(cfgKey, {});
+    if (!cfg.agentId) return { skipped: 'Jarvis agent not set up' };
+    const num = e164(to);
+    if (!num) return { skipped: 'no valid phone' };
+    const recent = await db.get(callsKey, []);
+    if ((Array.isArray(recent) ? recent : []).some((c) => c.phone && last10(c.phone) === last10(num) && Date.now() - Date.parse(c.at) < 10 * 60000)) return { skipped: 'called this number in the last 10 minutes' };
+    const first = String(name || '').split(/\s+/)[0];
+    const context = `This is an outgoing call to ${name || 'a Florida Beauty Flora team member'}, someone on our own team, to tell them about a callback request. Read it clearly: "${String(message).slice(0, 600)}". Then ask if they have questions; you may use lookup_load for the load${trip ? ` (trip ${trip})` : ''}. Keep it short and end the call when they are done.`;
+    const call = await retell('/v2/create-phone-call', { body: {
+      from_number: e164(env.RETELL_FROM_NUMBER), to_number: num, override_agent_id: cfg.agentId,
+      metadata: { trip, purpose: 'staff-alert', by },
+      retell_llm_dynamic_variables: { greeting: `Hi${first ? ` ${first}` : ''}, this is Jarvis from Florida Beauty Flora dispatch with a callback request. This call may be recorded.`, call_context: context },
+    } });
+    await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: num, trip, purpose: 'staff-alert', by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
+    return { called: true, callId: call.call_id };
+  }
+  return { findLoad, live, placeCall, callsFor, callStaff };
 }
