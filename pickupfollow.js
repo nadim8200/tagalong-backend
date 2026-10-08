@@ -113,7 +113,7 @@ ${rows ? `<p><b>What was said</b></p><table cellspacing="0" style="font-size:13p
   return { subject, html };
 }
 
-export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral = null, comms = null, voice = null, docs = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral = null, comms = null, voice = null, docs = null, driverLinks = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const key = `taPickupFollow:${site}`;
@@ -149,6 +149,12 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
 
   async function contact(item, step, plan, state) {
     const trip = tripNo(item);
+    // outside carriers with the TagAlong app: the check-in goes to the app (push notification) — no texting needed
+    if (item._oc && driverLinks && driverLinks.messageDriver) {
+      const name = item._oc.driverName || '';
+      const r = await driverLinks.messageDriver(site, trip, textFor(step, { name, trip, plan, moved: !!(state && state.plannedAt && state.plannedAt !== plan.ms) }).replace(/ Reply STOP to opt out\.$/, ''), 'Jarvis (pickup follow-up)').catch(() => null);
+      if (r && r.sent) return { via: r.via };
+    }
     const rcpt = recipientFor(item, 1, await db.get(`taSmsConsent:${site}`, {}));
     if (!rcpt || !rcpt.phone || !rcpt.consent) return { skipped: 'no consent / phone' };
     if ((await db.get('taSmsOptOut', {}))[last10(rcpt.phone)]) return { skipped: 'driver replied STOP' };

@@ -236,3 +236,38 @@ test('upload-only link for a company driver: no location sharing, no info form',
   assert.equal(view.body.purpose, 'docs');
   assert.equal(view.body.needInfo, false);
 });
+
+test('chat with the OC driver: dispatch writes → push to the phone; the driver answers with a photo; on the load like a text reply', async () => {
+  const db = fakeDb(); const app = fakeApp();
+  const pushes = []; const logged = []; const stored = [];
+  const push = { enabled: true, sendToTokens: async (tokens, msg) => { pushes.push({ tokens, msg }); return []; } };
+  const docs = { enabled: true, storeDocs: async (a) => { stored.push(a); return a.files.map((f, i) => ({ id: `d${i}` })); }, markDocs: async () => {} };
+  const dl = initDriverLinks(app, { requireAuth: () => {}, db, push, docs, env: {} });
+  dl.useComms({ log: async (site, trip, e) => logged.push({ trip, ...e }) });
+  const item = { trip: { tripNumber: '624268', powerUnit: 'OC1016' }, freightBills: [{ billNumber: 'B1' }], _oc: { carrier: { name: 'Zeal Xpress Inc' }, driverName: 'Luis Perez' } };
+  await dl.overlay('florida-beauty', [item]);
+  // no link yet → nothing to message
+  assert.equal((await dl.messageDriver('florida-beauty', '624268', 'hi')).skipped, 'no active driver link on this load');
+  const tok = (await app.call('POST', '/truckmate/oc/:trip/link', { trip: '624268' })).body.token;
+  // the app registers for notifications
+  assert.equal((await app.call('POST', '/driver/link/:token/push', { token: tok }, { token: 'a'.repeat(64), env: 'production' })).status, 200);
+  const sent = await app.call('POST', '/truckmate/oc/:trip/messages', { trip: '624268' }, { text: 'Please call the receiver 1 hour before arrival.' });
+  assert.equal(sent.body.via, 'app (push)');
+  assert.equal(pushes[0].tokens[0].token, 'a'.repeat(64)); assert.match(pushes[0].msg.title, /load 624268/); assert.equal(pushes[0].msg.data.path, `/t/${tok}`);
+  // the driver sees it and answers with a photo
+  const inbox = await app.call('GET', '/driver/link/:token/messages', { token: tok });
+  assert.equal(inbox.body.messages[0].text, 'Please call the receiver 1 hour before arrival.');
+  const reply = await app.call('POST', '/driver/link/:token/messages', { token: tok }, { text: 'Ok, rolling now', files: [{ dataBase64: 'AAAA', mediaType: 'image/jpeg' }] });
+  assert.equal(reply.status, 200);
+  assert.equal(stored[0].kind, 'driverdoc'); assert.equal(stored[0].trip, '624268');
+  assert.deepEqual(logged.map((l) => l.type), ['text', 'reply']); assert.match(logged[1].text, /Ok, rolling now \[1 photo\]/);
+  // the dispatcher's card shows the unread answer; opening the chat marks it seen
+  const again = [{ ...item }];
+  await dl.overlay('florida-beauty', again);
+  assert.equal(again[0]._ocChat.unread, 1); assert.equal(again[0]._driverLink.app, true);
+  const view = await app.call('GET', '/truckmate/oc/:trip/messages', { trip: '624268' });
+  assert.equal(view.body.messages.length, 2); assert.equal(view.body.app, true);
+  const after = [{ ...item }];
+  await dl.overlay('florida-beauty', after);
+  assert.equal(after[0]._ocChat.unread, 0);
+});

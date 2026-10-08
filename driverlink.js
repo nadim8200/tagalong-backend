@@ -20,6 +20,13 @@
 //   POST /driver/link/:token/ping          → one or more GPS fixes
 //   POST /driver/link/:token/checkin       → "Check in" button (note + position)
 //   POST /driver/link/:token/stop          → driver turned sharing off
+//   GET  /driver/link/:token/messages      → the load's chat with dispatch
+//   POST /driver/link/:token/messages      → driver writes (text and / or photos)
+//   POST /driver/link/:token/push          → the app's push-notification token (APNs)
+//
+//   Dispatcher: GET / POST /truckmate/oc/:trip/messages → the same chat; a dispatch
+//   message reaches the driver's phone as a push notification (app installed) and
+//   shows in the app. Jarvis uses it too (pickup check-ins, staff "text the driver").
 //
 // A link only ever exposes its own load, stops working when the load is
 // delivered / leaves the board, when revoked, or after LINK_DAYS. Nothing here
@@ -171,7 +178,7 @@ export function cleanFixes(list, now = Date.now()) {
   }).filter(Boolean).sort((a, b) => a.at.localeCompare(b.at));
 }
 
-export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcentral = null, docs = null, getBoard = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcentral = null, docs = null, getBoard = null, push = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const base = String(env.DRIVER_LINK_BASE || 'https://mytagalong.app').replace(/\/+$/, '');
   const company = env.DRIVER_LINK_COMPANY || 'Florida Beauty Flora';
@@ -179,6 +186,9 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
   const codeKey = (code) => `taDriverCode:${code}`;
   const posKey = (site, trip) => `taDriverPos:${site}:${trip}`;   // per TRIP: a new link continues the same history
   const siteKey = (site) => `taDriverLinks:${site}`;
+  const chatKey = (site) => `taOcChat:${site}`;                  // trip → [{ id, at, from: 'dispatch'|'driver', by, text, docIds }]
+  let comms = null;                                              // set after comms is created (logs chat on the load)
+  const useComms = (c) => { comms = c; };
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const urlOf = (tok) => `${base}/t/${tok}`;
@@ -229,6 +239,11 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
     boardTrips.set(site, trips);
     const idx = await db.get(siteKey(site), { byTrip: {} });
     const byTrip = idx.byTrip || {};
+    const chats = await db.get(chatKey(site), {});
+    for (const item of trips) {
+      const c = chats[String(tripOf(item).tripNumber || '')];
+      if (c && c.length) item._ocChat = { count: c.length, unread: c.filter((m) => m.from === 'driver' && !m.seenAt).length, last: c[c.length - 1] };
+    }
     const onBoard = new Set();
     const now = Date.now();
     for (const item of trips) {
@@ -243,6 +258,7 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
         link = await db.update(linkKey(tok), (cur) => ({ ...cur, completedAt: new Date(now).toISOString(), sharing: false }), link);
       }
       item._driverLink = summary(link, now);
+      item._driverLink.app = !!(link.push && link.push.length);   // the TagAlong app is installed and can get pushes
       const p = link.lastPing;
       const fresh = p && now - Date.parse(p.at) < FRESH_MIN * MIN;
       const s = item._samsara || null;
@@ -564,6 +580,99 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
     } catch (e) { res.status(500).json({ error: 'Could not stop sharing.' }); }
   });
 
+  // ---- chat between dispatch and the OC driver (in the app / link page) ----
+  const newId = () => crypto.randomBytes(6).toString('hex');
+  async function addMessage(site, trip, msg) {
+    const m = { id: newId(), at: new Date().toISOString(), docIds: [], ...msg, text: String(msg.text || '').slice(0, 1000) };
+    await db.update(chatKey(site), (cur) => ({ ...(cur || {}), [trip]: [...((cur || {})[trip] || []), m].slice(-200) }), {});
+    return m;
+  }
+  const linkForTrip = async (site, trip) => { const tok = ((await db.get(siteKey(site), { byTrip: {} })).byTrip || {})[trip]; return tok ? db.get(linkKey(tok), null) : null; };
+  // dispatch (or Jarvis) → driver: stored for the app + a push to the phone when the app is installed
+  async function messageDriver(site, trip, text, by = 'dispatcher') {
+    const body = String(text || '').trim();
+    if (!body) throw new Error('Write a message first.');
+    const link = await linkForTrip(site, String(trip));
+    if (!link || !isLive(linkStatus(link))) return { skipped: 'no active driver link on this load' };
+    const m = await addMessage(site, String(trip), { from: 'dispatch', by, text: body });
+    let pushed = false;
+    if (push && push.enabled && (link.push || []).length) {
+      const dead = await push.sendToTokens(link.push, { title: `${company} dispatch · load ${trip}`, body: body.slice(0, 180), data: { path: `/t/${link.token}`, kind: 'oc-message' } });
+      pushed = (link.push || []).some((p) => !dead.includes(p.token));
+      if (dead.length) await db.update(linkKey(link.token), (cur) => ({ ...cur, push: (cur.push || []).filter((p) => !dead.includes(p.token)) }), link);
+    }
+    if (comms && comms.log) await comms.log(site, String(trip), { type: 'text', kind: 'app-message', to: 'driver app', text: body, by, noThread: true });
+    return { sent: true, via: pushed ? 'app (push)' : 'app (shows when opened)', id: m.id };
+  }
+
+  app.get('/driver/link/:token/messages', async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
+    try {
+      const { link, status } = await activeLink(String(req.params.token));
+      if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
+      const list = ((await db.get(chatKey(link.site), {}))[link.trip] || []);
+      const now = new Date().toISOString();
+      if (list.some((m) => m.from === 'dispatch' && !m.readAt)) await db.update(chatKey(link.site), (cur) => ({ ...(cur || {}), [link.trip]: ((cur || {})[link.trip] || []).map((m) => (m.from === 'dispatch' && !m.readAt ? { ...m, readAt: now } : m)) }), {});
+      res.json({ active: isLive(status), messages: list.map(({ docIds, ...m }) => ({ ...m, photos: (docIds || []).length })) });
+    } catch (e) { res.status(500).json({ error: 'Could not load messages.' }); }
+  });
+  app.post('/driver/link/:token/messages', async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
+    try {
+      const { link, status } = await activeLink(String(req.params.token));
+      if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
+      if (!isLive(status) && status !== 'completed') return res.status(410).json({ active: false, status });
+      const b = req.body || {};
+      const text = String(b.text || '').trim().slice(0, 1000);
+      const files = (Array.isArray(b.files) ? b.files : []).slice(0, 6);
+      if (!text && !files.length) return res.status(400).json({ error: 'Write a message or add a photo.' });
+      const by = `${(link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'Driver'} (app)`;
+      let docIds = [];
+      if (files.length && docs && docs.enabled) {
+        const stored = await docs.storeDocs({ site: link.site, kind: 'driverdoc', trip: link.trip, files: files.map((f, i) => ({ ...f, filename: f.filename || `photo-${link.trip}-${Date.now()}-${i + 1}.jpg` })), by });
+        docIds = stored.map((d) => d.id);
+      }
+      const m = await addMessage(link.site, link.trip, { from: 'driver', by, text, docIds });
+      // on the load like a text reply (Jarvis' pickup follow-up and the rundown read it)
+      if (comms && comms.log) await comms.log(link.site, link.trip, { type: 'reply', from: 'driver app', text: `${text}${docIds.length ? ` [${docIds.length} photo${docIds.length === 1 ? '' : 's'}]` : ''}`, noThread: true });
+      if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: m.at, source: 'driver app message', text: text || `Sent ${docIds.length} photo${docIds.length === 1 ? '' : 's'}`, by }]);
+      res.json({ ok: true, id: m.id });
+    } catch (e) { res.status(400).json({ error: e.message || 'Could not send.' }); }
+  });
+  app.post('/driver/link/:token/push', async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
+    try {
+      const tok = String(req.params.token);
+      const { link } = await activeLink(tok);
+      if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
+      const t = String((req.body && req.body.token) || '').replace(/[^A-Fa-f0-9]/g, '');
+      if (t.length < 32) return res.status(400).json({ error: 'Bad push token.' });
+      const envName = /^(sandbox|production)$/.test(String(req.body.env || '')) ? req.body.env : '';
+      await db.update(linkKey(tok), (cur) => ({ ...cur, push: [...(cur.push || []).filter((p) => p.token !== t), { token: t, env: envName, at: new Date().toISOString() }].slice(-3) }), link);
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: 'Could not register notifications.' }); }
+  });
+
+  app.get('/truckmate/oc/:trip/messages', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const site = siteOf(req); const trip = String(req.params.trip);
+    try {
+      const list = (await db.get(chatKey(site), {}))[trip] || [];
+      const now = new Date().toISOString();
+      if (list.some((m) => m.from === 'driver' && !m.seenAt)) await db.update(chatKey(site), (cur) => ({ ...(cur || {}), [trip]: ((cur || {})[trip] || []).map((m) => (m.from === 'driver' && !m.seenAt ? { ...m, seenAt: now } : m)) }), {});
+      const link = await linkForTrip(site, trip);
+      res.json({ messages: list, app: !!(link && (link.push || []).length), live: !!(link && isLive(linkStatus(link))) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  app.post('/truckmate/oc/:trip/messages', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    try {
+      const r = await messageDriver(siteOf(req), String(req.params.trip), req.body && req.body.text, who(req));
+      if (r.skipped) return res.status(409).json({ error: 'Create the driver link first — messages go through the TagAlong app.' });
+      res.json(r);
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+
   console.log(`[driverlink] OC driver tracking links ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, routeFor, ensureDocsLink };
+  return { overlay, routeFor, ensureDocsLink, messageDriver, useComms };
 }

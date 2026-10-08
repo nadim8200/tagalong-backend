@@ -667,14 +667,15 @@ const carriers = initCarriers(app, { requireAuth, db });
 // load rundown PDF + Outlook email when a load finishes
 const rundowns = initRundowns(app, { requireAuth, db, docs, env: process.env });
 let truckmate;
-const driverLinks = initDriverLinks(app, { requireAuth, db, carriers, ringcentral: rc, docs, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const driverLinks = initDriverLinks(app, { requireAuth, db, carriers, ringcentral: rc, docs, push, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // driver calls / texts on a load, and their replies (RingCentral)
 const comms = initComms(app, { requireAuth, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
 const statusMail = initStatusMail(app, { requireAuth, db, comms, ringcentral: rc, env: process.env });
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
 const inbox = initInbox(app, { requireAuth, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []), packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   // our staff can ask Jarvis (by email) to text or call a driver — same consent / STOP rules
-  driver: { text: (site, trip, message, by) => comms.textDriverAuto(site, trip, message, by), call: async (site, trip, by) => { try { return { called: true, ...(await voice.placeCall(String(trip), { purpose: 'check', by })) }; } catch (e) { return { skipped: e.message }; } } } });
+  driver: { text: async (site, trip, message, by) => { const a = await driverLinks.messageDriver(site, trip, message, by).catch(() => ({ skipped: true })); return a && a.sent ? a : comms.textDriverAuto(site, trip, message, by); }, call: async (site, trip, by) => { try { return { called: true, ...(await voice.placeCall(String(trip), { purpose: 'check', by })) }; } catch (e) { return { skipped: e.message }; } } } });
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
 truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
@@ -688,7 +689,7 @@ manifestsApi = initManifests(app, { requireAuth, db, env: process.env, buildBoar
 // fleet managers' TagAlong app.
 const voice = initVoice(app, { requireAuth, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
-pickupFollow = initPickupFollow(app, { requireAuth, db, ringcentral: rc, comms, voice, docs, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+pickupFollow = initPickupFollow(app, { requireAuth, db, ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const flowerReport = initFlowerReport(app, { requireAuth, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
 initWatchtower(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await statusMail.process(site, board, ctx); } });
