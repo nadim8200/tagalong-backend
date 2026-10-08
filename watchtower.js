@@ -760,7 +760,7 @@ export function boardEtas(board, ctxIn) {
   return out;
 }
 
-export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null }) {
+export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null }) {
   if (!db || !db.enabled) { console.log('[watchtower] off — needs DATABASE_URL'); return; }
   const sites = String(env.WATCH_SITES || 'florida-beauty').split(',').map((s) => s.trim()).filter(Boolean);
   const CFG = 'taWatchCfg';
@@ -891,6 +891,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     const board = await buildBoard(site);
     if (afterBoard) { try { await afterBoard(site, board, { geo, now }); } catch (e) { console.warn('[watchtower] afterBoard:', e.message); } }
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
+    if (pushRules) cfg.recipients = await pushRules.emailsFor('priority');   // admin → Push notifications
     const toPush = []; const toEscalate = [];
 
     const archived = [];
@@ -1026,6 +1027,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
   app.get('/watchtower/config', requireAuth, async (req, res) => {
     try {
       const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
+      if (pushRules) cfg.recipients = await pushRules.emailsFor('priority');
       const recipients = push && push.phonesFor ? await push.phonesFor(cfg.recipients) : cfg.recipients.map((email) => ({ email, phones: null }));
       res.json({ ...cfg, recipients, me: (req.user && req.user.email) || '', pushEnabled: !!(push && push.enabled) });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1042,6 +1044,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
         if (body.escalateMin != null) c.escalateMin = Math.max(5, Math.min(120, Number(body.escalateMin) || 15));
         return c;
       }, DEFAULT_CFG);
+      if (pushRules && Array.isArray(body.recipients)) await pushRules.setPriority(cfg.recipients);   // same list as Push notifications
       res.json(cfg);
     } catch (e) { res.status(500).json({ error: e.message }); }
   });

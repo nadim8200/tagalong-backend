@@ -32,6 +32,7 @@ import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
 import { initCarriers } from './carriers.js';
 import { initDispatchers, dispatcherMayUse } from './dispatchers.js';
+import { initPushRules } from './pushrules.js';
 import { initJarvisChat } from './jarvischat.js';
 import { initHelpdesk } from './helpdesk.js';
 import { initProfiles } from './profiles.js';
@@ -682,7 +683,9 @@ const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.e
 // Original uploaded documents (rate cons, trip sheets) kept privately in Postgres.
 // Dispatch side (console, Jarvis, loads, emails, calls): admins and active dispatcher accounts only —
 // a TagAlong customer login can't reach it.
-const { requireDispatch } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
+const { requireDispatch, requireAdmin } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
+// who gets which push notifications — one admin screen for all of them
+const pushRules = initPushRules(app, { requireAdmin, db, push, listDispatchers: async () => (((await db.get('taDispatchers', { list: [] })) || {}).list || []).map(({ pass, reset, ...d }) => d) });
 const docs = initDocuments(app, { requireAuth: requireDispatch, db });
 // Geofence stop tracking (validated Samsara address boundaries only).
 const stopVisits = initStopVisits({ db, env: process.env, listAddresses, tokenFrom: samsaraTokenFrom });
@@ -693,7 +696,7 @@ const carriers = initCarriers(app, { requireAuth: requireDispatch, db });
 const rundowns = initRundowns(app, { requireAuth: requireDispatch, db, docs, env: process.env });
 let truckmate;
 // Calls & texts log by day (who called / was texted, both numbers, what was said)
-const activity = initActivity(app, { requireAuth: requireDispatch, db, push, getBoard: (site) => truckmate.buildBoard(site) });
+const activity = initActivity(app, { requireAuth: requireDispatch, db, push, pushRules, getBoard: (site) => truckmate.buildBoard(site) });
 // "someone needs us to reach out" (calls, emails, texts, driver app) → email + text the right people
 let helpdesk = null;
 const help = { raise: (r) => (helpdesk ? helpdesk.raise(r) : Promise.resolve(null)) };
@@ -701,7 +704,7 @@ const driverLinks = initDriverLinks(app, { help, requireAuth: requireDispatch, d
 // driver calls / texts on a load, and their replies (RingCentral)
 const comms = initComms(app, { help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
-helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
+helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, pushRules, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) },
   sms: { live: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } }, send: (to, text) => rc.sendSms('__shared', { to, text }) } });
 const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, comms, ringcentral: rc, env: process.env });
@@ -728,14 +731,14 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 const voice = initVoice(app, { help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
-const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, env: process.env });
+const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
 jarvisChat = initJarvisChat(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });
-initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); } });
+initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and

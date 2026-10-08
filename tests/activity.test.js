@@ -36,24 +36,24 @@ test('saved by day; filter by customers / brokers / drivers; a call updates in p
   assert.deepEqual(days, [{ day: '2026-10-09', count: 1 }, { day: '2026-10-08', count: 3 }]);
 });
 
-test('pushFor: calls ping once ended, texts as they come in; outbound off by default', async () => {
+test('pushFor: calls ping once ended, texts as they come in — each with its push type', async () => {
   const { pushFor } = await import('../activity.js');
-  const cfg = { emails: ['d@floridabeauty.us'], callsIn: true, callsOut: false, textsIn: true, textsOut: false };
-  assert.equal(pushFor({ kind: 'call', direction: 'inbound', from: '+17815550123' }, cfg), null); // still ringing
-  const n = pushFor({ kind: 'call', direction: 'inbound', from: '+17815550123', ended: true, trip: '624268', summary: 'Asked for ETA' }, cfg);
+  assert.equal(pushFor({ kind: 'call', direction: 'inbound', from: '+17815550123' }), null); // still ringing
+  const n = pushFor({ kind: 'call', direction: 'inbound', from: '+17815550123', ended: true, trip: '624268', summary: 'Asked for ETA' });
+  assert.equal(n.type, 'call-in');
   assert.match(n.title, /\(781\) 555-0123 called Jarvis/);
   assert.match(n.body, /Load 624268 · Asked for ETA/);
-  assert.equal(pushFor({ kind: 'call', direction: 'outbound', to: '3055550117', ended: true }, cfg), null);
-  assert.match(pushFor({ kind: 'text', dir: 'in', from: '3055550117', name: 'Luis', text: 'At the dock' }, cfg).title, /Text from Luis/);
-  assert.equal(pushFor({ kind: 'text', dir: 'out', to: '3055550117', text: 'hi' }, cfg), null);
-  assert.equal(pushFor({ kind: 'text', dir: 'in', from: '1', text: 'x' }, { ...cfg, emails: [] }), null);
+  assert.equal(pushFor({ kind: 'call', direction: 'outbound', to: '3055550117', ended: true }).type, 'call-out');
+  const t = pushFor({ kind: 'text', dir: 'in', from: '3055550117', name: 'Luis', text: 'At the dock' });
+  assert.equal(t.type, 'text-in'); assert.match(t.title, /Text from Luis/);
+  assert.equal(pushFor({ kind: 'app', dir: 'out', to: 'driver app', text: 'hi' }).type, 'text-out');
 });
 
-test('record pushes once per call even when the webhook repeats', async () => {
-  const db = memDb({ 'taActivityPush:florida-beauty': { emails: ['d@floridabeauty.us'] } });
+test('record pushes once per call even when the webhook repeats — to whoever the admin picked for that type', async () => {
+  const db = memDb();
   const sent = [];
-  const routes = {};
-  const a = initActivity({ get: (p, ...h) => { routes[p] = h.at(-1); }, put: () => {} }, { requireAuth: () => {}, db, push: { sendToEmails: async (to, m) => { sent.push({ to, ...m }); } } });
+  const pushRules = { emailsFor: async (type) => (type === 'call-in' ? ['d@floridabeauty.us'] : []) };
+  const a = initActivity({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, push: { sendToEmails: async (to, m) => { sent.push({ to, ...m }); } }, pushRules });
   const base = { id: 'call:abc', kind: 'call', direction: 'inbound', from: '+17815550123', to: '+17862040122', at: '2026-10-08T15:00:00Z' };
   await a.record(base);
   assert.equal(sent.length, 0);
@@ -61,5 +61,24 @@ test('record pushes once per call even when the webhook repeats', async () => {
   await a.record({ ...base, summary: 'Asked for ETA' });
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].to, ['d@floridabeauty.us']);
-  assert.equal(sent[0].data.type, 'activity');
+  assert.equal(sent[0].data.path, '/truckmate?tab=calls');
+  await a.record({ id: 't1', kind: 'text', dir: 'out', to: '3055550117', text: 'hi', at: '2026-10-08T15:10:00Z' });
+  assert.equal(sent.length, 1, 'nobody picked for texts sent');
+});
+
+test('calls show their callback request: open → "call back needed", then who handled it', async () => {
+  const { callbackOf } = await import('../activity.js');
+  const reqs = [{ id: 'h1', source: 'call', ref: 'abc:Please call me about 624268', status: 'open', need: 'ETA for 624268', urgent: false }, { id: 'h2', source: 'email', ref: 'abc', status: 'open' }];
+  assert.deepEqual(callbackOf('abc', reqs), { id: 'h1', status: 'open', need: 'ETA for 624268', urgent: false, handledBy: null, handledAt: null });
+  assert.equal(callbackOf('zzz', reqs), null);
+  const db = memDb({ 'taHelpRequests:florida-beauty': reqs });
+  const routes = {};
+  const a = initActivity({ get: (p, ...h) => { routes[p] = h.at(-1); }, put: () => {} }, { requireAuth: () => {}, db });
+  await a.record({ id: 'call:abc', kind: 'call', direction: 'inbound', from: '+17815550123', at: '2026-10-08T15:00:00Z', ended: true });
+  await a.record({ id: 'call:def', kind: 'call', direction: 'inbound', from: '+17815550999', at: '2026-10-08T16:00:00Z', ended: true });
+  let out; const res = { json: (j) => { out = j; }, status() { return this; } };
+  await routes['/truckmate/activity']({ query: { date: '2026-10-08', type: 'callback' } }, res);
+  assert.deepEqual(out.entries.map((e) => e.id), ['call:abc']);
+  await routes['/truckmate/activity/call/:callId']({ params: { callId: 'abc' }, query: { at: '2026-10-08T15:01:00Z' } }, res);
+  assert.equal(out.id, 'call:abc');
 });

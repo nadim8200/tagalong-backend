@@ -97,7 +97,7 @@ ${req.said ? `<p><b>What was said:</b></p><blockquote style="border-left:3px sol
   return { subject, html, text };
 }
 
-export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = null, sms = null, push = null, caller = null, classify = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = null, sms = null, push = null, pushRules = null, caller = null, classify = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const key = `taHelpRequests:${SITE}`;
   const cfgKey = 'taHelpCfg';
@@ -181,7 +181,8 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
         sent.call = out;
       }
     }
-    if (push && push.sendToEmails && to.emails.length) { try { sent.push = await push.sendToEmails(to.emails, { title: req.urgent ? '🚨 Call back — urgent' : '📞 Call back needed', body: msg.text.slice(0, 180), data: { type: 'help-request', id: req.id } }); } catch { sent.push = null; } }
+    const pushTo = pushRules ? await pushRules.emailsFor(req.urgent ? ['callback', 'callback-urgent'] : 'callback') : to.emails;   // who gets which pushes: admin → Push notifications
+    if (push && push.sendToEmails && pushTo.length) { try { sent.push = await push.sendToEmails(pushTo, { title: req.urgent ? '🚨 Call back — urgent' : '📞 Call back needed', body: msg.text.slice(0, 180), data: { path: '/truckmate?tab=inbox', type: 'help-request', id: req.id } }); } catch { sent.push = null; } }
     return sent;
   }
 

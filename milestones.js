@@ -134,7 +134,7 @@ export function applyReply(reply, { lastAsk = null, ms = {}, stops = [] } = {}) 
   return { kind: r.kind, set };
 }
 
-export function initMilestones(app, { requireAuth, db, ringcentral = null, comms = null, driverLinks = null, push = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initMilestones(app, { requireAuth, db, ringcentral = null, comms = null, driverLinks = null, push = null, pushRules = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const key = (site) => `taMilestones:${site}`;
   const cfgKey = 'taMilestonesCfg';
@@ -159,10 +159,10 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
   }
 
   async function alertDispatch(cfg, item, { title, body }) {
-    const to = cfg.notify || [];
-    if (!to.length) return;
-    if (push && push.sendToEmails) { try { await push.sendToEmails(to, { title, body: body.slice(0, 180), data: { type: 'milestone', trip: tripNo(item), path: '/truckmate' } }); } catch { /* best effort */ } }
-    if (mailConfig(env).ready) { try { await sendMail({ to, subject: title, html: `<div style="font-family:Arial,sans-serif;font-size:14px"><p>${body.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</p><p>Jarvis — AI Dispatcher</p></div>` }, { env, fetchFn }); } catch { /* best effort */ } }
+    const to = cfg.notify || [];                                              // email
+    const pushTo = pushRules ? await pushRules.emailsFor('driver') : to;      // push: admin → Push notifications
+    if (push && push.sendToEmails && pushTo.length) { try { await push.sendToEmails(pushTo, { title, body: body.slice(0, 180), data: { type: 'milestone', trip: tripNo(item), path: '/truckmate' } }); } catch { /* best effort */ } }
+    if (to.length && mailConfig(env).ready) { try { await sendMail({ to, subject: title, html: `<div style="font-family:Arial,sans-serif;font-size:14px"><p>${body.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</p><p>Jarvis — AI Dispatcher</p></div>` }, { env, fetchFn }); } catch { /* best effort */ } }
   }
 
   // Every Watchtower cycle, before the status emails (they read item._milestones).

@@ -27,30 +27,35 @@ export function whoIs(phone, { profiles = {}, drivers = new Map(), team = [] } =
   return { role: 'unknown' };
 }
 
-// Should this entry ping phones? Calls once they have ended (one push per call, with
-// the summary when it is ready); texts / app messages as they come in or go out. Pure.
-export function pushFor(e, cfg = {}) {
-  if (!e || !cfg || !(cfg.emails || []).length) return null;
+// Should this entry ping phones, and which push type is it (admin → Push notifications)?
+// Calls once they have ended (one push per call, with the summary when it is ready);
+// texts / app messages as they come in or go out. Pure.
+export function pushFor(e) {
+  if (!e) return null;
   const who = e.name || fmt(e.kind === 'call' ? (e.direction === 'outbound' ? e.to : e.from) : (e.dir === 'in' ? e.from : e.to));
   if (e.kind === 'call') {
     const out = e.direction === 'outbound';
-    if (!(out ? cfg.callsOut : cfg.callsIn !== false)) return null;
     if (!e.ended && !e.summary) return null;
-    return { title: out ? `📞 Jarvis called ${who}` : `📞 ${who} called Jarvis`, body: `${e.trip ? `Load ${e.trip} · ` : ''}${e.summary || (e.minutes != null ? `${e.minutes} min call` : 'Call ended')}`.slice(0, 180) };
+    return { type: out ? 'call-out' : 'call-in', title: out ? `📞 Jarvis called ${who}` : `📞 ${who} called Jarvis`, body: `${e.trip ? `Load ${e.trip} · ` : ''}${e.summary || (e.minutes != null ? `${e.minutes} min call` : 'Call ended')}`.slice(0, 180) };
   }
   const inbound = e.dir === 'in';
-  if (!(inbound ? cfg.textsIn !== false : cfg.textsOut)) return null;
   const label = e.kind === 'app' ? 'App message' : 'Text';
-  return { title: inbound ? `💬 ${label} from ${who}` : `💬 ${label} to ${who}`, body: `${e.trip ? `Load ${e.trip} · ` : ''}${e.text || ''}`.slice(0, 180) };
+  return { type: inbound ? 'text-in' : 'text-out', title: inbound ? `💬 ${label} from ${who}` : `💬 ${label} to ${who}`, body: `${e.trip ? `Load ${e.trip} · ` : ''}${e.text || ''}`.slice(0, 180) };
+}
+
+// The callback request that came out of a call (its ref starts with the call id). Pure.
+export function callbackOf(callId, requests = []) {
+  if (!callId) return null;
+  const hits = (requests || []).filter((r) => r && r.source === 'call' && String(r.ref || '').split(':')[0] === String(callId));
+  const r = hits.find((x) => x.status === 'open') || hits[0];
+  return r ? { id: r.id, status: r.status, need: r.need || null, urgent: !!r.urgent, handledBy: r.handledBy || null, handledAt: r.handledAt || null } : null;
 }
 const fmt = (p) => { const d = last10(p); return d ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || 'unknown number'); };
 
-export function initActivity(app, { requireAuth, db, getBoard = null, push = null }) {
+export function initActivity(app, { requireAuth, db, getBoard = null, push = null, pushRules = null }) {
   const enabled = !!(db && db.enabled);
   const key = (day) => `taActivity:${SITE}:${day}`;
   const daysKey = `taActivityDays:${SITE}`;
-  const pushKey = `taActivityPush:${SITE}`;
-  const PUSH_DEFAULT = { emails: [], callsIn: true, callsOut: false, textsIn: true, textsOut: false };
 
   // add (or update, same id) one entry on its day
   async function record(e) {
@@ -58,7 +63,6 @@ export function initActivity(app, { requireAuth, db, getBoard = null, push = nul
     const at = e.at || new Date().toISOString();
     const entry = { id: e.id || randomBytes(6).toString('hex'), ...e, at };
     const day = dayOf(at);
-    const cfg = push && push.sendToEmails ? { ...PUSH_DEFAULT, ...((await db.get(pushKey, {})) || {}) } : null;
     let note = null;
     const list = await db.update(key(day), (cur) => {
       const l = Array.isArray(cur) ? cur : [];
@@ -66,12 +70,17 @@ export function initActivity(app, { requireAuth, db, getBoard = null, push = nul
       const merged = i >= 0 ? { ...l[i], ...entry, at: l[i].at || at } : entry;
       // one push per entry — decided inside the same transaction so repeat webhooks can't double-ping
       note = null;
-      if (cfg && !merged.pushed) { note = pushFor(merged, cfg); if (note) merged.pushed = new Date().toISOString(); }
+      if (!merged.pushed) { note = pushFor(merged); if (note) merged.pushed = new Date().toISOString(); }
       if (i >= 0) { const copy = [...l]; copy[i] = merged; return copy; }
       return [merged, ...l].slice(0, 3000);
     }, []);
     await db.update(daysKey, (cur) => ({ ...(cur || {}), [day]: (list || []).length }), {});
-    if (note) { try { await push.sendToEmails(cfg.emails, { ...note, data: { type: 'activity', id: entry.id, day, path: '/truckmate?tab=calls' } }); } catch (err) { console.error('[activity] push failed:', err.message); } }
+    if (note && push && push.sendToEmails && pushRules) {
+      try {
+        const to = await pushRules.emailsFor(note.type);
+        if (to.length) await push.sendToEmails(to, { title: note.title, body: note.body, data: { type: 'activity', id: entry.id, day, path: '/truckmate?tab=calls' } });
+      } catch (err) { console.error('[activity] push failed:', err.message); }
+    }
     return entry;
   }
 
@@ -89,21 +98,6 @@ export function initActivity(app, { requireAuth, db, getBoard = null, push = nul
     return { profiles: profiles || {}, drivers, team };
   }
 
-  // who gets a phone push (TagAlong app) for calls and texts, and for which kinds
-  const splitEmails = (v) => [...new Set((Array.isArray(v) ? v : String(v || '').split(/[\s,;]+/)).map((x) => String(x).trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)))].slice(0, 50);
-  app.get('/truckmate/activity/push', requireAuth, async (req, res) => {
-    const cfg = { ...PUSH_DEFAULT, ...((await db.get(pushKey, {})) || {}) };
-    let phones = [];
-    try { phones = push && push.phonesFor ? await push.phonesFor(cfg.emails) : []; } catch { phones = []; }
-    res.json({ ...cfg, ready: !!(push && push.enabled), phones });
-  });
-  app.put('/truckmate/activity/push', requireAuth, async (req, res) => {
-    const b = req.body || {};
-    const cfg = { emails: splitEmails(b.emails), callsIn: b.callsIn !== false, callsOut: !!b.callsOut, textsIn: b.textsIn !== false, textsOut: !!b.textsOut };
-    await db.set(pushKey, cfg);
-    res.json(cfg);
-  });
-
   app.get('/truckmate/activity/days', requireAuth, async (req, res) => {
     const d = (await db.get(daysKey, {})) || {};
     res.json(Object.entries(d).sort((a, b) => b[0].localeCompare(a[0])).slice(0, 120).map(([day, count]) => ({ day, count })));
@@ -112,14 +106,28 @@ export function initActivity(app, { requireAuth, db, getBoard = null, push = nul
     const day = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || '')) ? req.query.date : dayOf();
     const list = (await db.get(key(day), [])) || [];
     const ctx = await context();
+    const requests = (await db.get(`taHelpRequests:${SITE}`, [])) || [];
     const type = String(req.query.type || 'all');
     const q = String(req.query.q || '').toLowerCase();
     const out = list.map((e) => {
       const other = e.kind === 'call' ? (e.direction === 'outbound' ? e.to : e.from) : (e.dir === 'in' ? e.from : e.to);
       const w = e.role && e.role !== 'unknown' ? { role: e.role, name: e.name || null, detail: e.detail || null } : whoIs(other, ctx);
-      return { ...e, otherPhone: other || null, role: w.role, name: e.name || w.name || null, detail: e.detail || w.detail || null };
-    }).filter((e) => (type === 'all' || e.role === type) && (!q || JSON.stringify([e.name, e.detail, e.otherPhone, e.trip, e.summary, e.text, e.transcript]).toLowerCase().includes(q)));
+      const callback = e.kind === 'call' ? callbackOf(String(e.id || '').replace(/^call:/, ''), requests) : null;
+      return { ...e, otherPhone: other || null, role: w.role, name: e.name || w.name || null, detail: e.detail || w.detail || null, callback };
+    }).filter((e) => (type === 'all' || e.role === type || (type === 'callback' && e.callback && e.callback.status === 'open')) && (!q || JSON.stringify([e.name, e.detail, e.otherPhone, e.trip, e.summary, e.text, e.transcript]).toLowerCase().includes(q)));
     res.json({ day, entries: out.sort((a, b) => String(b.at).localeCompare(String(a.at))) });
+  });
+
+  // one call (for a callback request: "hear the call / read the transcript")
+  app.get('/truckmate/activity/call/:callId', requireAuth, async (req, res) => {
+    const id = `call:${String(req.params.callId)}`;
+    const around = Date.parse(String(req.query.at || '')) || Date.now();
+    for (const d of [0, -1, 1]) {
+      const list = (await db.get(key(dayOf(new Date(around + d * 86400000).toISOString())), [])) || []; // eslint-disable-line no-await-in-loop
+      const e = list.find((x) => x.id === id);
+      if (e) return res.json(e);
+    }
+    res.status(404).json({ error: 'That call is not in the log (calls are logged from Oct 8 on).' });
   });
 
   return { record };
