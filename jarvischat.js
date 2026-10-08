@@ -26,6 +26,26 @@ const MAX_STEPS = 8;
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
 const newId = () => randomBytes(6).toString('hex');
+const unitKey = (u) => String(u == null ? '' : u).trim().toLowerCase().replace(/^0+(?=\d)/, '');
+const minsText = (m) => (m < 60 ? `${Math.round(m)} min` : `${Math.floor(m / 60)}h ${Math.round(m % 60)}m`);
+// Where the truck is and what it's doing — every load line Jarvis shows carries this. Pure.
+export function truckNow(it, w = {}, now = Date.now()) {
+  const l = (it && it._samsara) || {};
+  const n = tripNo(it);
+  const eta = (w.etas || {})[n];
+  const next = eta && eta.stops && eta.stops[0];
+  const gpsAge = l.gpsAt ? (now - Date.parse(l.gpsAt)) / 60000 : null;
+  const us = ((w.units || {})[unitKey(tripOf(it).powerUnit)]) || {};
+  const moving = l.speedMph != null && l.speedMph > 3;
+  return {
+    location: l.location || null,
+    gps: gpsAge == null ? 'no GPS' : gpsAge > 30 ? `last seen ${minsText(gpsAge)} ago` : 'live',
+    motion: l.speedMph == null ? 'unknown' : moving ? `rolling ${Math.round(l.speedMph)} mph` : `stopped${us.stoppedSince ? ` ${minsText((now - us.stoppedSince) / 60000)}${us.stopStartUnknown ? '+' : ''}` : ''}`,
+    driving: l.hos && l.hos.status ? l.hos.status : undefined,
+    driveLeft: l.hos && l.hos.driveLeftMin != null ? minsText(l.hos.driveLeftMin) : undefined,
+    nextStop: next ? { stop: next.label, eta: fmtLocal(next.etaMs, next.label), miles: next.miles } : null,
+  };
+}
 const clip = (x, n = 6000) => { const s = typeof x === 'string' ? x : JSON.stringify(x); return s.length > n ? `${s.slice(0, n)}…(truncated)` : s; };
 
 export const TOOLS = [
@@ -47,6 +67,7 @@ export const SYSTEM = (who) => `You are Jarvis, the AI dispatcher for Florida Be
 - Answer from the live system: use the tools, never guess trips, times, locations or names. If a tool finds nothing, say so.
 - Be brief and practical (a few lines or a short list). Lead with the answer. Use trip numbers.
 - ETAs and appointments: say them as the tools give them (delivery local time with the zone).
+- Whenever you list or describe a load, include where the truck is now (truckNow.location), whether it is rolling and how fast or stopped and for how long (truckNow.motion; say if the GPS is old), and its next stop with ETA (truckNow.nextStop). Keep each load to one or two lines.
 - When the dispatcher gives you an update, a task or a transfer between teams, record it with add_note (or set_hold) — then confirm in one line what you saved. For a transfer, capture both trucks / teams, the place and the time; ask for anything missing.
 - Anything that reaches outside people (texting or calling a driver, emailing a customer / broker) goes through propose_action — never claim it was sent; say it is waiting for their Confirm.
 - Documents the dispatcher uploads are read automatically; the results are in their message. If a document wasn't a trip sheet or rate con, ask which load it belongs to and attach it with attach_document.
@@ -74,7 +95,7 @@ export function initJarvisChat(app, { requireAuth, db, getBoard, docs = null, pa
       case 'board_summary': {
         const w = await watch(); const al = openAlerts(w);
         const f = String(input.filter || '').toUpperCase();
-        const rows = all.map((it) => { const t = tripOf(it); return `${tripNo(it)} · ${t.status || ''} · truck ${t.powerUnit || '—'} trl ${t.trailer || '—'} · ${t.origZoneDesc || '—'} → ${t.destZoneDesc || '—'} · now ${(it._samsara && it._samsara.location) || 'no GPS'}${it._hold ? ` · HOLD: ${it._hold.note}` : ''}`; })
+        const rows = all.map((it) => { const t = tripOf(it); const tn = truckNow(it, w); return `${tripNo(it)} · ${t.status || ''} · truck ${t.powerUnit || '—'} trl ${t.trailer || '—'} · ${t.origZoneDesc || '—'} → ${t.destZoneDesc || '—'} · now ${tn.location || 'no GPS'} (${tn.gps}, ${tn.motion})${tn.nextStop ? ` · next ${tn.nextStop.stop} ETA ${tn.nextStop.eta}` : ''}${it._hold ? ` · HOLD: ${it._hold.note}` : ''}`; })
           .filter((r) => !f || r.toUpperCase().includes(f));
         return { activeLoads: all.length, alerts: { critical: al.filter((a) => a.severity === 'critical').length, warning: al.filter((a) => a.severity !== 'critical').length }, notClosed: ((board && board.unclosed) || []).length, loads: rows.slice(0, 80), more: Math.max(0, rows.length - 80) };
       }
@@ -93,6 +114,7 @@ export function initJarvisChat(app, { requireAuth, db, getBoard, docs = null, pa
         const notes = ((await db.get(notesKey, {})) || {})[n] || [];
         return {
           ...slimItem(it, openAlerts(w).filter((a) => a.trip === n)),
+          truckNow: truckNow(it, w),
           etas: eta ? (eta.stops || []).map((s) => ({ stop: s.label, eta: fmtLocal(s.etaMs, s.label), miles: s.miles, appointment: s.apptMs ? fmtLocal(s.apptMs, s.label) : null })) : null,
           stopsAlreadyPassed: eta ? (eta.passed || []).map((s) => s.label) : [],
           hold: it._hold || null, tasks: (it._tasks || []).filter((t) => !t.done).map((t) => t.title),
@@ -101,8 +123,10 @@ export function initJarvisChat(app, { requireAuth, db, getBoard, docs = null, pa
         };
       }
       case 'alerts': {
-        const al = openAlerts(await watch()).filter((a) => !input.severity || a.severity === input.severity);
-        return al.slice(0, 60).map((a) => ({ trip: a.trip, truck: a.unit, severity: a.severity, title: a.title, detail: a.detail, owner: a.owner || null }));
+        const w = await watch();
+        const al = openAlerts(w).filter((a) => !input.severity || a.severity === input.severity).sort((a, b) => (a.severity === 'critical' ? 0 : 1) - (b.severity === 'critical' ? 0 : 1));
+        const now = Date.now();
+        return { total: al.length, alerts: al.slice(0, 150).map((a) => { const it = all.find((x) => tripNo(x) === a.trip); return { trip: a.trip, truck: a.unit, severity: a.severity, title: a.title, detail: clip(a.detail || '', 300), owner: a.owner || undefined, truckNow: it ? truckNow(it, w, now) : undefined }; }) };
       }
       case 'conversations': {
         const n = String(input.trip || '').replace(/\D/g, '');

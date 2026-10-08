@@ -66,3 +66,15 @@ test('uploads: a trip sheet is read and filed; another document is stored and ca
   assert.match(h.claude.sent[0].messages.at(-1).content, /\[Uploaded: .*pallet\.jpg → not a trip sheet or rate con.*docId 991/);
   assert.deepEqual(linked[0].links, [{ docId: '991', trips: ['624399'] }]);
 });
+
+import { truckNow } from '../jarvischat.js';
+test('every load Jarvis lists says where the truck is, rolling or stopped, and the next stop', () => {
+  const now = Date.parse('2026-10-08T16:00:00Z');
+  const it = { trip: { tripNumber: '624460', powerUnit: '1811' }, _samsara: { location: 'I 5, Stanislaus County, CA', gpsAt: '2026-10-08T15:58:00Z', speedMph: 0, hos: { status: 'onDuty', driveLeftMin: 0 } } };
+  const w = { units: { 1811: { stoppedSince: now - 95 * 60000 } }, etas: { 624460: { stops: [{ label: 'TRACY, CA, 95304', etaMs: Date.parse('2026-10-09T02:23:00Z'), miles: 28 }] } } };
+  const tn = truckNow(it, w, now);
+  assert.equal(tn.motion, 'stopped 1h 35m'); assert.equal(tn.gps, 'live'); assert.equal(tn.driveLeft, '0 min');
+  assert.deepEqual(tn.nextStop, { stop: 'TRACY, CA, 95304', eta: 'Thu, Oct 8, 7:23 PM Pacific (local time)', miles: 28 });
+  assert.equal(truckNow({ ...it, _samsara: { ...it._samsara, speedMph: 61 } }, w, now).motion, 'rolling 61 mph');
+  assert.equal(truckNow({ ...it, _samsara: { ...it._samsara, gpsAt: '2026-10-08T13:00:00Z' } }, w, now).gps, 'last seen 3h 0m ago');
+});
