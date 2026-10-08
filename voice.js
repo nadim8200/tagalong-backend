@@ -309,6 +309,14 @@ export function nameCandidates(items, said, city, max = 3) {
   return [...seen.entries()].filter(([k, v]) => k && (v >= 0.3 || seen.size <= 3)).sort((a, b) => b[1] - a[1]).slice(0, max).map(([k]) => k);
 }
 
+// A delayed pickup (from a dispatcher's email): callers hear THAT it's delayed, never why
+// (no medical or personal details about drivers).
+function holdSaid(item) {
+  const h = item && item._hold;
+  if (!h || h.kind !== 'pickup_delayed') return {};
+  return { departure_delayed: true, delay_note: `The truck's departure is delayed${h.newPickupAt ? ` — it is now planned to leave around ${new Date(Date.parse(`${h.newPickupAt}:00Z`)).toLocaleString('en-US', { timeZone: 'UTC', weekday: 'short', hour: 'numeric', minute: '2-digit' })} Eastern` : ' and the new departure time is not set yet'}. Say dispatch will confirm the new ETA. Never share the reason for the delay.` };
+}
+
 // What a customer or broker hears: where the truck is now and THEIR stop only —
 // never the other stops on the trip (not before, not after). Pure.
 const CUSTOMER_STATUS = { DISP: 'scheduled, not picked up yet', ASSGN: 'scheduled, not picked up yet', ARRSHIP: 'being loaded', DEPSHIP: 'picked up and on the way', ARRCONS: 'on the way', DEPCONS: 'on the way' };
@@ -320,7 +328,9 @@ export function customerView(item, eta, deliveries = null) {
   const f = voiceFacts(item, eta);
   const t = tripOf(item);
   const from = originOf(item);
+  const held = holdSaid(item);
   const base = {
+    ...held,
     trip: f.trip, status: `${CUSTOMER_STATUS[String(t.status || '').toUpperCase()] || 'on the way'}${/^ARRSHIP$/i.test(String(t.status || '')) && from ? ` in ${from}` : ''}`,
     truck: f.truck, trailer: f.trailer, breakdown: f.breakdown || undefined,
     truck_now: f.current_location, as_of: f.location_time, moving: f.moving, coming_from: from || undefined,
@@ -369,6 +379,7 @@ export function brokerView(item, eta) {
   const list = rcDel.length ? rcDel.map((d) => ({ city: [d.city, d.state].filter(Boolean).join(', '), receiver: d.name || null, appointment: [d.date, d.time || d.appointment].filter(Boolean).join(' ') || null }))
     : [...f.stops_delivered, ...f.stops_already_passed, ...f.stops_remaining].map((c) => ({ city: c, receiver: null, appointment: null }));
   return {
+    ...holdSaid(item),
     trip: f.trip, broker: rc.broker || null, broker_load_number: rc.loadNumber || null,
     status: BROKER_STATUS[String(t.status || '').toUpperCase()] || f.status,
     truck: f.truck, trailer: f.trailer, breakdown: f.breakdown || undefined,
@@ -646,40 +657,50 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
   const PURPOSE = {
     check: 'This is an outgoing check call to the driver of trip {{trip}} ({{driver_name}}). Ask where they are, how it is going and their estimated arrival at {{next_stop}}. Note any problem with report_problem.',
     'confirm-stop': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to confirm whether {{next_stop}} was delivered. If yes, save it with confirm_delivered (ask boxes and any shortage or damage) and remind them to upload the signed POD/BOL.',
+    'pickup-check': 'This is an outgoing check call to the driver of trip {{trip}} ({{driver_name}}) about the pickup at {{pickup}} planned for {{pickup_time}}. Ask whether they are already rolling / on the way, where they are, and their ETA to the pickup. If they will be late, ask why and the new time, and save it with report_problem (problem_type delay). Keep it short — they may be driving.',
     pod: 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to ask for the signed POD and BOL. Ask them to upload photos through the link we texted, or reply to our text with pictures.',
   };
-  app.post('/truckmate/trips/:trip/ai-call', requireAuth, async (req, res) => {
-    if (!key() || !env.RETELL_FROM_NUMBER) return res.status(503).json({ error: 'Jarvis voice is not set up yet (Retell key and number in Render).' });
+  // Jarvis calls a driver — only with recorded consent, never after STOP, at most once per 30 minutes.
+  // Used by the dispatcher's button and by the pickup follow-up. Throws {status, message}.
+  async function placeCall(trip, { which = 1, purpose = 'check', by = 'dispatcher', vars: extra = {} } = {}) {
+    const fail = (status, message, more = {}) => Object.assign(new Error(message), { status, ...more });
+    if (!key() || !env.RETELL_FROM_NUMBER) throw fail(503, 'Jarvis voice is not set up yet (Retell key and number in Render).');
     const cfg = await db.get(cfgKey, {});
-    if (!cfg.agentId) return res.status(503).json({ error: 'Set up the Jarvis agent first (Calls, texts & email → Jarvis voice).' });
-    const trip = String(req.params.trip); const b = req.body || {};
-    try {
-      const it = (await items()).find((x) => tripNo(x) === trip);
-      if (!it) return res.status(404).json({ error: 'That load is not on the live board.' });
-      const s = it._samsara || {};
-      const which = Number(b.driver) === 2 ? 2 : 1;
-      const d = it._oc ? { phone: which === 2 ? it._oc.driver2Phone : it._oc.driverPhone, name: which === 2 ? it._oc.driver2Name : it._oc.driverName }
-        : (which === 2 ? s.driver2Info : s.driver1Info) || {};
-      const to = e164(d.phone);
-      if (!to) return res.status(400).json({ error: 'No phone number for this driver.' });
-      const k = last10(to);
-      const [consent, optOut, recent] = await Promise.all([db.get(`taSmsConsent:${site}`, {}), db.get('taSmsOptOut', {}), db.get(callsKey, [])]);
-      if (optOut[k]) return res.status(409).json({ error: 'This driver replied STOP — no automated contact.' });
-      if (!consent[k] && !(it._oc && it._oc.smsConsent)) return res.status(409).json({ error: 'Record the driver\'s consent first (read the opt-in script).', needConsent: true });
-      if (recent.some((c) => c.phone && last10(c.phone) === k && Date.now() - Date.parse(c.at) < 30 * 60000)) return res.status(429).json({ error: 'Jarvis called this driver in the last 30 minutes.' });
-      const facts = voiceFacts(it, await etaFor(trip));
-      const purpose = PURPOSE[b.purpose] ? b.purpose : 'check';
-      const vars = { trip, driver_name: d.name || 'driver', next_stop: facts.next_stop || 'the next stop' };
-      const context = PURPOSE[purpose].replace(/\{\{(\w+)\}\}/g, (m, v) => vars[v] || '');
-      const call = await retell('/v2/create-phone-call', { body: {
-        from_number: e164(env.RETELL_FROM_NUMBER), to_number: to, override_agent_id: cfg.agentId,
-        metadata: { trip, purpose, which, by: who(req) },
-        retell_llm_dynamic_variables: { greeting: `Hi${d.name ? ` ${String(d.name).split(' ')[0]}` : ''}, this is Jarvis, the automated assistant from Florida Beauty Flora dispatch, calling about trip ${digitByDigit(trip)}. This call may be recorded.`, call_context: context },
-      } });
-      await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: to, trip, purpose, by: who(req), status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
-      res.json({ ok: true, callId: call.call_id, to });
-    } catch (e) { res.status(502).json({ error: e.message }); }
+    if (!cfg.agentId) throw fail(503, 'Set up the Jarvis agent first (Calls, texts & email → Jarvis voice).');
+    const it = (await items()).find((x) => tripNo(x) === trip);
+    if (!it) throw fail(404, 'That load is not on the live board.');
+    const s = it._samsara || {};
+    const d = it._oc ? { phone: which === 2 ? it._oc.driver2Phone : it._oc.driverPhone, name: which === 2 ? it._oc.driver2Name : it._oc.driverName }
+      : (which === 2 ? s.driver2Info : s.driver1Info) || {};
+    const to = e164(d.phone);
+    if (!to) throw fail(400, 'No phone number for this driver.');
+    const k = last10(to);
+    const [consent, optOut, recent] = await Promise.all([db.get(`taSmsConsent:${site}`, {}), db.get('taSmsOptOut', {}), db.get(callsKey, [])]);
+    if (optOut[k]) throw fail(409, 'This driver replied STOP — no automated contact.');
+    if (!consent[k] && !(it._oc && it._oc.smsConsent)) throw fail(409, 'Record the driver\'s consent first (read the opt-in script).', { needConsent: true });
+    if (recent.some((c) => c.phone && last10(c.phone) === k && Date.now() - Date.parse(c.at) < 30 * 60000)) throw fail(429, 'Jarvis called this driver in the last 30 minutes.');
+    const facts = voiceFacts(it, await etaFor(trip));
+    const why = PURPOSE[purpose] ? purpose : 'check';
+    const vars = { trip, driver_name: d.name || 'driver', next_stop: facts.next_stop || 'the next stop', ...extra };
+    const context = PURPOSE[why].replace(/\{\{(\w+)\}\}/g, (m, v) => vars[v] || '');
+    const call = await retell('/v2/create-phone-call', { body: {
+      from_number: e164(env.RETELL_FROM_NUMBER), to_number: to, override_agent_id: cfg.agentId,
+      metadata: { trip, purpose: why, which, by },
+      retell_llm_dynamic_variables: { greeting: `Hi${d.name ? ` ${String(d.name).split(' ')[0]}` : ''}, this is Jarvis, the automated assistant from Florida Beauty Flora dispatch, calling about trip ${digitByDigit(trip)}. This call may be recorded.`, call_context: context },
+    } });
+    await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: to, trip, purpose: why, by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
+    return { ok: true, callId: call.call_id, to };
+  }
+  app.post('/truckmate/trips/:trip/ai-call', requireAuth, async (req, res) => {
+    const b = req.body || {};
+    try { res.json(await placeCall(String(req.params.trip), { which: Number(b.driver) === 2 ? 2 : 1, purpose: b.purpose, by: who(req) })); }
+    catch (e) { res.status(e.status || 502).json({ error: e.message, ...(e.needConsent ? { needConsent: true } : {}) }); }
   });
+  // what Jarvis heard on calls about a load (for the follow-up emails)
+  async function callsFor(trip, since = 0) {
+    const all = await db.get(callsKey, []);
+    return (Array.isArray(all) ? all : []).filter((c) => c.trip === String(trip) && Date.parse(c.at) >= since && (c.summary || c.transcript));
+  }
 
   async function live() {
     const cfg = await db.get(cfgKey, {});
@@ -706,5 +727,5 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
   });
 
   console.log(`[voice] Jarvis voice ${key() ? 'ready (Retell key set)' : 'off — needs RETELL_API_KEY'}`);
-  return { findLoad, live };
+  return { findLoad, live, placeCall, callsFor };
 }

@@ -73,3 +73,43 @@ test('poll files a new email on its load, stores the PDF, marks it read; reply g
   await inbox.overlay('florida-beauty', trips);
   assert.deepEqual(trips[0]._emails.count, 1);
 });
+
+// Rosa's email for 624520: trip sheet pasted into the body (inline picture, Outlook says
+// hasAttachments=false) + "driver had an emergency, picks up when discharged".
+import { evaluateBoard } from '../watchtower.js';
+test('a dispatcher email with a pasted trip sheet and a delayed pickup: sheet read, load on hold, latest departure alert', async () => {
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us', ANTHROPIC_API_KEY: 'k' };
+  const big = Buffer.alloc(60 * 1024, 1).toString('base64');
+  const fetchFn = async (url, opts = {}) => {
+    const ok = (j) => ({ ok: true, status: 200, json: async () => j });
+    if (url.includes('oauth2')) return ok({ access_token: 'x', expires_in: 3600 });
+    if (url.includes('anthropic.com')) return ok({ content: [{ text: JSON.stringify({ summary: 'Trip 624520 pickup delayed — driver emergency.', attachments: [{ index: 1, type: 'trip_sheet' }, { index: 2, type: 'other' }], refs: { trip: '624520' }, loadUpdate: { kind: 'pickup_delayed', note: 'Driver Frankie Patterson had an emergency — picks up when discharged from the hospital', newPickupAt: null, driver: 'Frankie Patterson' }, actions: [{ kind: 'pickup_delay', title: 'Confirm when Frankie Patterson can pick up', detail: 'waiting on hospital discharge', urgency: 'urgent', due: null }] }) }] });
+    if (url.includes('/attachments')) return ok({ value: [
+      { '@odata.type': '#microsoft.graph.fileAttachment', name: 'image001.jpg', contentType: 'image/jpeg', size: 60 * 1024, isInline: true, contentBytes: big },
+      { '@odata.type': '#microsoft.graph.fileAttachment', name: 'logo.png', contentType: 'image/png', size: 4000, isInline: true, contentBytes: 'AAAA' },
+    ] });
+    if (url.includes('/mailFolders/inbox/messages')) return ok({ value: [{ id: 'm9', subject: 'Re: OUTBOUND 10 TRIP SHEETS (TRIP# 624520/ TK#2202/TL#7140 - FLOWERS 35 DEGREES TO NATIVE-LOMBARD, IL)', from: { emailAddress: { name: 'Rosa Reategui', address: 'rosa@floridabeauty.us' } }, receivedDateTime: '2026-10-08T01:39:00Z', body: { contentType: 'html', content: '<p>Driver FRANKIE PATTERSON (4098) had an emergency.</p><img src="cid:image001.jpg">' }, conversationId: 'c9', hasAttachments: false }] });
+    return ok({});
+  };
+  const board = [{ trip: { tripNumber: '624520', powerUnit: '2202', trailer: '7140', status: 'DISP', origZoneDesc: 'MIAMI TERMINAL' }, freightBills: [{ billNumber: 'M5040168', endZoneDescription: 'LOMBARD, IL, 60148', deliverBy: '2026-10-09T04:00:00', deliverByEnd: '2026-10-09T04:00:00', deliveryApptReq: 'True' }] }];
+  const app = { get: () => {}, post: () => {} };
+  const db = memDb();
+  const sheets = [];
+  const inbox = initInbox(app, { requireAuth: (q, r, n) => n(), db, docs: { enabled: true, storeDocs: async (a) => [{ id: a.files[0].filename }], linkDocs: async () => {} }, env, fetchFn, getBoard: async () => ({ trips: board }), tripSheets: async (site, pages, opts) => { sheets.push({ pages, opts }); return [{ trip: '624520', version: 2 }]; } });
+  assert.equal(await inbox.poll(), 1);
+  assert.equal(sheets.length, 1, 'the pasted trip-sheet photo was read'); assert.equal(sheets[0].pages.length, 1); assert.equal(sheets[0].opts.hintTrip, '624520');
+  const items = JSON.parse(JSON.stringify(board));
+  await inbox.overlay('florida-beauty', items);
+  assert.equal(items[0]._hold.kind, 'pickup_delayed'); assert.match(items[0]._hold.note, /emergency/);
+  // the alert: when it must leave Miami to make Lombard Fri 4:00 AM
+  const alerts = evaluateBoard({ trips: items }, { now: Date.parse('2026-10-08T02:00:00Z'), geo: (z) => (z === '60148' ? { lat: 41.88, lng: -88.0 } : null), unitState: () => ({}) });
+  const a = alerts.find((x) => x.code === 'pickup-hold');
+  assert.match(a.title, /^Pickup on hold — Driver Frankie Patterson had an emergency/);
+  // solo: Miami → Lombard ~1,430 mi needed it to leave Wednesday morning — already passed; a team could still make it
+  assert.match(a.detail, /\(~14\d\d mi, solo\) it must leave by Oct 7, .* PASSED .* A team could still make it if it leaves by Oct 8, /);
+  assert.equal(a.severity, 'critical');
+  // once the truck is at the shipper, the hold clears itself
+  const later = [{ ...JSON.parse(JSON.stringify(board[0])), trip: { ...board[0].trip, status: 'DEPSHIP' }, _times: { statusHistory: [{ status: 'DEPSHIP', at: '2026-10-08T15:00:00Z' }] } }];
+  await inbox.overlay('florida-beauty', later);
+  assert.equal(later[0]._hold, undefined);
+});

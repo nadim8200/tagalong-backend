@@ -36,6 +36,7 @@ import { initComms } from './comms.js';
 import { initRundowns } from './rundown.js';
 import { initOutbound } from './outbound.js';
 import { initFlowerReport } from './flowerreport.js';
+import { initPickupFollow } from './pickupfollow.js';
 import { initInbox } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
@@ -671,8 +672,9 @@ const driverLinks = initDriverLinks(app, { requireAuth, db, carriers, ringcentra
 const comms = initComms(app, { requireAuth, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const statusMail = initStatusMail(app, { requireAuth, db, comms, ringcentral: rc, env: process.env });
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
-const inbox = initInbox(app, { requireAuth, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null) });
-truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
+const inbox = initInbox(app, { requireAuth, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []) });
+let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
+truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
@@ -684,6 +686,7 @@ manifestsApi = initManifests(app, { requireAuth, db, env: process.env, buildBoar
 // fleet managers' TagAlong app.
 const voice = initVoice(app, { requireAuth, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+pickupFollow = initPickupFollow(app, { requireAuth, db, ringcentral: rc, comms, voice, docs, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const flowerReport = initFlowerReport(app, { requireAuth, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
 initWatchtower(app, { requireAuth, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await statusMail.process(site, board, ctx); } });

@@ -937,5 +937,34 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     const rc = await ratecon.read(pages);
     return fileRateCon(site, rc, opts);
   }
-  return { readAndFileRateCon };
+  // A trip sheet that came by email (attachment or a picture pasted in the body):
+  // read it in full and save it on its trip, like an upload. pages: [{dataBase64, mediaType, filename}].
+  async function readAndFileSheets(site, pages, { docIds = [], by = 'Jarvis inbox', hintTrip = null } = {}) {
+    if (!client || !pages.length) return [];
+    const units = await splitPages(pages);
+    const r = await readSheets(units);
+    const board = await boardIndex(site);
+    const now = new Date().toISOString();
+    const prevAll = (db && db.enabled) ? await db.get(storeKey(site), {}) : {};
+    const trips = (r.trips || []).filter((t) => t && (t.tripNumber || hintTrip)).map((t) => {
+      const tripNumber = String(t.tripNumber || hintTrip).replace(/\D/g, '') || String(hintTrip);
+      const prev = prevAll[tripNumber] || null;
+      const rec = { ...t, tripNumber, uploadedAt: now, uploadedBy: by, pageCount: (t.sourcePages || []).length || 1, batchId: null, source: 'email' };
+      rec.stops = keyStops(rec.stops);
+      rec.version = prev ? (prev.version || 1) + 1 : 1;
+      rec.changes = sheetChanges(prev, rec);
+      rec.docIds = docIds.filter(Boolean).map(String);
+      rec.onBoard = board.has(tripNumber);
+      rec.diffs = rec.onBoard ? compareWithTruckMate(rec, board.get(tripNumber)) : [];
+      return rec;
+    });
+    if (!trips.length) return [];
+    if (docs && docs.enabled && docIds.length) {
+      try { await docs.linkDocs({ site, kind: 'tripsheet', links: docIds.map((docId) => ({ docId, trips: trips.map((t) => t.tripNumber) })) }); } catch (e) { console.warn('[manifest] email sheet link:', e.message); }
+    }
+    if (db && db.enabled) await db.update(storeKey(site), (cur) => { const all = { ...(cur || {}) }; trips.forEach((t) => { all[t.tripNumber] = t; }); return all; }, {});
+    return trips.map((t) => ({ trip: t.tripNumber, version: t.version, changes: t.changes || [], onBoard: t.onBoard }));
+  }
+
+  return { readAndFileRateCon, readAndFileSheets };
 }

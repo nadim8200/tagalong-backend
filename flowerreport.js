@@ -51,8 +51,13 @@ export function flowerRow(it, eta, alerts = [], now = Date.now()) {
   else if (late) state = 'AT RISK';
   else if (/^(DISP|ASSGN)/.test(code)) state = 'NOT LEFT';
   else if (!stops.length && (gpsAge == null || gpsAge > 60)) state = 'NO GPS';
-  const why = [late && late.title, passedAppt && passedAppt.title].filter(Boolean).join(' · ');
-  const other = alerts.filter((a) => !['late-risk', 'appt-passed', 'sheet-mismatch', 'appt-missing', 'email-todo', 'call-ahead'].includes(a.code)).map((a) => a.title).slice(0, 3);
+  const hold = it._hold && /^(pickup_delayed|driver_changed|truck_changed)$/.test(it._hold.kind) ? it._hold : null;
+  if (hold && state === 'ON TIME') state = 'AT RISK';
+  if (hold && state === 'NOT LEFT') state = 'AT RISK';
+  const holdAlert = alerts.find((a) => a.code === 'pickup-hold');
+  if (holdAlert && holdAlert.severity === 'critical' && state !== 'BREAKDOWN') state = 'LATE';
+  const why = [hold && `${{ pickup_delayed: 'Pickup on hold', driver_changed: 'Driver changed', truck_changed: 'Truck changed' }[hold.kind]}: ${hold.note}`, late && late.title, passedAppt && passedAppt.title].filter(Boolean).join(' · ');
+  const other = alerts.filter((a) => !['late-risk', 'appt-passed', 'pickup-hold', 'sheet-mismatch', 'appt-missing', 'email-todo', 'call-ahead'].includes(a.code)).map((a) => a.title).slice(0, 3);
   const drivers = [live.driver1, live.driver2].filter(Boolean).join(' & ') || (m.drivers || []).map((d) => d.name).filter(Boolean).join(' & ');
   const where = live.location ? String(live.location).split(',').map((x) => x.trim()).filter((x) => !/^\d{5}/.test(x)).slice(-2).join(', ') : null;
   return {

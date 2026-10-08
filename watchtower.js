@@ -280,6 +280,7 @@ function tripFacts(item, now) {
     instrPending: instr.filter((s) => !(checks[s] && checks[s].done)).length,
     tasks: (item && item._tasks) || [],
     instrTotal: instr.length,
+    hold: (item && item._hold) || null,
   };
 }
 
@@ -613,6 +614,36 @@ const RULES = [
       title: `Unscheduled stop leaving Florida — ${fmtMin(mins)}`,
       detail: `${l.location || 'Unknown location'} · ${duty}. Not the yard or a stop on this trip (trip rules: no unauthorized stops). Call the driver${codes ? ` — ${codes} engine code${codes === 1 ? '' : 's'} on the truck, could be a breakdown` : ''}.`,
     };
+  },
+  // An email said the pickup is delayed (driver emergency, waiting on something). Show it,
+  // and the latest the truck can leave and still make the first delivery appointment.
+  function pickupHold(f, ctx) {
+    const h = f.hold;
+    if (!h || !/^(pickup_delayed|driver_changed|truck_changed)$/.test(h.kind)) return null;
+    const first = [...f.stops].filter((s2) => !s2.delivered && s2.apptMs != null).sort((a, b) => ((a.seq ?? 999) - (b.seq ?? 999)) || (a.apptMs - b.apptMs))[0];
+    const g = first && first.zip ? ctx.geo(first.zip) : null;
+    const o = ctx.origin;
+    let plan = '';
+    let sev = 'warning';
+    if (first && g) {
+      const miles = haversineMi(o.lat, o.lng, g.lat, g.lng) * 1.2;
+      const need = estimateArrival(miles, { team: f.team, now: 0 }) + 60 * MIN;     // fresh driver(s) + an hour of slack
+      const latest = first.apptMs - need;
+      const where = (first.customers && first.customers[0]) ? `${first.customers[0]} (${first.label.replace(/, \d{5}$/, '')})` : first.label.replace(/, \d{5}$/, '');
+      const newAt = h.newPickupAt ? localToUtcMs(h.newPickupAt, 'America/New_York') : NaN;
+      if (!Number.isNaN(newAt)) {
+        const arrive = newAt + need - 60 * MIN;
+        plan = ` New pickup ${fmtTime(newAt)} → arrives ~${fmtTime(arrive)} at ${where} (appointment ${fmtTime(first.apptMs)})${arrive > first.apptMs ? ' — TOO LATE: warn the customer or send another driver' : ''}.`;
+        if (arrive > first.apptMs) sev = 'critical';
+      } else {
+        const teamLatest = f.team ? null : first.apptMs - (estimateArrival(miles, { team: true, now: 0 }) + 60 * MIN);
+        const teamTip = teamLatest && ctx.now > latest ? (ctx.now <= teamLatest ? ` A team could still make it if it leaves by ${fmtTime(teamLatest)}.` : ' Even a team can no longer make it — tell the customer now.') : '';
+        plan = ` To make ${where} by ${fmtTime(first.apptMs)} (~${Math.round(miles)} mi${f.team ? ', team' : ', solo'}) it must leave by ${fmtTime(latest)}.${ctx.now > latest ? ` That time has PASSED — warn the customer or send another driver.${teamTip}` : ' Line up a backup driver if the pickup slips past that.'}`;
+        if (ctx.now > latest - 3 * 60 * MIN) sev = 'critical';
+      }
+    }
+    const label = { pickup_delayed: 'Pickup on hold', driver_changed: 'Driver changed', truck_changed: 'Truck changed' }[h.kind];
+    return { code: 'pickup-hold', severity: sev, title: `${label} — ${String(h.note || '').slice(0, 90)}`, detail: `From ${h.from || 'email'}${h.subject ? ` ("${String(h.subject).slice(0, 80)}")` : ''}.${plan}` };
   },
   function checkEngine(f) {
     if (f.oc) return null;                              // outside carrier: not our ELD / engine
