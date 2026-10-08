@@ -598,7 +598,7 @@ const RULES = [
     if (!isRolling(f.status) || !l || !f.gpsFresh || l.lat == null || !f.stoppedMin || f.stoppedMin < 20) return null;
     if (!inFlorida(l)) return null;
     const o = ctx.origin;
-    if (haversineMi(l.lat, l.lng, o.lat, o.lng) <= 1) return null;                    // still in the yard
+    if (yardMiles(l) <= 1) return null;                                                  // still in the yard
     const nearStop = f.stops.some((s2) => { if (s2.delivered || !s2.zip) return false; const g = ctx.geo(s2.zip); return g && haversineMi(l.lat, l.lng, g.lat, g.lng) < 5; });
     if (nearStop) return null;
     const mins = f.stoppedMin;
@@ -677,7 +677,17 @@ const RULES = [
 ];
 
 // Florida Beauty's Miami terminal — where the outbound trips load.
-export const MIAMI_TERMINAL = { lat: 25.795, lng: -80.33 };
+// The Miami yard — all Florida Beauty: 2355 NW 70th Ave (the terminal), the lot at 3315 NW 70th Ave,
+// and the cooler at 3400 NW 74th Ave where trailers are loaded (and sometimes picked up).
+// Time at any of them is yard time; a truck has left once it is away from all of them.
+export const MIAMI_YARDS = [
+  { lat: 25.7947, lng: -80.3099, label: '2355 NW 70th Ave (Miami yard)' },
+  { lat: 25.8026, lng: -80.3102, label: '3315 NW 70th Ave (lot)' },
+  { lat: 25.8062, lng: -80.3180, label: '3400 NW 74th Ave (cooler)' },
+];
+export const MIAMI_TERMINAL = { lat: MIAMI_YARDS[0].lat, lng: MIAMI_YARDS[0].lng };
+// miles from the nearest Miami yard lot
+export const yardMiles = (p) => Math.min(...MIAMI_YARDS.map((y) => haversineMi(p.lat, p.lng, y.lat, y.lng)));
 // Inside Florida (rough border: Georgia line ~30.7°N, Alabama line 31°N west of the Apalachicola).
 export const inFlorida = (p) => !!p && p.lat != null && p.lng > -87.65 && p.lng < -79.8 && (p.lat < 30.71 || (p.lat < 31.0 && p.lng < -85.0));
 

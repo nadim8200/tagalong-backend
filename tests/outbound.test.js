@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { parseSheetTime, clock, trackAnalysis, reportRow, buildReport, fromMiamiYard } from '../outbound.js';
 import { evaluateBoard } from '../watchtower.js';
 
-const YARD = { lat: 25.795, lng: -80.33 };
+const YARD = { lat: 25.8026, lng: -80.3102 };   // 3315 NW 70th Ave
 const at = (iso) => Date.parse(iso);
 // a GPS breadcrumb every 2 minutes: [minutesAfterStart, lat, lng, place?]
 const crumbs = (start, list) => list.map(([m, lat, lng, place, mph = 0]) => ({ t: new Date(at(start) + m * 60000).toISOString(), lat, lng, mph, place: place || null }));
@@ -17,20 +17,20 @@ test('handwritten dispatch times on the trip sheet', () => {
 
 test('GPS: departure from the yard, an unscheduled stop in Florida, then out of Florida', () => {
   const pts = crumbs('2026-10-07T00:00:00Z', [
-    [0, 25.795, -80.33], [10, 25.796, -80.331], [18, 25.80, -80.33],           // in the yard
+    [0, 25.8026, -80.3102], [10, 25.8030, -80.3110], [18, 25.8062, -80.3180],           // in the yard
     [20, 25.85, -80.30, null, 55], [30, 26.10, -80.20, null, 60],                                   // left ~8:20 pm
     [60, 26.70, -80.10, 'Lake Worth, FL'], [70, 26.701, -80.101, 'Lake Worth, FL'], [95, 26.70, -80.10, 'Lake Worth, FL'],   // 35+ min stop
     [100, 27.0, -80.2, null, 62], [400, 30.9, -81.6, 'Kingsland, GA', 60],                    // into Georgia
   ]);
-  const a = trackAnalysis(pts, { yard: YARD });
+  const a = trackAnalysis(pts, { yards: [YARD, { lat: 25.8062, lng: -80.3180 }] });
   assert.equal(clock(a.departedMs), '8:20 pm');
   assert.equal(a.stops.length, 1); assert.ok(a.stops[0].minutes >= 35); assert.match(a.stops[0].place, /Lake Worth/);
   assert.ok(a.leftFloridaMs);
   // the same stop is fine when it's a Florida delivery on the trip sheet
-  assert.equal(trackAnalysis(pts, { yard: YARD, stopCities: ['LAKE WORTH'] }).stops.length, 0);
+  assert.equal(trackAnalysis(pts, { yards: [YARD, { lat: 25.8062, lng: -80.3180 }], stopCities: ['LAKE WORTH'] }).stops.length, 0);
 });
 
-test('report rows: yellow when dispatch → departure is over 30 min; NOT TRACKING without GPS', () => {
+test('report rows: yellow when dispatch → departure is over 30 min; NO GPS without GPS', () => {
   const it = (n, disp) => ({ trip: { tripNumber: n, powerUnit: '2606', trailer: '2029', origZoneDesc: 'MIAMI TERMINAL' },
     _manifest: { dateLoaded: '2026-10-06', dispatchTime: disp, pickupAt: '2026-10-06T20:30', truck: '2606', trailer: '2029', drivers: [{ name: 'Patrick Forbes', id: '1776' }, { name: 'Wilmar Lozano', id: '7344' }],
       stops: [{ action: 'LOAD', customer: 'MIAMI TERMINAL' }, { action: 'DELIVER', city: 'KINSTON', state: 'NC' }, { action: 'DELIVER', city: 'WALTHAM', state: 'MA' }] },
@@ -42,8 +42,9 @@ test('report rows: yellow when dispatch → departure is over 30 min; NOT TRACKI
   assert.equal(slow.drivers, 'PATRICK FORBES (1776) WILMAR LOZANO (7344)');
   const quick = reportRow(it('624482', '20:00'), { departedMs: at('2026-10-07T00:18:00Z'), stops: [] });
   assert.equal(quick.slow, false);
-  assert.equal(reportRow(it('624483', '20:00'), null).departure, 'NOT TRACKING');
-  const parked = reportRow(it('624484', '20:00'), { departedMs: null, inYardNow: true, stops: [] });
+  assert.equal(reportRow(it('624483', '20:00'), null).departure, 'NO GPS');
+  assert.equal(reportRow(it('624485', '20:00'), { departedMs: null, seenInYard: false, inYardNow: false, points: 40, stops: [] }).departure, 'NOT SEEN IN YARD');
+  const parked = reportRow(it('624484', '20:00'), { departedMs: null, inYardNow: true, seenInYard: true, points: 30, stops: [] });
   const rep = buildReport([slow, quick, parked], '2026-10-06');
   assert.equal(rep.subject, 'OUTBOUND 3 TRIP SHEETS - TUE 10/06/26');
   assert.match(rep.html, /Tuesday Trip sheets/); assert.match(rep.html, /All loads left the yard except truck 2606/);
@@ -59,7 +60,7 @@ test('live alert: stopped 20+ min in Florida after leaving the yard, not a trip 
   assert.match(a.title, /Unscheduled stop leaving Florida — 25m/); assert.equal(a.severity, 'warning');
   assert.equal(run(65).find((x) => x.code === 'unscheduled-stop').severity, 'critical');
   assert.equal(run(10).find((x) => x.code === 'unscheduled-stop'), undefined);
-  assert.equal(run(25, { lat: 25.796, lng: -80.331 }).find((x) => x.code === 'unscheduled-stop'), undefined);   // still in the yard
+  assert.equal(run(25, { lat: 25.8027, lng: -80.3103 }).find((x) => x.code === 'unscheduled-stop'), undefined);   // still in the yard
   assert.equal(run(65).filter((x) => x.code === 'stopped').length, 0);                                         // no double alert
 });
 
@@ -79,4 +80,25 @@ test('a truck on several unclosed loads gets its truck alerts once — on its cu
   const hos = alerts.filter((a) => a.code === 'hos-low');
   assert.equal(hos.length, 1);
   assert.equal(hos[0].trip, '624195');                                           // newest rolling load
+});
+
+test('truck 2618 on 10/07: the yard at 3315 NW 70th Ave and the 74th Ave lot are the yard — departure measured, no fake stops', () => {
+  const pts = crumbs('2026-10-07T23:20:00Z', [
+    [0, 25.8062, -80.3180, '3400 Northwest 74th Avenue, Miami, FL'], [16, 25.8062, -80.3181, '3400 Northwest 74th Avenue, Miami, FL'],
+    [20, 25.8026, -80.3102, '3315 Northwest 70th Avenue, Miami, FL'], [200, 25.8027, -80.3103, '3315 Northwest 70th Avenue, Miami, FL'],
+    [204, 25.82, -80.29, null, 45], [230, 26.3, -80.15, null, 64],
+  ]);
+  const a = trackAnalysis(pts);
+  assert.equal(a.seenInYard, true); assert.ok(a.departedMs);
+  assert.deepEqual(a.stops, [], 'yard time is not an unscheduled stop');
+});
+
+import { MIAMI_YARDS, MIAMI_TERMINAL } from '../watchtower.js';
+test('the Miami yard is 2355 NW 70th Ave, plus the 3315 NW 70th Ave lot and the cooler at 3400 NW 74th Ave', () => {
+  assert.deepEqual(MIAMI_TERMINAL, { lat: 25.7947, lng: -80.3099 });
+  assert.equal(MIAMI_YARDS.length, 3);
+  // a truck picked up at the cooler and leaving from there: departure measured, cooler time is yard time
+  const pts = crumbs('2026-10-08T23:00:00Z', [[0, 25.7947, -80.3099], [30, 25.8062, -80.3180, '3400 Northwest 74th Avenue (cooler)'], [90, 25.8062, -80.3181], [95, 25.84, -80.31, null, 40], [120, 26.2, -80.17, null, 63]]);
+  const a = trackAnalysis(pts);
+  assert.equal(clock(a.departedMs), clock(Date.parse('2026-10-09T00:35:00Z'))); assert.deepEqual(a.stops, []);
 });

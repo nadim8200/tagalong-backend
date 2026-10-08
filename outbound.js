@@ -12,7 +12,7 @@
 // out from the Jarvis mailbox once Outlook is connected.
 import { sendMail, mailConfig } from './mailer.js';
 import { samsaraTokenFrom, getLiveIndex, vehicleForUnit, vehicleGpsHistory } from './samsara.js';
-import { haversineMi, MIAMI_TERMINAL, inFlorida } from './watchtower.js';
+import { haversineMi, MIAMI_YARDS, inFlorida } from './watchtower.js';
 
 const MIN = 60000;
 const TZ = 'America/New_York';
@@ -66,20 +66,21 @@ export { inFlorida };
 // From the truck's GPS history: when it left the yard, unscheduled stops before
 // it left Florida, when it crossed out of Florida. Pure.
 // points: [{t, lat, lng, mph, place}] sorted; stopPts: [{lat, lng}] trip stops in Florida.
-export function trackAnalysis(points, { yard = MIAMI_TERMINAL, stopPts = [], stopCities = [], from = null } = {}) {
+export function trackAnalysis(points, { yards = MIAMI_YARDS, stopPts = [], stopCities = [], from = null } = {}) {
   const pts = (points || []).filter((p) => p && p.lat != null && p.t && (!from || Date.parse(p.t) >= from));
   const out = { departedMs: null, seenInYard: false, inYardNow: false, leftFloridaMs: null, stops: [], points: pts.length };
   if (!pts.length) return out;
   const d = (p, q) => haversineMi(p.lat, p.lng, q.lat, q.lng);
+  const toYard = (p) => Math.min(...yards.map((y) => d(p, y)));
   let i = 0;
   // departure: last yard point, then the truck is 1+ mile out
   let lastYard = -1;
   for (; i < pts.length; i++) {
-    if (d(pts[i], yard) <= YARD_MI) { lastYard = i; out.seenInYard = true; continue; }
-    if (lastYard >= 0 && d(pts[i], yard) > 1) break;
+    if (toYard(pts[i]) <= YARD_MI) { lastYard = i; out.seenInYard = true; continue; }
+    if (lastYard >= 0 && toYard(pts[i]) > 1) break;
   }
   if (lastYard >= 0 && i < pts.length) out.departedMs = Date.parse(pts[lastYard + 1].t);
-  out.inYardNow = d(pts[pts.length - 1], yard) <= YARD_MI;
+  out.inYardNow = toYard(pts[pts.length - 1]) <= YARD_MI;
   if (out.departedMs == null) return out;
   // stops between departure and leaving Florida: the truck stays within ~0.25 mi for 10+ minutes
   let j = lastYard + 1;
@@ -90,7 +91,7 @@ export function trackAnalysis(points, { yard = MIAMI_TERMINAL, stopPts = [], sto
     while (k + 1 < pts.length && d(pts[k + 1], p) <= 0.25) k++;
     const end = k + 1 < pts.length ? Date.parse(pts[k + 1].t) : Date.parse(pts[k].t);
     const minutes = Math.round((end - Date.parse(p.t)) / MIN);
-    const atYard = d(p, yard) <= 1;
+    const atYard = toYard(p) <= 1;
     const atStop = stopPts.some((s) => s && s.lat != null && d(p, s) <= 1.5)
       || (p.place && stopCities.some((c) => c && new RegExp(`\\b${String(c).replace(/[^A-Za-z ]/g, '')}\\b`, 'i').test(p.place)));
     // a lone breadcrumb before a GPS gap only counts if the truck was actually standing still
@@ -125,7 +126,7 @@ export function reportRow(it, track = null) {
     location: titleCity(cityState(live.location)) || '—', destination: dest || '—',
     puAppt: apptMs ? clock(apptMs) : '****',
     dispatch: dispatchMs ? clock(dispatchMs) : (m.dispatchTime || '****'),
-    departure: departedMs ? clock(departedMs) : (track && track.inYardNow ? 'IN YARD' : 'NOT TRACKING'),
+    departure: departedMs ? clock(departedMs) : !track || !track.points ? 'NO GPS' : track.inYardNow ? 'IN YARD' : !track.seenInYard ? 'NOT SEEN IN YARD' : 'NO GPS',
     slow: slowMin != null && slowMin > SLOW_MIN, slowMin,
     notLeft: !!(track && !departedMs && track.inYardNow),
     stops: (track && track.stops) || [],
