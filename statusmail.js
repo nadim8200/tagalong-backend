@@ -7,6 +7,12 @@
 //   3. Location update  — every 3 hours while in transit (location + ETA to the next stop)
 //   4. Arrived at stop  — "at the receiver" / stop 1, 2, 3 of N
 //   5. Delivered        — the whole load delivered
+//   6. Delay notice     — before an appointment the truck will miss: the new ETA
+//                         (once per stop; again only if it slips another 90 min)
+//
+// "Picked up" doesn't wait for someone to mark Depart Shipper in TruckMate (after
+// hours nobody may): when the truck sat at the pickup (Miami yard / cooler, or the
+// shipper's town) and is now 25+ miles away, Jarvis knows it left — by GPS.
 //
 // Events come from TruckMate statuses (DEPSHIP, ARRCONS…), the stop geofence
 // visits, bill delivery times and the live GPS. Runs after every Watchtower
@@ -18,7 +24,7 @@
 // (optionally) the broker email read from the rate con.
 // ---------------------------------------------------------------
 import { sendMail, mailConfig } from './mailer.js';
-import { haversineMi, estimateArrival, MIAMI_TERMINAL } from './watchtower.js';
+import { haversineMi, estimateArrival, MIAMI_TERMINAL, MIAMI_YARDS } from './watchtower.js';
 import { fmtLocal } from './localtime.js';
 
 const H = 3600000;
@@ -175,22 +181,72 @@ function etaTo(item, here, zip, { geo, now }) {
   return { miles: Math.round(miles), atMs: estimateArrival(miles, { team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, now }) };
 }
 
+// Where the load is picked up: our Miami yard / lot / cooler, or the shipper's zip.
+function pickupPoints(item, geo) {
+  const t = tripOf(item);
+  const sheetPick = ((item && item._manifest && item._manifest.stops) || []).filter((s) => /PICK|LOAD/i.test(s.action || ''));
+  if (/MIAMI/i.test(t.origZoneDesc || '') || sheetPick.some((s) => /MIAMI/i.test(`${s.city} ${s.customer}`))) return { pts: MIAMI_YARDS, nearMi: 1 };
+  const z = zipOf(t.origZoneDesc);
+  const g = z ? geo(z) : null;
+  return g ? { pts: [g], nearMi: 5 } : { pts: [], nearMi: 0 };
+}
+
+// GPS pickup watch, kept per load: { nearAt, lastNearAt, leftAt, miles }. The truck
+// must sit at the pickup 10+ min (not just drive by) after it's on the load, then be
+// 25+ miles away. Pure.
+export function trackPickup(item, gps = {}, { geo = () => null, now = Date.now() } = {}) {
+  const g = { ...(gps || {}) };
+  if (g.leftAt) return g;
+  const t = tripOf(item);
+  const s = (item && item._samsara) || {};
+  if (!(t.powerUnit || (item && item._oc)) || s.lat == null || !s.gpsAt || now - Date.parse(s.gpsAt) > 30 * 60000) return g;
+  const { pts, nearMi } = pickupPoints(item, geo);
+  if (!pts.length) return g;
+  const d = Math.min(...pts.map((p) => haversineMi(s.lat, s.lng, p.lat, p.lng)));
+  const at = new Date(now).toISOString();
+  const sat = g.nearAt && g.lastNearAt && Date.parse(g.lastNearAt) - Date.parse(g.nearAt) >= 10 * 60000;
+  if (d <= nearMi) { g.nearAt = g.nearAt || at; g.lastNearAt = at; } else if (sat && d >= 25) { g.leftAt = g.lastNearAt; g.miles = Math.round(d); } else if (g.nearAt && !sat && d >= 25) { delete g.nearAt; delete g.lastNearAt; }   // only drove by
+  return g;
+}
+
+// A stop the truck will miss: the appointment (not TruckMate's bare due time) is
+// still ahead and the live ETA is 45+ min past it. Once per stop, again only if the
+// ETA slips another 90 min. e = the Watchtower ETA record for the load. Pure.
+export function lateNotice(e, sentLate = {}, { now = Date.now() } = {}) {
+  if (!e || !e.at || now - e.at > 30 * 60000) return null;
+  let worst = null;
+  for (const st of e.stops || []) {
+    if (st.apptMs == null || st.apptFrom === 'truckmate-due' || st.miles < 5 || st.apptMs < now - 30 * 60000) continue;
+    const late = (st.etaMs - st.apptMs) / 60000;
+    if (late >= 45 && (!worst || late > worst.late)) worst = { ...st, late };
+  }
+  if (!worst || (e.guess && worst.late < 120)) return null;
+  const prev = (sentLate || {})[worst.key];
+  if (prev && worst.etaMs - prev.etaMs < 90 * 60000) return null;
+  return { kind: 'late', stop: worst.key, label: worst.label, etaMs: worst.etaMs, apptMs: worst.apptMs, lateMin: Math.round(worst.late), revised: !!prev };
+}
+
 // What has happened on the load that the customer hasn't been told yet. Pure.
-// sent: { assigned, pickedUp, stops: {key: at}, delivered, lastLocationAt }
-export function pendingEvents(item, sent = {}, { now = Date.now(), everyHours = 3 } = {}) {
+// sent: { assigned, pickedUp, stops: {key: at}, delivered, lastLocationAt, late: {stop: {etaMs, at}} }
+// gps: the GPS pickup watch (trackPickup) — a departure there counts as picked up.
+export function pendingEvents(item, sent = {}, { now = Date.now(), everyHours = 3, gps = null } = {}) {
   const t = tripOf(item);
   const status = String(t.status || '');
   if (DEAD.test(status)) return [];
   const stops = stopsOf(item);
   const hist = (item && item._times && item._times.statusHistory) || [];
-  const everPicked = PICKED.test(status) || hist.some((h) => PICKED.test(h.status)) || stops.some((s) => s.delivered);
+  const byGps = !!(gps && gps.leftAt);
+  const everPicked = PICKED.test(status) || hist.some((h) => PICKED.test(h.status)) || stops.some((s) => s.delivered) || byGps;
   const allDelivered = stops.length > 0 && stops.every((s) => s.delivered);
   const delivered = allDelivered || DONE.test(status);
   const truck = t.powerUnit || (item && item._oc && item._oc.truck);
   const out = [];
   const sentStops = sent.stops || {};
   if (!sent.assigned && truck && (driversOf(item).length || item._oc)) out.push({ kind: 'assigned' });
-  if (!sent.pickedUp && everPicked) out.push({ kind: 'picked-up' });
+  if (!sent.pickedUp && everPicked) {
+    const dep = hist.find((h) => /^depsh/i.test(h.status || ''));
+    out.push({ kind: 'picked-up', ...(byGps ? { departedAt: gps.leftAt, gps: true } : dep && dep.at ? { departedAt: dep.at } : {}) });
+  }
   // arrivals: geofence visit, a TruckMate "arrived consignee", or the stop's bills delivered
   const visits = (item && item._visits) || {};
   const arrCount = hist.filter((h) => ARRIVE.test(h.status)).length + (ARRIVE.test(status) && !hist.some((h) => ARRIVE.test(h.status)) ? 1 : 0);
@@ -243,7 +299,8 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
     row('ETA to pickup', eta ? (eta.here ? 'At the pickup now' : `${fmtLocal(eta.atMs, t.origZoneDesc)} (~${eta.miles} mi)`) : 'To follow');
   } else if (ev.kind === 'picked-up') {
     title = 'Load picked up — driver departed shipper';
-    lead = 'Your load has been picked up and the driver has departed the shipper.';
+    lead = ev.gps ? 'Your load has been picked up — our GPS shows the truck departed the shipper and is on its way.' : 'Your load has been picked up and the driver has departed the shipper.';
+    if (ev.departedAt) row('Departed', fmtLocal(Date.parse(ev.departedAt), t.origZoneDesc || 'MIAMI, FL'));
     row('Truck / trailer', `${truck} / ${trailer}`);
     row('Current location', loc);
     if (next) { const e = etaTo(item, here, next.zip, { geo, now }); row(`Next stop (${next.number} of ${stops.length})`, stopName(next)); row('ETA', e ? (e.here ? 'Arriving now' : `${fmtLocal(e.atMs, next.key || next.place)} (~${e.miles} mi)`) : 'To follow'); }
@@ -268,6 +325,17 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
     lead = 'Your load has been delivered.';
     stops.forEach((s) => row(`Stop ${s.number}`, `${stopName(s)}${s.deliveredAt ? ` · ${s.deliveredAt.replace('T', ' ').slice(0, 16)}` : ''}`));
     row('Truck / trailer', `${truck} / ${trailer}`);
+  } else if (ev.kind === 'late') {
+    const st = stops.find((s) => s.key === ev.stop) || { place: cityOf(ev.label || ev.stop), key: ev.stop };
+    const h = Math.floor(ev.lateMin / 60); const m = ev.lateMin % 60;
+    title = ev.revised ? 'Delay notice — revised ETA' : 'Delay notice — new ETA';
+    lead = `A heads-up ahead of the appointment: the truck is running behind and is expected to arrive about ${[h ? `${h}h` : '', m ? `${m}m` : ''].filter(Boolean).join(' ')} after the appointment time. We are on it and will keep you updated.`;
+    row('Stop', stopName(st));
+    row('Appointment', fmtLocal(ev.apptMs, ev.label || st.key || st.place));
+    row(ev.revised ? 'Revised ETA' : 'New ETA', fmtLocal(ev.etaMs, ev.label || st.key || st.place));
+    row('Current location', loc);
+    row('Truck / trailer', `${truck} / ${trailer}`);
+    row('Note', 'This is an estimated time of arrival and may change. If it does, we will let you know.');
   } else if (ev.kind === 'breakdown') {
     title = 'Delay notice — truck breakdown';
     lead = 'The truck carrying your load has had a breakdown. The ETA will be impacted. We are working on it and will get back to you as soon as we have a better update.';
@@ -333,6 +401,7 @@ export function initStatusMail(app, { requireAuth, db, comms = null, ringcentral
   // After every Watchtower cycle.
   async function process(site, board, { geo = () => null, now = Date.now() } = {}) {
     if (!enabled) return;
+    const etas = ((await db.get(`taWatch:${site}`, {})) || {}).etas || {};   // Watchtower's live stop ETAs (last cycle)
     lastBoard = { site, board, geo };
     const cfg = await settings();
     const items = (board.trips || []).filter((it) => qualifies(it, cfg.prefixes));
@@ -345,8 +414,10 @@ export function initStatusMail(app, { requireAuth, db, comms = null, ringcentral
       const trip = String(tripOf(item).tripNumber || '');
       if (!trip) continue;
       const rec = next.trips[trip] || { sent: { stops: {} }, log: [] };
-      const evs = pendingEvents(item, rec.sent, { now, everyHours: cfg.everyHours }).filter((ev) => !(ev.kind === 'location' && down[trip] && down[trip].on));   // no routine location emails during a breakdown
-      if (!evs.length) { next.trips[trip] = rec; continue; }
+      if (!rec.sent.pickedUp) rec.gps = trackPickup(item, rec.gps, { geo, now });
+      const evs = pendingEvents(item, rec.sent, { now, everyHours: cfg.everyHours, gps: rec.gps }).filter((ev) => !(ev.kind === 'location' && down[trip] && down[trip].on));   // no routine location emails during a breakdown
+      const late = down[trip] && down[trip].on ? null : lateNotice(etas[trip], rec.sent.late, { now });
+      if (!evs.length && !late) { next.trips[trip] = rec; continue; }
       const nowIso = new Date(now).toISOString();
       const mark = (ev) => {
         if (ev.kind === 'assigned') rec.sent.assigned = nowIso;
@@ -356,7 +427,12 @@ export function initStatusMail(app, { requireAuth, db, comms = null, ringcentral
       };
       evs.forEach(mark);
       // only the newest milestone goes out when several piled up (first sight / first run)
-      const sendable = adopting || cfg.enabled === false ? [] : [evs[evs.length - 1]];
+      const sendable = adopting || cfg.enabled === false || !evs.length ? [] : [evs[evs.length - 1]];
+      if (late) {   // a delay notice always goes on its own
+        rec.sent.late = { ...(rec.sent.late || {}), [late.stop]: { etaMs: late.etaMs, at: nowIso } };
+        evs.push(late);
+        if (!adopting && cfg.enabled !== false) sendable.push(late);
+      }
       const today = rec.log.filter((l) => now - Date.parse(l.at) < 24 * H && l.status === 'sent').length;
       if (today >= MAX_PER_DAY) sendable.length = 0;
       evs.forEach((ev) => { if (!sendable.includes(ev)) rec.log = [{ kind: ev.kind, stop: ev.number || null, at: nowIso, status: adopting ? 'before setup — not sent' : cfg.enabled === false ? 'off — not sent' : 'combined into the next update' }, ...rec.log].slice(0, 80); });

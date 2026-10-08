@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { qualifies, stopsOf, pendingEvents, renderEvent, initStatusMail } from '../statusmail.js';
+import { qualifies, stopsOf, pendingEvents, renderEvent, initStatusMail, trackPickup, lateNotice } from '../statusmail.js';
 
 const NOW = Date.parse('2026-10-05T16:00:00Z');
 const geo = (zip) => ({ 30436: { lat: 32.11, lng: -82.32 }, 31601: { lat: 30.83, lng: -83.28 } }[zip] || null);
@@ -133,4 +133,42 @@ test('stopped alert: on duty and parked 45+ min alerts; resting (sleeper) does n
   assert.equal(find(item('onDuty'), ctx(95)).severity, 'critical');
   assert.equal(find(item('sleeperBerth'), ctx(300)), undefined);
   assert.match(find(item('sleeperBerth'), ctx(12 * 60)).title, /longer than a 10-hour break/);
+});
+
+test('GPS pickup: sat at the Miami yard, now 25+ mi out → picked up even with no TruckMate status', () => {
+  const t0 = Date.parse('2026-10-05T01:00:00Z');
+  const at = (lat, lng, ms) => load({ trip: { status: 'DISP' }, extra: { _samsara: { lat, lng, gpsAt: new Date(ms).toISOString(), speedMph: 0 } } });
+  let g = trackPickup(at(25.7950, -80.3100, t0), {}, { now: t0 });
+  assert.ok(g.nearAt && !g.leftAt);
+  g = trackPickup(at(25.7950, -80.3100, t0 + 40 * 60000), g, { now: t0 + 40 * 60000 });
+  g = trackPickup(at(26.3, -80.2, t0 + 80 * 60000), g, { now: t0 + 80 * 60000 });   // ~35 mi north
+  assert.equal(g.leftAt, new Date(t0 + 40 * 60000).toISOString());
+  const evs = pendingEvents(at(26.3, -80.2, t0 + 80 * 60000), { assigned: 'x' }, { now: t0 + 80 * 60000, gps: g });
+  assert.deepEqual(evs.map((e) => [e.kind, e.gps]), [['picked-up', true]]);
+  const m = renderEvent(evs[0], load(), { now: t0 + 80 * 60000 });
+  assert.match(m.html, /our GPS shows the truck departed/);
+  assert.match(m.html, /Departed/);
+  // only drove past the yard → not a pickup
+  let d = trackPickup(at(25.7950, -80.3100, t0), {}, { now: t0 });
+  d = trackPickup(at(26.3, -80.2, t0 + 30 * 60000), d, { now: t0 + 30 * 60000 });
+  assert.equal(d.leftAt, undefined);
+  assert.equal(d.nearAt, undefined);
+});
+
+test('delay notice: once per stop before a missed appointment, again only if it slips 90+ min', () => {
+  const now = Date.parse('2026-10-08T17:30:00Z');
+  const appt = Date.parse('2026-10-08T17:24:00Z') + 60 * 60000;     // 10:24 AM PT appt … in the future
+  const e = { at: now, stops: [{ key: 'CLOVIS, CA, 93612', label: 'CLOVIS, CA, 93612', miles: 101, etaMs: appt + 111 * 60000, apptMs: appt, apptFrom: 'truckmate-appt' }] };
+  const n = lateNotice(e, {}, { now });
+  assert.equal(n.kind, 'late'); assert.equal(n.lateMin, 111); assert.equal(n.revised, false);
+  assert.equal(lateNotice(e, { [n.stop]: { etaMs: n.etaMs } }, { now }), null, 'already told');
+  const slipped = { ...e, stops: [{ ...e.stops[0], etaMs: n.etaMs + 100 * 60000 }] };
+  assert.equal(lateNotice(slipped, { [n.stop]: { etaMs: n.etaMs } }, { now }).revised, true);
+  assert.equal(lateNotice({ ...e, stops: [{ ...e.stops[0], apptFrom: 'truckmate-due' }] }, {}, { now }), null, 'bare due time is not an appointment');
+  assert.equal(lateNotice({ ...e, stops: [{ ...e.stops[0], etaMs: appt + 20 * 60000 }] }, {}, { now }), null, '20 min is not worth a notice');
+  const m = renderEvent(n, load({ bills: [{ billNumber: 'B180215', billToName: 'PAYSTAR LOGISTICS', endZoneDescription: 'CLOVIS, CA, 93612' }] }), { now });
+  assert.match(m.subject, /^Delay notice — new ETA — Trip 900200 · Bill B180215/);
+  assert.match(m.html, /about 1h 51m after the appointment/);
+  assert.match(m.html, /Pacific/);
+  assert.match(m.html, /may change/);
 });
