@@ -16,6 +16,9 @@
 //   APNS_TEAM_ID     your Apple Team ID
 //   APNS_BUNDLE_ID   com.dynamicsbpo.tagalong (default)
 //   APNS_PRODUCTION  "true" for TestFlight/App Store builds, else sandbox
+// Android phones (the TagAlong Android app) go through Firebase Cloud Messaging:
+//   FCM_SERVICE_ACCOUNT  the Firebase service-account JSON (raw or base64) — Firebase
+//                        console → Project settings → Service accounts → Generate key
 // ---------------------------------------------------------------
 import http2 from 'node:http2';
 import jwt from 'jsonwebtoken';
@@ -95,6 +98,44 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     return defaultHost;
   }
 
+  // ---- Firebase Cloud Messaging (Android) ----
+  const fcm = (() => {
+    const raw = String(env.FCM_SERVICE_ACCOUNT || '').trim();
+    if (!raw) return null;
+    try {
+      const j = JSON.parse(raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8'));
+      return j.client_email && j.private_key && j.project_id ? { email: j.client_email, key: normalizePem(j.private_key), project: j.project_id } : null;
+    } catch { console.warn('[push] FCM_SERVICE_ACCOUNT is not valid JSON'); return null; }
+  })();
+  let fcmTok = null; let fcmTokAt = 0;
+  async function fcmAccess() {
+    if (fcmTok && Date.now() - fcmTokAt < 50 * 60 * 1000) return fcmTok;
+    const now = Math.floor(Date.now() / 1000);
+    const assertion = jwt.sign({ iss: fcm.email, scope: 'https://www.googleapis.com/auth/firebase.messaging', aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 }, fcm.key, { algorithm: 'RS256' });
+    const r = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `grant_type=${encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer')}&assertion=${assertion}` });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.access_token) throw new Error(`FCM auth ${r.status}`);
+    fcmTok = j.access_token; fcmTokAt = Date.now();
+    return fcmTok;
+  }
+  // one Android push → { ok, status, dead }
+  async function sendFcm(token, { title, body, data }) {
+    try {
+      const flat = Object.fromEntries(Object.entries(data || {}).filter(([, v]) => v != null).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]));
+      const r = await fetch(`https://fcm.googleapis.com/v1/projects/${fcm.project}/messages:send`, {
+        method: 'POST', headers: { Authorization: `Bearer ${await fcmAccess()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: { token, notification: { title, body }, data: flat, android: { priority: 'HIGH', notification: { sound: 'default', channel_id: 'default' } } } }),
+      });
+      const j = r.ok ? null : await r.json().catch(() => ({}));
+      const code = j && j.error && (j.error.status || (j.error.details || []).map((d) => d.errorCode).join(','));
+      if (!r.ok) console.log(`[push] FCM ${r.status} ${code || ''}`);
+      return { ok: r.ok, status: r.status, dead: r.status === 404 || /UNREGISTERED|INVALID_ARGUMENT/.test(String(code || '')) };
+    } catch (e) { console.log('[push] FCM error:', e.message); return { ok: false, status: 0, dead: false }; }
+  }
+  // FCM tokens are long and contain ':' / '-' / '_'; APNs tokens are 64 hex characters.
+  const isAndroidTok = (tr) => (typeof tr === 'object' && tr && tr.platform === 'android') || /[^A-Fa-f0-9]/.test(typeof tr === 'string' ? tr : (tr && tr.token) || '');
+  if (fcm) console.log(`[push] Android (FCM) ready — project ${fcm.project}`);
+
   if (!enabled) console.warn('[push] APNs not configured — set APNS_KEY / APNS_KEY_ID / APNS_TEAM_ID to enable locked-phone alerts.');
 
   // ---- APNs provider JWT (reused up to ~50 min) ----
@@ -145,7 +186,13 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
   // Accepts token records ({ token, env }) or plain token strings. Returns the
   // list of tokens Apple says are dead (410/BadDeviceToken) so they get pruned.
   async function sendToTokens(tokenRecs, { title, body, data }) {
-    if (!enabled || !tokenRecs || !tokenRecs.length) return [];
+    if (!tokenRecs || !tokenRecs.length) return [];
+    // Android phones → Firebase; iPhones → Apple (below)
+    const android = tokenRecs.filter(isAndroidTok);
+    const deadAndroid = [];
+    if (fcm) for (const tr of android) { const r = await sendFcm(typeof tr === 'string' ? tr : tr.token, { title, body, data }); if (r.dead) deadAndroid.push(typeof tr === 'string' ? tr : tr.token); } // eslint-disable-line no-await-in-loop
+    tokenRecs = tokenRecs.filter((tr) => !isAndroidTok(tr)); // eslint-disable-line no-param-reassign
+    if (!enabled || !tokenRecs.length) return deadAndroid;
     const payload = {
       aps: { alert: { title, body }, sound: 'default', 'interruption-level': 'time-sensitive' },
       ...(data || {}),
@@ -169,7 +216,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
       // Only prune a token that's truly gone (410) or still bad on both hosts.
       if (!r.ok && (r.status === 410 || r.status === 400)) dead.push(token);
     }
-    return dead;
+    return [...dead, ...deadAndroid];
   }
 
   // ---- token store: lives in the Traccar host device's attributes (taPush) ----
@@ -2072,5 +2119,5 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     return (emails || []).map((e) => ({ email: e, phones: byEmail[String(e).toLowerCase()] || 0 }));
   }
 
-  return { enabled, sendToTokens, sendToEmails, phonesFor };
+  return { enabled: enabled || !!fcm, apns: enabled, android: !!fcm, sendToTokens, sendToEmails, phonesFor };
 }

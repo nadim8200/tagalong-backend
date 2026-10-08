@@ -645,10 +645,11 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
       const tok = String(req.params.token);
       const { link } = await activeLink(tok);
       if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
-      const t = String((req.body && req.body.token) || '').replace(/[^A-Fa-f0-9]/g, '');
-      if (t.length < 32) return res.status(400).json({ error: 'Bad push token.' });
+      const platform = req.body && req.body.platform === 'android' ? 'android' : 'ios';
+      const t = String((req.body && req.body.token) || '').replace(platform === 'android' ? /[^A-Za-z0-9:_-]/g : /[^A-Fa-f0-9]/g, '');
+      if (t.length < 32 || t.length > 400) return res.status(400).json({ error: 'Bad push token.' });
       const envName = /^(sandbox|production)$/.test(String(req.body.env || '')) ? req.body.env : '';
-      await db.update(linkKey(tok), (cur) => ({ ...cur, push: [...(cur.push || []).filter((p) => p.token !== t), { token: t, env: envName, at: new Date().toISOString() }].slice(-3) }), link);
+      await db.update(linkKey(tok), (cur) => ({ ...cur, push: [...(cur.push || []).filter((p) => p.token !== t), { token: t, platform, env: envName, at: new Date().toISOString() }].slice(-3) }), link);
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: 'Could not register notifications.' }); }
   });
