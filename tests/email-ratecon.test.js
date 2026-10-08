@@ -29,7 +29,7 @@ test('a forwarded rate con email: rate con read + filed on its load, the email\'
   const filed = [];
   const rateCons = async (site, pages, opts) => { filed.push({ pages: pages.length, opts }); return { trip: '624335', matchedBy: 'bill B180354', record: { broker: 'Red Lab' } }; };
   const routes = {};
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put: () => {} };
   const db = memDb();
   const docs = { enabled: true, storeDocs: async () => [{ id: 77 }], linkDocs: async () => {} };
   const board = [{ trip: { tripNumber: '624335', powerUnit: '2212', status: 'ARRCONS' }, freightBills: [{ billNumber: 'B180354' }] }];

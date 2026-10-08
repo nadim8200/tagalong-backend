@@ -672,7 +672,9 @@ const driverLinks = initDriverLinks(app, { requireAuth, db, carriers, ringcentra
 const comms = initComms(app, { requireAuth, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const statusMail = initStatusMail(app, { requireAuth, db, comms, ringcentral: rc, env: process.env });
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
-const inbox = initInbox(app, { requireAuth, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []) });
+const inbox = initInbox(app, { requireAuth, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []), packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
+  // our staff can ask Jarvis (by email) to text or call a driver — same consent / STOP rules
+  driver: { text: (site, trip, message, by) => comms.textDriverAuto(site, trip, message, by), call: async (site, trip, by) => { try { return { called: true, ...(await voice.placeCall(String(trip), { purpose: 'check', by })) }; } catch (e) { return { skipped: e.message }; } } } });
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
 truckmate = initTruckMate(app, { requireAuth, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 

@@ -146,6 +146,23 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
 
+  // Jarvis texting a driver on its own (asked by our staff in an email): driver 1, recorded
+  // consent only, never after STOP (sendSms checks), only when company texting is live.
+  async function textDriverAuto(site, trip, body, by = 'Jarvis') {
+    if (!enabled || !ringcentral) return { skipped: 'texting not connected' };
+    const cfg = await shared();
+    if (!cfg || !cfg.fromNumber) return { skipped: 'texting not live yet (RingCentral approval)' };
+    const item = (await board(site)).find((it) => String(tripOf(it).tripNumber) === String(trip));
+    const rcpt = recipientFor(item, 1, await db.get(consentKey(site), {}));
+    if (!rcpt || !rcpt.phone) return { skipped: 'no phone number for the driver' };
+    if (!rcpt.consent) return { skipped: 'driver has not agreed to texts' };
+    const text = messageFor('custom', { text: body });
+    if (!text) return { skipped: 'empty message' };
+    await ringcentral.sendSms('__shared', { to: rcpt.phone, text });
+    await log(site, String(trip), { type: 'text', kind: 'custom', to: rcpt.phone, text, by });
+    return { sent: true, to: rcpt.phone, text };
+  }
+
   // ---- STOP / START / HELP and the opt-in confirmation text ----
   const OPTOUT = 'taSmsOptOut';                           // last10 → { at, text } (global, every sender checks it)
   async function shared() { return ringcentral && ringcentral.configFor ? ringcentral.configFor('__shared') : null; }
@@ -267,5 +284,5 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
   }
 
   console.log(`[comms] driver calls/texts ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, pollReplies, log, sendConfirmations, handleKeyword };
+  return { overlay, pollReplies, log, sendConfirmations, handleKeyword, textDriverAuto };
 }

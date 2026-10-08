@@ -689,12 +689,11 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  app.post('/truckmate/manifests', requireAuth, async (req, res) => {
-    if (!client) return res.status(503).json({ error: 'AI reader not configured (ANTHROPIC_API_KEY).' });
-    const pages = Array.isArray(req.body && req.body.pages) ? req.body.pages : [];
-    if (!pages.length) return res.status(400).json({ error: 'No pages uploaded.' });
-    const site = siteOf(req);
-    try {
+  // Read a batch of trip-sheet pages (a scanned nightly packet, photos…): sort every page,
+  // read the trip sheets in full, read the rate cons, drop the rest. Used by the upload
+  // screen and by trip-sheet emails. Throws {status, message} on a bad batch.
+  async function processPacket(site, { pages, originalIds = [], batchId = null, by = 'dispatcher' }) {
+    {
       // 1) every page on its own (a 69-page packet → 69 single pages)
       const units = await splitPages(pages);
       // 2) quick look at every page: is it a trip sheet? (cheap model, small answer)
@@ -714,7 +713,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
         }
         open = null;
       }
-      if (!sheetUnits.length && !rcUnits.length) return res.status(422).json({ error: `No trip sheets or rate confirmations found in these ${units.length} page${units.length === 1 ? '' : 's'}.` });
+      if (!sheetUnits.length && !rcUnits.length) throw Object.assign(new Error(`No trip sheets or rate confirmations found in these ${units.length} page${units.length === 1 ? '' : 's'}.`), { status: 422 });
       // 3) full read of the trip-sheet pages only, a few trips per call, in parallel
       const groups = [];
       for (const u of sheetUnits) {
@@ -724,7 +723,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       const batches = [];
       for (let i = 0; i < groups.length; i += TRIPS_PER_READ) batches.push(groups.slice(i, i + TRIPS_PER_READ).flat());
       let results;
-      try { results = batches.length ? await pool(batches, 3, (b) => readSheets(b)) : []; } catch (e) { if (e.userMessage) return res.status(422).json({ error: e.userMessage }); throw e; }
+      try { results = batches.length ? await pool(batches, 3, (b) => readSheets(b)) : []; } catch (e) { if (e.userMessage) throw Object.assign(new Error(e.userMessage), { status: 422 }); throw e; }
       const parsed = {
         trips: results.flatMap((r) => r.trips || []),
         pages: units.map((u) => {
@@ -739,7 +738,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       // Originals were stored first (POST /truckmate/docs, one request per file).
       // originalIds[i] is the stored doc for file i+1 — or, for a multi-page
       // PDF that the server split, the list of per-page doc ids.
-      const originalIds = Array.isArray(req.body.originalIds) ? req.body.originalIds : [];
+      
       const docOf = (file, page) => {
         const o = originalIds[(Number(file) || 0) - 1];
         if (Array.isArray(o)) return o[(Number(page) || 1) - 1] != null ? String(o[(Number(page) || 1) - 1]) : null;
@@ -749,7 +748,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       const trips = (parsed.trips || []).filter((t) => t && t.tripNumber).map((t) => {
         const tripNumber = String(t.tripNumber).replace(/\D/g, '') || String(t.tripNumber);
         const prev = prevAll[tripNumber] || null;
-        const rec = { ...t, tripNumber, uploadedAt: now, uploadedBy: who(req), pageCount: (t.sourcePages || []).length || 1, batchId: req.body.batchId || null };
+        const rec = { ...t, tripNumber, uploadedAt: now, uploadedBy: by, pageCount: (t.sourcePages || []).length || 1, batchId: batchId || null };
         rec.stops = keyStops(rec.stops);
         rec.version = prev ? (prev.version || 1) + 1 : 1;
         rec.changes = sheetChanges(prev, rec);
@@ -761,7 +760,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       });
       // every page of the packet, typed and matched to a trip
       const allPages = matchPacketPages(Array.isArray(parsed.pages) ? parsed.pages : [], trips, board).map((pg) => ({
-        ...pg, docId: docOf(pg.file, pg.page), batchId: req.body.batchId || null, uploadedAt: now, uploadedBy: who(req),
+        ...pg, docId: docOf(pg.file, pg.page), batchId: batchId || null, uploadedAt: now, uploadedBy: by,
         keyFields: pg.type === 'driver_id' ? [] : (pg.keyFields || []),
       }));
       const sheetDocIds = new Set(trips.flatMap((t) => t.docIds));
@@ -770,10 +769,10 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       const skipped = allPages.filter((pg) => !keepPage(pg, sheetDocIds) && !rcDocIds.has(String(pg.docId)) && pg.type !== 'rate_confirmation');
       let rateCons = [];
       if (rcUnits.length && ratecon && ratecon.enabled) {
-        try { rateCons = await readRateConPackets(site, rcUnits, sorted, board, docOf, who(req), [...trips, ...Object.values(prevAll)]); } catch (e) { console.warn('[manifest] rate cons:', e.message); }
+        try { rateCons = await readRateConPackets(site, rcUnits, sorted, board, docOf, by, [...trips, ...Object.values(prevAll)]); } catch (e) { console.warn('[manifest] rate cons:', e.message); }
       }
       if (docs && docs.enabled && docs.deleteDocs) {
-        try { await docs.deleteDocs({ site, ids: skipped.map((pg) => pg.docId).filter((id) => id && !sheetDocIds.has(String(id)) && !rcDocIds.has(String(id))), packetBatch: req.body.batchId || null }); } catch (e) { console.warn('[manifest] could not drop skipped pages:', e.message); }
+        try { await docs.deleteDocs({ site, ids: skipped.map((pg) => pg.docId).filter((id) => id && !sheetDocIds.has(String(id)) && !rcDocIds.has(String(id))), packetBatch: batchId || null }); } catch (e) { console.warn('[manifest] could not drop skipped pages:', e.message); }
       }
       if (docs && docs.enabled) {
         const byDoc = new Map();
@@ -819,12 +818,22 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
           return all;
         }, {});
       }
-      res.json({ rateCons, trips, pages: pagesOut.map((pg) => ({ file: pg.file, page: pg.page, type: pg.type, trip: pg.trip, matchedBy: pg.matchedBy, summary: pg.summary })), skipped: skipped.map((pg) => ({ file: pg.file, page: pg.page, type: pg.type })), usage: msg.usage ? { input: msg.usage.input_tokens, output: msg.usage.output_tokens } : null });
+      return ({ rateCons, trips, pages: pagesOut.map((pg) => ({ file: pg.file, page: pg.page, type: pg.type, trip: pg.trip, matchedBy: pg.matchedBy, summary: pg.summary })), skipped: skipped.map((pg) => ({ file: pg.file, page: pg.page, type: pg.type })), usage: msg.usage ? { input: msg.usage.input_tokens, output: msg.usage.output_tokens } : null });
+    }
+  }
+
+  app.post('/truckmate/manifests', requireAuth, async (req, res) => {
+    if (!client) return res.status(503).json({ error: 'AI reader not configured (ANTHROPIC_API_KEY).' });
+    const pages = Array.isArray(req.body && req.body.pages) ? req.body.pages : [];
+    if (!pages.length) return res.status(400).json({ error: 'No pages uploaded.' });
+    const site = siteOf(req);
+    try {
+      res.json(await processPacket(site, { pages, originalIds: Array.isArray(req.body.originalIds) ? req.body.originalIds : [], batchId: req.body.batchId || null, by: who(req) }));
     } catch (e) {
       if (e instanceof Anthropic.RateLimitError) return res.status(429).json({ error: 'AI is busy — try again in a minute.' });
       if (e instanceof Anthropic.BadRequestError) return res.status(400).json({ error: `AI rejected the upload: ${e.message}` });
       if (e instanceof Anthropic.APIError) return res.status(502).json({ error: `AI error (${e.status})` });
-      res.status(500).json({ error: String(e.message || e) });
+      res.status(e.status || 500).json({ error: String(e.message || e) });
     }
   });
 
@@ -966,5 +975,22 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     return trips.map((t) => ({ trip: t.tripNumber, version: t.version, changes: t.changes || [], onBoard: t.onBoard }));
   }
 
-  return { readAndFileRateCon, readAndFileSheets };
+  // The nightly trip-sheet email: store the attached packet (split into pages) and run it
+  // through the same reader as an upload. files: [{dataBase64, mediaType, filename}].
+  async function readPacketFromEmail(site, files, { by = 'Jarvis inbox' } = {}) {
+    if (!client || !files.length) return null;
+    const batchId = `email-${Date.now()}`;
+    let originalIds = [];
+    if (docs && docs.enabled && docs.storeDocs) {
+      const stored = await docs.storeDocs({ site, kind: 'tripsheet', batchId, files, by });
+      originalIds = files.map((f, i) => {
+        const mine = stored.filter((d) => d.fileIndex === i).sort((a, b) => (a.page || 0) - (b.page || 0)).map((d) => d.id);
+        return mine.length > 1 ? mine : (mine[0] != null ? mine[0] : null);
+      });
+    }
+    const r = await processPacket(site, { pages: files, originalIds, batchId, by });
+    return { trips: (r.trips || []).map((t) => ({ trip: t.tripNumber, version: t.version, changes: t.changes || [], onBoard: t.onBoard })), rateCons: r.rateCons || [], kept: (r.pages || []).length, skipped: (r.skipped || []).length };
+  }
+
+  return { readAndFileRateCon, readAndFileSheets, readPacketFromEmail };
 }
