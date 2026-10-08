@@ -11,6 +11,7 @@
 // logged there as a check-in, and "YES" to "was stop N delivered?" marks that
 // stop confirmed by the driver.
 // ---------------------------------------------------------------
+import { wantsContact } from './helpdesk.js';
 
 const COMPANY = 'Florida Beauty Flora dispatch';
 const last10 = (p) => String(p || '').replace(/\D+/g, '').slice(-10);
@@ -63,7 +64,7 @@ export function recipientFor(item, which = 1, phoneConsent = {}) {
   return { phone: info.phone, name: info.name, consent: phoneConsent[last10(info.phone)] || null, kind: 'company' };
 }
 
-export function initComms(app, { requireAuth, db, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, env = process.env }) {
+export function initComms(app, { requireAuth, db, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, help = null, env = process.env }) {
   const enabled = !!(db && db.enabled);
   const logKey = (site) => `taTripComms:${site}`;
   const askKey = (site) => `taCommsAsks:${site}`;
@@ -237,6 +238,10 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
       const { trips, confirm } = kw ? { trips: [], confirm: null } : routeReply(r, { asks, driverPhones });
       if (!trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: null }); // eslint-disable-line no-await-in-loop
       if (trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: trips.join(', ') }); // eslint-disable-line no-await-in-loop
+      // a text asking for a call back / help → email / text the right people now
+      if (!kw && help && help.raise && wantsContact(r.text)) {
+        help.raise({ source: 'text', ref: r.id, role: driverPhones.has(last10(r.from)) ? 'driver' : 'unknown', from: { phone: r.from }, trip: trips[0] || null, need: String(r.text).slice(0, 400), said: r.text }).catch(() => {});
+      }
       for (const trip of trips) {
         await log(site, trip, { type: 'reply', from: r.from, text: r.text, at: r.at, noThread: true }); // eslint-disable-line no-await-in-loop
         if (carriers && carriers.addCheckins) await carriers.addCheckins(site, trip, [{ at: r.at, source: 'driver text', text: r.text, from: r.from }]); // eslint-disable-line no-await-in-loop

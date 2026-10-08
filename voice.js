@@ -395,7 +395,7 @@ export function brokerView(item, eta) {
   };
 }
 
-export function initVoice(app, { requireAuth, db, comms = null, carriers = null, getBoard = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initVoice(app, { requireAuth, db, comms = null, carriers = null, getBoard = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taRetellCfg';
@@ -506,6 +506,12 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
       const msg = { at: new Date().toISOString(), callId: call.call_id || null, from: callerPhone(call) || null, name: String(a.caller_name || '').slice(0, 80) || null, callback: String(a.callback_number || '').slice(0, 30) || null, message: String(a.message || '').slice(0, 600), urgent: !!a.urgent, trip };
       await db.update(`taJarvisMessages:${site}`, (cur) => [msg, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
       if (trip && carriers && carriers.addCheckins) await carriers.addCheckins(site, trip, [{ at: msg.at, source: 'Jarvis call', from: msg.name || msg.from, text: `Message: ${msg.message}${msg.callback ? ` · call back ${msg.callback}` : ''}`, issue: msg.urgent }]);
+      // someone wants a call back → email / text the right people now
+      if (help && help.raise) {
+        const it = trip ? (await items()).find((x) => tripNo(x) === trip) : null;
+        const role = it ? (() => { const r = findLoad([it], { trip, phone: callerPhone(call) }); return r && r.role === 'driver' ? 'driver' : (it._ratecon ? 'broker' : 'customer'); })() : 'unknown';
+        help.raise({ source: 'call', ref: `${call.call_id || msg.at}:${msg.message.slice(0, 40)}`, role, from: { name: msg.name, phone: msg.callback || msg.from }, trip, need: msg.message, urgent: msg.urgent }).catch(() => {});
+      }
       res.json({ saved: true, say: 'Tell the caller the message is saved and a dispatcher will call them back.' });
     } catch (e) { res.json({ saved: false, say: 'Could not save — offer to transfer to dispatch.' }); }
   });
@@ -538,6 +544,8 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
       const text = `${String(a.problem_type || 'problem').toUpperCase()}: ${a.details}${a.location ? ` · at ${a.location}` : ''}`;
       await db.update(`taJarvisMessages:${site}`, (cur) => [{ at, callId: call.call_id || null, from: callerPhone(call) || null, message: text, urgent: true, trip, problem: a.problem_type }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
       if (trip && carriers && carriers.addCheckins) await carriers.addCheckins(site, trip, [{ at, source: 'Jarvis call', from: hit.role === 'driver' ? 'driver' : (callerPhone(call) || 'caller'), text, issue: true }]);
+      // a problem on the road: dispatch hears it now (breakdown / accident → urgent group too)
+      if (help && help.raise) help.raise({ source: 'call', ref: `${call.call_id || at}:problem:${a.problem_type}`, role: hit && hit.role === 'driver' ? 'driver' : 'unknown', from: { phone: callerPhone(call) }, trip, need: text, urgent: ['breakdown', 'accident', 'reefer'].includes(a.problem_type) }).catch(() => {});
       res.json({ saved: true, trip, say: a.problem_type === 'breakdown' || a.problem_type === 'accident' ? 'Tell the driver dispatch is alerted now; offer to transfer them to a dispatcher.' : 'Tell the caller dispatch has the update.' });
     } catch (e) { res.json({ saved: false, say: 'Could not save — transfer to dispatch.' }); }
   });

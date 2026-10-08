@@ -34,6 +34,7 @@
 // ---------------------------------------------------------------
 
 import crypto from 'crypto';
+import { wantsContact } from './helpdesk.js';
 
 const LINK_DAYS = 5;
 const MIN_STORE_GAP_MS = 25 * 1000;   // keep at most one stored point per ~25s
@@ -178,7 +179,7 @@ export function cleanFixes(list, now = Date.now()) {
   }).filter(Boolean).sort((a, b) => a.at.localeCompare(b.at));
 }
 
-export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcentral = null, docs = null, getBoard = null, push = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcentral = null, docs = null, getBoard = null, push = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const base = String(env.DRIVER_LINK_BASE || 'https://mytagalong.app').replace(/\/+$/, '');
   const company = env.DRIVER_LINK_COMPANY || 'Florida Beauty Flora';
@@ -635,6 +636,7 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
       const m = await addMessage(link.site, link.trip, { from: 'driver', by, text, docIds });
       // on the load like a text reply (Jarvis' pickup follow-up and the rundown read it)
       if (comms && comms.log) await comms.log(link.site, link.trip, { type: 'reply', from: 'driver app', text: `${text}${docIds.length ? ` [${docIds.length} photo${docIds.length === 1 ? '' : 's'}]` : ''}`, noThread: true });
+      if (help && help.raise && wantsContact(text)) help.raise({ source: 'app', ref: m.id, role: 'driver', from: { name: by.replace(/ \(app\)$/, ''), phone: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].phone) || null, company: link.carrierName || null }, trip: link.trip, need: text.slice(0, 400), said: text }).catch(() => {});
       if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: m.at, source: 'driver app message', text: text || `Sent ${docIds.length} photo${docIds.length === 1 ? '' : 's'}`, by }]);
       res.json({ ok: true, id: m.id });
     } catch (e) { res.status(400).json({ error: e.message || 'Could not send.' }); }

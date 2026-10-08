@@ -347,3 +347,19 @@ test('ETAs in the delivery\'s local time: 4:00 AM in Miami is 1:00 AM in Califor
   assert.equal(r[0].estimated_arrival, 'Thu, Oct 8, 1:00 AM Pacific (local time)');
   assert.match(PROMPT, /delivery's LOCAL time, so always say the time zone/);
 });
+
+test('a caller leaves a message with Jarvis → a callback request goes to the right people', async () => {
+  const raised = [];
+  const items = [{ trip: { tripNumber: '624481', powerUnit: '2606', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }] }];
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
+  initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), help: { raise: async (r) => { raised.push(r); return r; } }, env: { RETELL_API_KEY: KEY, RETELL_AUTO_KEYWORDS: 'off' } });
+  const body = { args: { message: 'Bokhary Farms wants to know if the truck can come before 6 AM', caller_name: 'Sam at Bokhary Farms', callback_number: '781-555-0123', trip_number: '624481' }, call: { call_id: 'c77', direction: 'inbound', from_number: '+17815550123' } };
+  const raw = JSON.stringify(body); const sig = await Retell.sign(raw, KEY);
+  let out; const res = { status() { return this; }, json(j) { out = j; } };
+  const [guard, handler] = routes['POST /retell/fn/take_message'];
+  await guard({ body, rawBody: raw, get: () => sig }, res, () => handler({ body, rawBody: raw, get: () => sig }, res));
+  assert.equal(out.saved, true);
+  assert.deepEqual({ source: raised[0].source, role: raised[0].role, trip: raised[0].trip, name: raised[0].from.name, phone: raised[0].from.phone }, { source: 'call', role: 'customer', trip: '624481', name: 'Sam at Bokhary Farms', phone: '781-555-0123' });
+});
