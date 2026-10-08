@@ -182,7 +182,7 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
       }
     }
     const pushTo = pushRules ? await pushRules.emailsFor(req.urgent ? ['callback', 'callback-urgent'] : 'callback') : to.emails;   // who gets which pushes: admin → Push notifications
-    if (push && push.sendToEmails && pushTo.length) { try { sent.push = await push.sendToEmails(pushTo, { title: req.urgent ? '🚨 Call back — urgent' : '📞 Call back needed', body: msg.text.slice(0, 180), data: { path: '/truckmate?tab=inbox', type: 'help-request', id: req.id } }); } catch { sent.push = null; } }
+    if (push && push.sendToEmails && pushTo.length) { try { sent.push = await push.sendToEmails(pushTo, { title: req.urgent ? '🚨 Call back — urgent' : '📞 Call back needed', body: msg.text.slice(0, 180), data: { path: '/truckmate?tab=calls', type: 'help-request', id: req.id } }); } catch { sent.push = null; } }
     return sent;
   }
 
