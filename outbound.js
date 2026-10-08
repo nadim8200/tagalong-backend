@@ -73,13 +73,12 @@ export function trackAnalysis(points, { yards = MIAMI_YARDS, stopPts = [], stopC
   const d = (p, q) => haversineMi(p.lat, p.lng, q.lat, q.lng);
   const toYard = (p) => Math.min(...yards.map((y) => d(p, y)));
   let i = 0;
-  // departure: last yard point, then the truck is 1+ mile out
+  // departure: the LAST time the truck was in the yard before it left for good — a run out and
+  // back (e.g. to Doral and back to the cooler) before the real departure doesn't count
   let lastYard = -1;
-  for (; i < pts.length; i++) {
-    if (toYard(pts[i]) <= YARD_MI) { lastYard = i; out.seenInYard = true; continue; }
-    if (lastYard >= 0 && toYard(pts[i]) > 1) break;
-  }
-  if (lastYard >= 0 && i < pts.length) out.departedMs = Date.parse(pts[lastYard + 1].t);
+  for (; i < pts.length; i++) if (toYard(pts[i]) <= YARD_MI) { lastYard = i; out.seenInYard = true; }
+  const goneAfter = lastYard >= 0 && pts.slice(lastYard + 1).some((p) => toYard(p) > 1);
+  if (goneAfter) out.departedMs = Date.parse(pts[lastYard + 1].t);
   out.inYardNow = toYard(pts[pts.length - 1]) <= YARD_MI;
   if (out.departedMs == null) return out;
   // stops between departure and leaving Florida: the truck stays within ~0.25 mi for 10+ minutes

@@ -102,3 +102,16 @@ test('the Miami yard is 2355 NW 70th Ave, plus the 3315 NW 70th Ave lot and the 
   const a = trackAnalysis(pts);
   assert.equal(clock(a.departedMs), clock(Date.parse('2026-10-09T00:35:00Z'))); assert.deepEqual(a.stops, []);
 });
+
+test('truck 2618 on 10/07: out to Doral and back before the real departure — the departure is the last time it left the yard', () => {
+  const pts = crumbs('2026-10-07T22:00:00Z', [
+    [0, 25.8026, -80.3102], [35, 25.8100, -80.3500, null, 30],                         // 6:35 pm out
+    [40, 25.8460, -80.3400, '2019 Northwest 89th Place, Doral, FL'], [66, 25.8461, -80.3401, 'Doral'],
+    [83, 25.8062, -80.3180, 'cooler'], [99, 25.8062, -80.3181, 'cooler'],                // 7:23–7:39 pm cooler
+    [103, 25.8026, -80.3102, 'lot'], [306, 25.8027, -80.3103, 'lot'],                    // 7:43–11:06 pm lot
+    [310, 25.83, -80.29, null, 45], [340, 26.3, -80.15, null, 64],                      // leaves for good
+  ]);
+  const a = trackAnalysis(pts);
+  assert.equal(new Date(a.departedMs).toISOString(), '2026-10-08T03:10:00.000Z');       // 11:10 pm Eastern
+  assert.deepEqual(a.stops, [], 'the Doral run before departure is not a stop on the trip');
+});
