@@ -421,7 +421,7 @@ export function brokerView(item, eta) {
   };
 }
 
-export function initVoice(app, { requireAuth, db, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initVoice(app, { requireAuth, db, training = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taRetellCfg';
@@ -785,6 +785,7 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
     const why = PURPOSE[purpose] ? purpose : 'check';
     const vars = { trip, driver_name: d.name || 'driver', next_stop: facts.next_stop || 'the next stop', ...extra };
     const context = PURPOSE[why].replace(/\{\{(\w+)\}\}/g, (m, v) => vars[v] || '');
+    if (training) { const held = await training.hold('call', { to, trip, purpose: `${why} call to ${d.name || 'the driver'}`, text: context }); if (held) return { ok: true, callId: null, to, ...held }; }
     const call = await retell('/v2/create-phone-call', { body: {
       from_number: e164(env.RETELL_FROM_NUMBER), to_number: to, override_agent_id: cfg.agentId,
       metadata: { trip, purpose: why, which, by },

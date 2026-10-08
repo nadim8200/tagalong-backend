@@ -29,6 +29,10 @@
 
 const RC_DEFAULT_SERVER = 'https://platform.ringcentral.com';
 
+// training mode: texts are held (a copy is emailed instead)
+let smsGuard = null;
+export const setSmsGuard = (fn) => { smsGuard = fn; };
+
 export function initRingCentral(app, { requireAuth, db, pool, env = process.env }) {
   const cfgKey = 'taRingCentral';
 
@@ -191,6 +195,7 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
       const out = await db.get('taSmsOptOut', {});
       if (out[k]) { const e = new Error(`This number replied STOP on ${String(out[k].at).slice(0, 10)} — no texts until they reply START.`); e.optedOut = true; throw e; }
     }
+    if (smsGuard) { const held = await smsGuard({ to, text }); if (held) return { id: 'training', messageStatus: 'Held (training mode)', ...held }; }
     const cfg = await configFor(owner);
     const fromNumber = from || (cfg && cfg.fromNumber);
     if (!fromNumber) throw new Error('No RingCentral from-number configured.');

@@ -179,7 +179,7 @@ export function cleanFixes(list, now = Date.now()) {
   }).filter(Boolean).sort((a, b) => a.at.localeCompare(b.at));
 }
 
-export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcentral = null, docs = null, getBoard = null, push = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initDriverLinks(app, { requireAuth, db, training = null, carriers = null, ringcentral = null, docs = null, getBoard = null, push = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const base = String(env.DRIVER_LINK_BASE || 'https://mytagalong.app').replace(/\/+$/, '');
   const company = env.DRIVER_LINK_COMPANY || 'Florida Beauty Flora';
@@ -595,6 +595,7 @@ export function initDriverLinks(app, { requireAuth, db, carriers = null, ringcen
     if (!body) throw new Error('Write a message first.');
     const link = await linkForTrip(site, String(trip));
     if (!link || !isLive(linkStatus(link))) return { skipped: 'no active driver link on this load' };
+    if (training) { const held = await training.hold('app', { to: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'the driver app', trip, text: body }); if (held) return { sent: true, via: 'held — training mode (copy emailed)', ...held }; }
     const m = await addMessage(site, String(trip), { from: 'dispatch', by, text: body });
     let pushed = false;
     if (push && push.enabled && (link.push || []).length) {

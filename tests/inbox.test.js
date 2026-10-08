@@ -201,3 +201,28 @@ test('iPhone HEIC photos become JPEGs (even when the email calls them a plain fi
   const pdf = { dataBase64: Buffer.from('%PDF-1.4').toString('base64'), mediaType: 'application/pdf', filename: 'rc.pdf' };
   assert.equal(await readableFile(pdf), pdf, 'other files untouched');
 });
+
+test('outbound\'s trip-sheet email: notes and tasks for the named loads are saved; texts go to the right driver', async () => {
+  const { isPacketEmail } = await import('../inbox.js');
+  const pdf = [{ contentType: 'application/pdf' }];
+  assert.equal(isPacketEmail('Outbound 10/08', pdf), true);
+  assert.equal(isPacketEmail('TRIP SHEETS 10-8', pdf), true);
+  assert.equal(isPacketEmail('Rate question', pdf), false);
+  const texts = [];
+  const driver = { text: async (site, trip, message) => { texts.push({ trip, message }); return { sent: true }; } };
+  const ask = { summary: 'Tonight', attachments: [], refs: {}, actions: [], reply: { needed: false }, instructions: [
+    { kind: 'note', trip: '623869', message: 'Leaves the cooler at 9 PM' },
+    { kind: 'task', trip: '623869', message: 'Send the rate con to RXO' },
+    { kind: 'text_driver', trip: '623869', message: 'Pick up 2 more pallets in Ocala.' },
+    { kind: 'note', trip: null, message: 'No load named' },
+  ] };
+  const h = harness({ messages: [msg({ subject: 'Outbound 10/08', from: { emailAddress: { name: 'Andres', address: 'andres@floridabeauty.us' } }, body: { contentType: 'text', content: '623869 leaves the cooler at 9 PM. Jarvis send the rate con to RXO and text the driver to pick up 2 more pallets in Ocala.' } })], triageOut: ask, board: [LOAD], driver });
+  await h.inbox.poll();
+  const notes = (await h.db.get('taLoadNotes:florida-beauty', {}))['623869'] || [];
+  assert.deepEqual(notes.map((n) => [n.kind, n.text]), [['note', 'Leaves the cooler at 9 PM'], ['task', 'Send the rate con to RXO'], ['note', 'No load named']], 'no load named → the email\'s only load');
+  const tasks = (await h.db.get('taEmailTasks:florida-beauty', {}))['623869'] || (await h.db.get('taLoadTasks:florida-beauty', {}))['623869'] || [];
+  assert.ok(tasks.some((t) => /rate con to RXO/.test(t.title)));
+  assert.deepEqual(texts, [{ trip: '623869', message: 'Pick up 2 more pallets in Ocala.' }]);
+  const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
+  assert.equal(e.instructionResults.find((r) => r.message === 'No load named').trip, '623869');
+});

@@ -45,7 +45,12 @@ export async function graph(path, { method = 'GET', body = null } = {}, { env = 
 }
 
 // sendMail({ to: [..], subject, html, attachments: [{ name, contentType, bytes }] })
-export async function sendMail({ to, subject, html, attachments = [] }, { env = process.env, fetchFn = globalThis.fetch } = {}) {
+// training mode (training.js) rewrites every email unless sent { direct: true }
+let guard = null;
+export const setMailGuard = (fn) => { guard = fn; };
+
+export async function sendMail(message, { env = process.env, fetchFn = globalThis.fetch, direct = false } = {}) {
+  const { to, subject, html, attachments = [] } = guard && !direct ? await guard(message) : message;
   const cfg = mailConfig(env);
   if (!cfg.ready) throw new Error(`Outlook is not connected yet (missing ${cfg.missing.join(', ')} in Render).`);
   const list = (Array.isArray(to) ? to : String(to || '').split(/[,;\s]+/)).map((x) => String(x).trim()).filter((x) => /@/.test(x));
