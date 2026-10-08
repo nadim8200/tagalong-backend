@@ -682,7 +682,7 @@ const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.e
 // Original uploaded documents (rate cons, trip sheets) kept privately in Postgres.
 // Dispatch side (console, Jarvis, loads, emails, calls): admins and active dispatcher accounts only —
 // a TagAlong customer login can't reach it.
-const { requireDispatch } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }) });
+const { requireDispatch } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
 const docs = initDocuments(app, { requireAuth: requireDispatch, db });
 // Geofence stop tracking (validated Samsara address boundaries only).
 const stopVisits = initStopVisits({ db, env: process.env, listAddresses, tokenFrom: samsaraTokenFrom });

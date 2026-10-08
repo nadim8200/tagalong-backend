@@ -78,3 +78,19 @@ test('every load Jarvis lists says where the truck is, rolling or stopped, and t
   assert.equal(truckNow({ ...it, _samsara: { ...it._samsara, speedMph: 61 } }, w, now).motion, 'rolling 61 mph');
   assert.equal(truckNow({ ...it, _samsara: { ...it._samsara, gpsAt: '2026-10-08T13:00:00Z' } }, w, now).gps, 'last seen 3h 0m ago');
 });
+
+test('voice: a spoken turn asks for a short answer; speech is transcribed only with a key', async () => {
+  const h = setup([say('Truck 724 is near Cranbury, New Jersey, rolling 64.')]);
+  await h.call('POST /jarvis/chat', { message: 'where is 624399', voice: true });
+  assert.match(h.claude.sent[0].system, /SPOKEN conversation/);
+  const off = setup([]);
+  assert.equal((await off.call('GET /jarvis/voice')).body.serverStt, false);
+  const no = await off.call('POST /jarvis/transcribe', { audio: 'AAAA', mimeType: 'audio/webm' });
+  assert.equal(no.status, 503);
+  const seen = [];
+  const on = setup([], { env: { ANTHROPIC_API_KEY: 'k', OPENAI_API_KEY: 'sk-test' }, fetchFn: async (url, opts) => { seen.push({ url, opts }); return { ok: true, status: 200, json: async () => ({ text: ' Where is load 624399? ' }) }; } });
+  const r = await on.call('POST /jarvis/transcribe', { audio: Buffer.from('fake').toString('base64'), mimeType: 'audio/mp4', lang: 'en' });
+  assert.equal(r.body.text, 'Where is load 624399?');
+  assert.match(seen[0].url, /audio\/transcriptions/);
+  assert.equal(seen[0].opts.body.get('file').name, 'speech.m4a');
+});
