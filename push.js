@@ -2103,7 +2103,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
       const email = String((rec && rec.email) || '').toLowerCase();
       if (!want.has(email)) continue;
       const tokens = rec.tokens || [];
-      if (enabled && tokens.length) await sendToTokens(tokens, { title, body, data }); // eslint-disable-line no-await-in-loop
+      if ((enabled || fcm) && tokens.length) await sendToTokens(tokens, { title, body, data }); // eslint-disable-line no-await-in-loop
       out.push({ email, phones: tokens.length });
     }
     return out;

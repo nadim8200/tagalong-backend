@@ -318,6 +318,32 @@ function holdSaid(item) {
   return { departure_delayed: true, delay_note: `The truck's departure is delayed${h.newPickupAt ? ` — it is now planned to leave around ${new Date(Date.parse(`${h.newPickupAt}:00Z`)).toLocaleString('en-US', { timeZone: 'UTC', weekday: 'short', hour: 'numeric', minute: '2-digit' })} Eastern` : ' and the new departure time is not set yet'}. Say dispatch will confirm the new ETA. Never share the reason for the delay.` };
 }
 
+// The email with a Jarvis call's whole conversation. Pure.
+const escH = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const prettyNum = (p) => { const d = last10(p); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(p || 'unknown number'); };
+export function transcriptEmail(call, { trip = null, callerName = null, minutes = null } = {}) {
+  const inbound = call.direction !== 'outbound';
+  const num = prettyNum(inbound ? call.from_number : call.to_number);
+  const who = callerName ? `${callerName} ${num}` : num;
+  const subject = `Jarvis call — ${inbound ? 'from' : 'to'} ${who}${trip ? ` · load ${trip}` : ''}${minutes != null ? ` · ${minutes} min` : ''}`;
+  const when = call.start_timestamp ? new Date(call.start_timestamp).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' Eastern' : '';
+  const lines = String(call.transcript || '').split(/\n+/).filter((l) => l.trim()).map((l) => {
+    const m = l.match(/^\s*(Agent|User|Jarvis|Caller)\s*:\s*(.*)$/i);
+    if (!m) return `<div>${escH(l)}</div>`;
+    const jarvis = /^(agent|jarvis)$/i.test(m[1]);
+    return `<div style="margin:4px 0"><b style="color:${jarvis ? '#2563eb' : '#0f172a'}">${jarvis ? 'Jarvis' : 'Caller'}:</b> ${escH(m[2])}</div>`;
+  }).join('');
+  const summary = call.call_analysis && call.call_analysis.call_summary;
+  const html = `<div style="font-family:Arial,sans-serif;font-size:14px">
+<p><b>${inbound ? 'Incoming call to Jarvis' : 'Jarvis called'}</b> ${inbound ? 'from' : ''} ${escH(who)}${when ? ` · ${escH(when)}` : ''}${minutes != null ? ` · ${minutes} min` : ''}${trip ? ` · load ${escH(trip)}` : ''}${call.disconnection_reason ? ` · ended: ${escH(String(call.disconnection_reason).replace(/_/g, ' '))}` : ''}</p>
+${summary ? `<p><b>Summary:</b> ${escH(summary)}</p>` : ''}
+${call.recording_url ? `<p><a href="${escH(call.recording_url)}">Listen to the recording</a></p>` : ''}
+<p><b>Transcript</b></p>
+<div style="border-left:3px solid #ddd;padding-left:10px">${lines || '<i>No transcript.</i>'}</div>
+<p style="color:#666;font-size:12px">Jarvis — AI Dispatcher · Florida Beauty Flora</p></div>`;
+  return { subject, html };
+}
+
 // What a customer or broker hears: where the truck is now and THEIR stop only —
 // never the other stops on the trip (not before, not after). Pure.
 const CUSTOMER_STATUS = { DISP: 'scheduled, not picked up yet', ASSGN: 'scheduled, not picked up yet', ARRSHIP: 'being loaded', DEPSHIP: 'picked up and on the way', ARRCONS: 'on the way', DEPCONS: 'on the way' };
@@ -395,7 +421,7 @@ export function brokerView(item, eta) {
   };
 }
 
-export function initVoice(app, { requireAuth, db, comms = null, carriers = null, getBoard = null, help = null, profiles = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initVoice(app, { requireAuth, db, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taRetellCfg';
@@ -585,8 +611,66 @@ export function initVoice(app, { requireAuth, db, comms = null, carriers = null,
         if (trip && comms && comms.log) await comms.log(site, trip, entry);
         else if (comms && comms.log && phone) await comms.log(site, null, entry);
       }
+      // the Calls & texts log (by day): both numbers, who it was, the whole conversation
+      if (activity && call.call_id) {
+        const purpose = call.metadata && call.metadata.purpose;
+        const said = callName.get(call.call_id);
+        activity.record({
+          id: `call:${call.call_id}`, kind: 'call', at: rec.at, direction: call.direction === 'outbound' ? 'outbound' : 'inbound',
+          from: call.from_number || null, to: call.to_number || null, ourLine: call.direction === 'outbound' ? call.from_number : call.to_number,
+          minutes: rec.minutes, trip, summary: rec.summary, transcript: String(call.transcript || '').slice(0, 60000), recording: call.recording_url || null,
+          ended: call.disconnection_reason || null, by: rec.by, purpose: purpose || null,
+          ...(purpose === 'staff-alert' ? { role: 'team' } : purpose && call.direction === 'outbound' ? { role: 'driver' } : said ? { role: 'customer', name: spokenName(said) } : {}),
+        }).catch(() => {});
+      }
+      // the whole conversation by email (Calls, texts & email → Jarvis call transcripts)
+      if (event === 'call_analyzed' && call.call_id) {
+        try { await queueTranscript(call, { trip, callerName: callName.get(call.call_id) ? spokenName(callName.get(call.call_id)) : null, minutes: rec.minutes }); } catch (e) { console.warn('[voice] transcript email:', e.message); }
+      }
       if (call.call_id && event === 'call_analyzed') { callTrip.delete(call.call_id); callLookups.delete(call.call_id); callName.delete(call.call_id); }
     } catch (e) { console.warn('[voice] webhook:', e.message); }
+  });
+
+  // ---- call transcripts by email ----
+  const tKey = 'taJarvisTranscriptCfg';
+  const tQueue = `taJarvisTranscripts:${site}`;       // [{ callId, subject, html, at, sentAt, error }]
+  async function queueTranscript(call, info) {
+    const cfg = await db.get(tKey, {});
+    const to = (cfg && cfg.to) || [];
+    const which = (cfg && cfg.which) || 'all';
+    if (!to.length || (which === 'inbound' && call.direction === 'outbound') || (which === 'outbound' && call.direction !== 'outbound')) return;
+    const list = await db.get(tQueue, []);
+    if ((Array.isArray(list) ? list : []).some((x) => x.callId === call.call_id)) return;   // once per call
+    const m = transcriptEmail(call, info);
+    const item = { callId: call.call_id, subject: m.subject, html: m.html, at: new Date().toISOString(), sentAt: null };
+    if (mail && mail.ready()) { try { await mail.send({ to, subject: m.subject, html: m.html }); item.sentAt = new Date().toISOString(); item.to = to; } catch (e) { item.error = e.message; } }
+    await db.update(tQueue, (cur) => [item, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
+  }
+  // Outlook connected later → send what waited (up to 2 days)
+  if (enabled && env.NODE_ENV !== 'test') {
+    const t = setInterval(async () => {
+      try {
+        if (!mail || !mail.ready()) return;
+        const cfg = await db.get(tKey, {});
+        if (!(cfg.to || []).length) return;
+        const list = await db.get(tQueue, []);
+        for (const x of (Array.isArray(list) ? list : []).filter((y) => !y.sentAt && Date.now() - Date.parse(y.at) < 48 * 3600000)) {
+          try { await mail.send({ to: cfg.to, subject: x.subject, html: x.html }); await db.update(tQueue, (cur) => cur.map((y) => (y.callId === x.callId ? { ...y, sentAt: new Date().toISOString(), to: cfg.to, error: null } : y)), []); } catch (e) { /* try next time */ } // eslint-disable-line no-await-in-loop
+        }
+      } catch (e) { console.warn('[voice] transcripts:', e.message); }
+    }, 10 * 60000);
+    if (t.unref) t.unref();
+  }
+  app.get('/voice/transcripts/settings', requireAuth, async (req, res) => {
+    const cfg = await db.get(tKey, {});
+    const list = await db.get(tQueue, []);
+    res.json({ to: cfg.to || [], which: cfg.which || 'all', outlook: !!(mail && mail.ready()), waiting: (Array.isArray(list) ? list : []).filter((x) => !x.sentAt).length, lastSent: ((Array.isArray(list) ? list : []).find((x) => x.sentAt) || {}).sentAt || null });
+  });
+  app.put('/voice/transcripts/settings', requireAuth, async (req, res) => {
+    const b = req.body || {};
+    const to = [...new Set(String(Array.isArray(b.to) ? b.to.join(',') : b.to || '').split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)))].slice(0, 20);
+    const which = ['all', 'inbound', 'outbound'].includes(b.which) ? b.which : 'all';
+    res.json(await db.update(tKey, (cur) => ({ ...(cur || {}), to, which, updatedBy: who(req), updatedAt: new Date().toISOString() }), {}));
   });
 
   // ---- dispatcher side ----

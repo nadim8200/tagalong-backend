@@ -64,7 +64,7 @@ export function recipientFor(item, which = 1, phoneConsent = {}) {
   return { phone: info.phone, name: info.name, consent: phoneConsent[last10(info.phone)] || null, kind: 'company' };
 }
 
-export function initComms(app, { requireAuth, db, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, help = null, env = process.env }) {
+export function initComms(app, { requireAuth, db, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, help = null, activity = null, env = process.env }) {
   const enabled = !!(db && db.enabled);
   const logKey = (site) => `taTripComms:${site}`;
   const askKey = (site) => `taCommsAsks:${site}`;
@@ -87,6 +87,13 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
   }
   async function log(site, trip, entry) {
     const phone = entry.type === 'reply' ? entry.from : entry.to;
+    // the Calls & texts log (by day): texts and driver-app messages, both numbers
+    if (activity && (entry.type === 'text' || entry.type === 'reply')) {
+      const app = entry.kind === 'app-message' || entry.from === 'driver app' || entry.to === 'driver app';
+      let line = app ? 'TagAlong app' : null;
+      if (!app) { try { const cfg = await shared(); line = (cfg && cfg.fromNumber) || 'company texting line'; } catch { line = 'company texting line'; } }
+      activity.record({ kind: app ? 'app' : 'text', dir: entry.type === 'reply' ? 'in' : 'out', at: entry.at, from: entry.type === 'reply' ? entry.from : line, to: entry.type === 'reply' ? line : entry.to, ourLine: line, text: entry.text, by: entry.by || null, trip: trip || null, purpose: entry.kind || null }).catch(() => {});
+    }
     if (phone && !entry.noThread) await thread(site, phone, { ...entry, trip: trip || null });
     if (!enabled || !trip) return;
     await db.update(logKey(site), (cur) => {

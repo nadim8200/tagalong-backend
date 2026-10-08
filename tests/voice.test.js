@@ -16,7 +16,7 @@ function memDb() {
 }
 function setup(extraEnv = {}) {
   const routes = {}; const logged = []; const checkins = []; const retellCalls = [];
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const db = memDb();
   const fetchFn = async (url, opts) => {
     retellCalls.push({ url, method: opts.method, body: opts.body ? JSON.parse(opts.body) : null, auth: opts.headers.Authorization });
@@ -173,7 +173,7 @@ test('flower customers by name: their own stop only — boxes, cubes, stop numbe
 test('a business name in the wrong box still searches trip-sheet customers', async () => {
   const items = [{ trip: { tripNumber: '624297', powerUnit: '4504', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'B1', endZoneDescription: 'SPRINGFIELD, MA, 01104' }], _manifest: { stops: [{ stopNumber: 6, action: 'DELIVER', customer: 'SPRINGFIELD FLORIST', city: 'SPRINGFIELD', state: 'MA', pieces: 139, cubes: 187.71 }] } }];
   const routes = {};
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const m = new Map();
   const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async () => {}, update: async (k, fn, fb) => fn(fb) };
   initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY } });
@@ -190,7 +190,7 @@ test('a business name in the wrong box still searches trip-sheet customers', asy
 test('a customer name together with a trip number answers for THAT customer stop, not the whole load', async () => {
   const items = [{ trip: { tripNumber: '624399', powerUnit: '724', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M1', endZoneDescription: 'GWYNN OAK, MD, 21207' }, { billNumber: 'M2', endZoneDescription: 'MERCHANTVILLE, NJ, 08109' }], _manifest: { stops: [{ stopNumber: 2, action: 'DELIVER', customer: 'DBG - BALTIMORE', city: 'WOODLAWN', state: 'MD', tmPlace: 'GWYNN OAK, MD' }, { stopNumber: 3, action: 'DELIVER', customer: 'MAIN WHOLESALE FLORIST PENNSAUKEN LLC.', city: 'PENNSAUKEN', state: 'NJ', tmPlace: 'MERCHANTVILLE, NJ', pieces: 135, cubes: 168.85 }] } }];
   const routes = {};
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
   initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY } });
   const body = { args: { trip_number: '624399', customer_name: 'Main Wholesale' }, call: { direction: 'inbound', from_number: '+18565550000' } };
@@ -219,7 +219,7 @@ test('customers never hear the other stops; the name said earlier in the call pi
     _manifest: { stops: [{ stopNumber: 2, action: 'DELIVER', customer: 'ALCOCK WHOLESALE FLOWERS', city: 'KINSTON', state: 'NC' }, { stopNumber: 9, action: 'DELIVER', customer: 'BOKHARY FARMS LLC *', city: 'WALTHAM', state: 'MA', piecesText: '4 PALLETS', cubes: 400 }] },
     _samsara: { location: '3315 NW 70th Ave, Miami, FL, 33122', gpsAt: '2026-10-07T02:33:12Z', speedMph: 0 } }];
   const routes = {};
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
   initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY } });
   const ask = async (args) => {
@@ -261,7 +261,7 @@ test('customer names the way people say them, fed to the transcriber', () => {
 test('a caller who found their stop before is recognized by phone next time', async () => {
   const items = [{ trip: { tripNumber: '624481', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }], _manifest: { stops: [{ stopNumber: 9, action: 'DELIVER', customer: 'BOKHARY FARMS LLC *', city: 'WALTHAM', state: 'MA' }] } }];
   const routes = {}; const m = new Map();
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
   initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY, RETELL_AUTO_KEYWORDS: 'off' } });
   const ask = async (args, id) => {
@@ -302,7 +302,7 @@ test('brokers get their whole load by load number or company name — not "which
   assert.equal(v.pickup, 'West Palm Beach, Florida'); assert.equal(v.deliveries.length, 2);
   assert.match(v.deliveries[0].estimated_arrival, /Eastern$/); assert.equal(v.deliveries[0].appointment, '10/08 06:00');
   const routes = {};
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
   initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY, RETELL_AUTO_KEYWORDS: 'off' } });
   const ask = async (args, id) => {
@@ -352,7 +352,7 @@ test('a caller leaves a message with Jarvis → a callback request goes to the r
   const raised = [];
   const items = [{ trip: { tripNumber: '624481', powerUnit: '2606', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }] }];
   const routes = {};
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
   initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: items }), help: { raise: async (r) => { raised.push(r); return r; } }, env: { RETELL_API_KEY: KEY, RETELL_AUTO_KEYWORDS: 'off' } });
   const body = { args: { message: 'Bokhary Farms wants to know if the truck can come before 6 AM', caller_name: 'Sam at Bokhary Farms', callback_number: '781-555-0123', trip_number: '624481' }, call: { call_id: 'c77', direction: 'inbound', from_number: '+17815550123' } };
@@ -367,7 +367,7 @@ test('a caller leaves a message with Jarvis → a callback request goes to the r
 test('authorized numbers only: an unknown phone asking about a customer gets no details — offered a callback', async () => {
   const items = [{ trip: { tripNumber: '624481', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }], _manifest: { stops: [{ stopNumber: 9, action: 'DELIVER', customer: 'BOKHARY FARMS LLC *', city: 'WALTHAM', state: 'MA' }] } }];
   const routes = {};
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
   const profiles = { allowed: async ({ phone }) => ({ ok: String(phone).endsWith('5550123') }), anyLoad: async () => false };
   initVoice(app, { requireAuth: (q, r, n) => n(), db, profiles, getBoard: async () => ({ trips: items }), env: { RETELL_API_KEY: KEY, RETELL_AUTO_KEYWORDS: 'off' } });
@@ -384,4 +384,55 @@ test('authorized numbers only: an unknown phone asking about a customer gets no 
   assert.equal(JSON.stringify(stranger).includes('WALTHAM'), false, 'nothing about the load');
   const owner = await ask('+17815550123');
   assert.equal(owner.found, true);
+});
+
+import { transcriptEmail } from '../voice.js';
+test('every Jarvis call can be emailed with the whole conversation', () => {
+  const call = { call_id: 'c1', direction: 'inbound', from_number: '+17815550123', start_timestamp: Date.parse('2026-10-08T14:05:00Z'), recording_url: 'https://example.com/rec.wav', disconnection_reason: 'user_hangup',
+    call_analysis: { call_summary: 'Bokhary Farms asked for the ETA on load 624481.' },
+    transcript: 'Agent: Hi, this is Jarvis, Florida Beauty Flora\'s assistant.\nUser: Hi, this is Sam from Bokhary Farms, where is my truck?\nAgent: Your delivery is expected Thu, Oct 8, 9:00 AM Eastern.' };
+  const m = transcriptEmail(call, { trip: '624481', callerName: 'Bokhary Farms', minutes: 2.4 });
+  assert.equal(m.subject, 'Jarvis call — from Bokhary Farms (781) 555-0123 · load 624481 · 2.4 min');
+  assert.match(m.html, /<b style="color:#2563eb">Jarvis:<\/b> Hi, this is Jarvis/);
+  assert.match(m.html, /<b style="color:#0f172a">Caller:<\/b> Hi, this is Sam from Bokhary Farms/);
+  assert.match(m.html, /Summary:<\/b> Bokhary Farms asked for the ETA/); assert.match(m.html, /Listen to the recording/); assert.match(m.html, /ended: user hangup/);
+});
+
+test('when a call ends, the transcript is emailed once to the addresses set in Calls, texts & email', async () => {
+  const m = new Map([['taJarvisTranscriptCfg', { to: ['nadim8200@outlook.com', 'dispatch@floridabeauty.us'], which: 'all' }]]);
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const sent = [];
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
+  initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: [] }), mail: { ready: () => true, send: async (x) => sent.push(x) }, env: { RETELL_API_KEY: KEY, RETELL_AUTO_KEYWORDS: 'off' } });
+  const fire = async (event) => {
+    const body = { event, call: { call_id: 'cx1', direction: 'inbound', from_number: '+17815550123', start_timestamp: 1, end_timestamp: 61000, transcript: 'Agent: Hi, this is Jarvis.\nUser: Where is my truck?', call_analysis: { call_summary: 'Caller asked for an ETA.' } } };
+    const raw = JSON.stringify(body); const sig = await Retell.sign(raw, KEY);
+    const res = { status() { return this; }, end() {}, json() {} };
+    const [guard, handler] = routes['POST /retell/webhook'];
+    await guard({ body, rawBody: raw, get: () => sig }, res, () => handler({ body, rawBody: raw, get: () => sig }, res));
+  };
+  await fire('call_ended');
+  assert.equal(sent.length, 0, 'waits for the summary');
+  await fire('call_analyzed');
+  await fire('call_analyzed');
+  assert.equal(sent.length, 1, 'once per call');
+  assert.deepEqual(sent[0].to, ['nadim8200@outlook.com', 'dispatch@floridabeauty.us']);
+  assert.match(sent[0].subject, /^Jarvis call — from \(781\) 555-0123 · 1 min$/);
+  assert.match(sent[0].html, /Where is my truck\?/);
+});
+
+test('every Jarvis call lands in the Calls & texts log with both numbers and the transcript', async () => {
+  const recorded = [];
+  const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
+  initVoice(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: [] }), activity: { record: async (e) => { recorded.push(e); return e; } }, env: { RETELL_API_KEY: KEY, RETELL_AUTO_KEYWORDS: 'off' } });
+  const body = { event: 'call_analyzed', call: { call_id: 'cz', direction: 'inbound', from_number: '+17815550123', to_number: '+17862040122', start_timestamp: Date.parse('2026-10-08T14:05:00Z'), end_timestamp: Date.parse('2026-10-08T14:07:00Z'), transcript: 'Agent: Hi\nUser: Where is my truck?', recording_url: 'https://x/r.wav', call_analysis: { call_summary: 'ETA question' } } };
+  const raw = JSON.stringify(body); const sig = await Retell.sign(raw, KEY);
+  const res = { status() { return this; }, end() {}, json() {} };
+  const [guard, handler] = routes['POST /retell/webhook'];
+  await guard({ body, rawBody: raw, get: () => sig }, res, () => handler({ body, rawBody: raw, get: () => sig }, res));
+  assert.deepEqual({ id: recorded[0].id, from: recorded[0].from, to: recorded[0].to, ourLine: recorded[0].ourLine, minutes: recorded[0].minutes, recording: recorded[0].recording }, { id: 'call:cz', from: '+17815550123', to: '+17862040122', ourLine: '+17862040122', minutes: 2, recording: 'https://x/r.wav' });
+  assert.match(recorded[0].transcript, /Where is my truck\?/);
 });

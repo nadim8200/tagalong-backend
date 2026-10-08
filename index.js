@@ -35,6 +35,7 @@ import { initDispatchers } from './dispatchers.js';
 import { initJarvisChat } from './jarvischat.js';
 import { initHelpdesk } from './helpdesk.js';
 import { initProfiles } from './profiles.js';
+import { initActivity } from './activity.js';
 import { initDriverLinks } from './driverlink.js';
 import { initComms } from './comms.js';
 import { initRundowns } from './rundown.js';
@@ -675,12 +676,14 @@ const carriers = initCarriers(app, { requireAuth: requireDispatch, db });
 // load rundown PDF + Outlook email when a load finishes
 const rundowns = initRundowns(app, { requireAuth: requireDispatch, db, docs, env: process.env });
 let truckmate;
+// Calls & texts log by day (who called / was texted, both numbers, what was said)
+const activity = initActivity(app, { requireAuth: requireDispatch, db, push, getBoard: (site) => truckmate.buildBoard(site) });
 // "someone needs us to reach out" (calls, emails, texts, driver app) → email + text the right people
 let helpdesk = null;
 const help = { raise: (r) => (helpdesk ? helpdesk.raise(r) : Promise.resolve(null)) };
 const driverLinks = initDriverLinks(app, { help, requireAuth: requireDispatch, db, carriers, ringcentral: rc, docs, push, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // driver calls / texts on a load, and their replies (RingCentral)
-const comms = initComms(app, { help, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const comms = initComms(app, { help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
 helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) },
@@ -706,7 +709,7 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
-const voice = initVoice(app, { help, profiles, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const voice = initVoice(app, { help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
