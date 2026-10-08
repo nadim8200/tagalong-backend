@@ -42,6 +42,7 @@ import { initRundowns } from './rundown.js';
 import { initOutbound } from './outbound.js';
 import { initFlowerReport } from './flowerreport.js';
 import { initPickupFollow } from './pickupfollow.js';
+import { initMilestones } from './milestones.js';
 import { initInbox } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
@@ -712,13 +713,14 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 const voice = initVoice(app, { help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, env: process.env });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
 jarvisChat = initJarvisChat(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });
-initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await statusMail.process(site, board, ctx); } });
+initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and

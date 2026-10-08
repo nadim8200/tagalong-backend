@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { qualifies, stopsOf, pendingEvents, renderEvent, initStatusMail, trackPickup, lateNotice } from '../statusmail.js';
+import { qualifies, stopsOf, pendingEvents, renderEvent, initStatusMail, trackPickup, lateNotice, assignmentOf } from '../statusmail.js';
 
 const NOW = Date.parse('2026-10-05T16:00:00Z');
 const geo = (zip) => ({ 30436: { lat: 32.11, lng: -82.32 }, 31601: { lat: 30.83, lng: -83.28 } }[zip] || null);
@@ -38,7 +38,7 @@ test('events in order: assigned → picked up → arrivals → delivered, then 3
 
 test('the assigned email has truck, trailer, driver name + phone, location and pickup ETA', () => {
   const m = renderEvent({ kind: 'assigned' }, load(), { geo, now: NOW });
-  assert.match(m.subject, /^Truck assigned — Trip 900200 · Bill B0180251, R0180252/);
+  assert.match(m.subject, /^Truck 2403, trailer 5310 and driver assigned — Trip 900200 · Bill B0180251, R0180252/);
   for (const s of ['2403', '5310', 'John Doe', '+13055550100', 'Miami, FL', 'At the pickup now']) assert.ok(m.html.includes(s), s);
   const arr = renderEvent({ kind: 'arrived', stop: 'LYONS, GA, 30436', number: 2, of: 2 }, load(), { geo, now: NOW });
   assert.match(arr.subject, /^Arrived at stop 2 of 2/);
@@ -66,7 +66,7 @@ test('first run adopts silently; later events email the customer list and log on
   const picked = load({ trip: { status: 'DEPSHIP' } });
   await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 60000 });
   assert.equal(sent.length, 1);
-  assert.match(sent[0].message.subject, /^Load picked up — driver departed shipper/);
+  assert.match(sent[0].message.subject, /^Picked up — trailer departed and rolling/);
   assert.deepEqual(sent[0].message.toRecipients.map((r) => r.emailAddress.address), ['ops@fixture.com']);
   assert.equal(logged[0].auto, true);
   await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 120000 });
@@ -146,7 +146,7 @@ test('GPS pickup: sat at the Miami yard, now 25+ mi out → picked up even with 
   const evs = pendingEvents(at(26.3, -80.2, t0 + 80 * 60000), { assigned: 'x' }, { now: t0 + 80 * 60000, gps: g });
   assert.deepEqual(evs.map((e) => [e.kind, e.gps]), [['picked-up', true]]);
   const m = renderEvent(evs[0], load(), { now: t0 + 80 * 60000 });
-  assert.match(m.html, /our GPS shows the truck departed/);
+  assert.match(m.html, /our GPS shows the trailer departed/);
   assert.match(m.html, /Departed/);
   // only drove past the yard → not a pickup
   let d = trackPickup(at(25.7950, -80.3100, t0), {}, { now: t0 });
@@ -171,4 +171,39 @@ test('delay notice: once per stop before a missed appointment, again only if it 
   assert.match(m.html, /about 1h 51m after the appointment/);
   assert.match(m.html, /Pacific/);
   assert.match(m.html, /may change/);
+});
+
+test('trailer loaded, drivers and swaps each get their own email; LOADED TO GO is not "picked up"', () => {
+  const NOW2 = Date.parse('2026-10-05T16:00:00Z');
+  // truck + trailer on the load, no driver yet
+  const noDriver = load({ trip: { status: 'ASSGN', driver: '' }, extra: { _samsara: { lat: 25.79, lng: -80.31, gpsAt: '2026-10-05T15:55:00Z', speedMph: 0 } } });
+  let evs = pendingEvents(noDriver, {}, { now: NOW2 });
+  assert.deepEqual(evs.map((e) => e.parts), [['truck', 'trailer']]);
+  const told = evs[0].told;
+  assert.match(renderEvent(evs[0], noDriver, { now: NOW2 }).subject, /^Truck 2403 and trailer 5310 assigned/);
+  // driver assigned later
+  const withDriver = load({ trip: { status: 'DISP' } });
+  evs = pendingEvents(withDriver, { assigned: 'x', told }, { now: NOW2 });
+  assert.deepEqual(evs.map((e) => e.parts), [['drivers']]);
+  assert.match(renderEvent(evs[0], withDriver, { now: NOW2 }).subject, /^Driver assigned/);
+  // trailer loaded to go — loaded email, and NOT picked up
+  const loaded = load({ trip: { status: 'LOADEDTOGO' }, hist: [{ status: 'LOADINGMAN' }, { status: 'LOADEDTOGO' }] });
+  const t2 = { ...assignmentOf(withDriver) };
+  evs = pendingEvents(loaded, { assigned: 'x', told: t2 }, { now: NOW2 });
+  assert.deepEqual(evs.map((e) => [e.kind, e.parts]), [['assigned', ['loaded']]]);
+  const m = renderEvent(evs[0], loaded, { now: NOW2 });
+  assert.match(m.subject, /^Trailer 5310 loaded — Trip/);
+  assert.match(m.html, /We will let you know as soon as it departs/);
+  // trailer swap
+  const swapped = load({ trip: { status: 'LOADEDTOGO', trailer: '7141' }, hist: [{ status: 'LOADEDTOGO' }] });
+  evs = pendingEvents(swapped, { assigned: 'x', told: { ...t2, loaded: true } }, { now: NOW2 });
+  assert.deepEqual(evs.map((e) => [e.parts, e.changed]), [[['trailer'], ['trailer']]]);
+  assert.match(renderEvent(evs[0], swapped, { now: NOW2 }).subject, /^Update: new trailer 7141 assigned/);
+  // loads told the old way don't get re-announced
+  assert.deepEqual(pendingEvents(withDriver, { assigned: 'x' }, { now: NOW2 }), []);
+  // departed → the rolling email
+  const gone = load({ trip: { status: 'DEPSHIP' }, hist: [{ status: 'LOADEDTOGO' }, { status: 'DEPSHIP', at: '2026-10-05T15:00:00Z' }] });
+  evs = pendingEvents(gone, { assigned: 'x', told: { ...t2, loaded: true } }, { now: NOW2 });
+  assert.deepEqual(evs.map((e) => e.kind), ['picked-up']);
+  assert.match(renderEvent(evs[0], gone, { now: NOW2 }).subject, /^Picked up — trailer departed and rolling/);
 });

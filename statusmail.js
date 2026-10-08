@@ -2,8 +2,10 @@
 // Customer status emails for B and R loads (bill numbers starting B / R),
 // sent automatically from Jarvis (the Outlook mailbox, see mailer.js):
 //
-//   1. Truck assigned   — truck, trailer, driver name + phone, current location, ETA to pickup
-//   2. Picked up        — load picked up, driver departed the shipper
+//   1. Assigned         — truck / trailer / driver(s), each when it is first put on the
+//                         load or changes (a new trailer, a driver swap); "trailer
+//                         loaded" when TruckMate says LOADED TO GO / SPOTTED LOADED
+//   2. Picked up        — trailer departed and rolling
 //   3. Location update  — every 3 hours while in transit (location + ETA to the next stop)
 //   4. Arrived at stop  — "at the receiver" / stop 1, 2, 3 of N
 //   5. Delivered        — the whole load delivered
@@ -28,8 +30,9 @@ import { haversineMi, estimateArrival, MIAMI_TERMINAL, MIAMI_YARDS } from './wat
 import { fmtLocal } from './localtime.js';
 
 const H = 3600000;
-const PICKED = /^(depship|depshp|loaded|pickd|intran|enroute|enrt|arrcons|arrcon|depcons|depcon|delvd|deliv|cmplt|complete)/i;
+const PICKED = /^(depship|depshp|pickd|intran|enroute|enrt|arrcons|arrcon|depcons|depcon|delvd|deliv|cmplt|complete)/i;
 const ARRIVE = /^arrcon/i;
+const LOADED = /^(loadedtogo|sptld)/i;          // TruckMate: TRAILER NOW LOADED TO GO / SPOTTED LOADED
 const DONE = /^(delvd|deliv|del$|cmplt|complete)/i;
 const DEAD = /^(canc|void)/i;
 export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, useBroker: true, customers: {}, trips: {} };
@@ -182,7 +185,7 @@ function etaTo(item, here, zip, { geo, now }) {
 }
 
 // Where the load is picked up: our Miami yard / lot / cooler, or the shipper's zip.
-function pickupPoints(item, geo) {
+export function pickupPoints(item, geo) {
   const t = tripOf(item);
   const sheetPick = ((item && item._manifest && item._manifest.stops) || []).filter((s) => /PICK|LOAD/i.test(s.action || ''));
   if (/MIAMI/i.test(t.origZoneDesc || '') || sheetPick.some((s) => /MIAMI/i.test(`${s.city} ${s.customer}`))) return { pts: MIAMI_YARDS, nearMi: 1 };
@@ -226,6 +229,27 @@ export function lateNotice(e, sentLate = {}, { now = Date.now() } = {}) {
   return { kind: 'late', stop: worst.key, label: worst.label, etaMs: worst.etaMs, apptMs: worst.apptMs, lateMin: Math.round(worst.late), revised: !!prev };
 }
 
+// Stops, counting a stop the driver confirmed delivered (TruckMate can lag). Pure.
+function stopsNow(item) {
+  const ms = (item && item._milestones) || {};
+  return stopsOf(item).map((s) => (!s.delivered && ms[`delivered:${s.key}`] && ms[`delivered:${s.key}`].src !== 'GPS' ? { ...s, delivered: true, deliveredAt: s.deliveredAt || ms[`delivered:${s.key}`].at, byDriver: true } : s));
+}
+
+// Truck, trailer, driver names and "trailer loaded" on the load right now. Pure.
+export function assignmentOf(item) {
+  const t = tripOf(item);
+  const hist = (item && item._times && item._times.statusHistory) || [];
+  // TruckMate driver codes are stable; Samsara / app names only when TruckMate has none
+  const codes = [t.driver, t.driver2].map((x) => String(x || '').trim().toUpperCase()).filter(Boolean);
+  const names = (codes.length ? codes : driversOf(item).map((d) => String(d.name || d.phone || '').trim().toUpperCase()).filter(Boolean)).sort().join(' + ');
+  return {
+    truck: String(t.powerUnit || (item && item._oc && item._oc.truck) || '').trim() || null,
+    trailer: String(t.trailer || (item && item._oc && item._oc.trailer) || '').trim() || null,
+    drivers: names || null,
+    loaded: LOADED.test(String(t.status || '')) || hist.some((h) => LOADED.test(h.status || '')) || !!(item && item._milestones && item._milestones.loaded && item._milestones.loaded.src !== 'GPS'),
+  };
+}
+
 // What has happened on the load that the customer hasn't been told yet. Pure.
 // sent: { assigned, pickedUp, stops: {key: at}, delivered, lastLocationAt, late: {stop: {etaMs, at}} }
 // gps: the GPS pickup watch (trackPickup) — a departure there counts as picked up.
@@ -233,19 +257,36 @@ export function pendingEvents(item, sent = {}, { now = Date.now(), everyHours = 
   const t = tripOf(item);
   const status = String(t.status || '');
   if (DEAD.test(status)) return [];
-  const stops = stopsOf(item);
   const hist = (item && item._times && item._times.statusHistory) || [];
+  // driver check-ins (milestones.js): what the driver confirmed counts; GPS-only guesses don't
+  const ms = (item && item._milestones) || {};
+  const sure = (k) => !!(ms[k] && ms[k].src !== 'GPS');
+  const stops = stopsNow(item);
   const byGps = !!(gps && gps.leftAt);
-  const everPicked = PICKED.test(status) || hist.some((h) => PICKED.test(h.status)) || stops.some((s) => s.delivered) || byGps;
+  const byDriver = sure('departed');
+  const everPicked = PICKED.test(status) || hist.some((h) => PICKED.test(h.status)) || stops.some((s) => s.delivered) || byGps || byDriver;
   const allDelivered = stops.length > 0 && stops.every((s) => s.delivered);
   const delivered = allDelivered || DONE.test(status);
   const truck = t.powerUnit || (item && item._oc && item._oc.truck);
   const out = [];
   const sentStops = sent.stops || {};
-  if (!sent.assigned && truck && (driversOf(item).length || item._oc)) out.push({ kind: 'assigned' });
+  // what the customer has been told about truck / trailer / drivers / loaded. Loads told
+  // the old way (one "truck assigned" email) count as told what is on them now.
+  const nowAssign = assignmentOf(item);
+  const told = sent.told || (sent.assigned ? { ...nowAssign } : {});
+  if (!delivered) {
+    const parts = [];
+    if (nowAssign.truck && nowAssign.truck !== told.truck) parts.push('truck');
+    if (nowAssign.trailer && nowAssign.trailer !== told.trailer) parts.push('trailer');
+    if (nowAssign.drivers && nowAssign.drivers !== told.drivers) parts.push('drivers');
+    if (nowAssign.loaded && !told.loaded && !everPicked) parts.push('loaded');
+    if (parts.length) out.push({ kind: 'assigned', parts, changed: parts.filter((x) => x !== 'loaded' && told[x]), told: { ...told, ...Object.fromEntries(Object.entries(nowAssign).filter(([, v]) => v)) } });
+  }
+  // the driver checked in at the shipper (TruckMate ARRSHIP or the driver said so)
+  if (!sent.atShipper && !sent.pickedUp && !everPicked && sure('arrived-shipper') && !nowAssign.loaded) out.push({ kind: 'at-shipper' });
   if (!sent.pickedUp && everPicked) {
     const dep = hist.find((h) => /^depsh/i.test(h.status || ''));
-    out.push({ kind: 'picked-up', ...(byGps ? { departedAt: gps.leftAt, gps: true } : dep && dep.at ? { departedAt: dep.at } : {}) });
+    out.push({ kind: 'picked-up', ...(byGps ? { departedAt: gps.leftAt, gps: true } : dep && dep.at ? { departedAt: dep.at } : byDriver ? { departedAt: ms.departed.at, driver: true } : {}) });
   }
   // arrivals: geofence visit, a TruckMate "arrived consignee", or the stop's bills delivered
   const visits = (item && item._visits) || {};
@@ -254,7 +295,7 @@ export function pendingEvents(item, sent = {}, { now = Date.now(), everyHours = 
     if (sentStops[st.key]) return;
     const v = st.sheetKey ? visits[st.sheetKey] : null;
     const atStop = v && ['at_stop', 'departing', 'completed'].includes(v.state);
-    const byStatus = i < arrCount;
+    const byStatus = i < arrCount || sure(`arrived:${st.key}`);
     if (atStop || byStatus || st.delivered) out.push({ kind: 'arrived', stop: st.key, number: st.number, of: stops.length, delivered: st.delivered && !atStop && !byStatus });
   });
   if (!sent.delivered && delivered) out.push({ kind: 'delivered' });
@@ -270,7 +311,7 @@ const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</
 // The email for one event. Pure (given geo).
 export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {}) {
   const t = tripOf(item);
-  const stops = stopsOf(item);
+  const stops = stopsNow(item);
   const bills = billsOf(item).map((b) => b.billNumber).filter(Boolean);
   const rc = (item && item._ratecon && (item._ratecon.data || item._ratecon)) || {};
   const truck = t.powerUnit || (item._oc && item._oc.truck) || '—';
@@ -285,21 +326,46 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
   const loc = here ? `${here.place || 'Location on file'}${here.stale ? ' (last known)' : ''}${here.at ? ` · ${fmtTime(Date.parse(here.at))}` : ''}` : 'Not available yet';
   const stopName = (s) => `${s.name || (s.customers || [])[0] || 'Receiver'} — ${s.place}`;
   if (ev.kind === 'assigned') {
-    title = 'Truck assigned';
-    lead = 'A truck and driver have been assigned to your load.';
-    row('Truck', truck); row('Trailer', trailer);
+    const parts = ev.parts || ['truck', 'trailer', 'drivers'];
+    const nDrivers = driversOf(item).length;
+    const word = { truck: `truck ${truck}`, trailer: `trailer ${trailer}`, drivers: nDrivers > 1 ? 'drivers' : 'driver' };
+    const named = parts.filter((x) => x !== 'loaded').map((x) => word[x]);
+    const list = named.length > 1 ? `${named.slice(0, -1).join(', ')} and ${named[named.length - 1]}` : (named[0] || '');
+    const changed = (ev.changed || []).length > 0;
+    const plural = named.length > 1 || (parts.includes('drivers') && named.length === 1 && nDrivers > 1);
+    const cap = (x) => x.charAt(0).toUpperCase() + x.slice(1);
+    if (parts.includes('loaded')) {
+      title = `Trailer ${trailer} loaded${named.length ? ` — ${list} assigned` : ''}`;
+      lead = `Your freight has been loaded on trailer ${trailer}${named.length ? `, and ${list} ${plural ? 'have' : 'has'} been assigned to your load` : ''}. We will let you know as soon as it departs.`;
+    } else if (changed) {
+      title = `Update: new ${list} assigned`;
+      lead = `There is a change on your load: ${list} ${plural ? 'are' : 'is'} now assigned.`;
+    } else {
+      title = `${cap(list)} assigned`;
+      lead = `${cap(list)} ${plural ? 'have' : 'has'} been assigned to your load.`;
+    }
+    row('Truck', truck); row('Trailer', `${trailer}${(ev.told && ev.told.loaded) || parts.includes('loaded') ? ' · loaded' : ''}`);
     driversOf(item).forEach((d, i, a) => row(a.length > 1 ? `Driver ${i + 1}` : 'Driver', [d.name, d.phone].filter(Boolean).join(' · ')));
+    driversOf(item).length || row('Driver', 'To follow');
     row('Current location', loc);
-    const pz = zipOf(t.origZoneDesc);
+    const hist = (item && item._times && item._times.statusHistory) || [];
+    const gone = PICKED.test(String(t.status || '')) || hist.some((h) => PICKED.test(h.status || ''));
+    const pz = gone ? null : zipOf(t.origZoneDesc);
     const pickupGeo = pz ? null : (/MIAMI/i.test(t.origZoneDesc || '') ? MIAMI_TERMINAL : null);
-    const eta = pickupGeo && here && here.lat != null
+    const eta = gone ? null : pickupGeo && here && here.lat != null
       ? (() => { const m = haversineMi(here.lat, here.lng, pickupGeo.lat, pickupGeo.lng) * 1.2; return m < 3 ? { here: true } : { miles: Math.round(m), atMs: estimateArrival(m, { now }) }; })()
       : etaTo(item, here, pz, { geo, now });
-    row('Pickup', cityOf(t.origZoneDesc) || null);
-    row('ETA to pickup', eta ? (eta.here ? 'At the pickup now' : `${fmtLocal(eta.atMs, t.origZoneDesc)} (~${eta.miles} mi)`) : 'To follow');
+    if (!gone) row('Pickup', cityOf(t.origZoneDesc) || null);
+    if (!gone) row('ETA to pickup', eta ? (eta.here ? 'At the pickup now' : `${fmtLocal(eta.atMs, t.origZoneDesc)} (~${eta.miles} mi)`) : 'To follow');
+  } else if (ev.kind === 'at-shipper') {
+    title = 'Driver arrived at the shipper';
+    lead = 'The driver has arrived at the shipper and checked in. We will let you know when your freight is loaded and the truck departs.';
+    row('Truck / trailer', `${truck} / ${trailer}`);
+    row('Shipper', cityOf(t.origZoneDesc) || null);
+    row('Current location', loc);
   } else if (ev.kind === 'picked-up') {
-    title = 'Load picked up — driver departed shipper';
-    lead = ev.gps ? 'Your load has been picked up — our GPS shows the truck departed the shipper and is on its way.' : 'Your load has been picked up and the driver has departed the shipper.';
+    title = 'Picked up — trailer departed and rolling';
+    lead = ev.gps ? 'Your load has been picked up — our GPS shows the trailer departed the shipper and is rolling.' : ev.driver ? 'Your load has been picked up — the driver confirmed the trailer departed the shipper and is rolling.' : 'Your load has been picked up — the trailer departed the shipper and is rolling.';
     if (ev.departedAt) row('Departed', fmtLocal(Date.parse(ev.departedAt), t.origZoneDesc || 'MIAMI, FL'));
     row('Truck / trailer', `${truck} / ${trailer}`);
     row('Current location', loc);
@@ -420,7 +486,7 @@ export function initStatusMail(app, { requireAuth, db, comms = null, ringcentral
       if (!evs.length && !late) { next.trips[trip] = rec; continue; }
       const nowIso = new Date(now).toISOString();
       const mark = (ev) => {
-        if (ev.kind === 'assigned') rec.sent.assigned = nowIso;
+        if (ev.kind === 'assigned') { rec.sent.assigned = nowIso; rec.sent.told = ev.told; } else if (ev.kind === 'at-shipper') rec.sent.atShipper = nowIso;
         else if (ev.kind === 'picked-up') { rec.sent.pickedUp = nowIso; rec.sent.lastLocationAt = nowIso; } else if (ev.kind === 'arrived') rec.sent.stops = { ...(rec.sent.stops || {}), [ev.stop]: nowIso };
         else if (ev.kind === 'delivered') rec.sent.delivered = nowIso;
         else if (ev.kind === 'location') rec.sent.lastLocationAt = nowIso;
