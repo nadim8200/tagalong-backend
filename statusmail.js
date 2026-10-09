@@ -36,7 +36,7 @@ const ARRIVE = /^arrcon/i;
 const LOADED = /^(loadedtogo|sptld)/i;          // TruckMate: TRAILER NOW LOADED TO GO / SPOTTED LOADED
 const DONE = /^(delvd|deliv|del$|cmplt|complete)/i;
 const DEAD = /^(canc|void)/i;
-export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 1, useBroker: true, customers: {}, trips: {} };   // SOP: an update every hour
+export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, routineLocation: false, useBroker: true, customers: {}, trips: {} };   // routine location emails only when turned on — scheduled updates for the loads dispatch asks for run through Scheduled ETA updates
 const MAX_PER_DAY = 15;
 
 const tripOf = (item) => (item && item.trip) || item || {};
@@ -542,7 +542,7 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       if (!trip) continue;
       const rec = next.trips[trip] || { sent: { stops: {} }, log: [] };
       if (!rec.sent.pickedUp) rec.gps = trackPickup(item, rec.gps, { geo, now });
-      const evs = pendingEvents(item, rec.sent, { now, everyHours: cfg.everyHours, gps: rec.gps }).filter((ev) => !(ev.kind === 'location' && down[trip] && down[trip].on));   // no routine location emails during a breakdown
+      const evs = pendingEvents(item, rec.sent, { now, everyHours: cfg.everyHours, gps: rec.gps }).filter((ev) => !(ev.kind === 'location' && ((down[trip] && down[trip].on) || !cfg.routineLocation)));   // routine location emails only when turned on, never during a breakdown
       const late = down[trip] && down[trip].on ? null : lateNotice(etas[trip], rec.sent.late, { now });
       if (!evs.length && !late) { next.trips[trip] = rec; continue; }
       const nowIso = new Date(now).toISOString();
@@ -605,7 +605,7 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       const prefixes = Array.isArray(b.prefixes) ? b.prefixes.map((x) => String(x).trim().charAt(0).toUpperCase()).filter(Boolean) : cur.prefixes;
       const everyHours = b.everyHours != null ? Math.min(12, Math.max(1, Number(b.everyHours) || 3)) : cur.everyHours;
       const { seen, outlook, ...keep } = cur; // eslint-disable-line no-unused-vars
-      const next = { ...keep, customers, prefixes: prefixes.length ? prefixes : DEFAULTS.prefixes, everyHours, enabled: b.enabled != null ? !!b.enabled : cur.enabled, useBroker: b.useBroker != null ? !!b.useBroker : cur.useBroker };
+      const next = { ...keep, customers, prefixes: prefixes.length ? prefixes : DEFAULTS.prefixes, everyHours, enabled: b.enabled != null ? !!b.enabled : cur.enabled, routineLocation: b.routineLocation != null ? !!b.routineLocation : !!cur.routineLocation, useBroker: b.useBroker != null ? !!b.useBroker : cur.useBroker };
       await db.set(cfgKey, next);
       res.json(next);
     } catch (e) { res.status(500).json({ error: e.message }); }

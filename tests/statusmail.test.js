@@ -88,6 +88,24 @@ test('first run adopts silently; later events email the customer list and log on
   assert.match(Buffer.from((sent[1].mime.match(/text\/plain[\s\S]*?base64\r\n\r\n([\s\S]*?)\r\n--/) || [])[1].replace(/\r\n/g, ''), 'base64').toString(), /Driver at the receiver \(stop 1 of 2\)/);
 });
 
+test('routine location emails are off unless turned on (milestones still go out)', async () => {
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
+  const sent = [];
+  const fetchFn = async (url, opts) => { if (url.includes('oauth2')) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) }; sent.push(readSent(opts)); return { ok: true, status: 202, json: async () => ({}) }; };
+  const db = memDb();
+  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] }, everyHours: 1 });
+  const sm = initStatusMail({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, env, fetchFn });
+  const picked = load({ trip: { status: 'DEPSHIP' } });
+  await sm.process('fb', { trips: [load()] }, { geo, now: NOW });
+  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 60000 });
+  assert.equal(sent.length, 1, 'picked up (milestone) still sent');
+  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 3 * 3600000 });
+  assert.equal(sent.length, 1, 'no hourly location email');
+  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] }, everyHours: 1, routineLocation: true });
+  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 4 * 3600000 });
+  assert.equal(sent.length, 2, 'turned on → location email');
+});
+
 import { contactsFor } from '../statusmail.js';
 import { evaluateBoard } from '../watchtower.js';
 
