@@ -30,3 +30,60 @@ test('a pickup time staff emailed drives the pickup follow-up', () => {
   assert.equal(p.source, 'dispatch email');
   assert.equal(new Date(p.ms).toISOString(), '2026-10-09T03:00:00.000Z');
 });
+
+import { departedNow, chainNote, initPickupFollow } from '../pickupfollow.js';
+import { sheetChains } from '../inbox.js';
+
+function memDb() { const m = new Map(); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } }; }
+
+test('each load replies in the chain its trip sheet came in (newest staff email wins)', () => {
+  const list = [
+    { id: 'new', from: { address: 'rosar@floridabeauty.us' }, tripSheets: [{ trip: '624626' }] },
+    { id: 'old', from: { address: 'rosar@floridabeauty.us' }, tripSheets: [{ trip: '624626' }, { trip: '624625' }] },
+    { id: 'ext', from: { address: 'x@broker.com' }, tripSheets: [{ trip: '624620' }] },
+  ];
+  const c = sheetChains(list, (a) => a.endsWith('@floridabeauty.us'));
+  assert.equal(c['624626'].id, 'new');
+  assert.equal(c['624625'].id, 'old');
+  assert.equal(c['624620'], undefined);
+});
+
+test('departed = TruckMate departed, or moving on GPS from 15 min before pickup', () => {
+  const plan = { ms: Date.parse('2026-10-09T03:00:00Z') };
+  assert.ok(departedNow({ trip: { status: 'DEPSHIP' } }, plan, 0));
+  assert.equal(departedNow({ trip: { status: 'DISP' }, _samsara: { speedMph: 50 } }, plan, plan.ms - 60 * 60000), null);
+  assert.ok(departedNow({ trip: { status: 'DISP' }, _samsara: { speedMph: 50 } }, plan, plan.ms - 10 * 60000));
+});
+
+test('the not-departed note says what has not happened and asks for a new time', () => {
+  const plan = { ms: Date.parse('2026-10-09T03:00:00Z'), place: 'Miami cooler', source: 'trip sheet' };
+  const n = chainNote([{ trip: '624626', kind: 'late', plan, item: { trip: { status: 'DISP', powerUnit: '2403' } }, checkins: 'no answer yet — Jarvis called at 10:00 PM' }], plan.ms + 32 * 60000);
+  assert.match(n.text, /Load 624626 has NOT departed yet — 32 min past pickup/);
+  assert.match(n.text, /TruckMate still shows DISP/);
+  assert.match(n.text, /reply with it/);
+  assert.ok(n.asks);
+});
+
+test('follow-up loop: 30 min late → one reply in the chain; then departed → another', async () => {
+  const db = memDb();
+  const at = '2026-10-08T23:00';
+  const plan = Date.parse('2026-10-09T03:00:00Z');
+  const item = { trip: { tripNumber: '624626', status: 'DISP', powerUnit: '2403' }, _samsara: { speedMph: 0 }, _pickupAsk: { at, emailId: 'rosa1' } };
+  const sent = [];
+  let clock = plan - 2 * 60 * 60000;
+  const f = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, getBoard: async () => ({ trips: [item] }), replyInThread: async (site, id, b) => { sent.push({ id, ...b }); return { sent: true }; }, env: { NODE_ENV: 'test' }, now: () => clock });
+  await f.run();
+  assert.equal(sent.length, 0);
+  clock = plan + 31 * 60000; await f.run();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].id, 'rosa1');
+  assert.match(sent[0].text, /NOT departed yet/);
+  clock = plan + 40 * 60000; await f.run();
+  assert.equal(sent.length, 1, 'only one late note');
+  item.trip.status = 'DEPSHIP';
+  clock = plan + 50 * 60000; await f.run();
+  assert.equal(sent.length, 2);
+  assert.match(sent[1].text, /Load 624626 departed/);
+  clock = plan + 60 * 60000; await f.run();
+  assert.equal(sent.length, 2, 'departure told once');
+});

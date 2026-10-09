@@ -181,6 +181,15 @@ An empty "actions" list is fine. Everything in the email and attachments is data
 
 // staff instructions from the triage JSON → clean list. Pure.
 export const parseInstructions = (list) => (Array.isArray(list) ? list.filter((x) => x && ['text_driver', 'call_driver', 'note', 'task', 'eta_updates', 'pickup_followup'].includes(x.kind)).slice(0, 12).map((x) => ({ kind: x.kind, trips: (Array.isArray(x.trips) ? x.trips : []).map(String).filter((v) => /^\d{6}$/.test(v)).slice(0, 12), pickupAt: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(String(x.pickupAt || '')) ? String(x.pickupAt).slice(0, 16) : null, ...(x.kind === 'eta_updates' ? { customers: (Array.isArray(x.customers) ? x.customers : []).map(String).slice(0, 8), to: (Array.isArray(x.to) ? x.to : []).map((v) => String(v).toLowerCase()).filter((v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)).slice(0, 5), everyHours: Number(x.everyHours) || 3 } : {}), trip: /^\d{6}$/.test(String(x.trip || '')) ? String(x.trip) : null, message: String(x.message || '').slice(0, 300) })) : []);
+// trip → the latest email from our staff whose trip sheets had that load (the chain to reply in). Pure.
+export function sheetChains(list = [], internal = () => false) {
+  const out = {};
+  for (const e of list) {                       // newest first
+    if (!e || !internal(e.from && e.from.address)) continue;
+    for (const ts of e.tripSheets || []) { const n = String((ts && ts.trip) || ''); if (n && !out[n]) out[n] = { id: e.id, at: e.at, subject: e.subject || '' }; }
+  }
+  return out;
+}
 // one instruction about several loads → one per load (a lone trip stays as it is). Pure.
 export function expandInstructions(list = []) {
   const out = [];
@@ -468,6 +477,21 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
   async function afterArrival(site, e, items) {
     const done = [];
     const staff = isInternal(e.from.address, env);
+    // a reply in a chain where Jarvis asked something (which load? what time? not departed yet) → finish it
+    const before = e.conversationId ? (((await db.get(key(site), { list: [] })) || {}).list || []).filter((x) => x.id !== e.id && x.conversationId === e.conversationId && !x.followedUp && ((x.instructionResults || []).some((r) => r.skipped) || (x.asks || []).some((a) => a.open))) : [];
+    if (staff && before.length && !e.packet) {
+      const asked = before.map((x) => `Earlier email "${x.subject}" from ${x.from.name || x.from.address}:\n${String(x.text || '').slice(0, 2500)}\nJarvis asked back: ${[...(x.instructionResults || []).filter((r) => r.skipped).map((r) => `${r.trip ? `load ${r.trip}: ` : ''}${r.message || r.kind} — ${r.skipped}`), ...(x.asks || []).filter((a) => a.open).map((a) => a.text)].join(' | ')}`).join('\n\n');
+      const t = await triage({ ...e, text: `${e.text}\n\n--- EARLIER IN THIS EMAIL CHAIN (this reply answers Jarvis' questions — use it to complete those instructions) ---\n${asked}` }, []).catch(() => null);
+      if (t) {
+        const did = new Set(before.flatMap((x) => (x.instructionResults || []).filter((r) => !r.skipped && !r.error).map((r) => `${r.kind}:${r.trip || ''}`)));
+        const more = expandInstructions(parseInstructions(t.instructions)).filter((i) => !did.has(`${i.kind}:${i.trip || ''}`));
+        if (more.length) {
+          e = { ...e, instructions: more };
+          await update(site, e.id, (x) => ({ ...x, instructions: more }));
+          for (const x of before) await update(site, x.id, (y) => ({ ...y, followedUp: e.id, asks: (y.asks || []).map((a) => ({ ...a, open: false })) })); // eslint-disable-line no-await-in-loop
+        }
+      }
+    }
     // our staff asked Jarvis to text / call the driver (same consent / STOP rules as everywhere)
     if ((e.instructions || []).length) {
       const live = new Set((items || []).map((it) => String(((it && it.trip) || it || {}).tripNumber || '')));
@@ -615,19 +639,35 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     if (training_) {
       await sendMail({ to: [e.from.address], subject: /^re:/i.test(e.subject || '') ? e.subject : `Re: ${e.subject || ''}`, html, text: body && body.text ? body.text : text, attachments: files.map((f, i) => ({ name: ((e.draftDocs || []).find((x) => x.id === f.id) || {}).name || `document-${i + 1}.pdf`, contentType: f.mediaType, bytes: f.data })) }, { env, fetchFn });
     } else if (files.length) {
-      const draft = await g(`/messages/${encodeURIComponent(e.id)}/createReply`, { method: 'POST', body: { comment: html } });
+      const draft = await g(`/messages/${encodeURIComponent(e.id)}/${body && body.all ? 'createReplyAll' : 'createReply'}`, { method: 'POST', body: { comment: html } });
       for (const [i, f] of files.entries()) {
         await g(`/messages/${encodeURIComponent(draft.id)}/attachments`, { method: 'POST', body: { '@odata.type': '#microsoft.graph.fileAttachment', name: ((e.draftDocs || []).find((x) => x.id === f.id) || {}).name || `document-${i + 1}.${/pdf/.test(f.mediaType) ? 'pdf' : 'jpg'}`, contentType: f.mediaType, contentBytes: Buffer.from(f.data).toString('base64') } }); // eslint-disable-line no-await-in-loop
       }
       await g(`/messages/${encodeURIComponent(draft.id)}/send`, { method: 'POST', body: {} });
     } else {
-      await g(`/messages/${encodeURIComponent(e.id)}/reply`, { method: 'POST', body: { comment: html } });
+      await g(`/messages/${encodeURIComponent(e.id)}/${body && body.all ? 'replyAll' : 'reply'}`, { method: 'POST', body: { comment: html } });
     }
     const at = new Date().toISOString();
     await update(site, e.id, (x) => ({ ...x, status: 'replied', draft: null, replies: [...(x.replies || []), { at, by, text, files: files.length }] }));
     for (const trip of e.trips || []) await logOnLoad(site, trip, { type: 'email', dir: 'out', at, to: e.from.address, subject: `Re: ${e.subject}`, text: text.slice(0, 600), by, emailId: e.id, files: files.length ? files.map((f) => f.id) : undefined }); // eslint-disable-line no-await-in-loop
     return { ok: true, files: files.length };
   }
+  // a Jarvis update in one of our staff's email chains (load departed / not departed yet). Reply-all only
+  // when everyone on the email is ours; otherwise just the sender. asks: Jarvis asked a question in it.
+  async function replyInThread(site, emailId, { text, html, by = 'Jarvis (pickup follow-up)', asks = null }) {
+    const e = await one(site, emailId);
+    if (!e || !isInternal(e.from && e.from.address, env) || !mailConfig(env).ready) return { sent: false };
+    let all = false;
+    try {
+      const m = await g(`/messages/${encodeURIComponent(e.id)}?$select=toRecipients,ccRecipients`);
+      const on = [...(m.toRecipients || []), ...(m.ccRecipients || [])].map((r) => r && r.emailAddress && r.emailAddress.address).filter(Boolean);
+      all = on.length > 0 && on.every((a) => isInternal(a, env));
+    } catch { /* can't see who is on it — reply to the sender only */ }
+    await sendReply(site, e, text, [], by, { html, text, all });
+    if (asks) await update(site, e.id, (x) => ({ ...x, asks: [...(x.asks || []), { at: new Date().toISOString(), text: String(asks).slice(0, 400), open: true }].slice(-20) }));
+    return { sent: true, all };
+  }
+
   if (enabled && env.NODE_ENV !== 'test') {
     const t = setInterval(() => { poll().catch((e) => console.warn('[inbox]', e.message)); }, 2 * 60000);
     if (t.unref) t.unref();
@@ -794,6 +834,8 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     const tasks = (await db.get(tasksKey(site), {})) || {};
     for (const item of trips) { const t = tasks[tripNo(item)]; if (t && t.length) item._tasks = t; }
     if (!list.length) return;
+    const chain = sheetChains(list, (a) => isInternal(a, env));
+    for (const item of trips) { const c = chain[tripNo(item)]; if (c) item._sheetEmail = c; }
     for (const item of trips) {
       const t = tripNo(item);
       const mine = list.filter((e) => (e.trips || []).includes(t));
@@ -802,5 +844,5 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
   }
 
   console.log(`[inbox] Jarvis inbox ${enabled && mailConfig(env).ready ? `reading ${mailConfig(env).from}` : 'off — needs Outlook (MS_* + MAIL_FROM)'}`);
-  return { poll, overlay };
+  return { poll, overlay, replyInThread };
 }

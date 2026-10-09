@@ -115,7 +115,44 @@ ${rows ? `<p><b>What was said</b></p><table cellspacing="0" style="font-size:13p
   return { subject, html };
 }
 
-export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral = null, comms = null, voice = null, docs = null, driverLinks = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+// Did the load leave? TruckMate departed / rolling, or the truck moving on GPS from 15 min before pickup on. Pure.
+export function departedNow(item, plan, now) {
+  const st = String(tripOf(item).status || '');
+  if (STARTED.test(st)) return { source: `TruckMate: ${st}` };
+  const live = (item && item._samsara) || {};
+  if (plan && now >= plan.ms - 15 * MIN && (live.speedMph || 0) > 25) return { source: `GPS: truck moving ${Math.round(live.speedMph)} mph` };
+  return null;
+}
+
+// One reply for an email chain: the loads that departed / are 30+ min past pickup and not departed. Pure.
+// ev: { trip, kind: 'departed' | 'late', plan, source?, item, driverSaid?, checkins? }
+export function chainNote(events, now) {
+  const line = (ev) => {
+    const t = tripOf(ev.item); const live = ev.item._samsara || {};
+    const driver = (live.driver1Info && live.driver1Info.name) || live.driver1 || (ev.item._oc && ev.item._oc.driverName) || null;
+    const unit = `truck ${t.powerUnit || '—'} · trailer ${t.trailer || '—'}${driver ? ` · driver ${driver}` : ''}`;
+    const where = live.location ? `${live.location}${live.gpsAt ? ` (as of ${fmt(Date.parse(live.gpsAt))})` : ''}${live.speedMph != null ? ` · ${live.speedMph > 5 ? `${Math.round(live.speedMph)} mph` : 'stopped'}` : ''}` : 'no GPS right now';
+    const pick = `pickup set for ${fmt(ev.plan.ms, ev.plan.tz)}${ev.plan.place ? ` at ${ev.plan.place}` : ''} (from ${ev.plan.source})`;
+    if (ev.kind === 'departed') {
+      const late = Math.round((now - ev.plan.ms) / MIN);
+      return { head: `✅ Load ${ev.trip} departed`, rows: [`${ev.source} · ${late > 10 ? `${late} min after the ` : 'on time for the '}${pick}`, unit, `Tracking: ${where}`] };
+    }
+    return { head: `⚠️ Load ${ev.trip} has NOT departed yet — ${Math.round((now - ev.plan.ms) / MIN)} min past pickup`, rows: [
+      `${pick[0].toUpperCase()}${pick.slice(1)}`,
+      `Not done yet: TruckMate still shows ${t.status || 'no status'} (no departure)${ev.moving ? '' : ' and the truck is not moving'}`,
+      unit, `Tracking: ${where}`,
+      ev.driverSaid ? `Driver said: “${ev.driverSaid}”` : `Driver: ${ev.checkins || 'no answer yet to my check-ins'}`,
+    ] };
+  };
+  const parts = events.map(line);
+  const late = events.some((e) => e.kind === 'late');
+  const tail = late ? 'I keep watching and will reply here the moment it leaves. If there is a new time, reply with it and I will follow up on that instead.' : '';
+  const text = [...parts.map((p) => [p.head, ...p.rows.map((r) => `• ${r}`)].join('\n')), tail, 'Jarvis — AI Dispatcher'].filter(Boolean).join('\n\n');
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1F2937;max-width:640px">${parts.map((p) => `<p style="margin:0 0 4px"><b>${esc(p.head)}</b></p><ul style="margin:0 0 14px;padding-left:18px">${p.rows.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`).join('')}${tail ? `<p>${esc(tail)}</p>` : ''}<p style="font-size:13px;color:#4B5563">Jarvis — AI Dispatcher · Florida Beauty Flora</p></div>`;
+  return { text, html, asks: late ? events.filter((e) => e.kind === 'late').map((e) => `Load ${e.trip} not departed ${Math.round((now - e.plan.ms) / MIN)} min after pickup — asked for a new time`).join(' | ') : null };
+}
+
+export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral = null, comms = null, voice = null, docs = null, driverLinks = null, replyInThread = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const key = `taPickupFollow:${site}`;
@@ -182,6 +219,8 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     const summary = outcome.summary || `${(item._samsara && item._samsara.driver1) || 'The driver'} is ${WORDS[outcome.status] || 'updated'} for trip ${trip}${outcome.eta ? ` — ETA ${outcome.eta}` : ''} (${outcome.source}).`;
     const link = item._driverLink && !['revoked', 'completed', 'expired'].includes(item._driverLink.status) ? item._driverLink.url : null;
     const { subject, html } = followEmail({ item, plan, outcome, convo, summary, link });
+    const chainId = (item._pickupAsk && item._pickupAsk.emailId) || (item._sheetEmail && item._sheetEmail.id);
+    if (chainId && replyInThread) { const r = await replyInThread(site, chainId, { text: summary, html }).catch(() => null); if (r && r.sent) return { emailed: true, subject, chain: chainId }; }
     if (!cfg.to.length || !mailConfig(env).ready) return { emailed: false, subject };
     const ids = ((item._manifest && item._manifest.docIds) || []).slice(0, 3);
     const files = docs && docs.readDocs && ids.length ? await docs.readDocs({ site, ids }) : [];
@@ -196,6 +235,8 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     const items = ((await getBoard(site)) || {}).trips || [];
     const book = await db.get(key, {});
     const done = [];
+    const chains = new Map();   // email id ('' = no chain) → departed / late events for that chain
+    const add = (id, ev) => { const k = id || ''; if (!chains.has(k)) chains.set(k, []); chains.get(k).push(ev); };
     for (const it of items) {
       const trip = tripNo(it);
       const plan = plannedPickup(it);
@@ -228,12 +269,41 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
           done.push({ trip, outcome: st.outcome.status });
         }
       }
+      // the email chain this load came in (staff asked to follow it, or the outbound trip-sheet email):
+      // reply when it departs, and once if it is 30+ min past pickup and has not left
+      const chainId = (it._pickupAsk && it._pickupAsk.emailId) || (it._sheetEmail && it._sheetEmail.id) || null;
+      const th = st.thread && st.thread.emailId === chainId && st.thread.plannedAt === plan.ms ? st.thread : { emailId: chainId, plannedAt: plan.ms, waiting: false, departed: null, late: null };
+      const dep = departedNow(it, plan, now());
+      const fresh = now() - plan.ms < 6 * 60 * MIN;                     // nothing about pickups long gone
+      if (dep && !th.departed) {
+        th.departed = new Date(now()).toISOString();
+        if ((th.waiting || it._pickupAsk) && now() - plan.ms < 12 * 60 * MIN) add(chainId, { trip, kind: 'departed', plan, source: dep.source, item: it });
+      } else if (!dep) {
+        th.waiting = true;
+        if (!th.late && fresh && now() > plan.ms + 30 * MIN) {
+          th.late = new Date(now()).toISOString();
+          const said = (await conversation(trip, Date.parse(st.startedAt) || 0)).filter((c) => c.who === 'Driver' || c.how === 'phone').pop(); // eslint-disable-line no-await-in-loop
+          const tried = Object.entries(st.steps || {}).filter(([k, v]) => k !== 'ack' && v && v.via).map(([, v]) => `${v.via === 'call' ? 'called' : 'texted'} at ${fmt(Date.parse(v.at))}`);
+          add(chainId, { trip, kind: 'late', plan, item: it, moving: ((it._samsara || {}).speedMph || 0) > 5, driverSaid: said ? String(said.text).slice(0, 300) : null, checkins: tried.length ? `no answer yet — Jarvis ${tried.join(', ')}` : 'not reached yet (no consent / texting not live)' });
+        }
+      }
+      st.thread = th;
       const step = nextStep(st, plan, now());
       if (step) {
         try { const r = await contact(it, step, plan, st); st.steps = { ...st.steps, [step]: { at: new Date(now()).toISOString(), ...r } }; done.push({ trip, step, ...r }); } // eslint-disable-line no-await-in-loop
         catch (e) { st.steps = { ...st.steps, [step]: { at: new Date(now()).toISOString(), error: e.message } }; }
       }
       book[trip] = st;
+    }
+    // one reply per email chain; loads without a chain go to the dispatch emails (settings), if set
+    for (const [chainId, evs] of chains) {
+      if (!evs.length) continue;
+      const n = chainNote(evs, now());
+      try {
+        if (chainId && replyInThread) await replyInThread(site, chainId, { text: n.text, html: n.html, asks: n.asks }); // eslint-disable-line no-await-in-loop
+        else if (!chainId && cfg.to.length && mailConfig(env).ready) await sendMail({ to: cfg.to, subject: evs.length === 1 ? `Trip ${evs[0].trip} — ${evs[0].kind === 'departed' ? 'departed' : 'NOT departed yet'}` : `${evs.length} loads — departure update`, html: n.html, text: n.text }, { env, fetchFn }); // eslint-disable-line no-await-in-loop
+        done.push({ chain: chainId || 'dispatch', events: evs.map((e) => `${e.trip}:${e.kind}`) });
+      } catch (e) { console.warn('[pickup-follow] chain reply:', e.message); }
     }
     await db.update(key, (cur) => {
       const a = { ...(cur || {}), ...book };
