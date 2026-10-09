@@ -12,9 +12,10 @@
 // Only drivers who agreed to dispatch texts/calls (recorded consent); never after STOP.
 import { sendMail, mailConfig } from './mailer.js';
 import { recipientFor } from './comms.js';
+import { renderOutboundFollowUp } from './followupmail.js';
 
 const MIN = 60000;
-const TZ_BY_STATE = { CA: 'America/Los_Angeles', WA: 'America/Los_Angeles', OR: 'America/Los_Angeles', NV: 'America/Los_Angeles', AZ: 'America/Phoenix', TX: 'America/Chicago', IL: 'America/Chicago', TN: 'America/Chicago', AL: 'America/Chicago', MS: 'America/Chicago', LA: 'America/Chicago', MO: 'America/Chicago', MN: 'America/Chicago', WI: 'America/Chicago', IA: 'America/Chicago', AR: 'America/Chicago', OK: 'America/Chicago', KS: 'America/Chicago', NE: 'America/Chicago', CO: 'America/Denver', UT: 'America/Denver', NM: 'America/Denver' };
+export const TZ_BY_STATE = { CA: 'America/Los_Angeles', WA: 'America/Los_Angeles', OR: 'America/Los_Angeles', NV: 'America/Los_Angeles', AZ: 'America/Phoenix', TX: 'America/Chicago', IL: 'America/Chicago', TN: 'America/Chicago', AL: 'America/Chicago', MS: 'America/Chicago', LA: 'America/Chicago', MO: 'America/Chicago', MN: 'America/Chicago', WI: 'America/Chicago', IA: 'America/Chicago', AR: 'America/Chicago', OK: 'America/Chicago', KS: 'America/Chicago', NE: 'America/Chicago', CO: 'America/Denver', UT: 'America/Denver', NM: 'America/Denver' };
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
 const last10 = (p) => String(p || '').replace(/\D+/g, '').slice(-10);
@@ -50,7 +51,7 @@ export function plannedPickup(item) {
   const place = pu ? [pu.name, [pu.city, pu.state].filter(Boolean).join(', ')].filter(Boolean).join(', ') : ((m && (m.stops || []).find((x) => /^LOAD/i.test(x.action || ''))) || {}).customer || String(tripOf(item).origZoneDesc || '').replace(/,\s*\d{5}.*$/, '');
   if (h && h.kind === 'pickup_delayed' && h.newPickupAt) return { ms: wallMs(h.newPickupAt.slice(0, 10), +h.newPickupAt.slice(11, 13), +h.newPickupAt.slice(14, 16)), source: 'email', place };
   const ask = item && item._pickupAsk;   // a staff member emailed Jarvis the pickup time to follow up
-  if (ask && ask.at) return { ms: wallMs(ask.at.slice(0, 10), +ask.at.slice(11, 13), +ask.at.slice(14, 16)), source: 'dispatch email', place };
+  if (ask && ask.at) return { ms: wallMs(ask.at.slice(0, 10), +ask.at.slice(11, 13), +ask.at.slice(14, 16), ask.tz || 'America/New_York'), source: 'dispatch email', place: ask.place || place, tz: ask.tz || 'America/New_York' };
   if (m && m.pickupAt) return { ms: wallMs(String(m.pickupAt).slice(0, 10), +String(m.pickupAt).slice(11, 13), +String(m.pickupAt).slice(14, 16)), source: 'trip sheet', place };
   if (pu) {
     const ymd = ymdOf(pu.date || pu.appointment); const hm = hmOf(pu.time || pu.appointment);
@@ -127,29 +128,21 @@ export function departedNow(item, plan, now) {
 // One reply for an email chain: the loads that departed / are 30+ min past pickup and not departed. Pure.
 // ev: { trip, kind: 'departed' | 'late', plan, source?, item, driverSaid?, checkins? }
 export function chainNote(events, now) {
-  const line = (ev) => {
+  const blocks = events.map((ev) => {
     const t = tripOf(ev.item); const live = ev.item._samsara || {};
     const driver = (live.driver1Info && live.driver1Info.name) || live.driver1 || (ev.item._oc && ev.item._oc.driverName) || null;
-    const unit = `truck ${t.powerUnit || '—'} · trailer ${t.trailer || '—'}${driver ? ` · driver ${driver}` : ''}`;
-    const where = live.location ? `${live.location}${live.gpsAt ? ` (as of ${fmt(Date.parse(live.gpsAt))})` : ''}${live.speedMph != null ? ` · ${live.speedMph > 5 ? `${Math.round(live.speedMph)} mph` : 'stopped'}` : ''}` : 'no GPS right now';
-    const pick = `pickup set for ${fmt(ev.plan.ms, ev.plan.tz)}${ev.plan.place ? ` at ${ev.plan.place}` : ''} (from ${ev.plan.source})`;
-    if (ev.kind === 'departed') {
-      const late = Math.round((now - ev.plan.ms) / MIN);
-      return { head: `✅ Load ${ev.trip} departed`, rows: [`${ev.source} · ${late > 10 ? `${late} min after the ` : 'on time for the '}${pick}`, unit, `Tracking: ${where}`] };
-    }
-    return { head: `⚠️ Load ${ev.trip} has NOT departed yet — ${Math.round((now - ev.plan.ms) / MIN)} min past pickup`, rows: [
-      `${pick[0].toUpperCase()}${pick.slice(1)}`,
-      `Not done yet: TruckMate still shows ${t.status || 'no status'} (no departure)${ev.moving ? '' : ' and the truck is not moving'}`,
-      unit, `Tracking: ${where}`,
-      ev.driverSaid ? `Driver said: “${ev.driverSaid}”` : `Driver: ${ev.checkins || 'no answer yet to my check-ins'}`,
-    ] };
-  };
-  const parts = events.map(line);
-  const late = events.some((e) => e.kind === 'late');
-  const tail = late ? 'I keep watching and will reply here the moment it leaves. If there is a new time, reply with it and I will follow up on that instead.' : '';
-  const text = [...parts.map((p) => [p.head, ...p.rows.map((r) => `• ${r}`)].join('\n')), tail, 'Jarvis — AI Dispatcher'].filter(Boolean).join('\n\n');
-  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1F2937;max-width:640px">${parts.map((p) => `<p style="margin:0 0 4px"><b>${esc(p.head)}</b></p><ul style="margin:0 0 14px;padding-left:18px">${p.rows.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`).join('')}${tail ? `<p>${esc(tail)}</p>` : ''}<p style="font-size:13px;color:#4B5563">Jarvis — AI Dispatcher · Florida Beauty Flora</p></div>`;
-  return { text, html, asks: late ? events.filter((e) => e.kind === 'late').map((e) => `Load ${e.trip} not departed ${Math.round((now - e.plan.ms) / MIN)} min after pickup — asked for a new time`).join(' | ') : null };
+    const where = live.location ? `${live.location}${live.gpsAt ? ` (GPS ${fmt(Date.parse(live.gpsAt), ev.plan.tz)})` : ''}${live.speedMph != null ? ` · ${live.speedMph > 5 ? `${Math.round(live.speedMph)} mph` : 'stopped'}` : ''}` : 'No GPS right now';
+    const mins = Math.round((now - ev.plan.ms) / MIN);
+    const hm = (m) => (m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
+    const details = [`Truck ${t.powerUnit || '—'} · trailer ${t.trailer || '—'}${driver ? ` · driver ${driver}` : ''}`, `Tracking: ${where}`];
+    const scheduled = `Pickup${ev.plan.place ? ` · ${ev.plan.place}` : ''} · ${fmt(ev.plan.ms, ev.plan.tz)} (from ${ev.plan.source})`;
+    if (ev.kind === 'departed') return { trip: ev.trip, group: 'Departures', sortKey: String(ev.plan.ms), scheduled, status: { label: 'Departed', tone: 'green', text: `${ev.source}${mins > 10 ? ` · ${hm(mins)} after the scheduled time` : ' · on time'}` }, next: 'Nothing — load is rolling', need: null, details };
+    details.push(ev.driverSaid ? `Driver said: “${ev.driverSaid}”` : `Driver: ${ev.checkins || 'no answer yet to Jarvis check-ins'}`);
+    return { trip: ev.trip, group: 'Not departed yet', sortKey: String(ev.plan.ms), scheduled, status: { label: 'Not departed', tone: 'red', text: `${hm(mins)} past pickup — TruckMate still shows ${t.status || 'no status'} (no departure)${ev.moving ? '' : ' and the truck is not moving'}` }, next: 'Jarvis keeps watching and replies here the moment it leaves', need: `a new time for ${ev.trip}, if it changed`, details };
+  });
+  const late = events.filter((e) => e.kind === 'late');
+  const out = renderOutboundFollowUp({ heading: late.length ? 'Departure check — not departed yet' : 'Departure check — departed', blocks });
+  return { text: out.text, html: out.html, asks: late.length ? late.map((e) => `Load ${e.trip} not departed ${Math.round((now - e.plan.ms) / MIN)} min after pickup — asked for a new time`).join(' | ') : null };
 }
 
 export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral = null, comms = null, voice = null, docs = null, driverLinks = null, replyInThread = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {

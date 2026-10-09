@@ -18,10 +18,15 @@ test('single-load and eta_updates instructions are left alone', () => {
   assert.deepEqual(out[1].trips, ['624620', '624626']);
 });
 
-test('pickup_followup keeps its time; bad times drop', () => {
-  const [a, b] = parseInstructions([{ kind: 'pickup_followup', trip: '624626', pickupAt: '2026-10-08T23:00' }, { kind: 'pickup_followup', trip: '624625', pickupAt: 'tonight' }]);
-  assert.equal(a.pickupAt, '2026-10-08T23:00');
-  assert.equal(b.pickupAt, null);
+test('pickup_followup keeps each trip own date / time / place; bad values drop', () => {
+  const [a, b, c] = parseInstructions([
+    { kind: 'pickup_followup', trip: '624626', event: 'pickup', date: '2026-10-08', time: '23:00', region: 'Florida', temp: '35 degrees' },
+    { kind: 'pickup_followup', trip: '624620', event: 'meetup', date: '2026-10-08', time: null, place: 'Fort Pierce', region: 'Florida' },
+    { kind: 'pickup_followup', trip: '624628', event: 'departure', date: '2026-10-09', time: 'afternoon', timeText: 'afternoon', region: 'California' },
+  ]);
+  assert.deepEqual([a.trip, a.date, a.time, a.event, a.temp], ['624626', '2026-10-08', '23:00', 'pickup', '35 degrees']);
+  assert.deepEqual([b.event, b.time, b.place], ['meetup', null, 'Fort Pierce']);
+  assert.deepEqual([c.time, c.timeText], [null, 'afternoon']);
   assert.match(fmtWall('2026-10-08T23:00'), /Oct 8.*11:00 PM/);
 });
 
@@ -58,9 +63,11 @@ test('departed = TruckMate departed, or moving on GPS from 15 min before pickup'
 test('the not-departed note says what has not happened and asks for a new time', () => {
   const plan = { ms: Date.parse('2026-10-09T03:00:00Z'), place: 'Miami cooler', source: 'trip sheet' };
   const n = chainNote([{ trip: '624626', kind: 'late', plan, item: { trip: { status: 'DISP', powerUnit: '2403' } }, checkins: 'no answer yet — Jarvis called at 10:00 PM' }], plan.ms + 32 * 60000);
-  assert.match(n.text, /Load 624626 has NOT departed yet — 32 min past pickup/);
+  assert.match(n.text, /Trip 624626 — NOT DEPARTED/);
+  assert.match(n.text, /32 min past pickup/);
   assert.match(n.text, /TruckMate still shows DISP/);
-  assert.match(n.text, /reply with it/);
+  assert.match(n.text, /a new time for 624626, if it changed/i);
+  assert.match(n.text, /Reply on this email/);
   assert.ok(n.asks);
 });
 
@@ -77,13 +84,13 @@ test('follow-up loop: 30 min late → one reply in the chain; then departed → 
   clock = plan + 31 * 60000; await f.run();
   assert.equal(sent.length, 1);
   assert.equal(sent[0].id, 'rosa1');
-  assert.match(sent[0].text, /NOT departed yet/);
+  assert.match(sent[0].text, /NOT DEPARTED/);
   clock = plan + 40 * 60000; await f.run();
   assert.equal(sent.length, 1, 'only one late note');
   item.trip.status = 'DEPSHIP';
   clock = plan + 50 * 60000; await f.run();
   assert.equal(sent.length, 2);
-  assert.match(sent[1].text, /Load 624626 departed/);
+  assert.match(sent[1].text, /Trip 624626 — DEPARTED/);
   clock = plan + 60 * 60000; await f.run();
   assert.equal(sent.length, 2, 'departure told once');
 });
