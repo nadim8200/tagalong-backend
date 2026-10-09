@@ -69,3 +69,18 @@ test('Gus\'s email: one rate con + "This will be for truck # 2604" → truck 260
   assert.equal(truckFor({ loadNumber: '108638' }, { emailText: text, single: false }), null, 'a batch needs the truck next to its load');
   assert.equal(truckFor({ loadNumber: '1' }, { emailText: 'truck 2604 and truck 2612', single: true }), null, 'two trucks named → ask');
 });
+
+import { tmNextTrips } from '../nextloads.js';
+
+test('TruckMate next trip: 2615 on 624497 (rolling, 35°F) with 624682 already assigned (Eliot ME → Hialeah FL, −10°F)', () => {
+  const cur = { trip: { tripNumber: '624497', status: 'DEPCONS', powerUnit: '2615', origZoneDesc: 'VENTURA TERMINAL', destZoneDesc: 'BEDFORD, NH, 03110' }, freightBills: [{ billNumber: 'C978029', temperature: 35 }, { billNumber: 'C978031', temperature: 35 }] };
+  const next = { trip: { tripNumber: '624682', status: 'ASSGN', powerUnit: '2615', origZoneDesc: 'ELIOT, ME, 03903', destZoneDesc: 'HIALEAH, FL, 33018' }, freightBills: [{ billNumber: 'B180414', billToName: 'BILL HOWARD CO', endZoneDescription: 'HIALEAH, FL, 33018', deliverBy: '2026-10-12T03:30:00', temperature: -10 }], _times: { createdAt: '2026-10-09T17:25:33.000Z', createdBy: 'JENNIFERG' } };
+  const other = { trip: { tripNumber: '624700', status: 'ASSGN', powerUnit: '2403' }, freightBills: [] };
+  const m = tmNextTrips([cur, next, other]);
+  const n = m.get('624497');
+  assert.equal(n.length, 1);
+  assert.deepEqual([n[0].trip, n[0].from, n[0].to, n[0].bills[0].bill, n[0].bills[0].billTo, n[0].createdBy], ['624682', 'ELIOT, ME, 03903', 'HIALEAH, FL, 33018', 'B180414', 'BILL HOWARD CO', 'JENNIFERG']);
+  assert.deepEqual(n[0].tempChange, { now: [35], next: [-10] });
+  assert.equal(m.has('624682'), false, 'shown on the current trip, not on itself');
+  assert.equal(m.has('624700'), false, 'a truck with no trip rolling has no "next"');
+});

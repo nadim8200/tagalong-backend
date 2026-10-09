@@ -51,6 +51,36 @@ export function truckFor(rc, { emailText = '', trucks = new Set(), single = fals
   return null;
 }
 
+// TruckMate's own next trips: a truck on a trip that's rolling, plus other trips already assigned to
+// the same truck that haven't started (dispatchers book the next load before the run ends). Pure.
+// → Map(current trip → [{ trip, status, from, to, bills, temps, createdAt, createdBy, tempChange }])
+const tempsOf = (it) => [...new Set(billsOf(it).map((b) => b.temperature).filter((x) => x != null && x !== '').map(Number))];
+export function tmNextTrips(trips = []) {
+  const out = new Map();
+  const byUnit = new Map();
+  for (const it of trips) { const u = unitOf(it); if (!u) continue; if (!byUnit.has(u)) byUnit.set(u, []); byUnit.get(u).push(it); }
+  for (const list of byUnit.values()) {
+    const running = list.filter((it) => ROLLING.test(String(tripOf(it).status || '')));
+    if (!running.length) continue;
+    const next = list.filter((it) => BOOKED.test(String(tripOf(it).status || '')) && !running.includes(it))
+      .sort((a, b) => String((a._times && a._times.createdAt) || tripNo(a)).localeCompare(String((b._times && b._times.createdAt) || tripNo(b))));
+    if (!next.length) continue;
+    const nowTemps = running.flatMap(tempsOf);
+    for (const cur of running) {
+      out.set(tripNo(cur), next.map((it) => {
+        const t = tripOf(it); const temps = tempsOf(it);
+        return {
+          trip: tripNo(it), status: t.status || null, from: t.origZoneDesc || null, to: t.destZoneDesc || null,
+          bills: billsOf(it).slice(0, 4).map((b) => ({ bill: String(b.billNumber || ''), billTo: b.billToName || null, stop: b.endZoneDescription || null, deliverBy: b.deliverBy || null, temp: b.temperature != null ? Number(b.temperature) : null })),
+          billCount: billsOf(it).length, temps, createdAt: (it._times && it._times.createdAt) || null, createdBy: (it._times && it._times.createdBy) || null,
+          tempChange: temps.length && nowTemps.length && !temps.every((x) => nowTemps.includes(x)) ? { now: nowTemps, next: temps } : null,
+        };
+      }));
+    }
+  }
+  return out;
+}
+
 // The short version kept on the card. Pure.
 export function brief(rc, docIds = []) {
   const stop = (s) => (s ? { name: s.name || null, city: [s.city, s.state].filter(Boolean).join(', ') || null, date: s.date || null, time: s.time || s.appointment || null } : null);
@@ -114,6 +144,9 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
 
   // On the board: each truck's current trip shows the next load(s) Gus sent for that truck.
   async function overlay(site, trips) {
+    // TruckMate's next trips for each truck on a run (no AI, straight from the board)
+    const tm = tmNextTrips(trips);
+    for (const it of trips) { const n = tm.get(tripNo(it)); if (n) it._tmNext = n; }
     if (!enabled) return;
     const list = (((await db.get(key, { list: [] })) || {}).list || []).filter((x) => x.truck && !x.doneAt);
     if (!list.length) return;
