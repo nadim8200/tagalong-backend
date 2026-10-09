@@ -46,6 +46,7 @@ import { initFlowerReport } from './flowerreport.js';
 import { initPickupFollow } from './pickupfollow.js';
 import { initTempPhotos } from './tempphotos.js';
 import { initOutreach } from './outreach.js';
+import { initMeetWatch } from './meetwatch.js';
 import { initMilestones } from './milestones.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
@@ -738,7 +739,9 @@ const driverHooks = { text: async (site, trip, message, by) => { const a = await
 const playbook = initPlaybook(app, { requireAuth: requireDispatch, db, env: process.env });
 // load follow-through: rate-con instructions to dispatch, Jarvis' offers (reply YES), revised rate cons after delivery
 const follow = initFollowThrough(app, { playbook, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), etaWatch, driver: driverHooks, docs, getBoard: (site) => truckmate.buildBoard(site) });
-const inbox = initInbox(app, { playbook, follow, etaWatch, training, help,
+// meetups ("meet in Fort Pierce"): track the truck to the place, reply on the chain, text the driver to verify
+const meetWatch = initMeetWatch({ db, getBoard: (site) => truckmate.buildBoard(site), textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), replyInThread: (...a) => inbox.replyInThread(...a), env: process.env });
+const inbox = initInbox(app, { meetWatch, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,

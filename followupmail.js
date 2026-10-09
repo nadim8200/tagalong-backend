@@ -61,7 +61,11 @@ export function tripBlock(ins, item, { now = Date.now(), reachable = () => false
   else status = { label: 'Awaiting confirmation', tone: 'amber', text: `Confirmation pending — TruckMate shows ${st || 'no status'}` };
   // next action — what is actually set up, or the one detail missing
   let next; let need = null;
+  const watching = ins.result && ins.result.watching;
+  const confirm = ins.verify ? `, then texts the driver to confirm: ${ins.verify}` : '';
+  if (watching === 'verify') details.push(`Jarvis texts the driver to confirm: ${ins.verify} — and replies here with the answer`);
   if (ins.result && ins.result.error) next = `Could not set up: ${ins.result.error}`;
+  else if (watching === 'tracking' && !ins.time) next = `Jarvis tracks the truck and replies here when it reaches ${ins.place}${confirm}`;
   else if (ev && !ins.date) { need = `the ${ev.toLowerCase()} date for ${ins.trip}`; next = `Need the ${ev.toLowerCase()} date — reply with it`; }
   else if (ev && !ins.time) { need = `the exact ${ev.toLowerCase()} time for ${ins.trip}${ins.place ? ` (${ins.place})` : ''}`; next = `Need the exact ${ev.toLowerCase()} time — reply with it and Jarvis follows up`; }
   else if (ev && zone && !zone.tz) { need = `the time zone for ${ins.trip}'s ${fmtClock(ins.time)} ${ev.toLowerCase()} (${zone.issue})`; next = `Need the time zone — ${zone.issue}`; }
@@ -69,7 +73,7 @@ export function tripBlock(ins, item, { now = Date.now(), reachable = () => false
   else if (ev && ms) {
     const checks = [ms - 60 * MIN, ms - 30 * MIN].filter((x) => x > now).map((x) => fmtAt(x, zone.tz));
     next = reachable(item)
-      ? `Jarvis checks in with the driver${checks.length ? ` at ${checks.join(' and ')} ${ABBR[zone.tz] || ''}` : ' now'}, then replies here when it departs`
+      ? `Jarvis checks in with the driver${checks.length ? ` at ${checks.join(' and ')} ${ABBR[zone.tz] || ''}` : ' now'}, then replies here when it departs${watching === 'tracking' ? ` and when it reaches ${ins.place}` : ''}`
       : 'Dispatch: confirm with the driver — Jarvis can\'t reach them (no texting consent or app on file). Jarvis watches TruckMate / GPS and replies here when it departs';
   } else next = ins.result && typeof ins.result.sent === 'string' ? ins.result.sent : ins.result && ins.result.skipped ? ins.result.skipped : 'Confirmation pending';
   const region = ins.region || (originState(item) ? Object.keys(STATES).find((k) => STATES[k] === originState(item)) || originState(item) : null);
