@@ -112,3 +112,20 @@ test('model-written "Done from your email" lists and offer endings are removed',
   const t = 'Two loads on the board.\n\nIf you want, I can text the driver on 624559.\n\n**Done from your email:**\n- To-do: x — which load?';
   assert.equal(cleanAnswer(t), 'Two loads on the board.');
 });
+
+test('once departed (GPS 47 mph), slowing to 6 mph in traffic later never sends "not departed"', async () => {
+  const db = memDb();
+  const plan = Date.parse('2026-10-09T03:30:00Z');   // Thu Oct 8, 11:30 PM ET
+  const item = { trip: { tripNumber: '624625', status: 'LOADEDTOGO', powerUnit: '2220' }, _samsara: { speedMph: 0 }, _sheetEmail: { id: 'rosa1' }, _manifest: { pickupAt: '2026-10-08T23:30' } };
+  const sent = [];
+  let clock = plan - 20 * 60000;
+  const f = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, getBoard: async () => ({ trips: [item] }), replyInThread: async (site, id, b) => { sent.push(b.text); return { sent: true }; }, env: { NODE_ENV: 'test' }, now: () => clock });
+  await f.run();                                                     // waiting at the cooler
+  item._samsara = { speedMph: 47, location: 'State Road 7, Palm Beach County, FL' };
+  clock = plan - 2 * 60000; await f.run();
+  assert.equal(sent.length, 1); assert.match(sent[0], /DEPARTED/);
+  item._samsara = { speedMph: 6, location: 'I 95, Oakland Park, FL' };   // traffic
+  clock = plan + 31 * 60000; await f.run();
+  clock = plan + 90 * 60000; await f.run();
+  assert.equal(sent.length, 1, 'no "not departed" after it departed');
+});

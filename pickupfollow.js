@@ -267,11 +267,13 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
       const chainId = (it._pickupAsk && it._pickupAsk.emailId) || (it._sheetEmail && it._sheetEmail.id) || null;
       const th = st.thread && st.thread.emailId === chainId && st.thread.plannedAt === plan.ms ? st.thread : { emailId: chainId, plannedAt: plan.ms, waiting: false, departed: null, late: null };
       const dep = departedNow(it, plan, now());
+      // departure is sticky for this pickup: a truck slowing down in traffic later has NOT "not departed"
+      if (dep && !st.departedAt) st = { ...st, departedAt: new Date(now()).toISOString(), departedBy: dep.source };
       const fresh = now() - plan.ms < 6 * 60 * MIN;                     // nothing about pickups long gone
       if (dep && !th.departed) {
         th.departed = new Date(now()).toISOString();
         if ((th.waiting || it._pickupAsk) && now() - plan.ms < 12 * 60 * MIN) add(chainId, { trip, kind: 'departed', plan, source: dep.source, item: it });
-      } else if (!dep) {
+      } else if (!dep && !th.departed && !st.departedAt) {
         th.waiting = true;
         if (!th.late && fresh && now() > plan.ms + 30 * MIN) {
           th.late = new Date(now()).toISOString();
