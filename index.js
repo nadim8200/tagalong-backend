@@ -47,6 +47,7 @@ import { initPickupFollow } from './pickupfollow.js';
 import { initTempPhotos } from './tempphotos.js';
 import { initOutreach } from './outreach.js';
 import { initMeetWatch } from './meetwatch.js';
+import { initBrokerTrack } from './brokertrack.js';
 import { initMilestones } from './milestones.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
@@ -731,7 +732,11 @@ driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
 helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, pushRules, directory, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) },
   sms: { live: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } }, send: (to, text) => rc.sendSms('__shared', { to, text }) } });
-const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env });
+// live tracking link for the rate con contact (one load only; stops once delivered)
+const brokerTrack = initBrokerTrack(app, { db, getBoard: (site) => truckmate.buildBoard(site), env: process.env });
+const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env,
+  track: (site, trip) => brokerTrack.linkFor(site, trip),
+  chainReply: (site, trip, m) => (inbox ? inbox.replyOnLoadChain(site, trip, m) : { sent: false }) });
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
 // Jarvis reaching a driver (asked by staff in an email or in the chat): the TagAlong app first (OC drivers), else a text — consent / STOP rules apply
 const driverHooks = { text: async (site, trip, message, by) => { const a = await driverLinks.messageDriver(site, trip, message, by).catch(() => ({ skipped: true })); return a && a.sent ? a : comms.textDriverAuto(site, trip, message, by); }, call: async (site, trip, by) => { try { return { called: true, ...(await voice.placeCall(String(trip), { purpose: 'check', by })) }; } catch (e) { return { skipped: e.message }; } } };

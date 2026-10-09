@@ -129,7 +129,7 @@ export function autoFollowUps(snaps, { audience = 'customer', tasks = {} } = {})
 }
 
 // The email. Pure. → { subject, html, text }
-export function renderUpdateEmail({ audience = 'customer', customer, destination, snaps = [], followUps = [], now = Date.now(), subject = null, extraRef = '', headline = null }) {
+export function renderUpdateEmail({ audience = 'customer', customer, destination, snaps = [], followUps = [], now = Date.now(), subject = null, extraRef = '', headline = null, trackUrl = null }) {
   const internal = audience === 'internal';
   const list = [...snaps].sort((a, b) => (ORDER[a.status] ?? 3) - (ORDER[b.status] ?? 3) || String(a.trip).localeCompare(String(b.trip)));
   const delivered = list.filter((s) => s.status === 'Delivered').length;
@@ -195,12 +195,12 @@ ${followUps.map((f) => `<table role="presentation" width="100%" cellspacing="0" 
 <tr><td bgcolor="#1E3A5F" style="background:#1E3A5F;padding:18px 20px;font-family:Arial,Helvetica,sans-serif;font-size:22px;font-weight:bold;color:#FFFFFF">Delivery update${internal ? ' <span style="font-size:13px;font-weight:normal">· internal</span>' : ''}</td></tr>
 <tr><td style="padding:14px 20px 4px 20px;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1F2937"><b>${esc(who)}</b>${destination ? `<br><span style="font-size:14px;color:#4B5563">${esc(destination)}</span>` : ''}</td></tr>
 <tr><td style="padding:8px 20px 16px 20px;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1F2937">${headline ? `<b>${esc(headline)}</b><br>` : ''}${esc(summary)}<br><span style="font-size:13px;color:#4B5563">As of ${esc(etTime(now))} · all times Eastern (ET)</span></td></tr>
-<tr><td style="padding:0 20px 8px 20px">${list.map(card).join('\n')}${fu}</td></tr>
+${trackUrl ? `<tr><td style="padding:0 20px 16px 20px"><a href="${esc(trackUrl)}" style="display:inline-block;background:#1E3A5F;color:#FFFFFF;font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:bold;text-decoration:none;padding:12px 18px;border-radius:6px">Track this load live</a><br><span style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#4B5563">Current truck location on a map. The link stops working once the load is delivered.</span></td></tr>\n` : ''}<tr><td style="padding:0 20px 8px 20px">${list.map(card).join('\n')}${fu}</td></tr>
 <tr><td style="padding:12px 20px 20px 20px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5;color:#4B5563">Arrival times are estimates and may change with traffic, weather and hours of service. If they change, we will let you know.<br>Florida Beauty Flora Dispatch</td></tr>
 </table>
 <!--[if mso]></td></tr></table><![endif]-->
 </div>`;
-  const text = [`DELIVERY UPDATE${internal ? ' (internal)' : ''}`, who, destination || null, '', ...(headline ? [headline] : []), summary, `As of ${etTime(now)} — all times Eastern (ET)`, '',
+  const text = [`DELIVERY UPDATE${internal ? ' (internal)' : ''}`, who, destination || null, '', ...(headline ? [headline] : []), summary, `As of ${etTime(now)} — all times Eastern (ET)`, ...(trackUrl ? [`Track this load live: ${trackUrl} (stops working once the load is delivered)`] : []), '',
     ...list.flatMap((s) => [`${(s.stageLabel && !['Delayed', 'Being verified', 'Delivered'].includes(s.status) ? s.stageLabel : s.status).toUpperCase()}${s.status === 'Delayed' && s.lateMin ? ` · ${hm(s.lateMin)}` : ''} · Trip ${s.trip}${s.truck ? ` · Truck ${s.truck}` : ''}`, ...rowsFor(s).map(([k, v]) => `  ${k}: ${v}${k === 'Current location' && s.mapUrl ? ` (${s.mapUrl})` : ''}`), '']),
     ...(followUps.length ? ['DISPATCH FOLLOW-UP', ...followUps.map((f) => `- ${f.issue} — Next: ${f.next || '—'}${f.owner ? ` (Owner: ${f.owner})` : ''} — ${f.status || 'Pending'}`), ''] : []),
     'Arrival times are estimates and may change. Florida Beauty Flora Dispatch'].filter((x) => x !== null).join('\n');
@@ -208,7 +208,7 @@ ${followUps.map((f) => `<table role="presentation" width="100%" cellspacing="0" 
 }
 
 // Build an update from live data for these trips. followUps are added to the automatic ones.
-export async function buildUpdateFor({ db, docs = null, site = 'florida-beauty', items = [], trips = [], customer = null, destination = null, audience = 'customer', followUps = [], now = Date.now(), subject = null, extraRef = '', stage = null, pickup = null, headline = null, attach = null }) {
+export async function buildUpdateFor({ db, docs = null, site = 'florida-beauty', items = [], trips = [], customer = null, destination = null, audience = 'customer', followUps = [], now = Date.now(), subject = null, extraRef = '', trackUrl = null, stage = null, pickup = null, headline = null, attach = null }) {
   const watch = (await db.get(`taWatch:${site}`, {})) || {};
   const alertsAll = Object.values(watch.alerts || {});
   const tasks = audience === 'internal' ? ((await db.get(`taLoadTasks:${site}`, {})) || {}) : {};
@@ -227,7 +227,7 @@ export async function buildUpdateFor({ db, docs = null, site = 'florida-beauty',
   const auto = autoFollowUps(snaps, { audience, tasks });
   const seen = new Set(followUps.map((f) => String(f.issue).slice(0, 40)));
   const all = [...followUps, ...auto.filter((f) => !seen.has(String(f.issue).slice(0, 40)))].slice(0, 8);
-  return { ...renderUpdateEmail({ audience, customer: customer || (snaps[0] && snaps[0].customer) || null, destination, snaps, followUps: all, now, subject, extraRef, headline }), attachIds };
+  return { ...renderUpdateEmail({ audience, customer: customer || (snaps[0] && snaps[0].customer) || null, destination, snaps, followUps: all, now, subject, extraRef, headline, trackUrl }), attachIds };
 }
 
 // Small internal note (e.g. what Jarvis did with an instruction email). Pure.

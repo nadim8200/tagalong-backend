@@ -36,7 +36,7 @@ const ARRIVE = /^arrcon/i;
 const LOADED = /^(loadedtogo|sptld)/i;          // TruckMate: TRAILER NOW LOADED TO GO / SPOTTED LOADED
 const DONE = /^(delvd|deliv|del$|cmplt|complete)/i;
 const DEAD = /^(canc|void)/i;
-export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, routineLocation: false, useBroker: true, customers: {}, trips: {} };   // routine location emails only when turned on — scheduled updates for the loads dispatch asks for run through Scheduled ETA updates
+export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, locationEvery: 2.5, routineLocation: true, useBroker: true, customers: {}, trips: {} };   // location updates every 2.5 h — only to the rate con contact (cc its tracking email), on the load's email chain, with a live tracking link
 const MAX_PER_DAY = 15;
 
 const tripOf = (item) => (item && item.trip) || item || {};
@@ -48,6 +48,20 @@ export const isBillingMailbox = (e) => /^(?:[^@]*[._-])?(invoic\w*|billing|bills
 // "l-greg.stroka@x.com" next to "greg.stroka@x.com" is the same person with a prefix glued on
 // (TruckMate contact fields) — keep the clean one. Pure.
 export const dropGarbled = (list) => list.filter((a) => { const [l, d] = a.split('@'); return !list.some((b) => b !== a && b.endsWith(`@${d}`) && l.length > b.split('@')[0].length && new RegExp(`^[a-z0-9]{1,3}[._-]${b.split('@')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`).test(l)); });
+// Who gets the routine location update: the contact on the rate confirmation (cc its tracking
+// email). No billing mailboxes. Pure.
+export function rateConAudience(item) {
+  const rc = (item && item._ratecon && (item._ratecon.data || item._ratecon)) || {};
+  const ok = (e) => e && !isBillingMailbox(e);
+  const contacts = Array.isArray(rc.contacts) ? rc.contacts : [];
+  const pick = (roles) => emailList(contacts.filter((c) => roles.includes(c.role)).map((c) => c.email)).filter(ok);
+  let to = emailList(rc.brokerEmail).filter(ok);
+  if (!to.length) to = pick(['broker_rep', 'dispatch']);
+  let cc = pick(['tracking']).filter((e) => !to.includes(e));
+  if (!to.length && cc.length) { to = cc; cc = []; }
+  to = dropGarbled(to); cc = dropGarbled(cc);
+  return { to, cc, domains: [...new Set([...to, ...cc].map((e) => e.split('@')[1]))] };
+}
 export const emailList = (v) => [...new Set((Array.isArray(v) ? v : String(v || '').split(/[,;\s]+/)).map((x) => String(x).trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)))];
 
 const phone10 = (p) => { const d = String(p || '').replace(/\D+/g, ''); return d.length === 11 && d[0] === '1' ? d.slice(1) : d.length === 10 ? d : null; };
@@ -475,7 +489,7 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
   return { subject, html, text };
 }
 
-export function initStatusMail(app, { requireAuth, db, docs = null, comms = null, ringcentral = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initStatusMail(app, { requireAuth, db, docs = null, comms = null, ringcentral = null, track = null, chainReply = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const cfgKey = 'taStatusMailCfg';
   const key = (site) => `taStatusMail:${site}`;      // { adopted, trips: { trip: { sent, log } } }
@@ -505,24 +519,32 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       const cust = (billsOf(item).find((b) => b.billToName) || {}).billToName || rc.broker || null;
       const now0 = (ctx && ctx.now) || Date.now();
       const sop = sopStage(ev, item, { geo: (ctx && ctx.geo) || (() => null), now: now0 });
-      const u = await buildUpdateFor({ db, docs, site, items: [item], trips: [trip], customer: cust, audience: 'customer', now: now0, extraRef: rc.loadNumber ? `Load ${rc.loadNumber}` : `Trip ${trip}`, ...sop });
+      // location updates carry the live tracking link (it stops working once the load is delivered)
+      const trackUrl = ev.kind === 'location' && track ? await track(site, trip).catch(() => null) : null;
+      const u = await buildUpdateFor({ db, docs, site, items: [item], trips: [trip], customer: cust, audience: 'customer', now: now0, extraRef: rc.loadNumber ? `Load ${rc.loadNumber}` : `Trip ${trip}`, trackUrl, ...sop });
       mail = { subject: u.subject, html: u.html, text: u.text };
       attachIds = u.attachIds || [];
     } else mail = renderEvent(ev, item, ctx);
     if (!mail) return { status: 'skipped' };
-    const rcpts = to || recipients(item, cfg);
-    let status = 'sent'; let error = null;
-    if (!rcpts.length) status = 'not sent — no customer email on file';
+    // routine location updates: the rate con contact only (cc the rate con's tracking email)
+    const aud = !to && ev.kind === 'location' ? rateConAudience(item) : null;
+    const rcpts = to || (aud ? aud.to : recipients(item, cfg));
+    const ccs = aud ? aud.cc : [];
+    let status = 'sent'; let error = null; let chain = null;
+    if (!rcpts.length) status = aud ? 'not sent — no contact email on the rate con' : 'not sent — no customer email on file';
     else if (!mailConfig(env).ready) status = 'not sent — Outlook not connected yet';
     else {
       try {
         const files = attachIds.length && docs && docs.readDocs ? await docs.readDocs({ site, ids: attachIds }) : [];
-        await sendMail({ to: rcpts, subject: mail.subject, html: mail.html, text: mail.text, attachments: files.map((f, i) => ({ name: `${ev.kind === 'delivered' || ev.delivered ? 'POD' : 'BOL'}-${trip}-${i + 1}.${/pdf/.test(f.mediaType) ? 'pdf' : 'jpg'}`, contentType: f.mediaType, bytes: f.data })) }, { env, fetchFn });
+        // on the load's email chain with the broker when there is one
+        const r = aud && chainReply && !files.length ? await chainReply(site, trip, { to: rcpts, cc: ccs, html: mail.html, text: mail.text, partyDomains: aud.domains }).catch(() => null) : null;
+        if (r && r.sent) chain = r.chain;
+        else await sendMail({ to: rcpts, cc: ccs, subject: mail.subject, html: mail.html, text: mail.text, attachments: files.map((f, i) => ({ name: `${ev.kind === 'delivered' || ev.delivered ? 'POD' : 'BOL'}-${trip}-${i + 1}.${/pdf/.test(f.mediaType) ? 'pdf' : 'jpg'}`, contentType: f.mediaType, bytes: f.data })) }, { env, fetchFn });
       } catch (e) { status = 'failed'; error = e.message; }
     }
     const at = new Date().toISOString();
-    if (status === 'sent' && comms && comms.log) await comms.log(site, trip, { type: 'email', dir: 'out', auto: true, at, to: rcpts.join(', '), subject: mail.subject, text: mail.text.slice(0, 600), by, noThread: true });
-    return { status, error, to: rcpts, subject: mail.subject, at };
+    if (status === 'sent' && comms && comms.log) await comms.log(site, trip, { type: 'email', dir: 'out', auto: true, at, to: [...rcpts, ...ccs.map((x) => `cc ${x}`)].join(', '), subject: mail.subject, text: mail.text.slice(0, 600), by, noThread: true });
+    return { status, error, to: rcpts, cc: ccs, chain, subject: mail.subject, at };
   }
 
   // After every Watchtower cycle.
@@ -542,7 +564,7 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       if (!trip) continue;
       const rec = next.trips[trip] || { sent: { stops: {} }, log: [] };
       if (!rec.sent.pickedUp) rec.gps = trackPickup(item, rec.gps, { geo, now });
-      const evs = pendingEvents(item, rec.sent, { now, everyHours: cfg.everyHours, gps: rec.gps }).filter((ev) => !(ev.kind === 'location' && ((down[trip] && down[trip].on) || !cfg.routineLocation)));   // routine location emails only when turned on, never during a breakdown
+      const evs = pendingEvents(item, rec.sent, { now, everyHours: Number(cfg.locationEvery) || 2.5, gps: rec.gps }).filter((ev) => !(ev.kind === 'location' && ((down[trip] && down[trip].on) || cfg.routineLocation === false)));   // routine location emails only when turned on, never during a breakdown
       const late = down[trip] && down[trip].on ? null : lateNotice(etas[trip], rec.sent.late, { now });
       if (!evs.length && !late) { next.trips[trip] = rec; continue; }
       const nowIso = new Date(now).toISOString();
@@ -604,8 +626,9 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       const customers = b.customers ? Object.fromEntries(Object.entries(b.customers).map(([k, v]) => [custKey(k), emailList(v)]).filter(([k, v]) => k && v.length)) : cur.customers;
       const prefixes = Array.isArray(b.prefixes) ? b.prefixes.map((x) => String(x).trim().charAt(0).toUpperCase()).filter(Boolean) : cur.prefixes;
       const everyHours = b.everyHours != null ? Math.min(12, Math.max(1, Number(b.everyHours) || 3)) : cur.everyHours;
+      const locationEvery = b.locationEvery != null ? Math.min(12, Math.max(1, Math.round((Number(b.locationEvery) || 2.5) * 2) / 2)) : (cur.locationEvery || 2.5);
       const { seen, outlook, ...keep } = cur; // eslint-disable-line no-unused-vars
-      const next = { ...keep, customers, prefixes: prefixes.length ? prefixes : DEFAULTS.prefixes, everyHours, enabled: b.enabled != null ? !!b.enabled : cur.enabled, routineLocation: b.routineLocation != null ? !!b.routineLocation : !!cur.routineLocation, useBroker: b.useBroker != null ? !!b.useBroker : cur.useBroker };
+      const next = { ...keep, customers, prefixes: prefixes.length ? prefixes : DEFAULTS.prefixes, everyHours, locationEvery, enabled: b.enabled != null ? !!b.enabled : cur.enabled, routineLocation: b.routineLocation != null ? !!b.routineLocation : cur.routineLocation !== false, useBroker: b.useBroker != null ? !!b.useBroker : cur.useBroker };
       await db.set(cfgKey, next);
       res.json(next);
     } catch (e) { res.status(500).json({ error: e.message }); }

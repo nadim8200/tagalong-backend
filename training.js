@@ -12,9 +12,10 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': 
 
 // An email rewritten for training. Pure.
 export function redirectEmail(m, to) {
-  const orig = (Array.isArray(m.to) ? m.to : String(m.to || '').split(/[,;\s]+/)).filter(Boolean);
+  const split = (v) => (Array.isArray(v) ? v : String(v || '').split(/[,;\s]+/)).filter(Boolean);
+  const orig = [...split(m.to), ...split(m.cc).map((x) => `${x} (cc)`)];
   const banner = `<div style="font-family:Arial,sans-serif;font-size:13px;background:#fff7cc;border:1px solid #e6c200;padding:8px 10px;margin-bottom:12px"><b>TRAINING PREVIEW — Not sent to customer.</b> It would have gone to: <b>${esc(orig.join(', ') || '(nobody)')}</b></div>`;
-  return { ...m, to, subject: `[TRAINING → ${orig.slice(0, 3).join(', ')}${orig.length > 3 ? '…' : ''}] ${m.subject || ''}`.slice(0, 250), html: banner + (m.html || ''), ...(m.text ? { text: `TRAINING PREVIEW — Not sent to customer. It would have gone to: ${orig.join(', ') || '(nobody)'}\n\n${m.text}` } : {}) };
+  return { ...m, to, cc: [], subject: `[TRAINING → ${orig.slice(0, 3).join(', ')}${orig.length > 3 ? '…' : ''}] ${m.subject || ''}`.slice(0, 250), html: banner + (m.html || ''), ...(m.text ? { text: `TRAINING PREVIEW — Not sent to customer. It would have gone to: ${orig.join(', ') || '(nobody)'}\n\n${m.text}` } : {}) };
 }
 // The copy for a text / call / app message that was held. Pure.
 export function heldCopy(kind, { to, text, trip, purpose }) {

@@ -899,5 +899,28 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
   }
 
   console.log(`[inbox] Jarvis inbox ${enabled && mailConfig(env).ready ? `reading ${mailConfig(env).from}` : 'off — needs Outlook (MS_* + MAIL_FROM)'}`);
-  return { poll, overlay, replyInThread };
+  // A status update on the load's own email chain with the broker (the rate con email, or
+  // dispatch's thread with them that Jarvis is copied on). Only a chain the broker is already
+  // on — never an internal-only forward — and with the recipients set explicitly (To / Cc).
+  async function replyOnLoadChain(site, trip, { to = [], cc = [], html, text, partyDomains = [], by = 'Jarvis (status update)' }) {
+    if (!enabled || !mailConfig(env).ready || !to.length) return { sent: false };
+    const list = (((await db.get(key(site), { list: [] })) || {}).list || []).filter((x) => (x.trips || []).includes(String(trip)) || (x.rateCons || []).some((r) => String(r.trip) === String(trip)));
+    const doms = new Set(partyDomains.map((d) => String(d).toLowerCase()).filter(Boolean));
+    let chain = null;
+    for (const e of list.slice(0, 6)) {                     // newest first
+      let on = [String((e.from && e.from.address) || '').toLowerCase()];
+      try { const m = await g(`/messages/${encodeURIComponent(e.id)}?$select=toRecipients,ccRecipients`); on = [...on, ...[...(m.toRecipients || []), ...(m.ccRecipients || [])].map((r) => String((r.emailAddress && r.emailAddress.address) || '').toLowerCase())]; } catch { continue; } // eslint-disable-line no-await-in-loop
+      const outside = on.filter((a) => a && !isInternal(a, env));
+      if (outside.length && (!doms.size || outside.some((a) => doms.has(a.split('@')[1])))) { chain = e; break; }
+    }
+    if (!chain) return { sent: false };
+    const training_ = training && training.active ? await training.active() : null;
+    if (training_) await sendMail({ to, cc, subject: /^re:/i.test(chain.subject || '') ? chain.subject : `Re: ${chain.subject || ''}`, html, text }, { env, fetchFn });
+    else await g(`/messages/${encodeURIComponent(chain.id)}/reply`, { method: 'POST', body: { message: { toRecipients: to.map((address) => ({ emailAddress: { address } })), ccRecipients: cc.map((address) => ({ emailAddress: { address } })) }, comment: html } });
+    const at = new Date().toISOString();
+    await update(site, chain.id, (x) => ({ ...x, replies: [...(x.replies || []), { at, by, text: String(text || '').slice(0, 600), files: 0 }] }));
+    return { sent: true, chain: chain.id, subject: chain.subject };
+  }
+
+  return { poll, overlay, replyInThread, replyOnLoadChain };
 }

@@ -88,22 +88,29 @@ test('first run adopts silently; later events email the customer list and log on
   assert.match(Buffer.from((sent[1].mime.match(/text\/plain[\s\S]*?base64\r\n\r\n([\s\S]*?)\r\n--/) || [])[1].replace(/\r\n/g, ''), 'base64').toString(), /Driver at the receiver \(stop 1 of 2\)/);
 });
 
-test('routine location emails are off unless turned on (milestones still go out)', async () => {
+test('location updates: every 2.5 h, only the rate con contact (cc its tracking email), with the live tracking link; off when turned off', async () => {
   const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
   const sent = [];
   const fetchFn = async (url, opts) => { if (url.includes('oauth2')) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) }; sent.push(readSent(opts)); return { ok: true, status: 202, json: async () => ({}) }; };
   const db = memDb();
-  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] }, everyHours: 1 });
-  const sm = initStatusMail({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, env, fetchFn });
-  const picked = load({ trip: { status: 'DEPSHIP' } });
-  await sm.process('fb', { trips: [load()] }, { geo, now: NOW });
+  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
+  const chains = [];
+  const sm = initStatusMail({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, env, fetchFn, track: async (site, trip) => `https://mytagalong.app/s/tok${trip}`, chainReply: async (site, trip, m) => { chains.push({ trip, ...m }); return { sent: true, chain: 'msg1' }; } });
+  const rc = { _ratecon: { data: { brokerEmail: 'ana@rosebrokers.com', contacts: [{ role: 'tracking', email: 'tracking@rosebrokers.com' }, { role: 'billing', email: 'invoices@rosebrokers.com' }] } } };
+  const picked = load({ trip: { status: 'DEPSHIP' }, extra: rc });
+  await sm.process('fb', { trips: [load({ extra: rc })] }, { geo, now: NOW });
   await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 60000 });
-  assert.equal(sent.length, 1, 'picked up (milestone) still sent');
-  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 3 * 3600000 });
-  assert.equal(sent.length, 1, 'no hourly location email');
-  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] }, everyHours: 1, routineLocation: true });
-  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 4 * 3600000 });
-  assert.equal(sent.length, 2, 'turned on → location email');
+  assert.equal(sent.length, 1, 'picked up (milestone) to the customer list');
+  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 2 * 3600000 });
+  assert.equal(chains.length, 0, 'not 2.5 h yet');
+  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 2.6 * 3600000 });
+  assert.equal(chains.length, 1);
+  assert.deepEqual([chains[0].to, chains[0].cc], [['ana@rosebrokers.com'], ['tracking@rosebrokers.com']]);
+  assert.match(chains[0].text, /Track this load live: https:\/\/mytagalong\.app\/s\/tok900200 \(stops working once the load is delivered\)/);
+  assert.equal(sent.length, 1, 'went on the chain, not a new email');
+  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] }, routineLocation: false });
+  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 6 * 3600000 });
+  assert.equal(chains.length, 1, 'turned off');
 });
 
 import { contactsFor } from '../statusmail.js';
