@@ -44,8 +44,10 @@ import { initRundowns } from './rundown.js';
 import { initOutbound } from './outbound.js';
 import { initFlowerReport } from './flowerreport.js';
 import { initPickupFollow } from './pickupfollow.js';
+import { initTempPhotos } from './tempphotos.js';
+import { initOutreach } from './outreach.js';
 import { initMilestones } from './milestones.js';
-import { initInbox } from './inbox.js';
+import { initInbox, isInternal } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
 import { initVoice } from './voice.js';
@@ -750,9 +752,10 @@ const inbox = initInbox(app, { playbook, follow, etaWatch, training, help,
   driver: driverHooks });
 // customer & broker profiles (Customers tab): built from the loads, edited / verified by dispatch
 const profiles = initProfiles(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+let tempPhotos = null;    // reefer temp photos for trailers we can't read live (set below)
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
 let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers overlay)
-truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
+truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
@@ -766,6 +769,12 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 const voice = initVoice(app, { training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { requireAuth: requireDispatch, db, replyInThread: (...a) => inbox.replyInThread(...a), ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+// reefer temp photos (8 AM / 3 PM / 9:30 PM, hourly reminders) + an email to dispatch on every driver contact
+tempPhotos = initTempPhotos(app, { requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, ringcentral: rc, voice, comms, isInternal, env: process.env });
+driverLinks.usePhotos((site, trip, info) => tempPhotos.received(site, trip, info));
+const outreach = initOutreach({ db, getBoard: (site) => truckmate.buildBoard(site), isInternal, env: process.env });
+comms.useOutreach((ev) => outreach.notify(ev));
+voice.useOutreach((ev) => outreach.notify(ev));
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });

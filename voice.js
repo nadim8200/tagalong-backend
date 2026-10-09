@@ -803,9 +803,11 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
 
   // Jarvis calls the driver — a dispatcher's click, a driver who agreed to
   // dispatch contact and hasn't replied STOP, at most once per 30 minutes.
+  let outreach = null;   // set by index.js — emails dispatch on every driver call
   const PURPOSE = {
     check: 'This is an outgoing check call to the driver of trip {{trip}} ({{driver_name}}). Ask where they are, how it is going and their estimated arrival at {{next_stop}}. Note any problem with report_problem.',
     'confirm-stop': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to confirm whether {{next_stop}} was delivered. If yes, save it with confirm_delivered (ask boxes and any shortage or damage) and remind them to upload the signed POD/BOL.',
+    'temp-photo': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) for the {{check}} reefer temperature check — we cannot read this trailer\'s temperature remotely. Ask them to read the reefer display (box / return-air temperature and the set point), repeat the numbers back, and ask them to send a photo of the display to dispatch through the TagAlong link or by text as soon as they safely can.',
     'pickup-check': 'This is an outgoing check call to the driver of trip {{trip}} ({{driver_name}}) about the pickup at {{pickup}} planned for {{pickup_time}}. Ask whether they are already rolling / on the way, where they are, and their ETA to the pickup. If they will be late, ask why and the new time, and save it with report_problem (problem_type delay). Keep it short — they may be driving.',
     pod: 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to ask for the signed POD and BOL. Ask them to upload photos through the link we texted, or reply to our text with pictures.',
   };
@@ -832,13 +834,15 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
     const why = PURPOSE[purpose] ? purpose : 'check';
     const vars = { trip, driver_name: d.name || 'driver', next_stop: facts.next_stop || 'the next stop', ...extra };
     const context = PURPOSE[why].replace(/\{\{(\w+)\}\}/g, (m, v) => vars[v] || '');
-    if (training) { const held = await training.hold('call', { to, trip, purpose: `${why} call to ${d.name || 'the driver'}`, text: context }); if (held) return { ok: true, callId: null, to, ...held }; }
+    const told = () => (outreach ? Promise.resolve(outreach({ site, trip, channel: 'call', to, text: context, by, kind: why })).catch(() => {}) : null);
+    if (training) { const held = await training.hold('call', { to, trip, purpose: `${why} call to ${d.name || 'the driver'}`, text: context }); if (held) { told(); return { ok: true, callId: null, to, ...held }; } }
     const call = await retell('/v2/create-phone-call', { body: {
       from_number: e164(env.RETELL_FROM_NUMBER), to_number: to, override_agent_id: cfg.agentId,
       metadata: { trip, purpose: why, which, by },
       retell_llm_dynamic_variables: { greeting: `Hi${d.name ? ` ${String(d.name).split(' ')[0]}` : ''}, this is Jarvis, the automated assistant from Florida Beauty Flora dispatch, calling about trip ${digitByDigit(trip)}. This call may be recorded.`, call_context: context },
     } });
     await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: to, trip, purpose: why, by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
+    told();
     return { ok: true, callId: call.call_id, to };
   }
   app.post('/truckmate/trips/:trip/ai-call', requireAuth, async (req, res) => {
@@ -897,5 +901,5 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
     await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: num, trip, purpose: 'staff-alert', by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
     return { called: true, callId: call.call_id };
   }
-  return { findLoad, live, placeCall, callsFor, callStaff };
+  return { findLoad, live, placeCall, callsFor, callStaff, useOutreach: (fn) => { outreach = fn; } };
 }

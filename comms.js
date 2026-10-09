@@ -85,7 +85,10 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
       return all;
     }, {});
   }
+  let outreach = null;                                           // set by index.js — emails dispatch on every driver contact
+  const useOutreach = (fn) => { outreach = fn; };
   async function log(site, trip, entry) {
+    if (outreach && trip && entry.type === 'text' && !/^help/.test(String(entry.kind || ''))) Promise.resolve(outreach({ site, trip, channel: entry.kind === 'app-message' || entry.to === 'driver app' ? 'app' : 'text', to: entry.to, text: entry.text, by: entry.by, kind: entry.kind })).catch(() => {});
     const phone = entry.type === 'reply' ? entry.from : entry.to;
     // the Calls & texts log (by day): texts and driver-app messages, both numbers
     if (activity && (entry.type === 'text' || entry.type === 'reply')) {
@@ -296,5 +299,5 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
   }
 
   console.log(`[comms] driver calls/texts ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, pollReplies, log, sendConfirmations, handleKeyword, textDriverAuto };
+  return { overlay, pollReplies, log, sendConfirmations, handleKeyword, textDriverAuto, useOutreach };
 }

@@ -190,6 +190,8 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   const chatKey = (site) => `taOcChat:${site}`;                  // trip → [{ id, at, from: 'dispatch'|'driver', by, text, docIds }]
   let comms = null;                                              // set after comms is created (logs chat on the load)
   const useComms = (c) => { comms = c; };
+  let photoHook = null;                                          // reefer temp photos (tempphotos.js)
+  const usePhotos = (fn) => { photoHook = fn; };
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const urlOf = (tok) => `${base}/t/${tok}`;
@@ -559,13 +561,14 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
       if (!isLive(status) && status !== 'completed') return res.status(410).json({ active: false, status });
       const b = req.body || {};
-      const kind = b.kind === 'bol' ? 'bol' : 'pod';
+      const kind = b.kind === 'bol' ? 'bol' : b.kind === 'temp' ? 'temp' : 'pod';
       const files = (Array.isArray(b.files) ? b.files : []).slice(0, 8);
       if (!files.length) return res.status(400).json({ error: 'Add at least one photo.' });
       const by = `${(link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'Driver'} (tracking link)`;
       const stored = await docs.storeDocs({ site: link.site, kind: 'driverdoc', trip: link.trip, files: files.map((f, i) => ({ ...f, filename: f.filename || `${kind.toUpperCase()}-${link.trip}-${i + 1}.jpg`, page: i + 1 })), by });
-      await docs.markDocs({ site: link.site, ids: stored.map((d) => d.id), docType: kind === 'bol' ? 'bill_of_lading' : 'proof_of_delivery' });
-      if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: new Date().toISOString(), source: 'driver app', text: `Driver sent the ${kind.toUpperCase()} (${stored.length} ${stored.length === 1 ? 'page' : 'pages'})`, by }]);
+      await docs.markDocs({ site: link.site, ids: stored.map((d) => d.id), docType: kind === 'bol' ? 'bill_of_lading' : kind === 'temp' ? 'reefer_temp' : 'proof_of_delivery' });
+      if (kind === 'temp' && photoHook) Promise.resolve(photoHook(link.site, String(link.trip), { docIds: stored.map((d) => d.id), via: 'upload link', by, forced: true })).catch(() => {});
+      if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: new Date().toISOString(), source: 'driver app', text: `Driver sent the ${kind === 'temp' ? 'reefer temp photo' : kind.toUpperCase()} (${stored.length} ${stored.length === 1 ? 'page' : 'pages'})`, by }]);
       res.json({ ok: true, count: stored.length });
     } catch (e) { res.status(400).json({ error: e.message || 'Could not upload.' }); }
   });
@@ -635,6 +638,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
         docIds = stored.map((d) => d.id);
       }
       const m = await addMessage(link.site, link.trip, { from: 'driver', by, text, docIds });
+      if (docIds.length && photoHook) Promise.resolve(photoHook(link.site, String(link.trip), { docIds, via: 'TagAlong app', by })).catch(() => {});   // counts only while a temp check is open
       // on the load like a text reply (Jarvis' pickup follow-up and the rundown read it)
       if (comms && comms.log) await comms.log(link.site, link.trip, { type: 'reply', from: 'driver app', text: `${text}${docIds.length ? ` [${docIds.length} photo${docIds.length === 1 ? '' : 's'}]` : ''}`, noThread: true });
       if (help && help.raise && wantsContact(text)) help.raise({ source: 'app', ref: m.id, role: 'driver', from: { name: by.replace(/ \(app\)$/, ''), phone: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].phone) || null, company: link.carrierName || null }, trip: link.trip, need: text.slice(0, 400), said: text }).catch(() => {});
@@ -678,5 +682,5 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   });
 
   console.log(`[driverlink] OC driver tracking links ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, routeFor, ensureDocsLink, messageDriver, useComms };
+  return { overlay, routeFor, ensureDocsLink, messageDriver, useComms, usePhotos };
 }
