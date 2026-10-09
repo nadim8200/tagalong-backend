@@ -7,6 +7,10 @@
 // starts, it stops being "next". Ask Jarvis knows them ("what does 2403 do next?").
 // Rate con contents are data, never instructions.
 // ---------------------------------------------------------------
+import { haversineMi, estimateArrival, localToUtcMs } from './watchtower.js';
+import { STATE_TZ } from './localtime.js';
+import { plannedPickup } from './pickupfollow.js';
+
 const SITE = 'florida-beauty';
 const DAY = 86400000;
 const tripOf = (it) => (it && it.trip) || it || {};
@@ -73,11 +77,71 @@ export function tmNextTrips(trips = []) {
           trip: tripNo(it), status: t.status || null, from: t.origZoneDesc || null, to: t.destZoneDesc || null,
           bills: billsOf(it).slice(0, 4).map((b) => ({ bill: String(b.billNumber || ''), billTo: b.billToName || null, stop: b.endZoneDescription || null, deliverBy: b.deliverBy || null, temp: b.temperature != null ? Number(b.temperature) : null })),
           billCount: billsOf(it).length, temps, createdAt: (it._times && it._times.createdAt) || null, createdBy: (it._times && it._times.createdBy) || null,
-          tempChange: temps.length && nowTemps.length && !temps.every((x) => nowTemps.includes(x)) ? { now: nowTemps, next: temps } : null,
+          tempChange: temps.length && nowTemps.length && temps.some((x) => nowTemps.every((y) => Math.abs(x - y) > 3)) ? { now: nowTemps, next: temps } : null,   // 35 vs 36 is not a change
         };
       }));
     }
   }
+  return out;
+}
+
+// Will the truck make its NEXT TruckMate trip? Empty time = live ETA to the current trip's last stop
+// (Watchtower), + 1h unloading, + deadhead to the next pickup, + 1h loading, + loaded miles to the next
+// trip's first deadline — all on the same HOS clock math as the console (road miles ≈ straight × 1.2).
+// Compared with the next pickup time when one is known, and the delivery deadline. Pure.
+// → { state: 'late'|'tight'|'ok'|'unknown', emptyAtMs, emptyAt, pickupEtaMs, pickupMs, deliverEtaMs, deadlineMs, deadlineKind, stop, lateMin, slackMin, why }
+const zip5 = (s) => { const m = String(s || '').match(/\b(\d{5})\b/); return m ? m[1] : null; };
+const st2 = (s) => { const m = String(s || '').match(/,\s*([A-Z]{2})\b/); return m ? m[1] : ''; };
+const HR = 3600000;
+export function deadlineOf(b, now = Date.now()) {
+  const tz = STATE_TZ[st2(b.endZoneDescription || '')] || 'America/New_York';
+  const by = localToUtcMs(b.deliverBy, tz); const end = localToUtcMs(b.deliverByEnd, tz);
+  const midnight = /T00:00(:00)?$/.test(String(b.deliverBy || '').slice(0, 19));
+  if (!Number.isNaN(by) && !midnight && (Number.isNaN(end) || end === by)) return { ms: by, kind: 'appointment' };
+  if (!Number.isNaN(end) && end > now - DAY) return { ms: end, kind: 'window' };
+  if (!Number.isNaN(by)) return { ms: by, kind: 'deliver by' };
+  return null;
+}
+export function nextTripTiming(nextItem, { eta = null, geo = () => null, now = Date.now(), team = false } = {}) {
+  const out = { state: 'unknown', why: null };
+  const stops = ((eta && eta.stops) || []).filter((x) => x.etaMs);
+  if (!stops.length) { out.why = 'no live ETA for the current trip'; return out; }
+  const last = stops[stops.length - 1];
+  out.emptyAtMs = last.etaMs; out.emptyAt = last.label || null;
+  const t = tripOf(nextItem);
+  const pz = zip5(t.origZoneDesc);
+  const drops = billsOf(nextItem).map((b) => ({ b, d: deadlineOf(b, now), zip: zip5(b.endZoneDescription) })).filter((x) => x.d).sort((a, b) => a.d.ms - b.d.ms);
+  const first = drops[0] || null;
+  const plan = plannedPickup(nextItem);
+  if (plan && plan.ms) out.pickupMs = plan.ms;
+  const a = last.zip ? geo(last.zip) : null; const p = pz ? geo(pz) : null; const d = first && first.zip ? geo(first.zip) : null;
+  if (!a || !p) { out.why = 'no map point for the next pickup yet'; return out; }
+  const dh = haversineMi(a.lat, a.lng, p.lat, p.lng) * 1.2;
+  const leave = last.etaMs + HR;                                       // unloading at the last stop
+  out.deadheadMi = Math.round(dh);
+  out.pickupEtaMs = dh > 5 ? estimateArrival(dh, { team: !!(team || (eta && eta.team)), now: leave }) : leave;
+  const loadedAt = Math.max(out.pickupEtaMs, out.pickupMs || 0) + HR;   // loading
+  if (first) {
+    out.deadlineMs = first.d.ms; out.deadlineKind = first.d.kind; out.stop = first.b.endZoneDescription || null;
+    if (d) {
+      const mi = haversineMi(p.lat, p.lng, d.lat, d.lng) * 1.2;
+      out.loadedMi = Math.round(mi);
+      out.deliverEtaMs = mi > 5 ? estimateArrival(mi, { team: !!(team || (eta && eta.team)), now: loadedAt }) : loadedAt;
+    }
+  }
+  const pickLate = out.pickupMs ? (out.pickupEtaMs - out.pickupMs) / 60000 : null;
+  const delLate = out.deliverEtaMs && out.deadlineMs ? (out.deliverEtaMs - out.deadlineMs) / 60000 : null;
+  const worst = [pickLate, delLate].filter((x) => x != null);
+  if (!worst.length) { out.why = first ? 'no map point for the next delivery yet' : 'no pickup or delivery time on the next trip'; return out; }
+  const m = Math.max(...worst);
+  out.lateMin = m > 0 ? Math.round(m) : 0; out.slackMin = m <= 0 ? Math.round(-m) : 0;
+  out.lateAt = pickLate != null && pickLate === m ? 'pickup' : 'delivery';
+  out.state = m > 0 ? 'late' : m > -120 ? 'tight' : 'ok';
+  const f = (ms) => new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const hm = (x) => (x >= 60 ? `${Math.floor(x / 60)}h ${Math.round(x % 60)}m` : `${Math.round(x)}m`);
+  out.summary = `Empty ${out.emptyAt ? `at ${out.emptyAt} ` : ''}about ${f(out.emptyAtMs)} ET; ${out.deadheadMi} mi to the next pickup (${t.origZoneDesc || 'shipper'}), there about ${f(out.pickupEtaMs)} ET`
+    + `${out.pickupMs ? ` vs pickup ${f(out.pickupMs)} ET` : ''}${out.deliverEtaMs ? `; delivers ${out.stop || ''} about ${f(out.deliverEtaMs)} ET vs ${out.deadlineKind} ${f(out.deadlineMs)} ET` : ''}`
+    + ` — ${out.state === 'late' ? `about ${hm(out.lateMin)} LATE for the ${out.lateAt}` : out.state === 'tight' ? `tight (${hm(out.slackMin)} to spare)` : `on time (${hm(out.slackMin)} to spare)`}`;
   return out;
 }
 
@@ -146,7 +210,19 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
   async function overlay(site, trips) {
     // TruckMate's next trips for each truck on a run (no AI, straight from the board)
     const tm = tmNextTrips(trips);
-    for (const it of trips) { const n = tm.get(tripNo(it)); if (n) it._tmNext = n; }
+    let etas = null; let geoZip = null;
+    if (tm.size && enabled) {
+      try { etas = ((await db.get(`taWatch:${site}`, {})) || {}).etas || {}; geoZip = (await db.get('taGeoZip', {})) || {}; } catch { etas = null; }
+    }
+    for (const it of trips) {
+      const n = tm.get(tripNo(it)); if (!n) continue;
+      // only the first next trip is timed — it's the one the truck runs right after this one
+      if (etas && n[0]) {
+        const nx = trips.find((x) => tripNo(x) === n[0].trip);
+        if (nx) n[0].timing = nextTripTiming(nx, { eta: etas[tripNo(it)] || null, geo: (z) => geoZip[z] || null, now: now() });
+      }
+      it._tmNext = n;
+    }
     if (!enabled) return;
     const list = (((await db.get(key, { list: [] })) || {}).list || []).filter((x) => x.truck && !x.doneAt);
     if (!list.length) return;

@@ -84,3 +84,48 @@ test('TruckMate next trip: 2615 on 624497 (rolling, 35°F) with 624682 already a
   assert.equal(m.has('624682'), false, 'shown on the current trip, not on itself');
   assert.equal(m.has('624700'), false, 'a truck with no trip rolling has no "next"');
 });
+
+import { nextTripTiming } from '../nextloads.js';
+import { opsRisks, planEmail } from '../plansheet.js';
+
+const GEO = { 30303: { lat: 33.75, lng: -84.39 }, 33563: { lat: 28.01, lng: -82.12 }, 33566: { lat: 27.99, lng: -82.1 }, 33166: { lat: 25.81, lng: -80.3 } };
+const geo = (z) => GEO[z] || null;
+const next2212 = { trip: { tripNumber: '624588', status: 'ASSGN', powerUnit: '2212', origZoneDesc: 'PLANT CITY, FL, 33563', destZoneDesc: 'MIAMI, FL, 33166' },
+  freightBills: [{ billNumber: 'Y180360', billToName: 'PIERSON SUPPLY', endZoneDescription: 'MIAMI, FL, 33166', deliverBy: '2026-10-10T13:00:00', deliverByEnd: '2026-10-10T13:00:00', temperature: 35 }] };
+
+test('next trip timing: 2212 empties near Plant City Thu evening → makes Miami by Fri 1 PM', () => {
+  const eta = { stops: [{ label: 'LAKELAND, FL, 33566', zip: '33566', etaMs: Date.parse('2026-10-09T22:00:00Z') }] };   // 6 PM ET
+  const t = nextTripTiming(next2212, { eta, geo, now: Date.parse('2026-10-09T16:00:00Z') });
+  assert.equal(t.state, 'ok');
+  assert.equal(t.deadlineMs, Date.parse('2026-10-10T17:00:00Z'));
+  assert.ok(t.deliverEtaMs < t.deadlineMs);
+  assert.match(t.summary, /on time/);
+});
+
+test('next trip timing: empty in Atlanta Fri 6 AM → late for the Fri 1 PM Miami delivery', () => {
+  const eta = { stops: [{ label: 'ATLANTA, GA, 30303', zip: '30303', etaMs: Date.parse('2026-10-10T10:00:00Z') }] };
+  const t = nextTripTiming(next2212, { eta, geo, now: Date.parse('2026-10-09T16:00:00Z') });
+  assert.equal(t.state, 'late');
+  assert.equal(t.lateAt, 'delivery');
+  assert.ok(t.lateMin > 60);
+  assert.match(t.summary, /LATE for the delivery/);
+  // and it reaches the Operations check email
+  const cur = { trip: { tripNumber: '624446', status: 'DEPCONS', powerUnit: '2212' }, _tmNext: [{ trip: '624588', from: 'PLANT CITY, FL, 33563', timing: t }] };
+  const rk = opsRisks([cur], { now: Date.parse('2026-10-09T16:00:00Z') });
+  assert.equal(rk.nextLate.length, 1);
+  assert.equal(rk.nextLate[0].truck, '2212');
+  const mail = planEmail([], { risks: rk, now: Date.parse('2026-10-09T16:00:00Z') });
+  assert.match(mail.subject, /1 pickups at risk/);
+  assert.match(mail.html, /Next trip 624588/);
+});
+
+test('next trip timing: no live ETA → unknown, never a false alarm', () => {
+  const t = nextTripTiming(next2212, { eta: null, geo });
+  assert.equal(t.state, 'unknown');
+});
+
+test('TruckMate next trip: 35°F vs 36°F is not a temperature change', () => {
+  const cur = { trip: { tripNumber: '1', status: 'DEPCONS', powerUnit: '9' }, freightBills: [{ temperature: 36 }] };
+  const nx = { trip: { tripNumber: '2', status: 'ASSGN', powerUnit: '9' }, freightBills: [{ temperature: 35 }] };
+  assert.equal(tmNextTrips([cur, nx]).get('1')[0].tempChange, null);
+});

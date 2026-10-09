@@ -180,7 +180,17 @@ export function opsRisks(items = [], { now = Date.now(), etas = {}, horizonH = 1
     if (why.length) pickups.push({ trip: tripNo(it), truck: unitOf(it) || null, place: plan.place || null, pickupMs: plan.ms, source: plan.source, why, location: s.location });
   }
   late.sort((a, b) => b.lateMin - a.lateMin); pickups.sort((a, b) => a.pickupMs - b.pickupMs);
-  return { late, pickups };
+  // trucks whose current run makes them late (or tight) for the next trip TruckMate already has for them
+  const nextLate = [];
+  for (const it of items) {
+    const n = (it._tmNext || [])[0];
+    const tm = n && n.timing;
+    if (!tm || (tm.state !== 'late' && tm.state !== 'tight')) continue;
+    if (pickups.some((p) => p.trip === n.trip)) continue;
+    nextLate.push({ trip: n.trip, truck: unitOf(it), current: tripNo(it), from: n.from, state: tm.state, lateMin: tm.lateMin || 0, slackMin: tm.slackMin || 0, summary: tm.summary || '' });
+  }
+  nextLate.sort((a, b) => (b.lateMin - a.lateMin) || (a.slackMin - b.slackMin));
+  return { late, pickups, nextLate };
 }
 
 // The planning email for Gus: by region, problems first. Pure.
@@ -201,11 +211,14 @@ export function planEmail(rows, { now = Date.now(), title = 'Planning sheet', ri
     scheduled: `${l.stop || 'next stop'} · appointment ${fmt(l.apptMs) || '—'} ET`, status: { label: `${hm(l.lateMin)} late`, tone: 'red', text: `ETA ${fmt(l.etaMs)} ET (Samsara GPS)${l.location ? ` · now near ${l.location}${l.moving === false ? ', stopped' : ''}` : ''}` }, next: 'Dispatch: new appointment with the receiver / update the customer', need: null, details: [] }));
   const pickBlocks = rk.pickups.map((p) => ({ trip: p.trip, title: `Trip ${p.trip}${p.truck ? ` · truck ${p.truck}` : ''}`, group: '2 · Pickups at risk', sortKey: `1${p.pickupMs}`, schedLabel: 'Pickup',
     scheduled: `${p.place || 'shipper'} · ${fmt(p.pickupMs)} ET (from ${p.source})`, status: { label: p.pickupMs < now ? 'Late pickup' : 'At risk', tone: 'red', text: p.why.join(' · ') }, next: 'Dispatch: confirm with the driver / reassign or move the pickup', need: null, details: p.location ? [`Truck now near ${p.location}`] : [] }));
+  const nextBlocks = (rk.nextLate || []).map((x) => ({ trip: x.trip, title: `Next trip ${x.trip}${x.truck ? ` · truck ${x.truck}` : ''}`, group: '2 · Pickups at risk', sortKey: `1z${x.state === 'late' ? 0 : 1}${String(99999 - x.lateMin).padStart(5, '0')}`, schedLabel: 'Next load',
+    scheduled: `After trip ${x.current}${x.from ? ` · picks up ${x.from}` : ''}`, status: { label: x.state === 'late' ? `${hm(x.lateMin)} late` : 'Tight', tone: x.state === 'late' ? 'red' : 'amber', text: x.summary }, next: 'Dispatch: check the plan for this truck — swap trucks or move the appointment', need: null, details: ['From the live ETA of the current trip + HOS drive time (TruckMate next trip)'] }));
   const planBlocks = blocks.map((b) => ({ ...b, group: `3 · ${b.group}`, sortKey: `2${b.sortKey}` }));
   const bad = rows.filter((a) => a.tone === 'red').length;
-  const all = [...lateBlocks, ...pickBlocks, ...planBlocks.filter((b) => b.status.tone !== 'green'), ...planBlocks.filter((b) => b.status.tone === 'green')];
-  const out = renderOutboundFollowUp({ heading: `Operations check — ${rk.late.length} late · ${rk.pickups.length} pickup${rk.pickups.length === 1 ? '' : 's'} at risk · ${bad} plan problem${bad === 1 ? '' : 's'}`, blocks: all, closing: `Live board + Samsara ETAs${rows.length ? ` + "${title}" (read-only)` : ''}, ${fmt(now)} ET. Pickups checked for the next 18 hours.` });
-  return { subject: `Operations check | ${rk.late.length} late · ${rk.pickups.length} pickups at risk · ${bad} plan | ${new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' })}`, html: out.html, text: out.text };
+  const atRisk = rk.pickups.length + (rk.nextLate || []).length;
+  const all = [...lateBlocks, ...pickBlocks, ...nextBlocks, ...planBlocks.filter((b) => b.status.tone !== 'green'), ...planBlocks.filter((b) => b.status.tone === 'green')];
+  const out = renderOutboundFollowUp({ heading: `Operations check — ${rk.late.length} late · ${atRisk} pickup${atRisk === 1 ? '' : 's'} at risk · ${bad} plan problem${bad === 1 ? '' : 's'}`, blocks: all, closing: `Live board + Samsara ETAs${rows.length ? ` + "${title}" (read-only)` : ''}, ${fmt(now)} ET. Pickups checked for the next 18 hours.` });
+  return { subject: `Operations check | ${rk.late.length} late · ${atRisk} pickups at risk · ${bad} plan | ${new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' })}`, html: out.html, text: out.text };
 }
 
 export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBoard, nextLoads = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {

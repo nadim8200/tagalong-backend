@@ -36,7 +36,7 @@ const fmtTime = (ms) => new Date(ms).toLocaleString('en-US', { timeZone: 'Americ
 // TruckMate times carry no zone ("2026-10-03T06:00:00") — they are the
 // receiver's local wall clock. Read them in the stop's time zone (by state).
 const stateOf = (s) => { const m = String(s || '').match(/,\s*([A-Z]{2})\b/); return m ? m[1] : ''; };
-function localToUtcMs(wall, tz) {
+export function localToUtcMs(wall, tz) {
   const m = String(wall || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
   if (!m) return NaN;
   if (/(Z|[+-]\d{2}:?\d{2})$/.test(String(wall))) return Date.parse(wall); // already has a zone
