@@ -63,6 +63,8 @@ export async function readSheet(id, { token, fetchFn = globalThis.fetch, only = 
   return { title: m.properties && m.properties.title, allTabs: all.map((t) => t.title), tabs: tabs.map((t, i) => ({ title: t.title, rows: ((j.valueRanges || [])[i] || {}).values || [] })) };
 }
 
+// The read time that's due now: the latest of today's times that has passed and wasn't done. Pure.
+export const dueSlot = (times = [], hhmm = '00:00', isDone = () => false) => [...times].sort().filter((t) => t <= hhmm && !isDone(t)).pop() || null;
 // Which tabs to read: the ones chosen in settings (by name, any case), else the "Available Trucks"
 // tab, else all of them. Pure.
 export function pickTabs(titles = [], only = null) {
@@ -174,7 +176,7 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
   const enabled = !!(db && db.enabled);
   const key = `taPlanSheet:${SITE}`;        // { plan: [...], hash, readAt, title, error }
   const cfgKey = 'taPlanSheetCfg';           // { sheetId, to: [], times: ['07:00','17:00'], on }
-  const DEFAULTS = { sheetId: null, to: ['gus@floridabeauty.us'], times: ['07:00', '17:00'], on: true };
+  const DEFAULTS = { sheetId: null, to: ['gus@floridabeauty.us'], times: ['07:00', '17:00'], readTimes: ['03:00', '06:00', '10:00', '14:00', '17:00', '22:00'], on: true };
   const settings = async () => ({ ...DEFAULTS, ...((enabled && (await db.get(cfgKey, {}))) || {}) });
   const saEmail = () => { try { return JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}').client_email || null; } catch { return null; } };
 
@@ -242,10 +244,22 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
     return { sent: true, to: cfg.to };
   }
 
+  // read the sheet at the set times (Miami time) — not all day — so the AI only runs a few times a day
+  async function scheduledRead() {
+    const cfg = await settings();
+    if (!enabled || !cfg.on || !cfg.sheetId) return null;
+    const day = new Date(now()).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const hhmm = new Date(now()).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' });
+    const done = (((await db.get(key, {})) || {}).reads) || {};
+    const due = dueSlot(cfg.readTimes || DEFAULTS.readTimes, hhmm, (t) => !!done[`${day} ${t}`]);
+    if (!due) return null;
+    const covered = Object.fromEntries((cfg.readTimes || DEFAULTS.readTimes).filter((t) => t <= due).map((t) => [`${day} ${t}`, new Date(now()).toISOString()]));   // one read covers every earlier time today
+    await db.update(key, (c) => ({ ...(c || {}), reads: Object.fromEntries(Object.entries({ ...((c && c.reads) || {}), ...covered }).slice(-40)) }), {});
+    return refresh();
+  }
   if (enabled && env.NODE_ENV !== 'test') {
-    const tick = () => refresh().then(() => digest()).catch((e) => console.warn('[plan-sheet]', e.message));
-    const t = setInterval(tick, 15 * MIN); if (t.unref) t.unref();
-    setTimeout(tick, 60000).unref?.();
+    const tick = () => scheduledRead().then(() => digest()).catch((e) => console.warn('[plan-sheet]', e.message));
+    const t = setInterval(tick, 5 * MIN); if (t.unref) t.unref();
   }
 
   // the truck card shows its line on Gus's sheet
@@ -266,7 +280,7 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
   const admin = requireAdmin || requireAuth;
   app.get('/truckmate/plan-sheet', requireAuth, async (req, res) => {
     const cfg = await settings(); const st = (await db.get(key, {})) || {};
-    res.json({ sheetId: cfg.sheetId, sheetUrl: cfg.sheetId ? `https://docs.google.com/spreadsheets/d/${cfg.sheetId}` : null, serviceAccount: saEmail(), keyInRender: !!env.GOOGLE_SERVICE_ACCOUNT_JSON, title: st.title || null, tabs: st.tabs || [], allTabs: st.allTabs || [], chosenTabs: cfg.tabs || [], trucks: (st.plan || []).length, readAt: st.readAt || null, error: st.error || null, to: cfg.to, times: cfg.times, on: cfg.on });
+    res.json({ readTimes: cfg.readTimes || DEFAULTS.readTimes, sheetId: cfg.sheetId, sheetUrl: cfg.sheetId ? `https://docs.google.com/spreadsheets/d/${cfg.sheetId}` : null, serviceAccount: saEmail(), keyInRender: !!env.GOOGLE_SERVICE_ACCOUNT_JSON, title: st.title || null, tabs: st.tabs || [], allTabs: st.allTabs || [], chosenTabs: cfg.tabs || [], trucks: (st.plan || []).length, readAt: st.readAt || null, error: st.error || null, to: cfg.to, times: cfg.times, on: cfg.on });
   });
   app.put('/truckmate/plan-sheet/settings', admin, async (req, res) => {
     const b = req.body || {};
@@ -274,13 +288,14 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
     if (b.sheet && !id) return res.status(400).json({ error: 'Paste the Google Sheet link.' });
     const to = b.to != null ? [...new Set(String(Array.isArray(b.to) ? b.to.join(',') : b.to).split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[^@\s]+@floridabeauty\.us$/.test(x)))] : undefined;
     const times = Array.isArray(b.times) ? b.times.filter((t) => /^\d{2}:\d{2}$/.test(t)).slice(0, 6) : undefined;
+    const readTimes = Array.isArray(b.readTimes) ? b.readTimes.filter((t) => /^\d{2}:\d{2}$/.test(t)).slice(0, 12) : undefined;
     const tabs = Array.isArray(b.tabs) ? b.tabs.map((t) => String(t).slice(0, 100)).filter(Boolean).slice(0, 8) : undefined;
-    const next = await db.update(cfgKey, (cur) => ({ ...(cur || {}), ...(id ? { sheetId: id, sheetFrom: 'admin', sheetAt: new Date().toISOString() } : {}), ...(to ? { to } : {}), ...(times ? { times } : {}), ...(tabs ? { tabs } : {}), ...(b.on != null ? { on: !!b.on } : {}) }), {});
+    const next = await db.update(cfgKey, (cur) => ({ ...(cur || {}), ...(id ? { sheetId: id, sheetFrom: 'admin', sheetAt: new Date().toISOString() } : {}), ...(to ? { to } : {}), ...(times ? { times } : {}), ...(tabs ? { tabs } : {}), ...(readTimes ? { readTimes } : {}), ...(b.on != null ? { on: !!b.on } : {}) }), {});
     res.json(next);
   });
   app.post('/truckmate/plan-sheet/refresh', requireAuth, async (req, res) => { const plan = await refresh(); const st = (await db.get(key, {})) || {}; res.json({ ok: !!plan, trucks: (plan || []).length, error: st.error || null }); });
   app.post('/truckmate/plan-sheet/send', admin, async (req, res) => { try { res.json((await digest(true)) || { skipped: true }); } catch (e) { res.status(500).json({ error: e.message }); } });
 
   console.log(`[plan-sheet] Gus's planning sheet ${env.GOOGLE_SERVICE_ACCOUNT_JSON ? 'ready (service account set)' : 'waiting for GOOGLE_SERVICE_ACCOUNT_JSON'}`);
-  return { offer, refresh, overlay, lookup, digest, assessAll };
+  return { scheduledRead, offer, refresh, overlay, lookup, digest, assessAll };
 }

@@ -134,3 +134,13 @@ test('only the "Available Trucks" tab is read (or the tabs chosen in settings)',
   assert.deepEqual(pickTabs(tabs, ['gone']), ['Available Trucks'], 'a chosen tab that no longer exists → default');
   assert.deepEqual(pickTabs(['A', 'B']), ['A', 'B'], 'no Available Trucks tab → all');
 });
+
+import { dueSlot } from '../plansheet.js';
+
+test('the sheet is read only at the set times (3, 6, 10 AM, 2, 5, 10 PM)', () => {
+  const times = ['03:00', '06:00', '10:00', '14:00', '17:00', '22:00'];
+  assert.equal(dueSlot(times, '02:59'), null);
+  assert.equal(dueSlot(times, '06:05'), '06:00');
+  assert.equal(dueSlot(times, '06:05', () => true), null, 'already read');
+  assert.equal(dueSlot(times, '23:59', (t) => t !== '22:00'), '22:00');
+});
