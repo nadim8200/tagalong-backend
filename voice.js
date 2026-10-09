@@ -305,6 +305,8 @@ export function spokenName(raw) {
 }
 // Every customer name (and delivery town) on the board, most frequent first — fed to
 // Retell's speech-to-text so it hears "Bokhary" instead of "Bokori". Pure.
+// words every call uses — so speech-to-text hears "load", not "loan"
+export const BASE_WORDS = ['Florida Beauty Flora', 'Jarvis', 'load', 'trip number', 'bill number', 'trailer', 'POD', 'BOL', 'rate confirmation'];
 export function customerKeywords(items, max = 100) {
   const n = new Map();
   const add = (w) => { const k = String(w || '').trim(); if (k.length >= 3) n.set(k, (n.get(k) || 0) + 1); };
@@ -731,7 +733,7 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
         if (hour !== 5 || !key() || !/^https:\/\//.test(backend())) return;
         const cfg = await db.get(cfgKey, {});
         if (!cfg.agentId || cfg.keywordsDay === day) return;
-        const words = ['Florida Beauty Flora', 'Jarvis', ...customerKeywords(await items())].slice(0, 100).join('|');
+        const words = [...BASE_WORDS, ...customerKeywords(await items())].slice(0, 100).join('|');
         await db.update(cfgKey, (c) => ({ ...(c || {}), keywordsDay: day }), {});
         if (words !== cfg.keywords) await pushJarvis('Jarvis (daily customer-name refresh)');
       } catch (e) { console.warn('[voice] keyword refresh:', e.message); }
@@ -753,7 +755,7 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
         voice_id: env.RETELL_VOICE_ID || 'retell-Cimo', language: languages(),
         webhook_url: `${base}/retell/webhook`, max_call_duration_ms: 15 * 60000, end_call_after_silence_ms: 30000,
         // hear customer names right: bias the transcriber toward the names on today's loads
-        boosted_keywords: ['Florida Beauty Flora', 'Jarvis', ...customerKeywords(await items())].slice(0, 100),
+        boosted_keywords: [...BASE_WORDS, ...customerKeywords(await items())].slice(0, 100),
         stt_mode: env.RETELL_STT_MODE || 'accurate',
         // phone audio from docks / trucks: filter noise and other voices, don't cut Jarvis off on a cough or "uh-huh"
         denoising_mode: env.RETELL_DENOISING || 'noise-and-background-speech-cancellation',
@@ -806,7 +808,7 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
       try {
         const cfg = await db.get(cfgKey, {});
         if (!cfg.agentId) return;
-        const now = ['Florida Beauty Flora', 'Jarvis', ...customerKeywords(await items())].slice(0, 100).join('|');
+        const now = [...BASE_WORDS, ...customerKeywords(await items())].slice(0, 100).join('|');
         if (now !== cfg.keywords) await pushJarvis('auto: customer names');
       } catch (e) { console.warn('[voice] keyword refresh:', e.message); }
     }, 6 * 3600000);
