@@ -43,6 +43,11 @@ const tripOf = (item) => (item && item.trip) || item || {};
 export const custKey = (name) => String(name || '').trim().toUpperCase().replace(/\s+/g, ' ');
 const zipOf = (s) => { const m = String(s || '').match(/\b(\d{5})(?:-\d{4})?\b/); return m ? m[1] : null; };
 const cityOf = (s) => String(s || '').replace(/,?\s*\d{5}(-\d{4})?\s*$/, '').trim();
+// Billing / invoice / accounts-payable mailboxes get invoices, not hourly location updates. Pure.
+export const isBillingMailbox = (e) => /^(?:[^@]*[._-])?(invoic\w*|billing|bills?|accounts?[._-]?payable|ap|ar|payables?|remit\w*|freight[._-]?bills?)(?:[._-][^@]*)?@|invoice/i.test(String(e || '').split('@')[0] + '@');
+// "l-greg.stroka@x.com" next to "greg.stroka@x.com" is the same person with a prefix glued on
+// (TruckMate contact fields) — keep the clean one. Pure.
+export const dropGarbled = (list) => list.filter((a) => { const [l, d] = a.split('@'); return !list.some((b) => b !== a && b.endsWith(`@${d}`) && l.length > b.split('@')[0].length && new RegExp(`^[a-z0-9]{1,3}[._-]${b.split('@')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`).test(l)); });
 export const emailList = (v) => [...new Set((Array.isArray(v) ? v : String(v || '').split(/[,;\s]+/)).map((x) => String(x).trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)))];
 
 const phone10 = (p) => { const d = String(p || '').replace(/\D+/g, ''); return d.length === 11 && d[0] === '1' ? d.slice(1) : d.length === 10 ? d : null; };
@@ -343,7 +348,10 @@ export function sopStage(ev, item, { geo = () => null, now = Date.now() } = {}) 
   if (ev.kind === 'arrived' && !ev.delivered) return { stage: 'At receiver', destination: (stops.find((s) => s.key === ev.stop) || {}).place || null, headline: `Driver at the receiver${ev.of > 1 ? ` (stop ${ev.number} of ${ev.of})` : ''}.${posted}` };
   if (ev.kind === 'delivered' || (ev.kind === 'arrived' && ev.delivered)) return { attach: 'pod', destination: ev.stop ? ((stops.find((s) => s.key === ev.stop) || {}).place || null) : null, headline: `Load completed${ev.of > 1 ? ` (stop ${ev.number} of ${ev.of})` : ''}.${posted}` };
   if (ev.kind === 'late') return { headline: `Running behind the appointment — see the new ETA below.${posted}` };
-  return { stage: null, headline: `Rolling.${posted}` };
+  // the routine hourly update says what the truck is really doing right now
+  const here = whereNow(item, now);
+  if (here && here.mph != null && here.mph < 5 && !here.stale) return { stage: null, headline: `In transit — the truck is stopped${here.place ? ` at ${String(here.place).replace(/^.*?,\s*(?=[^,]+,\s*[A-Z]{2}\b)/, '')}` : ''} right now.${posted}` };
+  return { stage: null, headline: `Rolling${here && here.place && !here.stale ? ` — near ${String(here.place).replace(/^.*?,\s*(?=[^,]+,\s*[A-Z]{2}\b)/, '')}` : ''}.${posted}` };
 }
 
 // The email for one event. Pure (given geo).
@@ -483,7 +491,8 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
   // status emails go to the customer / broker side (not every receiving dock)
   function recipients(item, cfg) {
     const r = contactsOf(item, cfg);
-    return emailList(r.contacts.filter((c) => c.email && (r.edited || (['customer', 'broker', 'other'].includes(c.role) && (cfg.useBroker || c.sources.some((x) => x !== 'rate con'))))).map((c) => c.email));
+    // status updates: no billing / invoice mailboxes (unless dispatch added them by hand), no garbled duplicates
+    return dropGarbled(emailList(r.contacts.filter((c) => c.email && (r.edited || (['customer', 'broker', 'other'].includes(c.role) && (cfg.useBroker || c.sources.some((x) => x !== 'rate con')) && !isBillingMailbox(c.email)))).map((c) => c.email)));
   }
 
   async function deliver(site, trip, item, ev, ctx, { by = 'AI Dispatcher (automatic)', to = null } = {}) {
