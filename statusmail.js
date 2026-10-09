@@ -36,7 +36,7 @@ const ARRIVE = /^arrcon/i;
 const LOADED = /^(loadedtogo|sptld)/i;          // TruckMate: TRAILER NOW LOADED TO GO / SPOTTED LOADED
 const DONE = /^(delvd|deliv|del$|cmplt|complete)/i;
 const DEAD = /^(canc|void)/i;
-export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, locationEvery: 2.5, routineLocation: true, useBroker: true, customers: {}, trips: {} };   // location updates every 2.5 h — only to the rate con contact (cc its tracking email), on the load's email chain, with a live tracking link
+export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, locationEvery: 2.5, routineLocation: false, watchTimes: ['08:00', '12:00', '16:00', '20:00', '00:00', '04:00'], useBroker: true, customers: {}, trips: {} };   // location updates only when someone asks Jarvis (broker watch)   // location updates every 2.5 h — only to the rate con contact (cc its tracking email), on the load's email chain, with a live tracking link
 const MAX_PER_DAY = 15;
 
 const tripOf = (item) => (item && item.trip) || item || {};
@@ -62,6 +62,9 @@ export function rateConAudience(item) {
   to = dropGarbled(to); cc = dropGarbled(cc);
   return { to, cc, domains: [...new Set([...to, ...cc].map((e) => e.split('@')[1]))] };
 }
+// The broker-update time that's due: the latest of today's times that passed and wasn't sent. Pure.
+export const dueWatchSlot = (times = [], hhmm = '00:00', isDone = () => false) => [...times].sort().filter((t) => t <= hhmm && !isDone(t)).pop() || null;
+const MILESTONES = new Set(['at-shipper', 'picked-up', 'arrived', 'delivered']);
 export const emailList = (v) => [...new Set((Array.isArray(v) ? v : String(v || '').split(/[,;\s]+/)).map((x) => String(x).trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)))];
 
 const phone10 = (p) => { const d = String(p || '').replace(/\D+/g, ''); return d.length === 11 && d[0] === '1' ? d.slice(1) : d.length === 10 ? d : null; };
@@ -520,15 +523,15 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       const now0 = (ctx && ctx.now) || Date.now();
       const sop = sopStage(ev, item, { geo: (ctx && ctx.geo) || (() => null), now: now0 });
       // location updates carry the live tracking link (it stops working once the load is delivered)
-      const trackUrl = ev.kind === 'location' && track ? await track(site, trip).catch(() => null) : null;
+      const trackUrl = (ev.kind === 'location' || ev.watch) && track ? await track(site, trip).catch(() => null) : null;
       const u = await buildUpdateFor({ db, docs, site, items: [item], trips: [trip], customer: cust, audience: 'customer', now: now0, extraRef: rc.loadNumber ? `Load ${rc.loadNumber}` : `Trip ${trip}`, trackUrl, ...sop });
       mail = { subject: u.subject, html: u.html, text: u.text };
       attachIds = u.attachIds || [];
     } else mail = renderEvent(ev, item, ctx);
     if (!mail) return { status: 'skipped' };
     // routine location updates: the rate con contact only (cc the rate con's tracking email)
-    const aud = !to && ev.kind === 'location' ? rateConAudience(item) : null;
-    const rcpts = to || (aud ? aud.to : recipients(item, cfg));
+    const aud = !to && (ev.kind === 'location' || ev.watch) ? rateConAudience(item) : null;
+    const rcpts = to || (aud ? (ev.watch && ev.kind !== 'location' ? emailList([...recipients(item, cfg), ...aud.to]) : aud.to) : recipients(item, cfg));
     const ccs = aud ? aud.cc : [];
     let status = 'sent'; let error = null; let chain = null;
     if (!rcpts.length) status = aud ? 'not sent — no contact email on the rate con' : 'not sent — no customer email on file';
@@ -548,7 +551,9 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
   }
 
   // After every Watchtower cycle.
+  const watchKey = (site) => `taBrokerWatch:${site}`;   // trip → { since, emailId, by, firstAt }
   async function process(site, board, { geo = () => null, now = Date.now() } = {}) {
+    const watches = enabled ? ((await db.get(watchKey(site), {})) || {}) : {};
     if (!enabled) return;
     const etas = ((await db.get(`taWatch:${site}`, {})) || {}).etas || {};   // Watchtower's live stop ETAs (last cycle)
     lastBoard = { site, board, geo };
@@ -564,8 +569,23 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       if (!trip) continue;
       const rec = next.trips[trip] || { sent: { stops: {} }, log: [] };
       if (!rec.sent.pickedUp) rec.gps = trackPickup(item, rec.gps, { geo, now });
-      const evs = pendingEvents(item, rec.sent, { now, everyHours: Number(cfg.locationEvery) || 2.5, gps: rec.gps }).filter((ev) => !(ev.kind === 'location' && ((down[trip] && down[trip].on) || cfg.routineLocation === false)));   // routine location emails only when turned on, never during a breakdown
+      const evs = pendingEvents(item, rec.sent, { now, everyHours: Number(cfg.locationEvery) || 2.5, gps: rec.gps }).filter((ev) => !(ev.kind === 'location' && ((down[trip] && down[trip].on) || cfg.routineLocation !== true)));   // routine location emails only when turned on, never during a breakdown
       const late = down[trip] && down[trip].on ? null : lateNotice(etas[trip], rec.sent.late, { now });
+      // a load someone asked Jarvis to keep the broker updated on: current location now, then at the set times
+      const watch = watches[trip];
+      if (watch) {
+        evs.forEach((ev) => { if (MILESTONES.has(ev.kind)) ev.watch = true; });
+        const day = new Date(now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        const hhmm = new Date(now).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' });
+        const done = rec.sent.watchSlots || {};
+        const slot = !watch.firstAt ? 'first' : dueWatchSlot(cfg.watchTimes || DEFAULTS.watchTimes, hhmm, (t) => !!done[`${day} ${t}`] || Date.parse(watch.firstAt) > now - 60 * 60000);
+        if (slot && !(down[trip] && down[trip].on)) {
+          const covered = slot === 'first' ? {} : Object.fromEntries((cfg.watchTimes || DEFAULTS.watchTimes).filter((t) => t <= slot).map((t) => [`${day} ${t}`, new Date(now).toISOString()]));
+          rec.sent.watchSlots = Object.fromEntries(Object.entries({ ...done, ...covered }).slice(-40));
+          if (slot === 'first') watches[trip] = { ...watch, firstAt: new Date(now).toISOString() };
+          if (!evs.some((ev) => MILESTONES.has(ev.kind))) evs.push({ kind: 'location', stage: /^(DEPSHIP|ARRCONS|DEPCONS|INTRAN|ENROUTE)/i.test(String(tripOf(item).status || '')) ? 'rolling' : 'to-shipper', watch: true });
+        }
+      }
       if (!evs.length && !late) { next.trips[trip] = rec; continue; }
       const nowIso = new Date(now).toISOString();
       const mark = (ev) => {
@@ -579,6 +599,7 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       evs.forEach(mark);
       // only the newest milestone goes out when several piled up (first sight / first run)
       const sendable = adopting || cfg.enabled === false || !evs.length ? [] : [evs[evs.length - 1]];
+      if (!adopting && cfg.enabled !== false) { const w = evs.find((ev) => ev.watch && ev.kind === 'location'); if (w && !sendable.includes(w)) sendable.push(w); }   // an asked-for broker update always goes
       if (late) {   // a delay notice always goes on its own
         rec.sent.late = { ...(rec.sent.late || {}), [late.stop]: { etaMs: late.etaMs, at: nowIso } };
         evs.push(late);
@@ -596,6 +617,9 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       if (!live.has(trip)) { r.goneAt = r.goneAt || new Date(now).toISOString(); if (now - Date.parse(r.goneAt) > 7 * 24 * H) delete next.trips[trip]; } else delete r.goneAt;
     }
     await db.set(key(site), next);
+    // broker watches: remember the first update; end once delivered
+    for (const [n, w] of Object.entries(watches)) { const r = next.trips[n]; if (r && r.sent && r.sent.delivered && Date.parse(r.sent.delivered) >= Date.parse(w.since)) delete watches[n]; }
+    await db.set(watchKey(site), watches);
     for (const w of work) {
       const r = await deliver(site, w.trip, w.item, w.ev, { geo, now }); // eslint-disable-line no-await-in-loop
       await db.update(key(site), (cur) => { // eslint-disable-line no-await-in-loop
@@ -770,5 +794,13 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
   }
 
   console.log(`[status-mail] customer status emails for ${DEFAULTS.prefixes.join('/')} loads ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { process, overlay };
+  // "@Jarvis please update the broker on this load" → 6 location updates a day + every milestone, until delivered
+  async function watch(site, trip, { emailId = null, by = null } = {}) {
+    if (!enabled) return { ok: false };
+    await db.update(watchKey(site), (cur) => ({ ...(cur || {}), [String(trip)]: { since: new Date().toISOString(), emailId, by } }), {});
+    return { ok: true, times: (await settings()).watchTimes || DEFAULTS.watchTimes };
+  }
+  app.get('/truckmate/broker-watch', requireAuth, async (req, res) => res.json((await db.get(watchKey(String(req.query.site || 'florida-beauty')), {})) || {}));
+  app.post('/truckmate/broker-watch/:trip/stop', requireAuth, async (req, res) => { await db.update(watchKey(String(req.query.site || 'florida-beauty')), (cur) => { const a = { ...(cur || {}) }; delete a[String(req.params.trip)]; return a; }, {}); res.json({ ok: true }); });
+  return { process, overlay, watch };
 }

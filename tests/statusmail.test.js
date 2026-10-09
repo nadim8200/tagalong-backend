@@ -88,7 +88,7 @@ test('first run adopts silently; later events email the customer list and log on
   assert.match(Buffer.from((sent[1].mime.match(/text\/plain[\s\S]*?base64\r\n\r\n([\s\S]*?)\r\n--/) || [])[1].replace(/\r\n/g, ''), 'base64').toString(), /Driver at the receiver \(stop 1 of 2\)/);
 });
 
-test('location updates: every 2.5 h, only the rate con contact (cc its tracking email), with the live tracking link; off when turned off', async () => {
+test('broker updates only when asked: current location now, then at 8/12/4 AM-PM & 8/12/4 night, milestones to the broker too, ends at delivery', async () => {
   const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
   const sent = [];
   const fetchFn = async (url, opts) => { if (url.includes('oauth2')) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) }; sent.push(readSent(opts)); return { ok: true, status: 202, json: async () => ({}) }; };
@@ -96,21 +96,30 @@ test('location updates: every 2.5 h, only the rate con contact (cc its tracking 
   await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
   const chains = [];
   const sm = initStatusMail({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, env, fetchFn, track: async (site, trip) => `https://mytagalong.app/s/tok${trip}`, chainReply: async (site, trip, m) => { chains.push({ trip, ...m }); return { sent: true, chain: 'msg1' }; } });
-  const rc = { _ratecon: { data: { brokerEmail: 'ana@rosebrokers.com', contacts: [{ role: 'tracking', email: 'tracking@rosebrokers.com' }, { role: 'billing', email: 'invoices@rosebrokers.com' }] } } };
+  const rc = { _ratecon: { data: { brokerEmail: 'ana@rosebrokers.com', contacts: [{ role: 'tracking', email: 'tracking@rosebrokers.com' }] } } };
   const picked = load({ trip: { status: 'DEPSHIP' }, extra: rc });
-  await sm.process('fb', { trips: [load({ extra: rc })] }, { geo, now: NOW });
-  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 60000 });
-  assert.equal(sent.length, 1, 'picked up (milestone) to the customer list');
-  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 2 * 3600000 });
-  assert.equal(chains.length, 0, 'not 2.5 h yet');
-  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 2.6 * 3600000 });
-  assert.equal(chains.length, 1);
+  const T = Date.parse('2026-10-09T13:30:00Z');   // Fri 9:30 AM ET
+  await sm.process('fb', { trips: [load({ extra: rc })] }, { geo, now: T - 3600000 });
+  await sm.process('fb', { trips: [picked] }, { geo, now: T - 1800000 });
+  await sm.process('fb', { trips: [picked] }, { geo, now: T + 5 * 3600000 });
+  assert.equal(chains.length, 0, 'no automatic location updates any more');
+  await sm.watch('fb', '900200', { emailId: 'ask1', by: 'Rosa' });
+  await sm.process('fb', { trips: [picked] }, { geo, now: T });
+  assert.equal(chains.length, 1, 'current location right away');
   assert.deepEqual([chains[0].to, chains[0].cc], [['ana@rosebrokers.com'], ['tracking@rosebrokers.com']]);
-  assert.match(chains[0].text, /Track this load live: https:\/\/mytagalong\.app\/s\/tok900200 \(stops working once the load is delivered\)/);
-  assert.equal(sent.length, 1, 'went on the chain, not a new email');
-  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] }, routineLocation: false });
-  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 6 * 3600000 });
-  assert.equal(chains.length, 1, 'turned off');
+  assert.match(chains[0].text, /Track this load live/);
+  await sm.process('fb', { trips: [picked] }, { geo, now: T + 30 * 60000 });
+  assert.equal(chains.length, 1, 'nothing until the next set time');
+  await sm.process('fb', { trips: [picked] }, { geo, now: Date.parse('2026-10-09T16:05:00Z') });   // 12:05 PM ET
+  assert.equal(chains.length, 2, '12 PM update');
+  await sm.process('fb', { trips: [picked] }, { geo, now: Date.parse('2026-10-09T16:30:00Z') });
+  assert.equal(chains.length, 2);
+  // delivered → the milestone goes to the broker too, then the watch ends
+  const done = load({ trip: { status: 'DELVD' }, hist: [{ status: 'DEPSHIP' }, { status: 'ARRCONS' }, { status: 'DELVD' }], bills: [{ billNumber: 'B0180251', billToName: 'Fixture Floral Co', endZoneDescription: 'VALDOSTA, GA, 31601', actualDelivery: '2026-10-09T17:00:00Z' }, { billNumber: 'R0180252', billToName: 'Rose Brokers', endZoneDescription: 'LYONS, GA, 30436', actualDelivery: '2026-10-09T19:00:00Z' }], extra: rc });
+  await sm.process('fb', { trips: [done] }, { geo, now: Date.parse('2026-10-09T20:05:00Z') });
+  const last = chains[chains.length - 1];
+  assert.ok(last.to.includes('ana@rosebrokers.com') && last.to.includes('ops@fixture.com'), 'milestone to the broker and the customer list');
+  assert.deepEqual(await db.get('taBrokerWatch:fb', {}), {}, 'watch ended at delivery');
 });
 
 import { contactsFor } from '../statusmail.js';

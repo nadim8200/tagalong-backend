@@ -50,6 +50,7 @@ import { initMeetWatch } from './meetwatch.js';
 import { initBrokerTrack } from './brokertrack.js';
 import { initNextLoads } from './nextloads.js';
 import { initPlanSheet } from './plansheet.js';
+import { initPaperwork } from './paperwork.js';
 import { initMilestones } from './milestones.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
@@ -752,7 +753,7 @@ const meetWatch = initMeetWatch({ db, getBoard: (site) => truckmate.buildBoard(s
 const nextLoads = initNextLoads({ db, env: process.env });
 // Gus's planning sheet (Google Sheets, read-only via the service account)
 const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), nextLoads, env: process.env });
-const inbox = initInbox(app, { planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
+const inbox = initInbox(app, { brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
@@ -783,6 +784,8 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 const voice = initVoice(app, { training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, db, replyInThread: (...a) => inbox.replyInThread(...a), ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+// paperwork after delivery: POD / BOL from the driver → broker + Billing; Billing's document requests
+const paperwork = initPaperwork(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), groupEmail: (n) => directory.groupEmail(n), replyWithDocs: (id, o) => inbox.replyWithDocs(id, o), env: process.env });
 // reefer temp photos (8 AM / 3 PM / 9:30 PM, hourly reminders) + an email to dispatch on every driver contact
 tempPhotos = initTempPhotos(app, { groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, ringcentral: rc, voice, comms, isInternal, env: process.env });
 driverLinks.usePhotos((site, trip, info) => tempPhotos.received(site, trip, info));
