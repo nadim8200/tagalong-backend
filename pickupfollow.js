@@ -49,6 +49,8 @@ export function plannedPickup(item) {
   const pu = rc && (rc.pickups || []).find((x) => x && (x.date || x.time || x.appointment));
   const place = pu ? [pu.name, [pu.city, pu.state].filter(Boolean).join(', ')].filter(Boolean).join(', ') : ((m && (m.stops || []).find((x) => /^LOAD/i.test(x.action || ''))) || {}).customer || String(tripOf(item).origZoneDesc || '').replace(/,\s*\d{5}.*$/, '');
   if (h && h.kind === 'pickup_delayed' && h.newPickupAt) return { ms: wallMs(h.newPickupAt.slice(0, 10), +h.newPickupAt.slice(11, 13), +h.newPickupAt.slice(14, 16)), source: 'email', place };
+  const ask = item && item._pickupAsk;   // a staff member emailed Jarvis the pickup time to follow up
+  if (ask && ask.at) return { ms: wallMs(ask.at.slice(0, 10), +ask.at.slice(11, 13), +ask.at.slice(14, 16)), source: 'dispatch email', place };
   if (m && m.pickupAt) return { ms: wallMs(String(m.pickupAt).slice(0, 10), +String(m.pickupAt).slice(11, 13), +String(m.pickupAt).slice(14, 16)), source: 'trip sheet', place };
   if (pu) {
     const ymd = ymdOf(pu.date || pu.appointment); const hm = hmOf(pu.time || pu.appointment);
