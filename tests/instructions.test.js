@@ -197,3 +197,10 @@ test('cheaper: group emails are read only when they say "Jarvis" or Jarvis is al
   assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us', 'jarvis@floridabeauty.us'), text: 'hi' }).read, true, 'Jarvis also addressed directly');
   assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: 'hi', readAll: true }).read, true, 'setting: read everything');
 });
+
+test('auto-acknowledgements ("Confirmation reply for…", "Automatic reply:") are automatic notices, never the load chain', () => {
+  assert.equal(autoNotice('noreply@fedex.com', 'Confirmation reply for [EXTERNAL] Location update — Load 8192162'), 'auto_reply');
+  assert.equal(autoNotice('emily.cosgrove@chrobinson.com', 'Automatic reply: Location update — Load 569921506'), 'auto_reply');
+  assert.equal(autoNotice('ops@broker.com', 'RE: Thank you for contacting us'), 'auto_reply');
+  assert.equal(autoNotice('ops@broker.com', 'Re: Load 8192162 — pickup moved'), null);
+});

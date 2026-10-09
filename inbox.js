@@ -106,7 +106,7 @@ export function autoNotice(address, subject) {
   const local = String(address || '').toLowerCase().split('@')[0];
   const subj = String(subject || '');
   if (/^(undeliverable|undelivered|delivery (status notification|has failed|failure)|mail delivery (failed|subsystem)|returned mail|failure notice)/i.test(subj) || /^(microsoftexchange|postmaster|mailer-daemon)/i.test(local)) return 'bounce';
-  if (/^(automatic reply|auto(matic)?[- ]?reply|out of (the )?office|ooo\b|autoreply|respuesta autom[aá]tica)/i.test(subj)) return 'auto_reply';
+  if (/^(automatic reply|auto(matic)?[- ]?reply|out of (the )?office|ooo\b|autoreply|respuesta autom[aá]tica|confirmation reply|auto[- ]?(acknowledge?ment|response)|(we('ve| have)|has been) received|ticket (received|created|#)|thank you for (your|contacting))/i.test(subj.replace(/^(re|fw|fwd)\s*:\s*/i, ''))) return 'auto_reply';
   if (/^(read|le[ií]do|not read|accepted|declined|tentative|aceptado|rechazado|recall)\s*:/i.test(subj)) return 'receipt';   // read receipts, calendar replies
   return null;
 }
@@ -1000,7 +1000,8 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     const list = (((await db.get(key(site), { list: [] })) || {}).list || []).filter((x) => (x.trips || []).includes(String(trip)) || (x.rateCons || []).some((r) => String(r.trip) === String(trip)));
     const doms = new Set(partyDomains.map((d) => String(d).toLowerCase()).filter(Boolean));
     let chain = null;
-    for (const e of list.slice(0, 6)) {                     // newest first
+    const AUTO_SUBJ = /^(re:\s*)*(automatic reply|auto(matic)?[- ]?reply|out of (the )?office|confirmation reply|undeliverable|delivery (status notification|has failed)|read\s*:|accepted\s*:|declined\s*:)/i;
+    for (const e of list.filter((x) => !x.auto && !autoNotice(x.from && x.from.address, x.subject) && !AUTO_SUBJ.test(String(x.subject || ''))).slice(0, 6)) {   // newest first — never an auto-reply / bounce / receipt
       let on = [String((e.from && e.from.address) || '').toLowerCase()];
       try { const m = await g(`/messages/${encodeURIComponent(e.id)}?$select=toRecipients,ccRecipients`); on = [...on, ...[...(m.toRecipients || []), ...(m.ccRecipients || [])].map((r) => String((r.emailAddress && r.emailAddress.address) || '').toLowerCase())]; } catch { continue; } // eslint-disable-line no-await-in-loop
       const outside = on.filter((a) => a && !isInternal(a, env));
