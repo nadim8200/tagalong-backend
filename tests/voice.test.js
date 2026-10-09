@@ -30,7 +30,7 @@ function setup(extraEnv = {}, opts = {}) {
       : url.includes('create-phone-call') ? { call_id: 'call_9', call_status: 'registered' } : {};
     return { ok: true, status: 201, json: async () => body };
   };
-  initVoice(app, { ...(opts.clients ? { clients: opts.clients } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: board }), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
+  initVoice(app, { ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: board }), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
   const hit = async (route, body, { sign = true, user = { name: 'Ana' } } = {}) => {
     const raw = JSON.stringify(body);
     const sig = sign ? await Retell.sign(raw, KEY) : 'v=1,d=bad';
@@ -517,4 +517,21 @@ test('client list: "DBE C Wholesale" in Greensburg is D.B.E.C. WHOLESALE — its
   assert.equal(r3.out.found, false);
   assert.match(r3.out.say, /one of our customers.*no load for them is on the board/);
   assert.ok(!/601-?261|trussell/i.test(JSON.stringify(r3.out)));
+});
+
+test('the "Ashland Addison" call: a staff number is never tied to a business; a wrong phone memory is dropped; the client is recognized', async () => {
+  const clients = initClients({ score: nameScore });
+  const directory = { load: async () => ({ people: [{ name: 'Frank Ducassi', phone: '305-748-5611' }] }) };
+  // from Frank's cell: no "Is this Bokhary Produce?" even though a test call used that name before
+  const v = setup({}, { clients, directory });
+  await v.db.set('taJarvisCallers:florida-beauty', { '3057485611': { name: 'BOKHARY PRODUCE' } });
+  const r = await v.hit('POST /retell/fn/lookup_load', { args: {}, call: { call_id: 'c93', direction: 'inbound', from_number: '+13057485611' } });
+  assert.ok(!/BOKHARY/i.test(JSON.stringify(r.out)), 'no guess from a staff phone');
+  // a customer number remembered as Bokhary, caller says Ashland Addison → memory dropped, client recognized
+  const v2 = setup({}, { clients });
+  await v2.db.set('taJarvisCallers:florida-beauty', { '7735550100': { name: 'BOKHARY PRODUCE' } });
+  const r2 = await v2.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: { call_id: 'c94', direction: 'inbound', from_number: '+17735550100' } });
+  assert.equal(r2.out.found, false);
+  assert.match(r2.out.known_client || '', /Ashland Addison/i);
+  assert.deepEqual(await v2.db.get('taJarvisCallers:florida-beauty', {}), {}, 'wrong memory removed');
 });

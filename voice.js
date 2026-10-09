@@ -503,9 +503,14 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
       const isName = (v) => v && /[A-Za-z]{3,}/.test(String(v)) && !/\d{3,}/.test(String(v));
       const said = a.customer_name || [a.bill_number, a.broker_load_number, a.trip_number, a.truck_number, a.trailer_number].find(isName) || null;
       if (said && call.call_id) callName.set(call.call_id, said);
-      let known = said ? null : ((await db.get(bookKey, {}))[last10(callerPhone(call))] || null);   // called before from this phone
+      // our own staff call about many customers — their numbers are never tied to one business
+      const staffPhone = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []).some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call))) : false;
+      const memory = staffPhone ? null : ((await db.get(bookKey, {}))[last10(callerPhone(call))] || null);
+      // they named a different business than this number was remembered as → that memory was wrong
+      if (said && memory && nameScore(said, memory.name) < 0.75) await db.update(bookKey, (cur) => { const x = { ...(cur || {}) }; delete x[last10(callerPhone(call))]; return x; }, {});
+      let known = said ? null : memory;   // called before from this phone
       // a number on the client list → that business (confirmed with the caller before anything is shared)
-      if (!said && !known && clients) { const c = clients.byPhone(callerPhone(call)); if (c) known = { name: c.name, client: c.id }; }
+      if (!said && !known && clients && !staffPhone) { const c = clients.byPhone(callerPhone(call)); if (c) known = { name: c.name, client: c.id }; }
       if (known) { const d = findLoad(await items(), { phone: callerPhone(call) }); if (d && d.role === 'driver') known = null; }
       const name = said || (call.call_id && callName.get(call.call_id)) || (known && known.name) || null;   // remembered from earlier in the call
       const numbers = [a.trip_number, a.bill_number, a.broker_load_number, a.truck_number, a.trailer_number].some((v) => v && !isName(v));
@@ -541,13 +546,13 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
           return reply({ found: false, say: a.customer_city ? `Nothing found for "${name}" in ${a.customer_city}. Ask for the trailer, bill or PO number — or take a message.` : 'Not found as heard. Ask which city the delivery goes to and ask them to spell the business name, then try again with customer_name and customer_city.' });
         }
         const biz = spokenName(stops[0].customer);                        // the real name, not what was misheard
-        if (call.call_id) callName.set(call.call_id, stops[0].customer);
+        if (call.call_id && said) callName.set(call.call_id, stops[0].customer);   // a phone guess isn't the caller's name until they say it
         // only the customer's authorized numbers (when that rule is on) — owners' numbers get anything
         if (profiles && profiles.allowed) {
           const ok = await profiles.allowed({ customerName: stops[0].customer, phone: callerPhone(call) });
           if (!ok.ok) return reply({ found: false, private: true, say: `For privacy, updates on ${spokenName(stops[0].customer)} deliveries only go to the phone numbers they authorized. Do not share any details of the load. Offer to take a message (take_message with their name and callback number) so customer service calls them back on an authorized number.` });
         }
-        await remember(callerPhone(call), stops[0].customer);
+        if (said && !staffPhone) await remember(callerPhone(call), stops[0].customer);
         const trips = [...new Set(stops.map((x) => x.trip))];
         const loads = trips.map((n) => customerView(all.find((it) => tripNo(it) === n), etas[n], stops.filter((x) => x.trip === n)));
         return reply({ found: true, matched_by: known && !said ? 'caller phone (called before as this business)' : 'customer name', speaking_with: biz, ...(known && !said ? { confirm: `Confirm first: "Is this ${biz}?"` } : {}), loads, say: `${trips.length > 1 ? 'They have deliveries on more than one truck — ask which city or trailer number before giving an ETA. ' : ''}${CUSTOMER_RULE}` });
