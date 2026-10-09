@@ -49,6 +49,7 @@ import { initOutreach } from './outreach.js';
 import { initMeetWatch } from './meetwatch.js';
 import { initBrokerTrack } from './brokertrack.js';
 import { initNextLoads } from './nextloads.js';
+import { initPlanSheet } from './plansheet.js';
 import { initMilestones } from './milestones.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
@@ -749,7 +750,9 @@ const follow = initFollowThrough(app, { groupEmail: (n) => directory.groupEmail(
 const meetWatch = initMeetWatch({ db, getBoard: (site) => truckmate.buildBoard(site), textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), replyInThread: (...a) => inbox.replyInThread(...a), env: process.env });
 // next loads: rate cons Gus (dispatch GM) sends for trucks still on a run → on the truck's card
 const nextLoads = initNextLoads({ db, env: process.env });
-const inbox = initInbox(app, { groupEmail: (n) => directory.groupEmail(n), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
+// Gus's planning sheet (Google Sheets, read-only via the service account)
+const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), nextLoads, env: process.env });
+const inbox = initInbox(app, { planSheet, groupEmail: (n) => directory.groupEmail(n), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
@@ -766,7 +769,7 @@ const profiles = initProfiles(app, { requireAuth: requireDispatch, db, env: proc
 let tempPhotos = null;    // reefer temp photos for trailers we can't read live (set below)
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
 let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers overlay)
-truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
+truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
@@ -789,7 +792,7 @@ voice.useOutreach((ev) => outreach.notify(ev));
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
-jarvisChat = initJarvisChat(app, { nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
+jarvisChat = initJarvisChat(app, { planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });

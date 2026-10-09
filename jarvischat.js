@@ -55,6 +55,7 @@ export const TOOLS = [
   { name: 'update_email', description: 'EMAIL REPLIES ONLY: when the email asks where loads are / their status / ETAs, list the trips that answer it (and dispatch follow-ups). The reply is then built from live data in the standard delivery-update format — do not write the load details yourself.', input_schema: { type: 'object', properties: { customer: { type: 'string', description: 'Customer / receiver name the update is about (as on the loads), or the place' }, destination: { type: 'string', description: 'Delivery city / state if the question was about a place' }, trips: { type: 'array', items: { type: 'string' } }, followUps: { type: 'array', items: { type: 'object', properties: { issue: { type: 'string' }, next: { type: 'string' }, owner: { type: 'string' }, status: { type: 'string', enum: ['Pending', 'Completed'] } } } } }, required: ['trips'] } },
   { name: 'staff_directory', description: 'Florida Beauty employees by name, department or role (billing, payroll, claims, maintenance, sales, IT…): name, department and extension. Cell phones are never available.', input_schema: { type: 'object', properties: { name_or_department: { type: 'string' } }, required: ['name_or_department'] } },
   { name: 'load_details', description: 'Everything about one load: status, truck/trailer/drivers, live location, every stop with ETA (local time), appointments, rate con, trip sheet, open alerts, to-dos, notes and transfers, holds, emails count.', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
+  { name: 'truck_plan', description: 'Gus\'s truck planning sheet checked against the live board: each truck\'s region (California / Midwest / Northeast…), flowers or broker, current trip status / lateness / when it will be empty, the NEXT trip (B number, info, pickup) and problems (late, can\'t make the next pickup, sheet vs TruckMate / rate con mismatches). Optional truck or region.', input_schema: { type: 'object', properties: { truck: { type: 'string' }, region: { type: 'string' } } } },
   { name: 'next_loads', description: 'Next loads: rate cons dispatch (Gus, the dispatch GM) sent for trucks to run once they finish their current trip — truck, broker, load number, pickup → delivery, rate, notes, and whether TruckMate / a trip sheet confirms it. Optional truck number. Use for "what does truck 2403 do next?" or "which rate cons came in today?".', input_schema: { type: 'object', properties: { truck: { type: 'string' } } } },
   { name: 'alerts', description: 'Open alerts (late, stopped, reefer, engine, unscheduled stops, holds…). Optional severity: critical | warning.', input_schema: { type: 'object', properties: { severity: { type: 'string' } } } },
   { name: 'conversations', description: 'What was said with a load\'s driver: texts, replies, app messages and Jarvis phone calls (summaries / transcripts).', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
@@ -102,7 +103,7 @@ export function customerSafe(x) {
 // Voice conversation in Ask Jarvis: the answer is read out loud, so keep it short.
 export const SPOKEN = `\n\nThis turn is a SPOKEN conversation (the dispatcher talks, your answer is read aloud): answer in 1-3 short plain sentences, no lists, tables, markdown or emojis. Say truck and trailer numbers as written. If there's more, give the key point and say the full detail is on screen. Anything that needs the dispatcher's Confirm: say it's waiting for their Confirm on screen.`;
 
-export function initJarvisChat(app, { requireAuth, db, nextLoads = null, playbook = null, directory = null, getBoard, docs = null, packets = null, driver = null, voice = null, reports = {}, mail = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initJarvisChat(app, { requireAuth, db, planSheet = null, nextLoads = null, playbook = null, directory = null, getBoard, docs = null, packets = null, driver = null, voice = null, reports = {}, mail = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const threadsKey = (uid) => `taJarvisChat:${uid}`;
   const actionsKey = `taJarvisActions:${SITE}`;
@@ -134,6 +135,11 @@ export function initJarvisChat(app, { requireAuth, db, nextLoads = null, playboo
         if (hit) return { found: true, trip: tripNo(hit.item), matchedBy: hit.by };
         const names = customerStops(all, q, (await watch()).etas || {});
         return names.length ? { found: true, byCustomerName: names.map((x) => ({ trip: x.trip, customer: x.customer, city: x.city })) } : { found: false };
+      }
+      case 'truck_plan': {
+        if (!planSheet) return { error: 'The planning sheet is not connected.' };
+        const r = await planSheet.lookup({ truck: input.truck, region: input.region });
+        return { ...r, trucks: r.trucks.slice(0, 60) };
       }
       case 'next_loads': {
         const want = String(input.truck || '').replace(/[^0-9A-Z]/gi, '').replace(/^0+/, '').toUpperCase();

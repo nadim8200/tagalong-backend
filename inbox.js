@@ -235,7 +235,7 @@ export function expandInstructions(list = []) {
 // "2026-10-08T23:00" → "Thu Oct 8, 11:00 PM". Pure.
 export const fmtWall = (w) => { const d = new Date(`${w}:00Z`); return isNaN(d) ? String(w) : d.toLocaleString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
 
-export function initInbox(app, { requireAuth, db, meetWatch = null, nextLoads = null, groupEmail = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initInbox(app, { requireAuth, db, meetWatch = null, nextLoads = null, groupEmail = null, planSheet = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const key = (site) => `taEmails:${site}`;          // { list: [email…], status }
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
@@ -411,6 +411,10 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
           try { await g(`/messages/${encodeURIComponent(m.id)}`, { method: 'PATCH', body: { isRead: true } }); } catch { /* still remembered */ } // eslint-disable-line no-await-in-loop
           continue;
         }
+      }
+      // Gus shares his planning sheet (Google's share email, or staff pasting the link) → Jarvis reads it from now on
+      if (planSheet && /docs\.google\.com\/spreadsheets\/d\//.test(`${(m.body && m.body.content) || ''} ${text}`) && (/@(docs\.)?google\.com$/i.test(from.address) || isInternal(from.address, env))) {
+        try { const o = await planSheet.offer({ text: `${(m.body && m.body.content) || ''} ${text}`, by: from.name || from.address }); if (o) { email.sheetShared = o; if (/@(docs\.)?google\.com$/i.test(from.address)) { email.status = 'handled'; email.handledBy = 'Jarvis (planning sheet shared — read-only)'; email.reply = { needed: false, kind: 'none', documents: [] }; } } } catch (e) { console.warn('[inbox] sheet:', e.message); } // eslint-disable-line no-await-in-loop
       }
       // automatic notices: file them quietly (a real contact that bounced → one "fix this address" to-do on the load)
       const auto = autoNotice(from.address, email.subject);
