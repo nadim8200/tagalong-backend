@@ -106,3 +106,20 @@ test('cheaper: on a re-read only the tabs that changed go to the AI', async () =
   await p.refresh();
   assert.equal(ai, 3, 'only the changed tab');
 });
+
+import { parseTrucks, chunkTab } from '../plansheet.js';
+
+test('a cut-off AI answer keeps every complete truck', () => {
+  const cut = '{"trucks":[\n{"truck":"2403","region":"Northeast"},\n{"truck":"2612","region":"California"},\n{"truck":"2615","regi';
+  assert.deepEqual(parseTrucks(cut).map((t) => t.truck), ['2403', '2612']);
+  assert.deepEqual(parseTrucks('{"trucks":[{"truck":"1"}]}').map((t) => t.truck), ['1']);
+  assert.deepEqual(parseTrucks('nothing'), []);
+});
+
+test('a big tab is read in pieces, each with the header rows', () => {
+  const rows = [['Truck', 'Region'], ['', ''], ['WEEK 41'], ...Array.from({ length: 130 }, (_, i) => [String(2000 + i), 'NE'])];
+  const parts = chunkTab({ title: 'This week', rows }, 60);
+  assert.equal(parts.length, 3);
+  for (const p of parts) assert.deepEqual(p.rows[0], ['Truck', 'Region']);
+  assert.match(sheetText({ tabs: [parts[1]] }), /R1: Truck \| Region\nR3: WEEK 41\nR64: 2060 \| NE/);
+});
