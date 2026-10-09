@@ -12,7 +12,7 @@ import { createSign, createHash } from 'crypto';
 import { sendMail, mailConfig } from './mailer.js';
 import { loadSnapshot } from './updateemail.js';
 import { renderOutboundFollowUp } from './followupmail.js';
-import { wallMs } from './pickupfollow.js';
+import { wallMs, plannedPickup } from './pickupfollow.js';
 
 const SITE = 'florida-beauty';
 const MIN = 60000;
@@ -155,8 +155,36 @@ export function assess(row, items = [], { now = Date.now(), etas = {}, nextLoads
   return { truck: row.truck, region: row.region || null, kind: row.kind || null, driver: row.driver || null, row: row.row || null, tab: row.tab || null, sheetCurrent: row.current || null, sheetNext: row.next || null, notes: row.notes || null, current, next: { bill: (row.next && row.next.bill) || null, info: (row.next && row.next.info) || null, pickupMs: nextMs, tmTrip: booked ? tripNo(booked) : null, rateCon: nl[0] ? { broker: nl[0].rc.broker, load: nl[0].rc.loadNumber } : null }, flags, tone };
 }
 
+// Board-wide risks from the live board + Samsara ETAs (every load, not only the sheet). Pure.
+//  late: delivery ETA past the appointment · pickups: pickup time passed and not left, or the truck is
+//  still on its previous load and won't be empty in time.
+const LEFT = /^(DEPSHIP|ARRCONS|DEPCONS|INTRAN|ENROUTE)/i;
+const DONE2 = /^(delvd|deliv|del$|cmplt|complete|canc|void)/i;
+export function opsRisks(items = [], { now = Date.now(), etas = {}, horizonH = 18 } = {}) {
+  const late = []; const pickups = [];
+  const emptyAt = (it) => { const st = ((etas[tripNo(it)] || {}).stops || []).map((x) => x.etaMs).filter(Boolean); return st.length ? st[st.length - 1] : null; };
+  for (const it of items) {
+    const st = String(tripOf(it).status || '');
+    if (DONE2.test(st)) continue;
+    const s = loadSnapshot(it, { eta: etas[tripNo(it)] || null, now });
+    if (s.status === 'Delivered') continue;
+    if (LEFT.test(st) && s.status === 'Delayed') late.push({ trip: tripNo(it), truck: unitOf(it), stop: s.stopCity, etaMs: s.etaMs, apptMs: s.apptMs, lateMin: s.lateMin || 0, location: s.location, moving: s.moving });
+    if (LEFT.test(st)) continue;
+    const plan = plannedPickup(it);
+    if (!plan || plan.ms - now > horizonH * 3600000) continue;
+    const why = [];
+    if (plan.ms < now - 30 * MIN) why.push(`pickup was ${hm((now - plan.ms) / MIN)} ago and the load hasn't left (TruckMate ${st || 'no status'})`);
+    const prev = items.find((x) => x !== it && unitOf(x) && unitOf(x) === unitOf(it) && LEFT.test(String(tripOf(x).status || '')) && !DONE2.test(String(tripOf(x).status || '')));
+    const free = prev ? emptyAt(prev) : null;
+    if (prev && (!free || free > plan.ms - 30 * MIN)) why.push(`truck ${unitOf(it)} is still on trip ${tripNo(prev)}${free ? ` — empty about ${fmt(free)} ET` : ' (no ETA for its last stop)'}`);
+    if (why.length) pickups.push({ trip: tripNo(it), truck: unitOf(it) || null, place: plan.place || null, pickupMs: plan.ms, source: plan.source, why, location: s.location });
+  }
+  late.sort((a, b) => b.lateMin - a.lateMin); pickups.sort((a, b) => a.pickupMs - b.pickupMs);
+  return { late, pickups };
+}
+
 // The planning email for Gus: by region, problems first. Pure.
-export function planEmail(rows, { now = Date.now(), title = 'Planning sheet' } = {}) {
+export function planEmail(rows, { now = Date.now(), title = 'Planning sheet', risks = null } = {}) {
   const LABEL = { red: 'Needs attention', amber: 'Check', green: 'On track' };
   const blocks = rows.map((a) => ({
     trip: a.truck, title: `Truck ${a.truck}${a.kind ? ` · ${a.kind}` : ''}${a.driver ? ` · ${a.driver}` : ''}`,
@@ -167,9 +195,17 @@ export function planEmail(rows, { now = Date.now(), title = 'Planning sheet' } =
     next: a.next.bill || a.next.info ? `Next: ${[a.next.bill, a.next.info].filter(Boolean).join(' — ')}${a.next.pickupMs ? ` · pickup ${fmt(a.next.pickupMs)} ET` : ''}${a.next.tmTrip ? ` · in TruckMate (trip ${a.next.tmTrip})` : ''}` : 'No next trip on the sheet',
     need: null, details: [...(a.current && a.current.location ? [`Now near ${a.current.location}`] : []), ...(a.notes ? [`Sheet: ${a.notes}`] : []), ...(a.tab ? [`${a.tab}${a.row ? ` · row ${a.row}` : ''}`] : [])],
   }));
+  // board-wide: late deliveries and pickups at risk come first
+  const rk = risks || { late: [], pickups: [] };
+  const lateBlocks = rk.late.map((l) => ({ trip: l.trip, title: `Trip ${l.trip}${l.truck ? ` · truck ${l.truck}` : ''}`, group: '1 · Running late for delivery', sortKey: `0${String(99999 - Math.round(l.lateMin)).padStart(5, '0')}`, schedLabel: 'Delivery',
+    scheduled: `${l.stop || 'next stop'} · appointment ${fmt(l.apptMs) || '—'} ET`, status: { label: `${hm(l.lateMin)} late`, tone: 'red', text: `ETA ${fmt(l.etaMs)} ET (Samsara GPS)${l.location ? ` · now near ${l.location}${l.moving === false ? ', stopped' : ''}` : ''}` }, next: 'Dispatch: new appointment with the receiver / update the customer', need: null, details: [] }));
+  const pickBlocks = rk.pickups.map((p) => ({ trip: p.trip, title: `Trip ${p.trip}${p.truck ? ` · truck ${p.truck}` : ''}`, group: '2 · Pickups at risk', sortKey: `1${p.pickupMs}`, schedLabel: 'Pickup',
+    scheduled: `${p.place || 'shipper'} · ${fmt(p.pickupMs)} ET (from ${p.source})`, status: { label: p.pickupMs < now ? 'Late pickup' : 'At risk', tone: 'red', text: p.why.join(' · ') }, next: 'Dispatch: confirm with the driver / reassign or move the pickup', need: null, details: p.location ? [`Truck now near ${p.location}`] : [] }));
+  const planBlocks = blocks.map((b) => ({ ...b, group: `3 · ${b.group}`, sortKey: `2${b.sortKey}` }));
   const bad = rows.filter((a) => a.tone === 'red').length;
-  const out = renderOutboundFollowUp({ heading: `Truck plan check — ${bad ? `${bad} need${bad === 1 ? 's' : ''} attention` : 'all on track'}`, blocks, closing: `From "${title}" (read-only) and the live board, ${fmt(now)} ET.` });
-  return { subject: `Truck plan check | ${bad} need attention · ${rows.length} trucks | ${new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' })}`, html: out.html, text: out.text };
+  const all = [...lateBlocks, ...pickBlocks, ...planBlocks.filter((b) => b.status.tone !== 'green'), ...planBlocks.filter((b) => b.status.tone === 'green')];
+  const out = renderOutboundFollowUp({ heading: `Operations check — ${rk.late.length} late · ${rk.pickups.length} pickup${rk.pickups.length === 1 ? '' : 's'} at risk · ${bad} plan problem${bad === 1 ? '' : 's'}`, blocks: all, closing: `Live board + Samsara ETAs${rows.length ? ` + "${title}" (read-only)` : ''}, ${fmt(now)} ET. Pickups checked for the next 18 hours.` });
+  return { subject: `Operations check | ${rk.late.length} late · ${rk.pickups.length} pickups at risk · ${bad} plan | ${new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' })}`, html: out.html, text: out.text };
 }
 
 export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBoard, nextLoads = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
@@ -224,7 +260,7 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
     const items = ((await getBoard(SITE)) || {}).trips || [];
     const etas = ((await db.get(`taWatch:${SITE}`, {})) || {}).etas || {};
     const nl = nextLoads ? await nextLoads.list() : [];
-    return { title: st.title, readAt: st.readAt, error: st.error || null, rows: plan.map((r) => assess(r, items, { now: now(), etas, nextLoads: nl })) };
+    return { title: st.title, readAt: st.readAt, error: st.error || null, rows: plan.map((r) => assess(r, items, { now: now(), etas, nextLoads: nl })), risks: opsRisks(items, { now: now(), etas }) };
   }
 
   // planning email at the set times (Miami time)
@@ -237,8 +273,8 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
     const due = (cfg.times || []).filter((t) => t <= hhmm && !sent[`${day} ${t}`]).pop();
     if (!force && !due) return null;
     const a = await assessAll();
-    if (!a.rows.length || !mailConfig(env).ready || !cfg.to.length) return { skipped: true };
-    const m = planEmail(a.rows, { now: now(), title: a.title || 'Planning sheet' });
+    if ((!a.rows.length && !a.risks.late.length && !a.risks.pickups.length) || !mailConfig(env).ready || !cfg.to.length) return { skipped: true };
+    const m = planEmail(a.rows, { now: now(), title: a.title || 'Planning sheet', risks: a.risks });
     await sendMail({ to: cfg.to, subject: m.subject, html: m.html, text: m.text }, { env, fetchFn });
     if (due) await db.update(key, (c) => ({ ...(c || {}), sent: { ...((c && c.sent) || {}), [`${day} ${due}`]: new Date(now()).toISOString() } }), {});
     return { sent: true, to: cfg.to };

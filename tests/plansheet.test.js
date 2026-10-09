@@ -60,9 +60,9 @@ test('planning email: by region, problems first', () => {
     { truck: '2403', region: 'Northeast', kind: 'flowers', tone: 'red', flags: [{ tone: 'red', text: 'Running 2 h behind' }], current: { trip: '624318', status: 'Delayed' }, next: { bill: 'B180400', info: 'RXO' } },
   ];
   const m = planEmail(rows, { now: NOW, title: 'Truck plan' });
-  assert.match(m.subject, /^Truck plan check \| 1 need attention · 2 trucks \| Fri, Oct 9$/);
-  assert.match(m.text, /TRUCK PLAN CHECK — 1 NEEDS ATTENTION/);
-  assert.match(m.text, /== Northeast ==\nTruck 2403 · flowers — NEEDS ATTENTION/);
+  assert.match(m.subject, /^Operations check \| 0 late · 0 pickups at risk · 1 plan \| Fri, Oct 9$/);
+  assert.match(m.text, /OPERATIONS CHECK — 0 LATE · 0 PICKUPS AT RISK · 1 PLAN PROBLEM/);
+  assert.match(m.text, /== 3 · Northeast ==\nTruck 2403 · flowers — NEEDS ATTENTION/);
   assert.ok(m.text.indexOf('Northeast') < m.text.indexOf('California'), 'problems first');
 });
 
@@ -143,4 +143,35 @@ test('the sheet is read only at the set times (3, 6, 10 AM, 2, 5, 10 PM)', () =>
   assert.equal(dueSlot(times, '06:05'), '06:00');
   assert.equal(dueSlot(times, '06:05', () => true), null, 'already read');
   assert.equal(dueSlot(times, '23:59', (t) => t !== '22:00'), '22:00');
+});
+
+import { opsRisks } from '../plansheet.js';
+
+test('operations check: late deliveries (Samsara ETA past appointment) and pickups at risk, from the whole board', () => {
+  const NOW2 = Date.parse('2026-10-09T13:00:00Z');   // Fri 9:00 AM ET
+  const items = [
+    // rolling, ETA 2 h after the appointment
+    { trip: { tripNumber: '624318', status: 'DEPSHIP', powerUnit: '2403' }, _samsara: { lat: 40, lng: -74, gpsAt: new Date(NOW2 - 5 * 60000).toISOString(), location: 'I-95, Newark, NJ', speedMph: 55 }, _manifest: { stops: [{ action: 'DELIVER', customer: 'Rose Co', tmPlace: 'NEWARK, NJ', apptAt: '2026-10-09T10:00' }] } },
+    // pickup at 8:00 AM, still not left
+    { trip: { tripNumber: '624700', status: 'LOADEDTOGO', powerUnit: '2612' }, _manifest: { pickupAt: '2026-10-09T08:00' } },
+    // pickup at 1:00 PM but its truck 2403 is still on 624318 (empty ~3 PM)
+    { trip: { tripNumber: '624701', status: 'DISP', powerUnit: '2403' }, _manifest: { pickupAt: '2026-10-09T13:00' } },
+    // fine: pickup tomorrow evening (outside 18 h)
+    { trip: { tripNumber: '624702', status: 'DISP', powerUnit: '2700' }, _manifest: { pickupAt: '2026-10-10T20:00' } },
+  ];
+  const etas = { 624318: { stops: [{ label: 'NEWARK, NJ', etaMs: Date.parse('2026-10-09T19:00:00Z'), apptMs: Date.parse('2026-10-09T14:00:00Z'), miles: 40 }] } };
+  const r = opsRisks(items, { now: NOW2, etas });
+  assert.deepEqual(r.pickups.map((p) => p.trip), ['624700', '624701']);
+  assert.match(r.pickups[0].why[0], /pickup was 1 h 0 min ago and the load hasn't left \(TruckMate LOADEDTOGO\)/);
+  assert.match(r.pickups[1].why[0], /truck 2403 is still on trip 624318 — empty about Fri, Oct 9, 3:00 PM ET/);
+});
+
+test('operations check: a rolling load whose Samsara ETA is past the appointment is listed as late', () => {
+  const NOW2 = Date.parse('2026-10-09T13:00:00Z');
+  const it = { trip: { tripNumber: '624318', status: 'DEPSHIP', powerUnit: '2403', destZoneDesc: 'NEWARK, NJ, 07102' }, freightBills: [{ billNumber: 'B1', endZoneDescription: 'NEWARK, NJ, 07102', billToName: 'Rose' }], _samsara: { lat: 40, lng: -74, gpsAt: new Date(NOW2 - 5 * 60000).toISOString(), location: 'I-95, Newark, NJ', speedMph: 55 } };
+  const etas = { 624318: { stops: [{ label: 'NEWARK, NJ, 07102', etaMs: Date.parse('2026-10-09T19:00:00Z'), apptMs: Date.parse('2026-10-09T14:00:00Z'), miles: 40 }] } };
+  const r = opsRisks([it], { now: NOW2, etas });
+  assert.deepEqual([r.late[0].trip, r.late[0].lateMin], ['624318', 300]);
+  const m = planEmail([], { now: NOW2, risks: r });
+  assert.match(m.text, /== 1 · Running late for delivery ==\nTrip 624318 · truck 2403 — 5 H 0 MIN LATE/);
 });
