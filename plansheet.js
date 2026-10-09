@@ -48,20 +48,29 @@ export async function googleToken(saJson, { fetchFn = globalThis.fetch, now = Da
 }
 
 // Every tab of the sheet as rows of cells. → { title, tabs: [{ title, rows }] }
-export async function readSheet(id, { token, fetchFn = globalThis.fetch }) {
+export async function readSheet(id, { token, fetchFn = globalThis.fetch, only = null }) {
   const h = { Authorization: `Bearer ${token}` };
   const meta = await fetchFn(`https://sheets.googleapis.com/v4/spreadsheets/${id}?fields=properties.title,sheets.properties(title,hidden,index)`, { headers: h });
   const m = await meta.json();
   if (!meta.ok) throw new Error(meta.status === 403 || meta.status === 404 ? 'Jarvis does not have access to the sheet yet — share it with the service account email (Viewer).' : `Google Sheets: ${(m.error && m.error.message) || meta.status}`);
-  const tabs = (m.sheets || []).map((s) => s.properties).filter((p) => p && !p.hidden).sort((a, b) => a.index - b.index).slice(0, 8);
-  if (!tabs.length) return { title: m.properties && m.properties.title, tabs: [] };
+  const all = (m.sheets || []).map((s) => s.properties).filter((p) => p && !p.hidden).sort((a, b) => a.index - b.index);
+  const tabs = pickTabs(all.map((t) => t.title), only).map((t) => all.find((x) => x.title === t)).slice(0, 8);
+  if (!tabs.length) return { title: m.properties && m.properties.title, tabs: [], allTabs: all.map((t) => t.title) };
   const q = tabs.map((t) => `ranges=${encodeURIComponent(`'${t.title.replace(/'/g, "''")}'!A1:AF400`)}`).join('&');
   const v = await fetchFn(`https://sheets.googleapis.com/v4/spreadsheets/${id}/values:batchGet?${q}&valueRenderOption=FORMATTED_VALUE`, { headers: h });
   const j = await v.json();
   if (!v.ok) throw new Error(`Google Sheets: ${(j.error && j.error.message) || v.status}`);
-  return { title: m.properties && m.properties.title, tabs: tabs.map((t, i) => ({ title: t.title, rows: ((j.valueRanges || [])[i] || {}).values || [] })) };
+  return { title: m.properties && m.properties.title, allTabs: all.map((t) => t.title), tabs: tabs.map((t, i) => ({ title: t.title, rows: ((j.valueRanges || [])[i] || {}).values || [] })) };
 }
 
+// Which tabs to read: the ones chosen in settings (by name, any case), else the "Available Trucks"
+// tab, else all of them. Pure.
+export function pickTabs(titles = [], only = null) {
+  const norm = (x) => String(x || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (Array.isArray(only) && only.length) { const want = only.map(norm); const hit = titles.filter((t) => want.includes(norm(t))); if (hit.length) return hit; }
+  const avail = titles.filter((t) => /available\s*trucks?/i.test(t));
+  return avail.length ? avail : titles;
+}
 // Rows → compact text for the reader (row numbers kept so answers can point back). Pure.
 export function sheetText(sheet, max = 60000) {
   let out = '';
@@ -184,7 +193,7 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
     if (!env.GOOGLE_SERVICE_ACCOUNT_JSON) { await db.update(key, (c) => ({ ...(c || {}), error: 'Add GOOGLE_SERVICE_ACCOUNT_JSON in Render (the Google service account key).' }), {}); return null; }
     try {
       const { token } = await googleToken(env.GOOGLE_SERVICE_ACCOUNT_JSON, { fetchFn, now: now() });
-      const sheet = await readSheet(cfg.sheetId, { token, fetchFn });
+      const sheet = await readSheet(cfg.sheetId, { token, fetchFn, only: cfg.tabs || null });
       const prev = (await db.get(key, {})) || {};
       const today = new Date(now()).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
       // only the tabs that changed go to the AI; unchanged tabs keep what was read before
@@ -202,7 +211,7 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
       // one row per truck — the first tab (usually the current week) wins
       const seen = new Set(); const plan = [];
       for (const tab of sheet.tabs) for (const r of (byTab[tab.title] || {}).rows || []) if (!seen.has(r.truck)) { seen.add(r.truck); plan.push(r); }
-      await db.set(key, { ...prev, plan, byTab, title: sheet.title || null, tabs: sheet.tabs.map((t) => t.title), readAt: new Date(now()).toISOString(), ...(changed ? { changedAt: new Date(now()).toISOString() } : {}), error: null });
+      await db.set(key, { ...prev, plan, byTab, title: sheet.title || null, tabs: sheet.tabs.map((t) => t.title), allTabs: sheet.allTabs || [], readAt: new Date(now()).toISOString(), ...(changed ? { changedAt: new Date(now()).toISOString() } : {}), error: null });
       return plan;
     } catch (e) { await db.update(key, (c) => ({ ...(c || {}), error: e.message, failedAt: new Date(now()).toISOString() }), {}); return null; }
   }
@@ -257,7 +266,7 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
   const admin = requireAdmin || requireAuth;
   app.get('/truckmate/plan-sheet', requireAuth, async (req, res) => {
     const cfg = await settings(); const st = (await db.get(key, {})) || {};
-    res.json({ sheetId: cfg.sheetId, sheetUrl: cfg.sheetId ? `https://docs.google.com/spreadsheets/d/${cfg.sheetId}` : null, serviceAccount: saEmail(), keyInRender: !!env.GOOGLE_SERVICE_ACCOUNT_JSON, title: st.title || null, tabs: st.tabs || [], trucks: (st.plan || []).length, readAt: st.readAt || null, error: st.error || null, to: cfg.to, times: cfg.times, on: cfg.on });
+    res.json({ sheetId: cfg.sheetId, sheetUrl: cfg.sheetId ? `https://docs.google.com/spreadsheets/d/${cfg.sheetId}` : null, serviceAccount: saEmail(), keyInRender: !!env.GOOGLE_SERVICE_ACCOUNT_JSON, title: st.title || null, tabs: st.tabs || [], allTabs: st.allTabs || [], chosenTabs: cfg.tabs || [], trucks: (st.plan || []).length, readAt: st.readAt || null, error: st.error || null, to: cfg.to, times: cfg.times, on: cfg.on });
   });
   app.put('/truckmate/plan-sheet/settings', admin, async (req, res) => {
     const b = req.body || {};
@@ -265,7 +274,8 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
     if (b.sheet && !id) return res.status(400).json({ error: 'Paste the Google Sheet link.' });
     const to = b.to != null ? [...new Set(String(Array.isArray(b.to) ? b.to.join(',') : b.to).split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[^@\s]+@floridabeauty\.us$/.test(x)))] : undefined;
     const times = Array.isArray(b.times) ? b.times.filter((t) => /^\d{2}:\d{2}$/.test(t)).slice(0, 6) : undefined;
-    const next = await db.update(cfgKey, (cur) => ({ ...(cur || {}), ...(id ? { sheetId: id, sheetFrom: 'admin', sheetAt: new Date().toISOString() } : {}), ...(to ? { to } : {}), ...(times ? { times } : {}), ...(b.on != null ? { on: !!b.on } : {}) }), {});
+    const tabs = Array.isArray(b.tabs) ? b.tabs.map((t) => String(t).slice(0, 100)).filter(Boolean).slice(0, 8) : undefined;
+    const next = await db.update(cfgKey, (cur) => ({ ...(cur || {}), ...(id ? { sheetId: id, sheetFrom: 'admin', sheetAt: new Date().toISOString() } : {}), ...(to ? { to } : {}), ...(times ? { times } : {}), ...(tabs ? { tabs } : {}), ...(b.on != null ? { on: !!b.on } : {}) }), {});
     res.json(next);
   });
   app.post('/truckmate/plan-sheet/refresh', requireAuth, async (req, res) => { const plan = await refresh(); const st = (await db.get(key, {})) || {}; res.json({ ok: !!plan, trucks: (plan || []).length, error: st.error || null }); });

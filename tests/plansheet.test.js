@@ -123,3 +123,14 @@ test('a big tab is read in pieces, each with the header rows', () => {
   for (const p of parts) assert.deepEqual(p.rows[0], ['Truck', 'Region']);
   assert.match(sheetText({ tabs: [parts[1]] }), /R1: Truck \| Region\nR3: WEEK 41\nR64: 2060 \| NE/);
 });
+
+import { pickTabs } from '../plansheet.js';
+
+test('only the "Available Trucks" tab is read (or the tabs chosen in settings)', () => {
+  const tabs = ['Notes', 'Available Trucks', 'Old week', 'Drivers'];
+  assert.deepEqual(pickTabs(tabs), ['Available Trucks']);
+  assert.deepEqual(pickTabs(['AVAILABLE TRUCK LIST', 'x']), ['AVAILABLE TRUCK LIST']);
+  assert.deepEqual(pickTabs(tabs, ['old week']), ['Old week']);
+  assert.deepEqual(pickTabs(tabs, ['gone']), ['Available Trucks'], 'a chosen tab that no longer exists → default');
+  assert.deepEqual(pickTabs(['A', 'B']), ['A', 'B'], 'no Available Trucks tab → all');
+});
