@@ -118,6 +118,20 @@ export function isNewsletter({ from, text, trips = [], attachments = [] }, env =
   if (!/\bunsubscribe\b|manage (your )?(email )?preferences|view (this|it) in (your )?browser|darse de baja/i.test(t)) return false;
   return !/\b(load|trip|pick ?up|deliver|delivery|rate ?con|confirmation|truck|trailer|driver|pod|bol|appointment|eta|invoice|detention|lumper|reefer|B\d{6}|\d{6})\b/i.test(t);
 }
+// Should the AI read this email? Sent to Jarvis (To / Cc / Bcc) → yes. Arrived only through one of
+// our email GROUPS (dispatches@…) → only if it says "Jarvis" or Jarvis is already in that chain
+// (it asked or replied there). Everything else is filed for free (matched to loads, no AI). Pure.
+export function readGate({ me = '', to = [], cc = [], subject = '', text = '', inThread = false, groupAddrs = [], readAll = false }) {
+  const addr = (r) => String((r && r.emailAddress && r.emailAddress.address) || r || '').toLowerCase();
+  const on = [...(to || []), ...(cc || [])].map(addr).filter(Boolean);
+  const mine = String(me || '').toLowerCase();
+  const groups = groupAddrs.map((g) => String(g || '').toLowerCase()).filter(Boolean);
+  const viaGroup = !on.includes(mine) && on.find((a) => groups.includes(a));
+  if (!viaGroup || readAll) return { read: true, why: viaGroup ? 'all group emails are read (setting)' : 'sent to Jarvis' };
+  if (/\bjarvis\b/i.test(`${subject} ${text}`)) return { read: true, why: `mentions Jarvis (via ${viaGroup})`, group: viaGroup };
+  if (inThread) return { read: true, why: `Jarvis is in this conversation (via ${viaGroup})`, group: viaGroup };
+  return { read: false, group: viaGroup };
+}
 // The addresses a bounce says could not be reached. Pure.
 export function bouncedAddresses(text, ignore = []) {
   const skip = new Set(ignore.map((x) => String(x || '').toLowerCase()));
@@ -244,7 +258,7 @@ export function expandInstructions(list = []) {
 // "2026-10-08T23:00" → "Thu Oct 8, 11:00 PM". Pure.
 export const fmtWall = (w) => { const d = new Date(`${w}:00Z`); return isNaN(d) ? String(w) : d.toLocaleString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
 
-export function initInbox(app, { requireAuth, db, meetWatch = null, nextLoads = null, groupEmail = null, planSheet = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initInbox(app, { requireAuth, db, meetWatch = null, nextLoads = null, groupEmail = null, groupAddresses = null, planSheet = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const key = (site) => `taEmails:${site}`;          // { list: [email…], status }
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
@@ -360,7 +374,7 @@ export function initInbox(app, { requireAuth, db, meetWatch = null, nextLoads = 
     if (!enabled || !mailConfig(env).ready) return 0;
     let res;
     try {
-      res = await g('/mailFolders/inbox/messages?$filter=isRead%20eq%20false&$top=25&$select=id,subject,from,receivedDateTime,body,conversationId,hasAttachments');
+      res = await g('/mailFolders/inbox/messages?$filter=isRead%20eq%20false&$top=25&$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,body,conversationId,hasAttachments');
       status.canRead = true; status.error = null;
     } catch (e) { status.canRead = e.status === 403 ? false : status.canRead; status.error = e.status === 403 ? 'Jarvis can send but not read yet — IT needs to add Mail.Read.' : e.message; status.lastPoll = new Date().toISOString(); return 0; }
     status.lastPoll = new Date().toISOString();
@@ -379,6 +393,17 @@ export function initInbox(app, { requireAuth, db, meetWatch = null, nextLoads = 
       const threadTrips = (store.list || []).filter((e) => e.conversationId && e.conversationId === m.conversationId).flatMap((e) => e.trips || []);
       const matches = matchEmail({ subject: m.subject, text }, items, { threadTrips });
       const trips = matches.map((x) => x.trip);
+      // came through an email group and doesn't ask Jarvis anything → file it (load history) without the AI
+      const inThread = (store.list || []).some((e) => e.conversationId && e.conversationId === m.conversationId && ((e.replies || []).length || e.jarvisThread || (e.asks || []).length || (e.instructionResults || []).length)) || /\[JV-[a-z0-9]{4,}\]/i.test(`${m.subject} ${text}`);
+      const gate = readGate({ me: mailConfig(env).from, to: m.toRecipients, cc: m.ccRecipients, subject: m.subject, text, inThread, groupAddrs: groupAddresses ? await groupAddresses().catch(() => []) : [], readAll: !!(await settings()).readAllGroupEmails }); // eslint-disable-line no-await-in-loop
+      if (!gate.read) {
+        const email0 = { id: m.id, conversationId: m.conversationId || null, from, subject: String(m.subject || '').slice(0, 300), at: m.receivedDateTime, text, attachments: [], trips, why: matches.map((x) => x.why), status: 'handled', auto: 'group', viaGroup: gate.group, reply: { needed: false, kind: 'none', documents: [] }, replies: [],
+          summary: `Sent to the ${gate.group} group — not read by AI. Write "Jarvis" in an email to have it act.`, handledBy: 'Jarvis (group email — filed, not read)' };
+        fresh.push(email0);
+        for (const trip of trips) await logOnLoad(site, trip, { type: 'email', dir: 'in', at: email0.at, from: from.address, name: from.name, subject: email0.subject, text: text.slice(0, 600), emailId: m.id, files: [] }); // eslint-disable-line no-await-in-loop
+        try { await g(`/messages/${encodeURIComponent(m.id)}`, { method: 'PATCH', body: { isRead: true } }); } catch { /* still remembered */ } // eslint-disable-line no-await-in-loop
+        continue;
+      }
       let attachments = [];
       // Outlook says hasAttachments=false when the only picture is pasted into the body (cid:)
       const packetLike = /trip\s*-?\s*sheets?|manifests?/i.test(String(m.subject || ''));
@@ -904,7 +929,8 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
   app.get('/truckmate/emails/settings', requireAuth, async (req, res) => res.json(await settings()));
   app.put('/truckmate/emails/settings', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
-    res.json(await db.update(cfgKey, (cur) => ({ ...(cur || {}), autoSend: !!(req.body && req.body.autoSend), updatedBy: who(req), updatedAt: new Date().toISOString() }), {}));
+    const b = req.body || {};
+    res.json(await db.update(cfgKey, (cur) => ({ ...(cur || {}), ...('autoSend' in b ? { autoSend: !!b.autoSend } : {}), ...('readAllGroupEmails' in b ? { readAllGroupEmails: !!b.readAllGroupEmails } : {}), updatedBy: who(req), updatedAt: new Date().toISOString() }), {}));
   });
 
   // To-dos that came out of emails, per load — checked off with name + time.

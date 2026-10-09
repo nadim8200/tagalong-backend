@@ -752,7 +752,7 @@ const meetWatch = initMeetWatch({ db, getBoard: (site) => truckmate.buildBoard(s
 const nextLoads = initNextLoads({ db, env: process.env });
 // Gus's planning sheet (Google Sheets, read-only via the service account)
 const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), nextLoads, env: process.env });
-const inbox = initInbox(app, { planSheet, groupEmail: (n) => directory.groupEmail(n), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
+const inbox = initInbox(app, { planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,

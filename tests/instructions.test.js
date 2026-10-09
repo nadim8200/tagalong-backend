@@ -182,3 +182,18 @@ test('cheaper: newsletters, read receipts and calendar replies are filed without
   assert.equal(autoNotice('ana@broker.com', 'Accepted: Dispatch call'), 'receipt');
   assert.equal(autoNotice('ana@broker.com', 'Re: Load 8192162 rate'), null);
 });
+
+import { readGate } from '../inbox.js';
+
+test('cheaper: group emails are read only when they say "Jarvis" or Jarvis is already in the chain', () => {
+  const base = { me: 'jarvis@floridabeauty.us', groupAddrs: ['dispatches@floridabeauty.us', 'customerservice@floridabeauty.us'] };
+  const to = (...a) => a.map((address) => ({ emailAddress: { address } }));
+  assert.equal(readGate({ ...base, to: to('jarvis@floridabeauty.us') }).read, true, 'sent to Jarvis');
+  assert.equal(readGate({ ...base, to: to('ops@broker.com') }).read, true, 'Bcc / unknown route → read');
+  assert.deepEqual(readGate({ ...base, to: to('dispatches@floridabeauty.us'), subject: 'Load 8192162', text: 'Driver is at the shipper.' }), { read: false, group: 'dispatches@floridabeauty.us' });
+  assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: 'Jarvis, follow up with the driver on 624626' }).read, true);
+  assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: '@Jarvis send the POD' }).read, true);
+  assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: 'ok thanks', inThread: true }).read, true, 'Jarvis already in this chain');
+  assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us', 'jarvis@floridabeauty.us'), text: 'hi' }).read, true, 'Jarvis also addressed directly');
+  assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: 'hi', readAll: true }).read, true, 'setting: read everything');
+});
