@@ -901,6 +901,33 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
     told();
     return { ok: true, callId: call.call_id, to };
   }
+  // ---- saved caller numbers (customer service fixes "this number is saved for another customer") ----
+  const whoReq = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
+  app.get('/truckmate/caller-numbers', requireAuth, async (req, res) => {
+    const book = (await db.get(bookKey, {})) || {};
+    const q = String((req.query || {}).q || '').toUpperCase().replace(/[^A-Z0-9 ]/g, '');
+    const rows = Object.entries(book).map(([phone, v]) => ({ phone, name: v.name, at: v.at || null, by: v.by || null, client: clients && clients.byPhone(phone) ? clients.byPhone(phone).name : null }))
+      .filter((r) => !q || `${r.phone} ${r.name} ${r.client || ''}`.toUpperCase().includes(q) || r.phone.includes(q.replace(/\D/g, '') || '§'))
+      .sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+    res.json({ count: Object.keys(book).length, rows: rows.slice(0, 300) });
+  });
+  app.post('/truckmate/caller-numbers/:phone', requireAuth, async (req, res) => {
+    const phone = last10(req.params.phone);
+    if (phone.length !== 10) return res.status(400).json({ error: 'Enter a 10-digit phone number.' });
+    const said = String((req.body && req.body.name) || '').trim();
+    if (!said) return res.status(400).json({ error: 'Which customer is this number for?' });
+    // use the customer's real name from the client list when it's clearly them
+    const c = clients ? clients.byName(said, { max: 1 })[0] : null;
+    const name = c ? c.name : said.toUpperCase().slice(0, 80);
+    await db.update(bookKey, (cur) => ({ ...(cur || {}), [phone]: { name, at: new Date().toISOString(), by: whoReq(req) } }), {});
+    res.json({ ok: true, phone, name, client: c ? c.id : null });
+  });
+  app.post('/truckmate/caller-numbers/:phone/remove', requireAuth, async (req, res) => {
+    const phone = last10(req.params.phone);
+    await db.update(bookKey, (cur) => { const x = { ...(cur || {}) }; delete x[phone]; return x; }, {});
+    res.json({ ok: true, phone });
+  });
+
   app.post('/truckmate/trips/:trip/ai-call', requireAuth, async (req, res) => {
     const b = req.body || {};
     try { res.json(await placeCall(String(req.params.trip), { which: Number(b.driver) === 2 ? 2 : 1, purpose: b.purpose, by: who(req) })); }

@@ -38,6 +38,7 @@ const ADMIN_ONLY = [
   /^\/voice\/setup/,                                      // Jarvis voice agent in Retell
   /^\/truckmate\/activity\/push/,                         // who gets call / text pushes
   /^\/truckmate\/profiles(\/|$)/,                         // customer & broker profiles, authorized numbers
+  /^\/truckmate\/caller-numbers(\/|$)/,                   // which customer a caller's phone number is saved for
   /^\/truckmate\/consent\/settings/,
 ];
 export function dispatcherMayUse(method, path) {

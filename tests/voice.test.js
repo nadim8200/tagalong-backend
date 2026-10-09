@@ -552,3 +552,18 @@ test('phone rules: staff numbers aren\'t tied to a business; a number saved for 
     assert.equal((await v4.db.get('taJarvisCallers:florida-beauty', {}))['3125550177'].name, 'ASHLAND ADDISON');
   } finally { board.pop(); }
 });
+
+test('saved caller numbers: list, change to a real client name, remove', async () => {
+  const clients = initClients({ score: nameScore });
+  const v = setup({}, { clients });
+  await v.db.set('taJarvisCallers:florida-beauty', { '7735550100': { name: 'BOKHARY PRODUCE', at: '2026-10-09T17:00:00Z' } });
+  const list = await v.hit('GET /truckmate/caller-numbers', { query: {} });
+  assert.deepEqual(list.out.rows.map((r) => [r.phone, r.name]), [['7735550100', 'BOKHARY PRODUCE']]);
+  const ch = await v.hit('POST /truckmate/caller-numbers/:phone', { params: { phone: '(773) 555-0100' }, name: 'ashland addison' }, { user: { name: 'Frank Ducassi' } });
+  assert.deepEqual([ch.out.name, ch.out.client], ['ASHLAND ADDISON', '03625']);
+  const saved = (await v.db.get('taJarvisCallers:florida-beauty', {}))['7735550100'];
+  assert.deepEqual([saved.name, saved.by], ['ASHLAND ADDISON', 'Frank Ducassi']);
+  assert.equal((await v.hit('POST /truckmate/caller-numbers/:phone', { params: { phone: '123' }, name: 'x' })).code, 400);
+  await v.hit('POST /truckmate/caller-numbers/:phone/remove', { params: { phone: '7735550100' } });
+  assert.deepEqual(await v.db.get('taJarvisCallers:florida-beauty', {}), {});
+});
