@@ -570,7 +570,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
   //  2. the broker's load / PO / reference numbers inside TruckMate's bills (trace numbers)
   //  3. the truck number, narrowed by where it delivers / picks up
   //  4. pickup city → delivery city when only one active load runs that lane
-  function matchRateCon(rc, labels, board, sheets) {
+  function matchRateCon(rc, labels, board, sheets, saved = {}) {
     const items = [...board];
     const billsOf2 = (it) => it.freightBills || it.orders || (it.trip || {}).freightBills || [];
     for (const lab of labels.filter(Boolean)) {
@@ -589,6 +589,12 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
         if (r) return { trip: String(sh.tripNumber), matchedBy: `reference ${r} on the trip sheet` };
       }
     }
+    // a revised rate con: same broker + load number as the one already on a load
+    const ln = norm(rc.loadNumber);
+    if (ln && ln.length >= 4) {
+      const prev = Object.entries(saved || {}).filter(([, r]) => r && norm(r.loadNumber) === ln && (!rc.broker || !r.broker || norm(r.broker).slice(0, 5) === norm(rc.broker).slice(0, 5)));
+      if (prev.length === 1 && board.has(prev[0][0])) return { trip: prev[0][0], matchedBy: `revised rate con — load ${rc.loadNumber} is already on this trip` };
+    }
     const dropCities = (rc.deliveries || []).map((d) => cityKey2(d && d.city)).filter(Boolean);
     const pickCities = (rc.pickups || []).map((d) => cityKey2(d && d.city)).filter(Boolean);
     const tripCities = (it) => { const t = it.trip || it; return { to: new Set([cityKey2(t.destZoneDesc), ...billsOf2(it).map((b) => cityKey2(b.endZoneDescription))].filter(Boolean)), from: cityKey2(t.origZoneDesc) }; };
@@ -600,6 +606,13 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       const near = hits.filter(([, it]) => fits(it));
       if (near.length === 1) return { trip: near[0][0], matchedBy: `truck ${truck} + route` };
       if (hits.length === 1 && (!dropCities.length || fits(hits[0][1]))) return { trip: hits[0][0], matchedBy: `truck ${truck}` };
+    }
+    const trl = norm(rc.trailerNumber).replace(/^(TRL|TRLR|TRAILER|TL|TR)/, '');
+    if (trl) {
+      const hits = active.filter(([, it]) => norm((it.trip || it).trailer) === trl);
+      const near = hits.filter(([, it]) => fits(it));
+      if (near.length === 1) return { trip: near[0][0], matchedBy: `trailer ${trl} + route` };
+      if (hits.length === 1 && (!dropCities.length || fits(hits[0][1]))) return { trip: hits[0][0], matchedBy: `trailer ${trl}` };
     }
     if (dropCities.length && pickCities.length) {
       const lane = active.filter(([, it]) => { const c = tripCities(it); return dropCities.some((x) => c.to.has(x)) && pickCities.includes(c.from); });
@@ -613,7 +626,8 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
   async function fileRateCon(site, rc, { labels = [], docIds = [], by = 'AI Dispatcher', source = 'packet', filename = null, pageCount = 1, board = null, sheets = null, hintTrip = null } = {}) {
     const brd = board || await boardIndex(site);
     const shs = sheets || Object.values((await db.get(storeKey(site), {})) || {});
-    let m = matchRateCon(rc, [...labels, rc.fbfBillNumber], brd, shs);
+    const savedRcs = (db && db.enabled) ? ((await db.get(`taTruckMateRateCon:${site}`, {})) || {}) : {};
+    let m = matchRateCon(rc, [...labels, rc.fbfBillNumber], brd, shs, savedRcs);
     if (!m && hintTrip && brd.has(String(hintTrip))) m = { trip: String(hintTrip), matchedBy: source === 'email' ? 'the trip / bill number in the email' : 'the load it was uploaded to' };
     const bill = rc.fbfBillNumber || labels.find(Boolean) || null;
     const record = { ...rc, fbfBillNumber: bill ? billKey(bill) : null, filename, pageCount, uploadedAt: new Date().toISOString(), uploadedBy: by, source };

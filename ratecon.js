@@ -77,6 +77,9 @@ export function initRateCon(app, { requireAuth, db, env = process.env, docs = nu
   // con never wipes the dispatcher's sign-offs. Keyed by the instruction text so it
   // survives re-ordering. Must match the key used by the active-board overlay.
   const checkKey = (site) => `taTruckMateRcCheck:${site}`;
+  // whoever wants to know a rate con landed on a load (follow-through: instructions, offers, revised rate cons)
+  const onSaved = [];
+  const fire = async (site, trip, record, prev) => { for (const fn of onSaved) { try { await fn(site, String(trip), record, prev); } catch (e) { console.warn('[ratecon] onSaved:', e.message); } } }; // eslint-disable-line no-await-in-loop
   const whoAmI = (req) => (req.user && (req.user.name || (req.user.email || '').split('@')[0])) || 'Dispatcher';
 
   app.get('/truckmate/ratecon/:trip', requireAuth, async (req, res) => {
@@ -143,7 +146,9 @@ export function initRateCon(app, { requireAuth, db, env = process.env, docs = nu
         } catch (e) { record.docError = `Original not stored: ${e.message}`; }
       }
       if (db && db.enabled) {
+        const prev = ((await db.get(storeKey(site), {})) || {})[trip] || null;
         await db.update(storeKey(site), (cur) => ({ ...(cur || {}), [trip]: record }), {});
+        fire(site, trip, record, prev);
       }
       res.json(record);
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
@@ -151,10 +156,14 @@ export function initRateCon(app, { requireAuth, db, env = process.env, docs = nu
 
   // Save a read rate con on a trip (used by the bulk packet reader too).
   async function saveRateCon(site, trip, record) {
-    if (db && db.enabled) await db.update(storeKey(site), (cur) => ({ ...(cur || {}), [String(trip)]: record }), {});
+    if (db && db.enabled) {
+      const prev = ((await db.get(storeKey(site), {})) || {})[String(trip)] || null;
+      await db.update(storeKey(site), (cur) => ({ ...(cur || {}), [String(trip)]: record }), {});
+      fire(site, trip, record, prev);
+    }
     return record;
   }
 
   console.log('[ratecon] rate-confirmation reader ready' + (key ? '' : ' (no ANTHROPIC_API_KEY — uploads will 503)'));
-  return { read: (pages) => readRateConPages(pages, { key, model }), save: saveRateCon, enabled: !!key, whoAmI };
+  return { read: (pages) => readRateConPages(pages, { key, model }), save: saveRateCon, enabled: !!key, whoAmI, onSaved: (fn) => onSaved.push(fn) };
 }
