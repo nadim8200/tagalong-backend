@@ -491,6 +491,27 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
   const callGuess = new Map();   // call_id → names Jarvis suggested (did_you_mean) — need the caller's yes
   const bookKey = `taJarvisCallers:${site}`;   // caller phone → the business name that worked last time
   const remember = async (phone, name) => { const P = last10(phone); if (P.length === 10 && name) await db.update(bookKey, (cur) => ({ ...(cur || {}), [P]: { name, at: new Date().toISOString() } }), {}); };
+  // Is this caller's number saved for a DIFFERENT customer than the stops they asked about? (client list
+  // record first, else the business it called about before). Staff numbers are never tied to one. → that name | null
+  async function savedForOther(phone, stops, loads, staffPhone, memory) {
+    if (staffPhone || !stops.length) return null;
+    const c = clients ? clients.byPhone(phone) : null;
+    const owner = c ? c.name : memory ? memory.name : null;
+    if (!owner) return null;
+    const same = (x) => nameScore(owner, x) >= 0.75 || nameScore(x, owner) >= 0.75;
+    if (stops.some((st) => same(st.customer))) return null;
+    if (c && clients.loads(loads, c).some((it) => stops.some((st) => st.trip === tripNo(it)))) return null;   // their load by client ID
+    return owner;
+  }
+  async function otherCustomerReply() {
+    let who = 'Frank Ducassi in customer service';
+    try {
+      const f = directory && directory.find ? (await directory.find('Frank Ducassi'))[0] : null;
+      const main = directory && directory.main ? await directory.main() : '305-503-1200';
+      if (f) who = `${f.name} in ${f.department || 'customer service'}${f.extension ? ` at extension ${f.extension}` : ''} — main number ${main}`;
+    } catch { /* keep the plain wording */ }
+    return { found: false, private: true, saved_for_other_customer: true, say: `Do NOT share anything about the load. Say: "We're sorry — this phone number is saved for another customer in our system, so I can't give updates from it. Please contact ${who}, to update your contact information, and then you'll be able to get ETAs through the automated system." Then offer to take a message (take_message with their name, company and callback number). Never say which customer the number is saved for.` };
+  }
   app.post('/retell/fn/lookup_load', verified, async (req, res) => {
     const a = argsOf(req); const call = callOf(req);
     const reply = (j) => {
@@ -506,8 +527,6 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
       // our own staff call about many customers — their numbers are never tied to one business
       const staffPhone = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []).some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call))) : false;
       const memory = staffPhone ? null : ((await db.get(bookKey, {}))[last10(callerPhone(call))] || null);
-      // they named a different business than this number was remembered as → that memory was wrong
-      if (said && memory && nameScore(said, memory.name) < 0.75) await db.update(bookKey, (cur) => { const x = { ...(cur || {}) }; delete x[last10(callerPhone(call))]; return x; }, {});
       let known = said ? null : memory;   // called before from this phone
       // a number on the client list → that business (confirmed with the caller before anything is shared)
       if (!said && !known && clients && !staffPhone) { const c = clients.byPhone(callerPhone(call)); if (c) known = { name: c.name, client: c.id }; }
@@ -547,6 +566,9 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
         }
         const biz = spokenName(stops[0].customer);                        // the real name, not what was misheard
         if (call.call_id && said) callName.set(call.call_id, stops[0].customer);   // a phone guess isn't the caller's name until they say it
+        // this number is saved for ANOTHER customer (it called for them before, or it's on their client record) → no details
+        const other = await savedForOther(callerPhone(call), stops, all, staffPhone, memory);
+        if (other) return reply(await otherCustomerReply());
         // only the customer's authorized numbers (when that rule is on) — owners' numbers get anything
         if (profiles && profiles.allowed) {
           const ok = await profiles.allowed({ customerName: stops[0].customer, phone: callerPhone(call) });
@@ -573,6 +595,7 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
       if (isBroker) return reply({ found: true, matched_by: hit.by, ...(rc.broker ? { speaking_with: spokenName(rc.broker) } : {}), ...brokerView(hit.item, eta), say: BROKER_RULE });
       // everyone else: where the truck is + their own stop
       const mine = name ? customerStops([hit.item], name, { [trip]: eta }) : [];
+      if (mine.length && await savedForOther(callerPhone(call), mine, [hit.item], staffPhone, memory)) return reply(await otherCustomerReply());
       if (mine.length && profiles && profiles.allowed) {
         const ok = await profiles.allowed({ customerName: mine[0].customer, phone: callerPhone(call) });
         if (!ok.ok) return reply({ found: false, private: true, say: `For privacy, updates on ${spokenName(mine[0].customer)} deliveries only go to the phone numbers they authorized. Do not share any details of the load. Offer to take a message so customer service calls them back on an authorized number.` });

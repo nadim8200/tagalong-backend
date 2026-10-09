@@ -519,19 +519,36 @@ test('client list: "DBE C Wholesale" in Greensburg is D.B.E.C. WHOLESALE — its
   assert.ok(!/601-?261|trussell/i.test(JSON.stringify(r3.out)));
 });
 
-test('the "Ashland Addison" call: a staff number is never tied to a business; a wrong phone memory is dropped; the client is recognized', async () => {
+test('phone rules: staff numbers aren\'t tied to a business; a number saved for another customer gets the "contact Frank" message', async () => {
   const clients = initClients({ score: nameScore });
-  const directory = { load: async () => ({ people: [{ name: 'Frank Ducassi', phone: '305-748-5611' }] }) };
-  // from Frank's cell: no "Is this Bokhary Produce?" even though a test call used that name before
-  const v = setup({}, { clients, directory });
-  await v.db.set('taJarvisCallers:florida-beauty', { '3057485611': { name: 'BOKHARY PRODUCE' } });
-  const r = await v.hit('POST /retell/fn/lookup_load', { args: {}, call: { call_id: 'c93', direction: 'inbound', from_number: '+13057485611' } });
-  assert.ok(!/BOKHARY/i.test(JSON.stringify(r.out)), 'no guess from a staff phone');
-  // a customer number remembered as Bokhary, caller says Ashland Addison → memory dropped, client recognized
-  const v2 = setup({}, { clients });
-  await v2.db.set('taJarvisCallers:florida-beauty', { '7735550100': { name: 'BOKHARY PRODUCE' } });
-  const r2 = await v2.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: { call_id: 'c94', direction: 'inbound', from_number: '+17735550100' } });
-  assert.equal(r2.out.found, false);
-  assert.match(r2.out.known_client || '', /Ashland Addison/i);
-  assert.deepEqual(await v2.db.get('taJarvisCallers:florida-beauty', {}), {}, 'wrong memory removed');
+  const directory = { load: async () => ({ people: [{ name: 'Frank Ducassi', phone: '305-748-5611' }] }), find: async () => [{ name: 'Frank Ducassi', department: 'Customer Service', extension: '259' }], main: async () => '305-503-1200' };
+  const ash = { trip: { tripNumber: '624803', status: 'DEPSHIP', powerUnit: '2703' }, freightBills: [{ billNumber: 'B0200004', billToName: 'ASHLAND ADDISON', endZoneDescription: 'CHICAGO, IL, 60612', pieces: 12 }] };
+  board.push(ash);
+  try {
+    // Frank's cell: no Bokhary guess, and Ashland Addison's ETA is given
+    const v = setup({}, { clients, directory });
+    await v.db.set('taJarvisCallers:florida-beauty', { '3057485611': { name: 'BOKHARY PRODUCE' } });
+    const r0 = await v.hit('POST /retell/fn/lookup_load', { args: {}, call: { call_id: 'c93', direction: 'inbound', from_number: '+13057485611' } });
+    assert.ok(!/BOKHARY/i.test(JSON.stringify(r0.out)), 'no guess from a staff phone');
+    const r1 = await v.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: { call_id: 'c93', direction: 'inbound', from_number: '+13057485611' } });
+    assert.equal(r1.out.found, true);
+    // a customer number saved for Bokhary asks about Ashland Addison → the message, nothing shared, nothing named
+    const v2 = setup({}, { clients, directory });
+    await v2.db.set('taJarvisCallers:florida-beauty', { '7735550100': { name: 'BOKHARY PRODUCE' } });
+    const r2 = await v2.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: { call_id: 'c94', direction: 'inbound', from_number: '+17735550100' } });
+    assert.equal(r2.out.found, false);
+    assert.equal(r2.out.saved_for_other_customer, true);
+    assert.match(r2.out.say, /saved for another customer.*Frank Ducassi in Customer Service at extension 259 — main number 305-503-1200/);
+    assert.ok(!/BOKHARY|12 boxes|CHICAGO/i.test(r2.out.say));
+    // a number on Ashland Addison's own client record → gets it
+    const own = clients.byId('03625');
+    const v3 = setup({}, { clients, directory });
+    const r3 = await v3.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: { call_id: 'c95', direction: 'inbound', from_number: `+1${own.phone}` } });
+    assert.equal(r3.out.found, true);
+    // a brand-new number → gets it (and is saved for Ashland Addison)
+    const v4 = setup({}, { clients, directory });
+    const r4 = await v4.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: { call_id: 'c96', direction: 'inbound', from_number: '+13125550177' } });
+    assert.equal(r4.out.found, true);
+    assert.equal((await v4.db.get('taJarvisCallers:florida-beauty', {}))['3125550177'].name, 'ASHLAND ADDISON');
+  } finally { board.pop(); }
 });
