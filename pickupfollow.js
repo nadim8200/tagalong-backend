@@ -152,7 +152,7 @@ export function tmFixNote({ item, plan, dep, now }) {
   const out = renderOutboundFollowUp({ heading: `Update TruckMate — trip ${tripNo(item)} already departed`, blocks: [{
     trip: tripNo(item), group: 'TruckMate status out of date', sortKey: '0',
     scheduled: `Pickup${plan.place ? ` · ${plan.place}` : ''} · ${fmt(plan.ms, plan.tz)} (from ${plan.source})`,
-    status: { label: 'TruckMate wrong', tone: 'amber', text: `TruckMate shows ${t.status || 'no status'}, but the truck has left — ${dep.source}${live.location ? ` near ${live.location}` : ''}${live.gpsAt ? ` (GPS ${fmt(Date.parse(live.gpsAt), plan.tz)})` : ''}` },
+    status: { label: 'Wrong status on trip', tone: 'amber', text: `TruckMate shows ${t.status || 'no status'}, but the truck has left — ${dep.source}${live.location ? ` near ${live.location}` : ''}${live.gpsAt ? ` (GPS ${fmt(Date.parse(live.gpsAt), plan.tz)})` : ''}` },
     next: 'Please update the status in TruckMate to departed (DEPSHIP) so customer emails, ETAs and the board stay right',
     need: null, details: [`Truck ${t.powerUnit || '—'} · trailer ${t.trailer || '—'}${driver ? ` · driver ${driver}` : ''}`, `Checked ${fmt(now, plan.tz)}`],
   }] });

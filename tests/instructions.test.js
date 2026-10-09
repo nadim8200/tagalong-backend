@@ -166,4 +166,5 @@ test('the fix-TruckMate email says what TruckMate shows and what GPS shows', () 
   assert.equal(m.subject, 'Update TruckMate: trip 624625 departed — status still LOADEDTOGO');
   assert.match(m.text, /TruckMate shows LOADEDTOGO, but the truck has left — GPS: truck moving 47 mph near State Road 7, Palm Beach County, FL/);
   assert.match(m.text, /update the status in TruckMate to departed \(DEPSHIP\)/);
+  assert.match(m.text, /Trip 624625 — WRONG STATUS ON TRIP/);
 });
