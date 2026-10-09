@@ -722,7 +722,16 @@ const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, comms
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
 // Jarvis reaching a driver (asked by staff in an email or in the chat): the TagAlong app first (OC drivers), else a text — consent / STOP rules apply
 const driverHooks = { text: async (site, trip, message, by) => { const a = await driverLinks.messageDriver(site, trip, message, by).catch(() => ({ skipped: true })); return a && a.sent ? a : comms.textDriverAuto(site, trip, message, by); }, call: async (site, trip, by) => { try { return { called: true, ...(await voice.placeCall(String(trip), { purpose: 'check', by })) }; } catch (e) { return { skipped: e.message }; } } };
-const inbox = initInbox(app, { etaWatch, training, help, requireAuth: requireDispatch, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []), packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
+const inbox = initInbox(app, { etaWatch, training, help,
+  // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
+  askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
+    mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
+    text: `[Email from ${from.name || ''} <${from.address}>]\nSubject: ${subject || ''}\n\n${String(text || '').slice(0, 3500)}`,
+  } : {
+    user: { id: `email:${String(from.address || '').toLowerCase()}`, name: from.name || from.address, email: from.address },
+    threadId,
+    text: `[Email to Jarvis from ${from.name || ''} <${from.address}> — Florida Beauty Flora staff]\nSubject: ${subject || ''}\n\n${String(text || '').slice(0, 3500)}\n\n(Answer this email for them. Look everything up with the tools — loads_to_place for a city / state, find_load for a trip, truck, trailer or customer. Start with a one-line summary, then one short bullet per load: trip, truck, where it is now, next stop and ETA (local time), delivered or not.${(done || []).length ? ` Already done from this email, don't repeat: ${done.join('; ')}.` : ''})`,
+  }) : null), requireAuth: requireDispatch, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []), packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   // our staff can ask Jarvis (by email) to text or call a driver — same consent / STOP rules
   driver: driverHooks });
 // customer & broker profiles (Customers tab): built from the loads, edited / verified by dispatch

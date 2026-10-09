@@ -94,3 +94,24 @@ test('voice: a spoken turn asks for a short answer; speech is transcribed only w
   assert.match(seen[0].url, /audio\/transcriptions/);
   assert.equal(seen[0].opts.body.get('file').name, 'speech.m4a');
 });
+
+test('loads_to_place: "Lombard IL" finds the loads stopping there', async () => {
+  const LOMBARD = { trip: { tripNumber: '624520', status: 'DEPSHIP', powerUnit: 'OC1' }, freightBills: [{ billNumber: 'B1', billToName: 'MAYESH', endZoneDescription: 'LOMBARD, IL, 60148', actualDelivery: null }] };
+  const db = memDb(); const app = { get: () => {}, post: () => {} };
+  const chat = initJarvisChat(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: [JSON.parse(JSON.stringify(LOAD)), LOMBARD], unclosed: [] }), env: { ANTHROPIC_API_KEY: 'k' } });
+  const r = await chat.runTool('loads_to_place', { place: 'Lombard IL' }, { user: { id: 7, name: 'Rosa' }, did: [], proposed: [] });
+  assert.deepEqual(r.loads.map((x) => [x.trip, x.stop, x.delivered]), [['624520', 'LOMBARD, IL, 60148', false]]);
+  const none = await chat.runTool('loads_to_place', { place: 'Boise, ID' }, { user: { id: 7, name: 'Rosa' }, did: [], proposed: [] });
+  assert.equal(none.loads.length, 0);
+});
+
+test('customer mode (emails from customers / brokers): only look-up tools, nothing private comes back', async () => {
+  const { customerSafe } = await import('../jarvischat.js');
+  assert.deepEqual(customerSafe({ trip: '1', location: 'I-95', driverPhone: '305', rate: 2500, notes: ['x'], stops: [{ city: 'Lombard', contactEmail: 'a@b.c' }] }), { trip: '1', location: 'I-95', stops: [{ city: 'Lombard' }] });
+  const h = setup([useTool('propose_action', { type: 'text_driver', trip: '624399', message: 'hi' }), say('What is your PO number?')]);
+  const r = await h.chat.turn({ mode: 'customer', user: { id: 'email:ana@mayesh.com', name: 'Ana <ana@mayesh.com>' }, threadId: 'abcdef012345', text: 'where are my flowers' });
+  assert.match(h.claude.sent[0].system, /answering an email from Ana/);
+  assert.deepEqual(h.claude.sent[0].tools.map((t) => t.name).sort(), ['find_load', 'load_details', 'loads_to_place']);
+  assert.match(h.claude.sent[1].messages.at(-1).content[0].content, /Not available/);
+  assert.equal(r.actions.length, 0, 'a customer can never make Jarvis contact anyone');
+});

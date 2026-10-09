@@ -115,7 +115,7 @@ test('a dispatcher email with a pasted trip sheet and a delayed pickup: sheet re
 });
 
 import { isInternal, isPacketEmail } from '../inbox.js';
-function harness({ messages, triageOut, draftText = 'Hi, the truck is in Robeson County, NC. Next stop Kinston ETA Wed 10:00 AM (estimate). — Jarvis', board, docsList = [], cfg = {}, packets = null, driver = null, etaWatch = null }) {
+function harness({ messages, triageOut, draftText = 'Hi, the truck is in Robeson County, NC. Next stop Kinston ETA Wed 10:00 AM (estimate). — Jarvis', board, docsList = [], cfg = {}, packets = null, driver = null, etaWatch = null, askJarvis = null }) {
   const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us', ANTHROPIC_API_KEY: 'k' };
   const calls = [];
   const fetchFn = async (url, opts = {}) => {
@@ -132,7 +132,7 @@ function harness({ messages, triageOut, draftText = 'Hi, the truck is in Robeson
   const db = memDb();
   if (Object.keys(cfg).length) db.set('taInboxCfg', cfg);
   const docs = { enabled: true, storeDocs: async () => [{ id: 1 }], linkDocs: async () => {}, listDocs: async () => docsList, readDocs: async ({ ids }) => ids.map((id) => ({ id, mediaType: 'application/pdf', data: Buffer.from('%PDF') })) };
-  const inbox = initInbox({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: (q, r, n) => n(), db, docs, env, fetchFn, getBoard: async () => ({ trips: board }), packets, driver, etaWatch });
+  const inbox = initInbox({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: (q, r, n) => n(), db, docs, env, fetchFn, getBoard: async () => ({ trips: board }), packets, driver, etaWatch, askJarvis });
   return { inbox, calls, db };
 }
 const LOAD = { trip: { tripNumber: '623869', status: 'DEPSHIP', powerUnit: '2008', trailer: '7141' }, freightBills: [{ billNumber: 'B180400', endZoneDescription: 'BLOOMFIELD, CT, 06002' }], _ratecon: { data: { broker: 'RXO', loadNumber: 'RXO 24261611', brokerEmail: 'ops@rxo.com' } }, _samsara: { location: 'I 95, Robeson County, NC', gpsAt: '2026-10-07T12:00:00Z', speedMph: 64 } };
@@ -252,4 +252,49 @@ test('staff: "ETA every 3 hours on Native" → Jarvis schedules updates for that
   assert.deepEqual(added[0].to, ['ntellez@floridabeauty.us'], 'no address given → the sender');
   const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
   assert.match(e.instructionResults[0].sent, /ETA every 3h to ntellez@floridabeauty.us — loads 623869/);
+});
+
+test('a staff question by email ("update on deliveries to Lombard IL") is answered by Ask Jarvis and replied right away', async () => {
+  const { mdToHtml } = await import('../inbox.js');
+  assert.equal(mdToHtml('**2 loads** going there\n- 624520 · truck OC1 — no GPS'), '<p style="margin:0 0 8px"><b>2 loads</b> going there</p><ul style="margin:4px 0 8px;padding-left:20px"><li style="margin:2px 0">624520 · truck OC1 — no GPS</li></ul>');
+  const asked = [];
+  const askJarvis = async (q) => { asked.push(q); return { answer: '**1 load** to Lombard, IL\n- 624520 — no GPS yet, ETA Fri 9:00 AM Central' }; };
+  const q = { summary: 'Update on deliveries to Lombard IL', attachments: [], refs: {}, actions: [], reply: { needed: true, kind: 'status_eta', documents: [] }, instructions: [] };
+  const h = harness({ messages: [msg({ subject: 'Update', from: { emailAddress: { name: 'Nadim Tellez', address: 'ntellez@floridabeauty.us' } }, body: { contentType: 'text', content: 'I need an update on deliveries to Lombard IL' } })], triageOut: q, board: [LOAD], askJarvis });
+  await h.inbox.poll();
+  assert.match(asked[0].text, /Lombard IL/);
+  const sent = h.calls.filter((c) => /sendMail$/.test(c.url));
+  assert.equal(sent.length, 1);
+  const body = JSON.parse(sent[0].body).message;
+  assert.equal(body.toRecipients[0].emailAddress.address, 'ntellez@floridabeauty.us');
+  assert.match(body.body.content, /<b>1 load<\/b> to Lombard, IL/);
+  const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
+  assert.equal(e.status, 'replied');
+  // an outside sender's question is never answered this way — it waits as a draft
+  const asked2 = [];
+  const h2 = harness({ messages: [msg({})], triageOut: q, board: [LOAD], askJarvis: async (x) => { asked2.push(x); return { answer: 'x' }; } });
+  await h2.inbox.poll();
+  assert.equal(asked2.length, 0);
+});
+
+test('a customer asks by email without a load number → Jarvis asks back, and the reply continues the same conversation', async () => {
+  const asked = [];
+  const answers = ['Happy to help — what is the delivery city or your PO number?', 'Your load to Lombard, IL is in Indiana; ETA Fri 9:00 AM Central (estimate, may change).'];
+  const askJarvis = async (q) => { asked.push(q); return { answer: answers[asked.length - 1] }; };
+  const q = { summary: 'Where is my load', attachments: [], refs: {}, actions: [], reply: { needed: true, kind: 'status_eta', documents: [] }, instructions: [] };
+  const first = msg({ id: 'c1', conversationId: 'conv-1', subject: 'my flowers', from: { emailAddress: { name: 'Ana', address: 'ana@mayesh.com' } }, body: { contentType: 'text', content: 'Where are my flowers?' } });
+  const h = harness({ messages: [first], triageOut: q, board: [LOAD], askJarvis });
+  await h.inbox.poll();
+  assert.equal(asked[0].mode, 'customer');
+  let e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
+  assert.equal(e.draft, answers[0], 'auto-send off → the question waits as a draft');
+  assert.ok(e.jarvisThread);
+  // their answer arrives in the same email thread → same Jarvis conversation
+  const second = msg({ id: 'c2', conversationId: 'conv-1', subject: 'RE: my flowers', from: { emailAddress: { name: 'Ana', address: 'ana@mayesh.com' } }, body: { contentType: 'text', content: 'Lombard IL' } });
+  const h2 = harness({ messages: [second], triageOut: q, board: [LOAD], askJarvis, cfg: { autoSend: true } });
+  await h2.db.set('taEmails:florida-beauty', { list: [e] });
+  await h2.inbox.poll();
+  assert.equal(asked[1].threadId, e.jarvisThread, 'continues the conversation');
+  e = (await h2.db.get('taEmails:florida-beauty', { list: [] })).list.find((x) => x.id === 'c2');
+  assert.equal(e.status, 'replied', 'auto-send on → answered by email');
 });
