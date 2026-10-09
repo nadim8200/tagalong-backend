@@ -47,8 +47,8 @@ export function pushFor(e) {
 export function callbackOf(callId, requests = []) {
   if (!callId) return null;
   const hits = (requests || []).filter((r) => r && r.source === 'call' && String(r.ref || '').split(':')[0] === String(callId));
-  const r = hits.find((x) => x.status === 'open') || hits[0];
-  return r ? { id: r.id, status: r.status, need: r.need || null, urgent: !!r.urgent, handledBy: r.handledBy || null, handledAt: r.handledAt || null } : null;
+  const r = hits.find((x) => x.status !== 'handled') || hits[0];
+  return r ? { id: r.id, status: r.status === 'handled' ? 'handled' : 'open', need: r.need || null, urgent: !!r.urgent, handledBy: r.handledBy || null, handledAt: r.handledAt || null, owner: r.owner || null, dueAt: r.dueAt || null, teams: (r.sent && r.sent.teams) || [] } : null;
 }
 const fmt = (p) => { const d = last10(p); return d ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || 'unknown number'); };
 

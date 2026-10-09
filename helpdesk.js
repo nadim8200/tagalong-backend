@@ -99,6 +99,45 @@ ${req.said ? `<p><b>What was said:</b></p><blockquote style="border-left:3px sol
   return { subject, html, text };
 }
 
+// A callback task's status, from its real fields (never from the call's age). Pure.
+// completed · overdue (a due time that passed) · scheduled (has a due time) · assigned (has an owner) · requested
+export function taskStatus(r, now = Date.now()) {
+  if (!r) return null;
+  if (r.status === 'handled') return 'completed';
+  if (r.dueAt && Date.parse(r.dueAt) < now) return 'overdue';
+  if (r.dueAt) return 'scheduled';
+  if (r.owner) return 'assigned';
+  return 'requested';
+}
+const OUTCOMES = { reached: 'Reached contact — resolved', voicemail: 'Left voicemail', no_answer: 'No answer — follow-up needed' };
+// One change to a task → the new task (history kept). Pure. change: { assignTo, dueAt, nextStep, attempt, complete }
+export function applyTaskChange(r, change = {}, { by = 'dispatcher', now = Date.now() } = {}) {
+  const at = new Date(now).toISOString();
+  const t = { ...r, history: [...(r.history || [])] };
+  if (change.assignTo !== undefined) { t.owner = change.assignTo ? String(change.assignTo).slice(0, 80) : null; t.history.push({ at, by, action: t.owner ? 'assigned' : 'unassigned', to: t.owner }); }
+  if (change.dueAt !== undefined) {
+    const ms = change.dueAt ? Date.parse(change.dueAt) : null;
+    if (change.dueAt && Number.isNaN(ms)) throw Object.assign(new Error('That due time is not valid.'), { status: 400 });
+    t.dueAt = ms ? new Date(ms).toISOString() : null; t.history.push({ at, by, action: t.dueAt ? 'scheduled' : 'unscheduled', dueAt: t.dueAt });
+  }
+  if (change.nextStep !== undefined) { t.nextStep = String(change.nextStep || '').slice(0, 300) || null; t.history.push({ at, by, action: 'next step', note: t.nextStep }); }
+  if (change.complete) {
+    const outcome = OUTCOMES[change.complete.outcome] ? change.complete.outcome : null;
+    if (!outcome) throw Object.assign(new Error('Pick an outcome.'), { status: 400 });
+    const note = String(change.complete.note || '').slice(0, 300);
+    if (outcome === 'reached') {
+      Object.assign(t, { status: 'handled', handledBy: by, handledAt: at, outcome, note });
+      t.history.push({ at, by, action: 'completed', outcome, note });
+    } else {
+      // no answer / voicemail: an attempt, the task stays open (optionally with the next try scheduled)
+      t.attempts = [...(t.attempts || []), { at, by, outcome, note }];
+      t.history.push({ at, by, action: 'attempt', outcome, note });
+      if (change.complete.nextDueAt) { const ms = Date.parse(change.complete.nextDueAt); if (!Number.isNaN(ms)) { t.dueAt = new Date(ms).toISOString(); t.history.push({ at, by, action: 'scheduled', dueAt: t.dueAt }); } }
+    }
+  }
+  return t;
+}
+
 export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = null, sms = null, push = null, pushRules = null, directory = null, caller = null, classify = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const key = `taHelpRequests:${SITE}`;
@@ -223,12 +262,64 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
 
   app.get('/truckmate/help', requireAuth, async (req, res) => {
     const list = (await db.get(key, [])) || [];
-    res.json(req.query.all ? list.slice(0, 200) : list.filter((x) => x.status === 'open'));
+    const now = Date.now();
+    const out = req.query.all ? list.slice(0, 200) : list.filter((x) => x.status !== 'handled');
+    res.json(out.map((x) => ({ ...x, taskStatus: taskStatus(x, now) })));
   });
   app.post('/truckmate/help/:id/handled', requireAuth, async (req, res) => {
     const note = String((req.body && req.body.note) || '').slice(0, 300);
-    const list = await db.update(key, (cur) => (Array.isArray(cur) ? cur : []).map((x) => (x.id === req.params.id ? { ...x, status: 'handled', handledBy: who(req), handledAt: new Date().toISOString(), note } : x)), []);
+    const list = await db.update(key, (cur) => (Array.isArray(cur) ? cur : []).map((x) => (x.id === req.params.id ? applyTaskChange(x, { complete: { outcome: 'reached', note } }, { by: who(req) }) : x)), []);
     res.json(list.find((x) => x.id === req.params.id) || null);
+  });
+  // one task (e.g. a handled one, for the conversation panel)
+  app.get('/truckmate/help/task/:id', requireAuth, async (req, res) => {
+    const x = ((await db.get(key, [])) || []).find((r) => r.id === String(req.params.id));
+    if (!x) return res.status(404).json({ error: 'Task not found.' });
+    res.json({ ...x, taskStatus: taskStatus(x) });
+  });
+  // assign / schedule / next step / attempt / complete — saved, with history
+  app.post('/truckmate/help/:id/update', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const b = req.body || {};
+    const change = {};
+    if ('assignTo' in b) change.assignTo = b.assignTo === 'me' ? who(req) : b.assignTo;
+    if ('dueAt' in b) change.dueAt = b.dueAt;
+    if ('nextStep' in b) change.nextStep = b.nextStep;
+    if (b.complete) change.complete = b.complete;
+    let found = null; let err = null;
+    await db.update(key, (cur) => (Array.isArray(cur) ? cur : []).map((x) => {
+      if (x.id !== req.params.id) return x;
+      try { found = applyTaskChange(x, change, { by: who(req) }); return found; } catch (e) { err = e; return x; }
+    }), []);
+    if (err) return res.status(err.status || 400).json({ error: err.message });
+    if (!found) return res.status(404).json({ error: 'Task not found.' });
+    res.json({ ...found, taskStatus: taskStatus(found) });
+  });
+  // a callback task from a conversation that doesn't have one (one per call — no duplicates)
+  app.post('/truckmate/help/from-call', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const b = req.body || {};
+    const callId = String(b.callId || '').replace(/^call:/, '').trim();
+    if (!callId) return res.status(400).json({ error: 'Which call?' });
+    let existing = null; let made = null;
+    await db.update(key, (cur) => {
+      const list = Array.isArray(cur) ? cur : [];
+      existing = list.find((x) => x.source === 'call' && String(x.ref || '').split(':')[0] === callId) || null;
+      if (existing) return list;
+      made = { id: randomBytes(6).toString('hex'), at: new Date().toISOString(), callAt: b.at || null, source: 'call', ref: callId, role: ['customer', 'broker', 'driver', 'team'].includes(b.role) ? b.role : 'unknown',
+        from: { name: b.name ? String(b.name).slice(0, 80) : null, company: b.company ? String(b.company).slice(0, 80) : null, phone: b.phone ? String(b.phone).slice(0, 20) : null, email: null },
+        trip: b.trip ? String(b.trip).replace(/\D/g, '') || null : null, need: String(b.need || 'Call them back').slice(0, 500), status: 'open', urgent: false, by: who(req),
+        history: [{ at: new Date().toISOString(), by: who(req), action: 'created from the call' }] };
+      return [made, ...list].slice(0, 500);
+    }, []);
+    const t = existing || made;
+    res.status(existing ? 200 : 201).json({ ...t, taskStatus: taskStatus(t), existed: !!existing });
+  });
+  // who a task can be assigned to: dispatchers + callback teams (names only)
+  app.get('/truckmate/help/assignees', requireAuth, async (req, res) => {
+    const disp = (((await db.get('taDispatchers', { list: [] })) || {}).list || []).filter((d) => d && d.active !== false).map((d) => d.name || d.email).filter(Boolean);
+    const teams = teamsOf(await settings()).filter((t) => t.active !== false).map((t) => t.name).filter(Boolean);
+    res.json({ people: [...new Set(disp)].sort(), teams: [...new Set(teams)], me: who(req) });
   });
   app.get('/truckmate/help/settings', requireAuth, async (req, res) => res.json({ teams: teamsOf(await settings()), outlook: !!(mail && mail.ready()), texting: !!(sms && (await sms.live())), calls: !!caller }));
   app.put('/truckmate/help/settings', requireAuth, async (req, res) => {

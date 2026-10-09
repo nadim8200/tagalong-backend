@@ -69,7 +69,7 @@ test('record pushes once per call even when the webhook repeats — to whoever t
 test('calls show their callback request: open → "call back needed", then who handled it', async () => {
   const { callbackOf } = await import('../activity.js');
   const reqs = [{ id: 'h1', source: 'call', ref: 'abc:Please call me about 624268', status: 'open', need: 'ETA for 624268', urgent: false }, { id: 'h2', source: 'email', ref: 'abc', status: 'open' }];
-  assert.deepEqual(callbackOf('abc', reqs), { id: 'h1', status: 'open', need: 'ETA for 624268', urgent: false, handledBy: null, handledAt: null });
+  assert.deepEqual(callbackOf('abc', reqs), { id: 'h1', status: 'open', need: 'ETA for 624268', urgent: false, handledBy: null, handledAt: null, owner: null, dueAt: null, teams: [] });
   assert.equal(callbackOf('zzz', reqs), null);
   const db = memDb({ 'taHelpRequests:florida-beauty': reqs });
   const routes = {};
