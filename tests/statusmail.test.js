@@ -74,7 +74,8 @@ test('first run adopts silently; later events email the customer list and log on
   const picked = load({ trip: { status: 'DEPSHIP' } });
   await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 60000 });
   assert.equal(sent.length, 1);
-  assert.match(sent[0].message.subject, /^Picked up — trailer departed and rolling/);
+  assert.match(sent[0].message.subject, /^Fixture Floral Co \| 0 delivered · 0 delayed \| .* \| Trip 900200$/);
+  assert.match(Buffer.from((sent[0].mime.match(/text\/plain[\s\S]*?base64\r\n\r\n([\s\S]*?)\r\n--/) || [])[1].replace(/\r\n/g, ''), 'base64').toString(), /Loaded and ready to roll — 2 stops: 1\. VALDOSTA, GA, 2\. LYONS, GA\. We'll keep you posted\.[\s\S]*· Trip 900200 · Truck 2403/);
   assert.deepEqual(sent[0].message.toRecipients.map((r) => r.emailAddress.address), ['ops@fixture.com']);
   assert.equal(logged[0].auto, true);
   await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 120000 });
@@ -83,7 +84,8 @@ test('first run adopts silently; later events email the customer list and log on
   const other = load({ trip: { tripNumber: '900201', status: 'ARRCONS' }, hist: [{ status: 'DEPSHIP' }, { status: 'ARRCONS' }] });
   await sm.process('fb', { trips: [picked, other] }, { geo, now: NOW + 180000 });
   assert.equal(sent.length, 2);
-  assert.match(sent[1].message.subject, /^Arrived at stop 1 of 2 — Trip 900201/);
+  assert.match(sent[1].message.subject, /\| Trip 900201$/);
+  assert.match(Buffer.from((sent[1].mime.match(/text\/plain[\s\S]*?base64\r\n\r\n([\s\S]*?)\r\n--/) || [])[1].replace(/\r\n/g, ''), 'base64').toString(), /Driver at the receiver \(stop 1 of 2\)/);
 });
 
 import { contactsFor } from '../statusmail.js';
@@ -214,4 +216,19 @@ test('trailer loaded, drivers and swaps each get their own email; LOADED TO GO i
   evs = pendingEvents(gone, { assigned: 'x', told: { ...t2, loaded: true } }, { now: NOW2 });
   assert.deepEqual(evs.map((e) => e.kind), ['picked-up']);
   assert.match(renderEvent(evs[0], gone, { now: NOW2 }).subject, /^Picked up — trailer departed and rolling/);
+});
+
+test('SOP: hourly "headed to shipper" before pickup, then "still at the shipper"; stage headlines', async () => {
+  const { sopStage } = await import('../statusmail.js');
+  const assigned = { assigned: new Date(NOW - 2 * 3600000).toISOString(), told: { truck: '2403', trailer: '5310', drivers: 'JDOE' } };
+  const live = { _samsara: { lat: 25.9, lng: -80.3, gpsAt: new Date(NOW - 60000).toISOString(), speedMph: 55, driver1Info: { name: 'John Doe' } } };
+  const before = load({ trip: { status: 'DISP' }, extra: live });
+  assert.deepEqual(pendingEvents(before, { ...assigned }, { now: NOW, everyHours: 1 }).map((e) => [e.kind, e.stage]), [['location', 'to-shipper']]);
+  assert.deepEqual(pendingEvents(before, { ...assigned, lastPrePickAt: new Date(NOW - 30 * 60000).toISOString() }, { now: NOW, everyHours: 1 }), [], 'not yet an hour');
+  const atShip = { ...assigned, atShipper: new Date(NOW - 70 * 60000).toISOString() };
+  assert.deepEqual(pendingEvents(before, atShip, { now: NOW, everyHours: 1 }).map((e) => e.stage), ['at-shipper']);
+  const s1 = sopStage({ kind: 'location', stage: 'to-shipper' }, before, { geo, now: NOW });
+  assert.equal(s1.stage, 'Headed to shipper'); assert.match(s1.headline, /^Empty and headed to the shipper — about \d+ mi away\. We'll keep you posted\./);
+  assert.equal(sopStage({ kind: 'delivered' }, before, { now: NOW }).attach, 'pod');
+  assert.equal(sopStage({ kind: 'picked-up' }, before, { now: NOW }).attach, 'bol');
 });

@@ -35,3 +35,15 @@ test('email: subject format, action first, appointment vs ETA, customer vs inter
   const internal = renderUpdateEmail({ audience: 'internal', customer: 'Passion Growers', snaps: [s1], now: NOW });
   assert.match(internal.text, /Driver: Romane Williams/); assert.match(internal.text, /Drive time left: 2h 5m/);
 });
+
+test('SOP rows: trailer temperature, map link, miles; completed: clean bill / lumper / detention', () => {
+  const live = { lat: 39.9, lng: -75.1, tempF: 34, setpointF: 34 };
+  const s = loadSnapshot(item({ live }), { eta: { stops: [{ label: 'XENIA, OH, 45385', etaMs: NOW + 3600000, apptMs: NOW + 7200000, miles: 61.4 }] }, now: NOW, stage: 'Rolling' });
+  const t = renderUpdateEmail({ snaps: [s], now: NOW, headline: "Rolling. We'll keep you posted." }).text;
+  assert.match(t, /Trailer temperature: 34°F · set 34°F/); assert.match(t, /Miles to go: 61 mi/); assert.match(t, /maps\.google\.com\/\?q=39\.9,-75\.1/);
+  const done = item({ bills: [{ billNumber: 'B1', billToName: 'X', endZoneDescription: 'XENIA, OH, 45385', pieces: 40, actualDelivery: '2026-10-09T10:15:00' }] });
+  done._waits = { 'XENIA, OH, 45385': { arrivedAt: '2026-10-09T09:00:00Z', leftAt: '2026-10-09T13:20:00Z', minutes: 260 } };
+  const d = loadSnapshot(done, { now: NOW, notes: ['empty, paid lumper $185 cash'] });
+  const dt = renderUpdateEmail({ snaps: [d], now: NOW }).text;
+  assert.match(dt, /Exceptions: None reported \(clean bill\)/); assert.match(dt, /Lumper: \$185/); assert.match(dt, /Detention: In Fri, Oct 9, 5:00 AM ET · Out Fri, Oct 9, 9:20 AM ET · 4h 20m/);
+});

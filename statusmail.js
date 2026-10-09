@@ -36,7 +36,7 @@ const ARRIVE = /^arrcon/i;
 const LOADED = /^(loadedtogo|sptld)/i;          // TruckMate: TRAILER NOW LOADED TO GO / SPOTTED LOADED
 const DONE = /^(delvd|deliv|del$|cmplt|complete)/i;
 const DEAD = /^(canc|void)/i;
-export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, useBroker: true, customers: {}, trips: {} };
+export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 1, useBroker: true, customers: {}, trips: {} };   // SOP: an update every hour
 const MAX_PER_DAY = 15;
 
 const tripOf = (item) => (item && item.trip) || item || {};
@@ -307,13 +307,44 @@ export function pendingEvents(item, sent = {}, { now = Date.now(), everyHours = 
   });
   if (!sent.delivered && delivered) out.push({ kind: 'delivered' });
   const lastLoc = sent.lastLocationAt || sent.pickedUp;
-  // the 3-hour location email, only when nothing bigger is going out
-  if (!out.length && !delivered && everPicked && sent.pickedUp && lastLoc && now - Date.parse(lastLoc) >= everyHours * H) out.push({ kind: 'location' });
+  // the regular location update (SOP: every hour), only when nothing bigger is going out
+  if (!out.length && !delivered && everPicked && sent.pickedUp && lastLoc && now - Date.parse(lastLoc) >= everyHours * H) out.push({ kind: 'location', stage: 'rolling' });
+  // before pickup (SOP): "headed to the shipper — ETA", then "driver at / still at the shipper"
+  if (!out.length && !delivered && !everPicked && sent.assigned) {
+    const live = (item && item._samsara) || {};
+    const fresh = live.gpsAt && now - Date.parse(live.gpsAt) < 30 * 60000;
+    const atShip = sent.atShipper || sure('arrived-shipper');
+    const since = (iso) => !iso || now - Date.parse(iso) >= everyHours * H;
+    if (atShip && since(sent.lastShipperAt || sent.atShipper)) out.push({ kind: 'location', stage: 'at-shipper' });
+    else if (!atShip && fresh && since(sent.lastPrePickAt || sent.assigned)) out.push({ kind: 'location', stage: 'to-shipper' });
+  }
   return out;
 }
 
 const fmtTime = (ms) => (ms == null ? null : `${new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} ET`);
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// The office SOP stage for an update: card label, headline, and what's attached. Pure (given geo).
+export function sopStage(ev, item, { geo = () => null, now = Date.now() } = {}) {
+  const t = tripOf(item);
+  const stops = stopsNow(item);
+  const of = stops.length;
+  const posted = " We'll keep you posted.";
+  if (ev.kind === 'location' && ev.stage === 'to-shipper') {
+    const here = whereNow(item, now);
+    const pz = zipOf(t.origZoneDesc);
+    const g = pz ? geo(pz) : (/MIAMI/i.test(t.origZoneDesc || '') ? MIAMI_TERMINAL : null);
+    let miles = null; let etaMs = null;
+    if (g && here && here.lat != null) { miles = Math.round(haversineMi(here.lat, here.lng, g.lat, g.lng) * 1.2); etaMs = miles < 3 ? now : estimateArrival(miles, { now }); }
+    return { stage: 'Headed to shipper', pickup: { place: cityOf(t.origZoneDesc) || null, miles, etaMs, apptMs: null }, headline: `Empty and headed to the shipper${miles != null ? ` — about ${miles} mi away` : ''}.${posted}` };
+  }
+  if (ev.kind === 'at-shipper' || (ev.kind === 'location' && ev.stage === 'at-shipper')) return { stage: 'At shipper', headline: `${ev.kind === 'at-shipper' ? 'Driver at the shipper' : 'Driver still at the shipper'}.${posted}` };
+  if (ev.kind === 'picked-up') return { stage: 'Loaded — ready to roll', attach: 'bol', headline: `Loaded and ready to roll${of > 1 ? ` — ${of} stops: ${stops.map((s, i) => `${i + 1}. ${s.place}`).join(', ')}` : ''}.${posted}` };
+  if (ev.kind === 'arrived' && !ev.delivered) return { stage: 'At receiver', destination: (stops.find((s) => s.key === ev.stop) || {}).place || null, headline: `Driver at the receiver${ev.of > 1 ? ` (stop ${ev.number} of ${ev.of})` : ''}.${posted}` };
+  if (ev.kind === 'delivered' || (ev.kind === 'arrived' && ev.delivered)) return { attach: 'pod', destination: ev.stop ? ((stops.find((s) => s.key === ev.stop) || {}).place || null) : null, headline: `Load completed${ev.of > 1 ? ` (stop ${ev.number} of ${ev.of})` : ''}.${posted}` };
+  if (ev.kind === 'late') return { headline: `Running behind the appointment — see the new ETA below.${posted}` };
+  return { stage: null, headline: `Rolling.${posted}` };
+}
 
 // The email for one event. Pure (given geo).
 export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {}) {
@@ -458,12 +489,16 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
   async function deliver(site, trip, item, ev, ctx, { by = 'AI Dispatcher (automatic)', to = null } = {}) {
     const cfg = await settings();
     let mail;
-    if (['location', 'late', 'delivered'].includes(ev.kind)) {
-      // updates use the standard delivery-update format (customer version, live data)
+    let attachIds = [];
+    if (['location', 'late', 'delivered', 'picked-up', 'arrived', 'at-shipper'].includes(ev.kind)) {
+      // updates follow the office SOP wording, in the standard delivery-update format (customer version, live data)
       const rc = (item && item._ratecon && (item._ratecon.data || item._ratecon)) || {};
       const cust = (billsOf(item).find((b) => b.billToName) || {}).billToName || rc.broker || null;
-      const u = await buildUpdateFor({ db, docs, site, items: [item], trips: [trip], customer: cust, audience: 'customer', now: (ctx && ctx.now) || Date.now(), extraRef: rc.loadNumber ? `Load ${rc.loadNumber}` : `Trip ${trip}` });
+      const now0 = (ctx && ctx.now) || Date.now();
+      const sop = sopStage(ev, item, { geo: (ctx && ctx.geo) || (() => null), now: now0 });
+      const u = await buildUpdateFor({ db, docs, site, items: [item], trips: [trip], customer: cust, audience: 'customer', now: now0, extraRef: rc.loadNumber ? `Load ${rc.loadNumber}` : `Trip ${trip}`, ...sop });
       mail = { subject: u.subject, html: u.html, text: u.text };
+      attachIds = u.attachIds || [];
     } else mail = renderEvent(ev, item, ctx);
     if (!mail) return { status: 'skipped' };
     const rcpts = to || recipients(item, cfg);
@@ -471,7 +506,10 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
     if (!rcpts.length) status = 'not sent — no customer email on file';
     else if (!mailConfig(env).ready) status = 'not sent — Outlook not connected yet';
     else {
-      try { await sendMail({ to: rcpts, subject: mail.subject, html: mail.html, text: mail.text }, { env, fetchFn }); } catch (e) { status = 'failed'; error = e.message; }
+      try {
+        const files = attachIds.length && docs && docs.readDocs ? await docs.readDocs({ site, ids: attachIds }) : [];
+        await sendMail({ to: rcpts, subject: mail.subject, html: mail.html, text: mail.text, attachments: files.map((f, i) => ({ name: `${ev.kind === 'delivered' || ev.delivered ? 'POD' : 'BOL'}-${trip}-${i + 1}.${/pdf/.test(f.mediaType) ? 'pdf' : 'jpg'}`, contentType: f.mediaType, bytes: f.data })) }, { env, fetchFn });
+      } catch (e) { status = 'failed'; error = e.message; }
     }
     const at = new Date().toISOString();
     if (status === 'sent' && comms && comms.log) await comms.log(site, trip, { type: 'email', dir: 'out', auto: true, at, to: rcpts.join(', '), subject: mail.subject, text: mail.text.slice(0, 600), by, noThread: true });
@@ -503,6 +541,8 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
         if (ev.kind === 'assigned') { rec.sent.assigned = nowIso; rec.sent.told = ev.told; } else if (ev.kind === 'at-shipper') rec.sent.atShipper = nowIso;
         else if (ev.kind === 'picked-up') { rec.sent.pickedUp = nowIso; rec.sent.lastLocationAt = nowIso; } else if (ev.kind === 'arrived') rec.sent.stops = { ...(rec.sent.stops || {}), [ev.stop]: nowIso };
         else if (ev.kind === 'delivered') rec.sent.delivered = nowIso;
+        else if (ev.kind === 'location' && ev.stage === 'to-shipper') rec.sent.lastPrePickAt = nowIso;
+        else if (ev.kind === 'location' && ev.stage === 'at-shipper') rec.sent.lastShipperAt = nowIso;
         else if (ev.kind === 'location') rec.sent.lastLocationAt = nowIso;
       };
       evs.forEach(mark);

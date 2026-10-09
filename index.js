@@ -63,6 +63,7 @@ import { initTraining } from './training.js';
 import { initEtaWatch } from './etawatch.js';
 import { initFollowThrough } from './followthrough.js';
 import { initPlaybook } from './playbook.js';
+import { initDirectory } from './directory.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -693,6 +694,13 @@ const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.e
 const { requireDispatch, requireAdmin } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true }) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
 // who gets which push notifications — one admin screen for all of them
 const pushRules = initPushRules(app, { requireAdmin, db, push, listDispatchers: async () => (((await db.get('taDispatchers', { list: [] })) || {}).list || []).map(({ pass, reset, ...d }) => d) });
+// company directory: staff names + extensions (shareable); cells / emails are system-only
+const directory = initDirectory(app, { requireAuth: requireDispatch, requireAdmin, db, contact: {
+  textingLive: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } },
+  text: (to, text) => rc.sendSms('__shared', { to, text }),
+  email: (to, subject, text) => sendMail({ to: [to], subject, html: `<div style="font-family:Arial,sans-serif;font-size:15px">${String(text).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>`, text }, { env: process.env }),
+  call: (o) => voice.callStaff(o),
+} });
 // training mode: outside emails go to the test addresses; texts / calls / app messages are held (copy emailed)
 const training = initTraining(app, { requireAuth: requireDispatch, requireAdmin, db, sendDirect: (m) => sendMail(m, { env: process.env, direct: true }) });
 setMailGuard((m) => training.mailGuard(m));
@@ -717,7 +725,7 @@ const driverLinks = initDriverLinks(app, { training, help, requireAuth: requireD
 // driver calls / texts on a load, and their replies (RingCentral)
 const comms = initComms(app, { help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
-helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, pushRules, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
+helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, pushRules, directory, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) },
   sms: { live: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } }, send: (to, text) => rc.sendSms('__shared', { to, text }) } });
 const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env });
@@ -755,13 +763,13 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
-const voice = initVoice(app, { training, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const voice = initVoice(app, { training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
-jarvisChat = initJarvisChat(app, { playbook, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
+jarvisChat = initJarvisChat(app, { playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });

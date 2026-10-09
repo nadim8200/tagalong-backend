@@ -331,3 +331,16 @@ test('a TRAINING email from staff teaches Jarvis (no live action) and gets a "wh
   const reply = h.calls.find((c) => /\/reply$/.test(c.url));
   assert.match(JSON.parse(reply.body).comment, /RXO check calls/);
 });
+
+test('two inbox checks at once (slow trip-sheet packet, or two servers during a deploy) process an email only once', async () => {
+  const learned = [];
+  const playbook = { all: async () => [], remove: async () => {}, text: async () => '', learn: async () => { learned.push(1); await new Promise((r) => setTimeout(r, 30)); return { lessons: [], questions: [] }; } };
+  const h = harness({ messages: [msg({ subject: 'TRAINING: x', from: { emailAddress: { name: 'Nadim', address: 'ntellez@floridabeauty.us' } } })], triageOut: { summary: 'x', attachments: [], refs: {}, actions: [], reply: { needed: false } }, board: [LOAD], playbook });
+  await Promise.all([h.inbox.poll(), h.inbox.poll()]);
+  assert.equal(learned.length, 1, 'same process: one check at a time');
+  const h2 = harness({ messages: [msg({ subject: 'TRAINING: x', from: { emailAddress: { name: 'Nadim', address: 'ntellez@floridabeauty.us' } } })], triageOut: { summary: 'x', attachments: [], refs: {}, actions: [], reply: { needed: false } }, board: [LOAD], playbook });
+  await h2.db.set('taEmailClaims', { mx: Date.now() });   // another server already claimed it
+  await h2.inbox.poll();
+  assert.equal(learned.length, 1, 'claimed elsewhere → skipped');
+  assert.equal(((await h.db.get('taEmails:florida-beauty', { list: [] })).list || []).length, 1);
+});

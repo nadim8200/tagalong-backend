@@ -98,6 +98,14 @@ export function observe(item, state = {}, { geo = () => null, now = Date.now() }
   return { ms: out, near: near ? { place: near, since } : null, stops };
 }
 
+// The SOP driver checklists (office SOP, slides 5, 9, 10). Pure.
+export function checklistText(kind, { name, trip, pu = null, stop = null }) {
+  const hi = `Florida Beauty Flora dispatch (Jarvis): Hi${name ? ` ${first(name)}` : ''}, load ${trip}`;
+  if (kind === 'shipper') return `${hi}${pu ? ` — PU# ${pu}` : ''}. At the shipper please: 1) tell us when you get a door and start loading; 2) write "SLC" next to your signature on the BOL and make sure the seal # is on it; 3) set the trailer temp as agreed (photo); 4) seal the trailer (photo); 5) weight max 42,000 lbs; 6) boxes/pallets in good shape with at least 2 load locks (photo); 7) photo of the BOL. Reply "Done" when finished.`;
+  if (kind === 'before') return `${hi} — almost at ${stop || 'the receiver'}. Before delivering please send a photo of the reefer temperature, check the temp is as agreed and the boxes/pallets are secured (2+ load locks), and tell us when you get a door.`;
+  return `${hi} — at ${stop || 'the receiver'}. Please: 1) get the signed POD with the highlighted note; 2) send clear photos of all POD pages and stickers and the box/pallet label; 3) tell us right away if any product is REJECTED or not accepted, and why; 4) tell us any extra charge with the $ amount (lumper, restack, delay) and send the receipt.`;
+}
+
 // The question for the driver. Pure.
 export function askText(key, { name, trip, place, waitMin }) {
   const hi = `Florida Beauty Flora dispatch (Jarvis): Hi${name ? ` ${first(name)}` : ''},`;
@@ -216,6 +224,29 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
         w.leftAt = nowIso; w.minutes = Math.round((Date.parse(nowIso) - Date.parse(w.arrivedAt)) / MIN);
         if (w.minutes >= cfg.waitMin && comms && comms.log) await comms.log(site, trip, { type: 'note', kind: 'detention', text: `Detention record: ${place === 'pickup' ? 'shipper' : labelOf(`arrived:${place}`, o.stops).replace(/^arrived at /, '')} — arrived ${w.arrivedAt}, left ${w.leftAt}, ${fmtMin(w.minutes)} on site (${fmtMin(Math.max(0, w.minutes - cfg.waitMin))} past ${fmtMin(cfg.waitMin)} free).`, by: 'Jarvis', noThread: true }); // eslint-disable-line no-await-in-loop
       }
+      // 3b) the SOP checklists, once each: at the shipper, almost at a receiver, at a receiver
+      st.lists = st.lists || {};
+      if (cfg.askDriver && !firstSight) {
+        const nm = (item._oc && item._oc.driverName) || (item._samsara && item._samsara.driver1Info && item._samsara.driver1Info.name) || '';
+        const rc = (item._ratecon && (item._ratecon.data || item._ratecon)) || {};
+        const pu = ((rc.pickups || [])[0] || {}).refs || null;
+        const legs = ((((await db.get(`taWatch:${site}`, {})) || {}).etas || {})[trip] || {}).stops || []; // eslint-disable-line no-await-in-loop
+        const due = [];
+        if (st.ms['arrived-shipper'] && !st.ms.departed && !st.lists.shipper) due.push(['shipper', checklistText('shipper', { name: nm, trip, pu })]);
+        const cur = o.stops.find((x) => !x.delivered && !st.ms[`delivered:${x.key}`]);
+        const leg = cur ? legs.find((l) => String(l.label || '').split(',')[0] === String(cur.label || cur.key).split(',')[0]) : null;
+        const where = cur ? `${cur.name || (cur.customers || [])[0] || ''} ${cur.place || ''}`.trim() : null;
+        if (cur && st.ms.departed && !st.ms[`arrived:${cur.key}`] && leg && (leg.miles < 40 || leg.etaMs - t0 < 75 * 60000) && !(st.lists.before || {})[cur.key]) due.push([`before:${cur.key}`, checklistText('before', { name: nm, trip, stop: where })]);
+        if (cur && st.ms[`arrived:${cur.key}`] && !(st.lists.delivery || {})[cur.key]) due.push([`delivery:${cur.key}`, checklistText('delivery', { name: nm, trip, stop: where })]);
+        const duty = S(item._samsara && item._samsara.hos && item._samsara.hos.status);
+        if (due.length && !/sleeper|off ?duty|offduty/i.test(duty)) {
+          const [k, text] = due[0];
+          let r; try { r = await ask(site, item, text); } catch (e) { r = { error: e.message }; } // eslint-disable-line no-await-in-loop
+          const [kind, sk] = k.split(/:(.+)/);
+          if (kind === 'shipper') st.lists.shipper = { at: nowIso, ...r };
+          else st.lists[kind === 'before' ? 'before' : 'delivery'] = { ...(st.lists[kind === 'before' ? 'before' : 'delivery'] || {}), [sk]: { at: nowIso, ...r } };
+        }
+      }
       // 4) ask the driver to confirm one step at a time: newest unconfirmed, not yet asked
       if (cfg.askDriver && !firstSight) {
         const duty = S(item._samsara && item._samsara.hos && item._samsara.hos.status);
@@ -236,6 +267,7 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
       }
       book[trip] = st;
       // overlay for the status emails / console
+      item._waits = st.waits || {};   // arrive / leave times at the shipper and receivers (detention)
       item._milestones = Object.fromEntries(Object.entries(st.ms).map(([k, m]) => [k, { at: m.driverAt || m.at, src: m.driverAt ? (m.src === 'driver' ? 'driver' : `${m.src} + driver`) : m.src }]));
     }
     const live = new Set(items.map(tripNo));

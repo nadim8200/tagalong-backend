@@ -103,7 +103,7 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   assert.deepEqual(r.out && { llm: r.out.llmId, agent: r.out.agentId }, { llm: 'llm_1', agent: 'agent_1' });
   const llm = v.retellCalls.find((c) => c.url.endsWith('/create-retell-llm')).body;
   assert.match(llm.model, /^claude/);
-  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'take_message', 'confirm_delivered', 'report_problem', 'end_call', 'transfer_to_dispatch']);
+  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'take_message', 'staff_directory', 'confirm_delivered', 'report_problem', 'end_call', 'transfer_to_dispatch']);
   assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
   assert.deepEqual(agent.language, ['en-US', 'es-419', 'he-IL']);

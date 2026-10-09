@@ -97,3 +97,14 @@ test('teams with context: Jarvis matches the request to the team whose context f
   assert.deepEqual([...mails[0].to].sort(), ['accounting@floridabeauty.us', 'aleon@floridabeauty.us']);
   assert.deepEqual(texts, ['3055556000']); assert.deepEqual(calls, ['3055556000']);
 });
+
+test('a message for a named staff member goes to that person (cell is system-only)', async () => {
+  const { initHelpdesk } = await import('../helpdesk.js');
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const calls = [];
+  const directory = { mentioned: async (t) => (/frank/i.test(t) ? [{ name: 'Frank Ducassi', department: 'Customer Service', ext: '259', phone: '3057485611', email: null }] : []) };
+  const h = initHelpdesk({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: () => {}, db, env: { NODE_ENV: 'test' }, directory, sms: { live: async () => false }, caller: async (o) => { calls.push(o); return { called: true }; } });
+  const r = await h.raise({ source: 'call', ref: 'c1', role: 'customer', from: { name: 'Ana', phone: '3055550100' }, need: 'Please have Frank call me about my claim', forPerson: 'Frank' });
+  assert.deepEqual(r.forStaff, [{ name: 'Frank Ducassi', department: 'Customer Service', ext: '259' }]);
+  assert.equal(calls[0].to, '3057485611', 'texting not live yet → Jarvis calls Frank with the message');
+});

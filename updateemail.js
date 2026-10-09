@@ -38,7 +38,7 @@ function stopWall(raw, label) {
 }
 
 // One trip, read from live data. focus: { customer, place } picks the stop that matters. Pure.
-export function loadSnapshot(item, { eta = null, now = Date.now(), focus = {}, pods = [], alerts = [] } = {}) {
+export function loadSnapshot(item, { eta = null, now = Date.now(), focus = {}, pods = [], alerts = [], notes = [], stage = null, pickup = null } = {}) {
   const t = tripOf(item); const live = (item && item._samsara) || {};
   const bills = billsOf(item);
   const sheet = ((item && item._manifest && item._manifest.stops) || []).filter((s) => /DELIVER/i.test(s.action || ''));
@@ -75,7 +75,24 @@ export function loadSnapshot(item, { eta = null, now = Date.now(), focus = {}, p
     gpsAge, apptMs: leg && leg.apptMs != null ? leg.apptMs : null, apptFrom: leg && leg.apptFrom ? leg.apptFrom : null, etaMs: leg ? leg.etaMs : null,
     discrepancies: alerts.filter((a) => a && a.code === 'sheet-mismatch').map((a) => a.detail || a.title).slice(0, 2),
     podVerified: pods.some((d) => /proof_of_delivery|pod/i.test(`${d.docType || ''}`)),
+    miles: leg && leg.miles != null ? Math.round(leg.miles) : null,
+    temp: live.tempF != null && !live.tempStale ? { f: Math.round(live.tempF), set: live.setpointF != null ? Math.round(live.setpointF) : null } : null,
+    mapUrl: live.lat != null && live.lng != null && gpsAge != null && gpsAge < 120 ? `https://maps.google.com/?q=${live.lat},${live.lng}` : null,
+    stageLabel: stage || null,
   };
+  // detention record (driver check-ins keep arrive / leave times): 3 h+ at a stop
+  const waits = (item && item._waits) || {};
+  const det = (w) => (w && w.arrivedAt && (w.minutes || 0) >= 180 ? { in: Date.parse(w.arrivedAt), out: w.leftAt ? Date.parse(w.leftAt) : null, min: w.minutes } : null);
+  snap.detentionShipper = det(waits.pickup);
+  snap.detentionStop = det(waits[stop.label]);
+  // the driver's own words about this load: exceptions and lumper
+  const said = notes.map((n) => String(n || '')).join('\n');
+  const exc = said.match(/[^\n.]*\b(rejected|refused|not accepted|shortage|short \d|damaged|overage|over,? short)\b[^\n.]*/i);
+  const lump = said.match(/lumper[^\n]{0,60}?\$\s?(\d[\d,.]*)/i);
+  snap.exception = exc ? exc[0].trim().slice(0, 160) : null;
+  snap.lumper = lump ? `$${lump[1]}` : null;
+  // before pickup: heading to the shipper (miles / ETA from the pickup, not the receiver)
+  if (pickup && !/^(DEPSHIP|ARRCONS|DEPCONS)/i.test(code)) { snap.pickup = pickup; }
   if (stop.delivered) {
     snap.status = 'Delivered';
     snap.deliveredAt = stopWall(stop.deliveredRaw, stop.label);
@@ -112,7 +129,7 @@ export function autoFollowUps(snaps, { audience = 'customer', tasks = {} } = {})
 }
 
 // The email. Pure. → { subject, html, text }
-export function renderUpdateEmail({ audience = 'customer', customer, destination, snaps = [], followUps = [], now = Date.now(), subject = null, extraRef = '' }) {
+export function renderUpdateEmail({ audience = 'customer', customer, destination, snaps = [], followUps = [], now = Date.now(), subject = null, extraRef = '', headline = null }) {
   const internal = audience === 'internal';
   const list = [...snaps].sort((a, b) => (ORDER[a.status] ?? 3) - (ORDER[b.status] ?? 3) || String(a.trip).localeCompare(String(b.trip)));
   const delivered = list.filter((s) => s.status === 'Delivered').length;
@@ -130,26 +147,44 @@ export function renderUpdateEmail({ audience = 'customer', customer, destination
       add('Delivered to', [s.customer, s.stopCity].filter(Boolean).join(' — '));
       add('Delivered at', s.deliveredAt ? etTime(s.deliveredAt) : 'Time not recorded yet');
       add('Quantity', s.quantity);
+      add('Exceptions', s.exception ? `Reported by the driver: ${s.exception}` : 'None reported (clean bill)');
+      add('Lumper', s.lumper || 'None reported');
+      if (s.detentionStop) add('Detention', `In ${etTime(s.detentionStop.in)} · Out ${s.detentionStop.out ? etTime(s.detentionStop.out) : '—'} · ${hm(s.detentionStop.min)} — please help us with the detention`);
       if (s.podVerified) add('Proof of delivery', 'POD on file');
       else if (internal) add('Proof of delivery', 'Not received yet');
       return r;
     }
+    if (s.pickup) {
+      add('Heading to', `Shipper — ${s.pickup.place || 'pickup'}`);
+      add('Current location', s.location || 'Not available');
+      add('Miles to go', s.pickup.miles != null ? `${s.pickup.miles} mi to the shipper` : null);
+      add('Pickup appointment', s.pickup.apptMs ? etTime(s.pickup.apptMs) : null);
+      add('ETA to shipper', s.pickup.etaMs ? etTime(s.pickup.etaMs) : 'Being verified');
+      add('Then delivering to', [s.customer, s.stopCity].filter(Boolean).join(' — '));
+      add('GPS', s.gpsAge == null ? 'No live GPS' : `Updated ${hm(s.gpsAge)} ago`);
+      if (internal) { add('Driver', s.drivers); add('Duty status', s.duty); add('Drive time left', s.driveLeft != null ? hm(s.driveLeft) : null); }
+      return r;
+    }
     add('Delivering to', [s.customer, s.stopCity].filter(Boolean).join(' — '));
     add('Current location', s.location || 'Not available');
+    add('Miles to go', s.miles != null && s.miles > 0 ? `${s.miles} mi` : null);
     add('Movement', s.moving == null ? 'Not available' : s.moving ? `Moving${s.mph ? ` · ${s.mph} mph` : ''}` : 'Stopped');
     add('Appointment', s.apptMs != null ? `${etTime(s.apptMs)}${s.apptFrom === 'truckmate-due' ? ' (due time, not a confirmed appointment)' : ''}` : 'No appointment on file');
     add('Estimated arrival', s.verify ? `Being verified — ${s.verify}` : s.etaMs != null ? `${etTime(s.etaMs)}${s.status === 'Delayed' && s.lateMin ? ` · about ${hm(s.lateMin)} after the appointment` : ''}` : 'Being verified');
+    add('Trailer temperature', s.temp ? `${s.temp.f}°F${s.temp.set != null ? ` · set ${s.temp.set}°F` : ''}` : null);
+    if (s.detentionShipper && s.stageLabel && /loaded/i.test(s.stageLabel)) add('Detention at shipper', `In ${etTime(s.detentionShipper.in)} · Out ${s.detentionShipper.out ? etTime(s.detentionShipper.out) : '—'} · ${hm(s.detentionShipper.min)} — please help us with the detention`);
     add('GPS', s.gpsAge == null ? 'No live GPS' : `Updated ${hm(s.gpsAge)} ago`);
     if (internal) { add('Driver', s.drivers); add('Duty status', s.duty); add('Drive time left', s.driveLeft != null ? hm(s.driveLeft) : null); if (s.discrepancies.length) add('Data check', s.discrepancies.join('; ')); }
     return r;
   };
   const card = (s) => {
-    const [bg, fg] = BAND[s.status] || ['#EEF2F7', '#1F2937'];
-    const head = `${s.status.toUpperCase()}${s.status === 'Delayed' && s.lateMin ? ` · ${hm(s.lateMin)}` : ''} · Trip ${s.trip}${s.truck ? ` · Truck ${s.truck}` : ''}`;
+    const shown = s.stageLabel && !['Delayed', 'Being verified', 'Delivered'].includes(s.status) ? s.stageLabel : s.status;
+    const [bg, fg] = BAND[s.status] || (s.stageLabel ? ['#E0ECFF', '#1E3A8A'] : ['#EEF2F7', '#1F2937']);
+    const head = `${shown.toUpperCase()}${s.status === 'Delayed' && s.lateMin ? ` · ${hm(s.lateMin)}` : ''} · Trip ${s.trip}${s.truck ? ` · Truck ${s.truck}` : ''}`;
     return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #D1D5DB;border-radius:8px;margin:0 0 16px 0;background:#FFFFFF" bgcolor="#FFFFFF">
 <tr><td bgcolor="${bg}" style="background:${bg};padding:10px 20px;border-radius:8px 8px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;color:${fg}">${esc(head)}</td></tr>
 <tr><td style="padding:12px 20px 16px 20px"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
-${rowsFor(s).map(([k, v]) => `<tr><td valign="top" style="padding:5px 12px 5px 0;width:38%;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5;color:#4B5563">${esc(k)}</td><td valign="top" style="padding:5px 0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1F2937;word-break:break-word">${esc(v)}</td></tr>`).join('\n')}
+${rowsFor(s).map(([k, v]) => `<tr><td valign="top" style="padding:5px 12px 5px 0;width:38%;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5;color:#4B5563">${esc(k)}</td><td valign="top" style="padding:5px 0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1F2937;word-break:break-word">${esc(v)}${k === 'Current location' && s.mapUrl ? ` · <a href="${esc(s.mapUrl)}" style="color:#1D4ED8">see on map</a>` : ''}</td></tr>`).join('\n')}
 </table></td></tr></table>`;
   };
   const fu = followUps.length ? `<p style="margin:24px 0 8px 0;font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:bold;color:#1F2937">Dispatch follow-up</p>
@@ -159,36 +194,40 @@ ${followUps.map((f) => `<table role="presentation" width="100%" cellspacing="0" 
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" align="center" style="max-width:600px;margin:0 auto;background:#FFFFFF" bgcolor="#FFFFFF">
 <tr><td bgcolor="#1E3A5F" style="background:#1E3A5F;padding:18px 20px;font-family:Arial,Helvetica,sans-serif;font-size:22px;font-weight:bold;color:#FFFFFF">Delivery update${internal ? ' <span style="font-size:13px;font-weight:normal">· internal</span>' : ''}</td></tr>
 <tr><td style="padding:14px 20px 4px 20px;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1F2937"><b>${esc(who)}</b>${destination ? `<br><span style="font-size:14px;color:#4B5563">${esc(destination)}</span>` : ''}</td></tr>
-<tr><td style="padding:8px 20px 16px 20px;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1F2937">${esc(summary)}<br><span style="font-size:13px;color:#4B5563">As of ${esc(etTime(now))} · all times Eastern (ET)</span></td></tr>
+<tr><td style="padding:8px 20px 16px 20px;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1F2937">${headline ? `<b>${esc(headline)}</b><br>` : ''}${esc(summary)}<br><span style="font-size:13px;color:#4B5563">As of ${esc(etTime(now))} · all times Eastern (ET)</span></td></tr>
 <tr><td style="padding:0 20px 8px 20px">${list.map(card).join('\n')}${fu}</td></tr>
 <tr><td style="padding:12px 20px 20px 20px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5;color:#4B5563">Arrival times are estimates and may change with traffic, weather and hours of service. If they change, we will let you know.<br>Florida Beauty Flora Dispatch</td></tr>
 </table>
 <!--[if mso]></td></tr></table><![endif]-->
 </div>`;
-  const text = [`DELIVERY UPDATE${internal ? ' (internal)' : ''}`, who, destination || null, '', summary, `As of ${etTime(now)} — all times Eastern (ET)`, '',
-    ...list.flatMap((s) => [`${s.status.toUpperCase()}${s.status === 'Delayed' && s.lateMin ? ` · ${hm(s.lateMin)}` : ''} · Trip ${s.trip}${s.truck ? ` · Truck ${s.truck}` : ''}`, ...rowsFor(s).map(([k, v]) => `  ${k}: ${v}`), '']),
+  const text = [`DELIVERY UPDATE${internal ? ' (internal)' : ''}`, who, destination || null, '', ...(headline ? [headline] : []), summary, `As of ${etTime(now)} — all times Eastern (ET)`, '',
+    ...list.flatMap((s) => [`${(s.stageLabel && !['Delayed', 'Being verified', 'Delivered'].includes(s.status) ? s.stageLabel : s.status).toUpperCase()}${s.status === 'Delayed' && s.lateMin ? ` · ${hm(s.lateMin)}` : ''} · Trip ${s.trip}${s.truck ? ` · Truck ${s.truck}` : ''}`, ...rowsFor(s).map(([k, v]) => `  ${k}: ${v}${k === 'Current location' && s.mapUrl ? ` (${s.mapUrl})` : ''}`), '']),
     ...(followUps.length ? ['DISPATCH FOLLOW-UP', ...followUps.map((f) => `- ${f.issue} — Next: ${f.next || '—'}${f.owner ? ` (Owner: ${f.owner})` : ''} — ${f.status || 'Pending'}`), ''] : []),
     'Arrival times are estimates and may change. Florida Beauty Flora Dispatch'].filter((x) => x !== null).join('\n');
   return { subject: subj, html, text, counts: { delivered, delayed, verifying, total: list.length } };
 }
 
 // Build an update from live data for these trips. followUps are added to the automatic ones.
-export async function buildUpdateFor({ db, docs = null, site = 'florida-beauty', items = [], trips = [], customer = null, destination = null, audience = 'customer', followUps = [], now = Date.now(), subject = null, extraRef = '' }) {
+export async function buildUpdateFor({ db, docs = null, site = 'florida-beauty', items = [], trips = [], customer = null, destination = null, audience = 'customer', followUps = [], now = Date.now(), subject = null, extraRef = '', stage = null, pickup = null, headline = null, attach = null }) {
   const watch = (await db.get(`taWatch:${site}`, {})) || {};
   const alertsAll = Object.values(watch.alerts || {});
   const tasks = audience === 'internal' ? ((await db.get(`taLoadTasks:${site}`, {})) || {}) : {};
-  const snaps = [];
+  const comms = (await db.get(`taTripComms:${site}`, {})) || {};
+  const snaps = []; const attachIds = [];
   for (const trip of trips) {
     const item = items.find((it) => tripNo(it) === String(trip));
     if (!item) continue;
     let pods = [];
     if (docs && docs.listDocs) { try { pods = (await docs.listDocs({ site, trips: [String(trip)] })).filter((d) => !d.restricted); } catch { pods = []; } } // eslint-disable-line no-await-in-loop
-    snaps.push(loadSnapshot(item, { eta: (watch.etas || {})[String(trip)] || null, now, focus: { customer, place: destination }, pods, alerts: alertsAll.filter((a) => String(a.trip) === String(trip)) }));
+    const notes = (comms[String(trip)] || []).filter((c) => c && (c.type === 'reply' || c.kind === 'detention')).map((c) => c.text);
+    snaps.push(loadSnapshot(item, { eta: (watch.etas || {})[String(trip)] || null, now, focus: { customer, place: destination }, pods, alerts: alertsAll.filter((a) => String(a.trip) === String(trip)), notes, stage, pickup }));
+    // documents to attach: the BOL when loaded, the POD when completed (only what's on file)
+    if (attach) attachIds.push(...pods.filter((d) => (attach === 'pod' ? /proof_of_delivery|pod/i : /bill_of_lading|bol/i).test(`${d.docType || ''}`)).slice(0, 3).map((d) => d.id));
   }
   const auto = autoFollowUps(snaps, { audience, tasks });
   const seen = new Set(followUps.map((f) => String(f.issue).slice(0, 40)));
   const all = [...followUps, ...auto.filter((f) => !seen.has(String(f.issue).slice(0, 40)))].slice(0, 8);
-  return renderUpdateEmail({ audience, customer: customer || (snaps[0] && snaps[0].customer) || null, destination, snaps, followUps: all, now, subject, extraRef });
+  return { ...renderUpdateEmail({ audience, customer: customer || (snaps[0] && snaps[0].customer) || null, destination, snaps, followUps: all, now, subject, extraRef, headline }), attachIds };
 }
 
 // Small internal note (e.g. what Jarvis did with an instruction email). Pure.

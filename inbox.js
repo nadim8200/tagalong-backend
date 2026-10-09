@@ -255,6 +255,8 @@ export function initInbox(app, { requireAuth, db, docs = null, comms = null, pla
     return ids.size;
   }
   if (enabled && env.NODE_ENV !== 'test') setTimeout(() => cleanupAutoNotices().catch((e) => console.warn('[inbox] cleanup:', e.message)), 15000);
+  // one time: drop duplicate entries left by overlapping checks (before the claim fix)
+  if (enabled && env.NODE_ENV !== 'test') setTimeout(() => db.update(key('florida-beauty'), (cur) => { const seen = new Set(); return { ...(cur || {}), list: (((cur && cur.list) || [])).filter((e) => (seen.has(e.id) ? false : seen.add(e.id))) }; }, { list: [] }).catch(() => {}), 20000);
 
   async function addTasks(site, trip, email, actions, prefix = '') {
     if (!trip || !actions.length) return;
@@ -268,7 +270,27 @@ export function initInbox(app, { requireAuth, db, docs = null, comms = null, pla
     }, {});
   }
 
-  async function poll(site = 'florida-beauty') {
+  // one inbox check at a time (reading a trip-sheet packet can take longer than the 2-minute timer)
+  let polling = null;
+  function poll(site = 'florida-beauty') {
+    if (polling) return polling;
+    polling = pollOnce(site).finally(() => { polling = null; });
+    return polling;
+  }
+  // claim an email before working on it — atomic in the database, so even two servers
+  // (old + new during a deploy) never process the same email twice
+  async function claim(id) {
+    let mine = false;
+    await db.update(`taEmailClaims`, (cur) => {
+      const c = { ...(cur || {}) };
+      if (c[id] && Date.now() - c[id] < 30 * 60000) return c;   // a crashed check's claim expires after 30 min
+      mine = true; c[id] = Date.now();
+      const keys = Object.keys(c); if (keys.length > 3000) keys.sort((a, b) => c[a] - c[b]).slice(0, keys.length - 3000).forEach((k) => delete c[k]);
+      return c;
+    }, {});
+    return mine;
+  }
+  async function pollOnce(site = 'florida-beauty') {
     if (!enabled || !mailConfig(env).ready) return 0;
     let res;
     try {
@@ -284,6 +306,7 @@ export function initInbox(app, { requireAuth, db, docs = null, comms = null, pla
     const fresh = [];
     for (const m of msgs) {
       if (known.has(m.id)) continue;
+      if (!(await claim(m.id))) continue;   // another check already has it // eslint-disable-line no-await-in-loop
       const text = newPart(m.body && m.body.contentType === 'html' ? htmlToText(m.body.content) : String((m.body && m.body.content) || '')).slice(0, 6000);
       const from = { name: (m.from && m.from.emailAddress && m.from.emailAddress.name) || '', address: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '' };
       if (from.address && from.address.toLowerCase() === String(mailConfig(env).from).toLowerCase()) continue;
@@ -414,7 +437,8 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
       for (const trip of trips) await logOnLoad(site, trip, { type: 'email', dir: 'in', at: email.at, from: from.address, name: from.name, subject: email.subject, text: text.slice(0, 600), emailId: m.id, files: attachments.map((a) => a.name) }); // eslint-disable-line no-await-in-loop
       try { await g(`/messages/${encodeURIComponent(m.id)}`, { method: 'PATCH', body: { isRead: true } }); } catch { /* Mail.ReadWrite not granted — we still remember it */ } // eslint-disable-line no-await-in-loop
     }
-    if (fresh.length) await db.update(key(site), (cur) => ({ ...(cur || {}), list: [...fresh.reverse(), ...((cur && cur.list) || [])].slice(0, KEEP) }), { list: [] });
+    // save (and drop any duplicate entries an older version left behind)
+    if (fresh.length) await db.update(key(site), (cur) => { const seen = new Set(); const all = [...fresh.reverse(), ...((cur && cur.list) || [])].filter((e) => (seen.has(e.id) ? false : seen.add(e.id))); return { ...(cur || {}), list: all.slice(0, KEEP) }; }, { list: [] });
     for (const e of fresh) { try { await afterArrival(site, e, items); } catch (err) { console.warn('[inbox] reply / instructions:', err.message); } } // eslint-disable-line no-await-in-loop
     return fresh.length;
   }

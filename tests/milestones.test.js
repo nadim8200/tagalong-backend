@@ -99,3 +99,11 @@ test('process: asks the driver (app push for OC), reads the reply, alerts dispat
   await ms.process('florida-beauty', { trips: [other()] }, { geo });
   assert.equal(pushed.length, 1, 'alerted once');
 });
+
+test('SOP driver checklists: at the shipper, before and at delivery', async () => {
+  const { checklistText } = await import('../milestones.js');
+  const a = checklistText('shipper', { name: 'Ana Ruiz', trip: '624194', pu: 'PU 77812' });
+  for (const x of ['PU# PU 77812', '"SLC"', 'seal #', 'max 42,000 lbs', '2 load locks', 'photo of the BOL', 'Reply "Done"']) assert.ok(a.includes(x), x);
+  assert.match(checklistText('before', { trip: '1', stop: 'Mayesh Lombard' }), /almost at Mayesh Lombard[\s\S]*reefer temperature/);
+  assert.match(checklistText('delivery', { trip: '1' }), /signed POD[\s\S]*REJECTED[\s\S]*\$ amount/);
+});

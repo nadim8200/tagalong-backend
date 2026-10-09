@@ -16,6 +16,7 @@
 // A request shows in the Jarvis inbox until someone marks it handled.
 // ---------------------------------------------------------------
 import { randomBytes } from 'crypto';
+import { reachPlan } from './directory.js';
 import { fmtLocal } from './localtime.js';
 
 const SITE = 'florida-beauty';
@@ -83,7 +84,8 @@ export function routeTo(req, cfg, aiPicked = [], forced = []) {
 export function helpEmail(req, load) {
   const who = req.from.name || req.from.company || (req.role === 'driver' ? 'The driver' : 'A caller');
   const reach = [req.from.phone && `call ${prettyPhone(req.from.phone)}`, req.from.email && `email ${req.from.email}`].filter(Boolean).join(' or ') || 'no contact info left';
-  const subject = `${req.urgent ? 'URGENT — ' : ''}Call back ${who}${req.role && req.role !== 'unknown' ? ` (${req.role})` : ''}${req.trip ? ` · load ${req.trip}` : ''}: ${String(req.need).slice(0, 70)}`;
+  const forWho = (req.forStaff || []).map((p) => p.name).join(', ');
+  const subject = `${forWho ? `For ${forWho} — ` : ''}${req.urgent ? 'URGENT — ' : ''}Call back ${who}${req.role && req.role !== 'unknown' ? ` (${req.role})` : ''}${req.trip ? ` · load ${req.trip}` : ''}: ${String(req.need).slice(0, 70)}`;
   const via = { call: 'a Jarvis phone call', email: 'an email', text: 'a text message', app: 'the driver app', dispatcher: `${req.by || 'a dispatcher'} (Ask Jarvis)` }[req.source] || req.source;
   const html = `<div style="font-family:Arial,sans-serif;font-size:14px">
 <p>${req.urgent ? '<b style="color:#b91c1c">URGENT</b> — ' : ''}<b>${esc(who)}</b>${req.role && req.role !== 'unknown' ? ` (${esc(req.role)})` : ''} needs someone to reach out — from ${esc(via)}.</p>
@@ -97,7 +99,7 @@ ${req.said ? `<p><b>What was said:</b></p><blockquote style="border-left:3px sol
   return { subject, html, text };
 }
 
-export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = null, sms = null, push = null, pushRules = null, caller = null, classify = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = null, sms = null, push = null, pushRules = null, directory = null, caller = null, classify = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const key = `taHelpRequests:${SITE}`;
   const cfgKey = 'taHelpCfg';
@@ -141,7 +143,12 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
       need: String(r.need || 'Wants a call back').slice(0, 500), said: r.said ? String(r.said).slice(0, 3000) : null,
       forced: Array.isArray(r.teams) ? r.teams.map(String).slice(0, 5) : [], by: r.by ? String(r.by).slice(0, 80) : null,
       urgent: !!(r.urgent || isUrgent(r.need) || isUrgent(r.said)), status: 'open',
+      forPerson: r.forPerson ? String(r.forPerson).slice(0, 80) : null,
     };
+    // a message for a named staff member ("have Frank call me") → that person gets it directly
+    if (directory) {
+      try { req.forStaff = (await directory.mentioned(`${req.forPerson || ''} ${req.need} ${req.said || ''}`)).map((p) => ({ name: p.name, department: p.department, ext: p.ext || null })); } catch { req.forStaff = []; }
+    }
     let dup = false;
     await db.update(key, (cur) => {
       const list = Array.isArray(cur) ? cur : [];
@@ -160,6 +167,17 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
     const picked = req.aiTeams || await aiPick(req, teams);
     req.aiTeams = picked;
     const to = routeTo(req, cfg, picked, req.forced || []);
+    // the staff member the message is for: email + text, or a Jarvis call while texting isn't live (cells are system-only)
+    if (directory && (req.forStaff || []).length) {
+      const people = await directory.mentioned((req.forStaff || []).map((p) => p.name).join(', '));
+      const live = !!(sms && (await sms.live()));
+      for (const p of people) {
+        const plan = reachPlan(p, { textingLive: live });   // their chosen ways (Employees tab)
+        if (plan.email && !to.emails.includes(p.email)) to.emails.push(p.email);
+        if (plan.text && !to.phones.includes(p.phone)) to.phones.push(p.phone);
+        if (plan.call && !to.calls.some((c) => c.phone === p.phone)) to.calls.push({ phone: p.phone, name: p.name });
+      }
+    }
     const msg = helpEmail(req, await loadView(req.trip));
     const sent = { teams: to.groups, email: null, text: null, push: null, call: null };
     if (to.emails.length) {
