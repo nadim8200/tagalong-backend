@@ -444,3 +444,47 @@ test('names: "Calvert Wholesale" never matches "United Wholesale Flowers" just b
   const items = [{ trip: { tripNumber: '1' }, freightBills: [{ billToName: 'UNITED WHOLESALE FLOWERS', endZoneDescription: 'MIDDLETOWN, NJ, 07748' }, { billToName: 'CALVERTS WHOLESALE', endZoneDescription: 'MIDDLETOWN, NJ, 07748' }] }];
   assert.deepEqual(nameCandidates(items, 'Calvert Wholesale', 'Middletown')[0], 'Calverts Wholesale', 'the closest name first, not the one sharing "Wholesale"');
 });
+
+import { joinSpelled } from '../voice.js';
+
+test('the "DBEC Wholesale" call: spelled letters kept, "Wholesale" alone matches nobody, another customer is never shared', async () => {
+  // only Riccardi Wholesale delivers in Greensburg, PA
+  const ric = { trip: { tripNumber: '624800', status: 'DEPSHIP', powerUnit: '2700', origZoneDesc: 'VENTURA, CA' }, freightBills: [{ billNumber: 'B0200001', billToName: 'CHELSEA MARKET - RICCARDI WHOLESALE', endZoneDescription: 'GREENSBURG, PA, 15601', pieces: 8 }] };
+  board.push(ric);
+  try {
+    assert.equal(joinSpelled('D B E C Wholesale'), 'DBEC WHOLESALE');
+    assert.equal(joinSpelled('DBE C Wholesale'), 'DBEC WHOLESALE');
+    assert.equal(nameScore('D B E C Wholesale', 'RICCARDI WHOLESALE'), 0);
+    assert.equal(nameScore('Wholesale', 'RICCARDI WHOLESALE'), 0);
+    assert.equal(nameScore('D B E C Wholesale', 'DBEC WHOLESALE INC'), 1);
+    assert.deepEqual(nameCandidates(board, 'DBE C Wholesale', 'Greensburg'), [], 'no suggestion that sounds nothing like it');
+    const v = setup();
+    const call = { call_id: 'c77', direction: 'inbound', from_number: '+17245550100' };
+    for (const args of [{ customer_name: 'DBE C Wholesale' }, { customer_name: 'DBE C Wholesale', customer_city: 'Greensburg' }, { customer_name: 'D B E C Wholesale', customer_city: 'Greensburg, Pennsylvania' }]) {
+      const r = await v.hit('POST /retell/fn/lookup_load', { args, call });
+      assert.equal(r.out.found, false, JSON.stringify(args));
+      assert.ok(!JSON.stringify(r.out).includes('RICCARDI') && !JSON.stringify(r.out).includes('Riccardi'), 'nothing about another customer');
+    }
+  } finally { board.pop(); }
+});
+
+test('a name Jarvis suggested (did_you_mean) needs the caller\'s yes before anything is shared', async () => {
+  const ric = { trip: { tripNumber: '624801', status: 'DEPSHIP', powerUnit: '2701' }, freightBills: [{ billNumber: 'B0200002', billToName: 'RICCARDI WHOLESALE', endZoneDescription: 'GREENSBURG, PA, 15601', pieces: 8 }] };
+  board.push(ric);
+  try {
+    const v = setup();
+    const call = { call_id: 'c78', direction: 'inbound', from_number: '+17245550101' };
+    const first = await v.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ricardo Wholesale', customer_city: 'Greensburg' }, call });
+    assert.equal(first.out.found, true, 'close enough to match directly');
+    const v2 = setup();
+    const call2 = { call_id: 'c79', direction: 'inbound', from_number: '+17245550102' };
+    const miss = await v2.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Rikkard Produce', customer_city: 'Greensburg' }, call: call2 });
+    assert.equal(miss.out.found, false);
+    assert.deepEqual(miss.out.did_you_mean, ['Riccardi Wholesale']);
+    const unconfirmed = await v2.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Riccardi Wholesale' }, call: call2 });
+    assert.equal(unconfirmed.out.found, false);
+    assert.match(unconfirmed.out.say, /Not confirmed yet\. Ask exactly: "Is that Riccardi Wholesale\?"/);
+    const confirmed = await v2.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Riccardi Wholesale', caller_confirmed: true }, call: call2 });
+    assert.equal(confirmed.out.found, true);
+  } finally { board.pop(); }
+});

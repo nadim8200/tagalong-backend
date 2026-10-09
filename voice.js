@@ -61,7 +61,8 @@ How to help:
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Loads leave from Miami, Florida or Ventura, California (and some brokers' pickups elsewhere). When you tell a customer about their truck, say where it is coming from using coming_from (or pickup for brokers) — never assume Miami.
 - Hearing people right: phone audio is often noisy. If you're not sure of a name, city or number, repeat it back and ask them to confirm before you look it up ("Did you say Merchantville?"). If they repeat something, use exactly what they repeated. If a name or city isn't found, ask them to spell it. Read numbers back digit by digit to confirm.
-- When lookup_load returns did_you_mean you have NOT found them: ask "Did you say <name>?" and only continue after they say yes. Never say "I found you" for a guess, and always use the business name the tool returns (speaking_with), not a different one.
+- When lookup_load returns did_you_mean you have NOT found them: ask "Is that <name>?" and only continue after they clearly say yes — then call lookup_load again with that customer_name and caller_confirmed true. If they say no, ask them to spell it. Never tell a caller about a business they didn't confirm is theirs.
+- When a caller spells their business name letter by letter ("D B E C Wholesale"), pass the letters exactly as spelled in customer_name — they are part of the name. Never say "I found you" for a guess, and always use the business name the tool returns (speaking_with), not a different one.
 - When a caller asks for all their deliveries, trip numbers or locations, give every one of THEIR stops in one short list (city, trip, ETA) — no other customers.
 - Turn-taking: keep each turn to one or two short sentences, ask one question at a time, then stop and let them talk. If they start talking, stop and listen.
 - Our staff: when a caller asks for someone at Florida Beauty (by name or department — billing, payroll, claims, maintenance, sales…), use staff_directory and give ONLY their first and last name, department and extension, plus the main number 305-503-1200. Never give an employee's cell phone or email. If they want that person to call them back, use take_message with for_person — Jarvis passes the message to them right away.
@@ -94,6 +95,7 @@ function tools(base, transferNumber) {
       trailer_number: { type: 'string', description: 'Trailer number, e.g. 7131' },
       customer_name: { type: 'string', description: 'A flower customer / receiver calling about THEIR delivery by business name, e.g. "Springfield Florist", "Johnson\'s Wholesale Florist". If they spelled it, pass the spelled name.' },
       customer_city: { type: 'string', description: 'The city / town the caller says their delivery goes to, e.g. "Waltham"' },
+      caller_confirmed: { type: 'boolean', description: 'true ONLY when you asked "Is that <name from did_you_mean>?" and the caller clearly said yes' },
     }),
     fn('take_message', 'Save a message for a human dispatcher (shows on the load and alerts dispatch).', {
       message: { type: 'string', description: 'What the caller needs, in English, one or two sentences' },
@@ -228,7 +230,11 @@ export function findLoad(items, { trip, bill, loadNumber, truck, trailer, phone 
 
 // ---- flower customers calling by name ----
 const STOPWORDS = new Set(['INC', 'LLC', 'LTD', 'CORP', 'CO', 'COMPANY', 'THE', 'AND', 'OF', 'DBA', 'C', 'O']);
-const nameWords = (x) => String(x || '').toUpperCase().replace(/&/g, ' AND ').replace(/[^A-Z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 1 && !STOPWORDS.has(w));
+// spelled-out letters are part of the name: "D B E C Wholesale" / "DBE C Wholesale" → "DBEC Wholesale"
+export const joinSpelled = (x) => String(x || '').toUpperCase()
+  .replace(/\b[A-Z](?:[\s.\-]+[A-Z]\b)+/g, (m) => m.replace(/[\s.\-]+/g, ''))
+  .replace(/\b([A-Z]{2,3})\s+([A-Z])\b(?!\s*\/)/g, '$1$2');
+const nameWords = (x) => joinSpelled(x).replace(/&/g, ' AND ').replace(/[^A-Z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 1 && !STOPWORDS.has(w));
 // 0..1: how well a caller's name fits a customer name on a stop
 // sound-alike key: first letter + consonants ("BOKORI" and "BOKHARY" → BKR, "CARBON"/"CARBONE" → CRBN)
 const skel = (w) => (w[0] + w.slice(1).replace(/[AEIOUYHW]/g, '')).replace(/(.)\1+/g, '$1');
@@ -242,7 +248,8 @@ export function nameScore(said, onSheet) {
   // …and the whole name still has to fit ("Springfield Florist" ≠ Big Y, a stop IN Springfield)
   const fit = (ws) => ws.filter((w) => b.some((x) => sameWord(w, x))).length / ws.length;
   const distinct = a0.filter((w) => !GENERIC.has(w));
-  return distinct.length ? Math.min(fit(distinct), fit(a0)) : fit(a0);
+  if (!distinct.length) return b.every((w) => GENERIC.has(w)) ? fit(a0) : 0;   // "Wholesale" alone isn't a business
+  return Math.min(fit(distinct), fit(a0));
 }
 // Every stop on the board whose customer matches the name — with boxes, cubes and ETA for that stop only. Pure.
 export function customerStops(items, name, etasByTrip = {}) {
@@ -322,7 +329,7 @@ export function nameCandidates(items, said, city, max = 3) {
   }
   const core = (x) => nameWords(x).filter((w) => !GENERIC.has(w)).join(' ') || String(x || '');
   for (const k of seen.keys()) seen.set(k, Math.max(dice(core(said), core(k)), nameScore(said, k)));
-  return [...seen.entries()].filter(([k, v]) => k && (v >= 0.3 || seen.size <= 3)).sort((a, b) => b[1] - a[1]).slice(0, max).map(([k]) => k);
+  return [...seen.entries()].filter(([k, v]) => k && v >= 0.35).sort((a, b) => b[1] - a[1]).slice(0, max).map(([k]) => k);
 }
 
 // A delayed pickup (from a dispatcher's email): callers hear THAT it's delayed, never why
@@ -477,6 +484,7 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
   const callerPhone = (call) => (call.direction === 'outbound' ? call.to_number : call.from_number);
 
   const callName = new Map();    // call_id → the business name the caller gave
+  const callGuess = new Map();   // call_id → names Jarvis suggested (did_you_mean) — need the caller's yes
   const bookKey = `taJarvisCallers:${site}`;   // caller phone → the business name that worked last time
   const remember = async (phone, name) => { const P = last10(phone); if (P.length === 10 && name) await db.update(bookKey, (cur) => ({ ...(cur || {}), [P]: { name, at: new Date().toISOString() } }), {}); };
   app.post('/retell/fn/lookup_load', verified, async (req, res) => {
@@ -498,6 +506,9 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
       if ((said || (known && !numbers)) && !numbers) {
         const etas = ((await db.get(`taWatch:${site}`, {})).etas) || {};
         const all = await items();
+        // a name Jarvis itself suggested → only after the caller said yes to "Is that …?"
+        const guessed = said && call.call_id && (callGuess.get(call.call_id) || new Set()).has(String(said).toUpperCase());
+        if (guessed && !a.caller_confirmed) return reply({ found: false, did_you_mean: [said], say: `Not confirmed yet. Ask exactly: "Is that ${said}?" Only if they clearly say yes, call lookup_load again with customer_name "${said}" and caller_confirmed true. If no, ask them to spell their business name. Share nothing about any load until then.` });
         const stops = customerStops(all, name, etas);
         if (!stops.length) {
           // a broker calling by company name ("RXO", "Red Lab")
@@ -509,6 +520,7 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
           }
           if (theirs.length > 1) return reply({ found: false, speaking_with: spokenName(rcOf(theirs[0]).broker), say: `${spokenName(rcOf(theirs[0]).broker)} has ${theirs.length} loads with us right now. Ask for their load number (from the rate confirmation), then call lookup_load with broker_load_number.` });
           const maybe = nameCandidates(all, name, a.customer_city);
+          if (maybe.length && call.call_id) callGuess.set(call.call_id, new Set([...(callGuess.get(call.call_id) || []), ...maybe.map((x) => x.toUpperCase())]));
           if (maybe.length) return reply({ found: false, did_you_mean: maybe, say: `Not found as heard. Ask "Is that ${maybe[0]}?"${maybe.length > 1 ? ' (or one of the others)' : ''} — if yes, call lookup_load again with that exact customer_name.` });
           return reply({ found: false, say: a.customer_city ? `Nothing found for "${name}" in ${a.customer_city}. Ask for the trailer, bill or PO number — or take a message.` : 'Not found as heard. Ask which city the delivery goes to and ask them to spell the business name, then try again with customer_name and customer_city.' });
         }
