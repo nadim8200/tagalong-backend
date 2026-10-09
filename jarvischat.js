@@ -46,6 +46,36 @@ export function truckNow(it, w = {}, now = Date.now()) {
     nextStop: next ? { stop: next.label, eta: fmtLocal(next.etaMs, next.label), miles: next.miles } : null,
   };
 }
+// Which model answers: routine questions / email answers → the light model; planning, comparisons,
+// several loads, documents → the heavy one. JARVIS_CHAT_ROUTING=off → always heavy. Pure.
+export function pickModel({ mode = 'dispatcher', text = '', uploads = [] }, env = process.env) {
+  const heavy = env.JARVIS_CHAT_MODEL || 'claude-sonnet-5-5';
+  const light = env.JARVIS_CHAT_LIGHT_MODEL || 'claude-haiku-4-5-20251001';
+  if (String(env.JARVIS_CHAT_ROUTING || '').toLowerCase() === 'off') return heavy;
+  if (mode === 'customer' || mode === 'staff_email') return light;
+  const t = String(text || '');
+  const complex = uploads.length > 0 || t.length > 400 || (t.match(/\b\d{6}\b/g) || []).length >= 3
+    || /\b(why|plan|planning|compare|should|recommend|best|which trucks|analy[sz]e|explain|strategy|cover|swap|transfer|reassign|rebook|summar|por qu[eé]|planifica|recomienda)/i.test(t);
+  return complex ? heavy : light;
+}
+// Conversation history sent with each question: the last 6 turns, older long answers shortened. Pure.
+export function trimHistory(messages = [], { turns = 6, max = 1500 } = {}) {
+  const recent = messages.slice(-turns * 2);
+  return recent.map((m, i) => ({ role: m.role, content: i < recent.length - 2 && String(m.text || '').length > max ? `${String(m.text).slice(0, max)}…` : String(m.text || '') }));
+}
+// Prompt caching: the instructions, the tool list and the conversation so far are cached, so each
+// step of a question (and the next question) pays ~10% for the part already sent. Pure.
+export function withCache({ system, tools, messages }) {
+  const msgs = messages.map((m) => ({ ...m }));
+  const last = msgs[msgs.length - 1];
+  if (last) {
+    const blocks = typeof last.content === 'string' ? [{ type: 'text', text: last.content || ' ' }] : last.content.map((b) => ({ ...b }));
+    blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], cache_control: { type: 'ephemeral' } };
+    msgs[msgs.length - 1] = { ...last, content: blocks };
+  }
+  const tl = tools.map((t, i) => (i === tools.length - 1 ? { ...t, cache_control: { type: 'ephemeral' } } : t));
+  return { system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }], tools: tl, messages: msgs };
+}
 const clip = (x, n = 6000) => { const s = typeof x === 'string' ? x : JSON.stringify(x); return s.length > n ? `${s.slice(0, n)}…(truncated)` : s; };
 
 export const TOOLS = [
@@ -295,14 +325,17 @@ export function initJarvisChat(app, { requireAuth, db, planSheet = null, nextLoa
     if (!key) throw Object.assign(new Error('AI is not configured (ANTHROPIC_API_KEY).'), { status: 503 });
     const store = await db.get(threadsKey(user.id), { threads: {} });
     const thread = (store.threads || {})[threadId] || { id: threadId, title: String(text || 'Documents').slice(0, 60), messages: [] };
-    const history = thread.messages.slice(-16).map((m) => ({ role: m.role, content: m.text }));
+    const history = trimHistory(thread.messages);
     const uploadNote = uploads.length ? `\n\n[Uploaded: ${uploads.map((u) => `${u.name} → ${u.result}${u.docId ? ` (docId ${u.docId})` : ''}`).join('; ')}]` : '';
     const messages = [...history, { role: 'user', content: `${text || ''}${uploadNote}`.trim() }];
     const ctx = { user, threadId, uploaded: uploads, proposed: [], did: [], customer };
     const pbText = playbook && !customer ? await playbook.text() : '';   // what staff taught Jarvis (internal only)
     let answer = '';
+    const sys = (customer ? CUSTOMER_SYSTEM(user.name) : SYSTEM(user.name) + (spoken ? SPOKEN : '') + pbText) + (email ? EMAIL_NOTE : '');
+    const toolList = customer ? TOOLS.filter((t) => CUSTOMER_TOOLS.has(t.name)) : email ? TOOLS : TOOLS.filter((t) => t.name !== 'update_email');
+    const useModel = pickModel({ mode, text, uploads }, env);
     for (let step = 0; step < MAX_STEPS; step++) {
-      const r = await fetchFn(API, { method: 'POST', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: model(), max_tokens: 1500, system: (customer ? CUSTOMER_SYSTEM(user.name) : SYSTEM(user.name) + (spoken ? SPOKEN : '') + pbText) + (email ? EMAIL_NOTE : ''), tools: customer ? TOOLS.filter((t) => CUSTOMER_TOOLS.has(t.name)) : email ? TOOLS : TOOLS.filter((t) => t.name !== 'update_email'), messages }) });
+      const r = await fetchFn(API, { method: 'POST', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: useModel, max_tokens: 1500, ...withCache({ system: sys, tools: toolList, messages }) }) });
       if (!r.ok) throw Object.assign(new Error(`AI error (${r.status})`), { status: 502 });
       const j = await r.json();
       const content = j.content || [];

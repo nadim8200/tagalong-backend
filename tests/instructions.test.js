@@ -168,3 +168,17 @@ test('the fix-TruckMate email says what TruckMate shows and what GPS shows', () 
   assert.match(m.text, /update the status in TruckMate to departed \(DEPSHIP\)/);
   assert.match(m.text, /Trip 624625 — WRONG STATUS ON TRIP/);
 });
+
+import { isNewsletter, autoNotice } from '../inbox.js';
+
+test('cheaper: newsletters, read receipts and calendar replies are filed without the AI — anything load-ish is still read', () => {
+  const env = { INTERNAL_DOMAINS: 'floridabeauty.us' };
+  assert.equal(isNewsletter({ from: 'news@truckingweekly.com', text: 'This week in trucking… Unsubscribe | Manage preferences' }, env), true);
+  assert.equal(isNewsletter({ from: 'ops@broker.com', text: 'Please confirm pickup for load 8192162. Unsubscribe' }, env), false);
+  assert.equal(isNewsletter({ from: 'ops@broker.com', text: 'Weekly deals. Unsubscribe', attachments: [{}] }, env), false);
+  assert.equal(isNewsletter({ from: 'ops@broker.com', text: 'Unsubscribe', trips: ['624318'] }, env), false);
+  assert.equal(isNewsletter({ from: 'rosar@floridabeauty.us', text: 'Unsubscribe' }, env), false);
+  assert.equal(autoNotice('ana@broker.com', 'Read: Trip 624318 update'), 'receipt');
+  assert.equal(autoNotice('ana@broker.com', 'Accepted: Dispatch call'), 'receipt');
+  assert.equal(autoNotice('ana@broker.com', 'Re: Load 8192162 rate'), null);
+});

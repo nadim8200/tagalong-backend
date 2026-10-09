@@ -107,7 +107,16 @@ export function autoNotice(address, subject) {
   const subj = String(subject || '');
   if (/^(undeliverable|undelivered|delivery (status notification|has failed|failure)|mail delivery (failed|subsystem)|returned mail|failure notice)/i.test(subj) || /^(microsoftexchange|postmaster|mailer-daemon)/i.test(local)) return 'bounce';
   if (/^(automatic reply|auto(matic)?[- ]?reply|out of (the )?office|ooo\b|autoreply|respuesta autom[aá]tica)/i.test(subj)) return 'auto_reply';
+  if (/^(read|le[ií]do|not read|accepted|declined|tentative|aceptado|rechazado|recall)\s*:/i.test(subj)) return 'receipt';   // read receipts, calendar replies
   return null;
+}
+// A newsletter / marketing email: from outside, an unsubscribe footer, no load matched, no files,
+// and nothing about freight in it. Conservative on purpose — anything load-ish still gets read. Pure.
+export function isNewsletter({ from, text, trips = [], attachments = [] }, env = process.env) {
+  if (isInternal(from, env) || trips.length || attachments.length) return false;
+  const t = String(text || '');
+  if (!/\bunsubscribe\b|manage (your )?(email )?preferences|view (this|it) in (your )?browser|darse de baja/i.test(t)) return false;
+  return !/\b(load|trip|pick ?up|deliver|delivery|rate ?con|confirmation|truck|trailer|driver|pod|bol|appointment|eta|invoice|detention|lumper|reefer|B\d{6}|\d{6})\b/i.test(t);
 }
 // The addresses a bounce says could not be reached. Pure.
 export function bouncedAddresses(text, ignore = []) {
@@ -428,6 +437,13 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
           email.handledBy = 'Jarvis (bounce — nothing to reply)';
           for (const trip of trips) for (const a of real) await addBounceTask(site, trip, a, email); // eslint-disable-line no-await-in-loop
         } else { email.summary = 'Automatic reply (out of office / acknowledgement).'; email.handledBy = 'Jarvis (automatic reply — nothing to do)'; }
+        fresh.push(email);
+        try { await g(`/messages/${encodeURIComponent(m.id)}`, { method: 'PATCH', body: { isRead: true } }); } catch { /* still remembered */ } // eslint-disable-line no-await-in-loop
+        continue;
+      }
+      // marketing / newsletters: no load, no file, nothing about freight → filed without reading (saves AI cost)
+      if (isNewsletter({ from: from.address, text, trips, attachments }, env)) {
+        email.auto = 'newsletter'; email.status = 'handled'; email.reply = { needed: false, kind: 'none', documents: [] }; email.summary = 'Newsletter / marketing email.'; email.handledBy = 'Jarvis (newsletter — nothing to do)';
         fresh.push(email);
         try { await g(`/messages/${encodeURIComponent(m.id)}`, { method: 'PATCH', body: { isRead: true } }); } catch { /* still remembered */ } // eslint-disable-line no-await-in-loop
         continue;

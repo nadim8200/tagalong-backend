@@ -161,12 +161,23 @@ export function initPlanSheet(app, { requireAuth, requireAdmin = null, db, getBo
     try {
       const { token } = await googleToken(env.GOOGLE_SERVICE_ACCOUNT_JSON, { fetchFn, now: now() });
       const sheet = await readSheet(cfg.sheetId, { token, fetchFn });
-      const text = sheetText(sheet);
-      const hash = createHash('sha256').update(text).digest('hex').slice(0, 16);
       const prev = (await db.get(key, {})) || {};
-      if (prev.hash === hash && prev.plan) { await db.set(key, { ...prev, readAt: new Date(now()).toISOString(), error: null }); return prev.plan; }
-      const plan = await extractPlan(text, { env, fetchFn, today: new Date(now()).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) });
-      await db.set(key, { plan, hash, title: sheet.title || null, tabs: sheet.tabs.map((t) => t.title), readAt: new Date(now()).toISOString(), changedAt: new Date(now()).toISOString(), error: null });
+      const today = new Date(now()).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      // only the tabs that changed go to the AI; unchanged tabs keep what was read before
+      const byTab = {}; let changed = 0;
+      for (const tab of sheet.tabs) {
+        const text = sheetText({ tabs: [tab] });
+        const hash = createHash('sha256').update(text).digest('hex').slice(0, 16);
+        const old = (prev.byTab || {})[tab.title];
+        if (old && old.hash === hash) { byTab[tab.title] = old; continue; }
+        changed += 1;
+        const rows = text.split('\n').length > 2 ? await extractPlan(text, { env, fetchFn, today }) : []; // eslint-disable-line no-await-in-loop
+        byTab[tab.title] = { hash, rows: rows.map((r) => ({ ...r, tab: r.tab || tab.title })) };
+      }
+      // one row per truck — the first tab (usually the current week) wins
+      const seen = new Set(); const plan = [];
+      for (const tab of sheet.tabs) for (const r of (byTab[tab.title] || {}).rows || []) if (!seen.has(r.truck)) { seen.add(r.truck); plan.push(r); }
+      await db.set(key, { ...prev, plan, byTab, title: sheet.title || null, tabs: sheet.tabs.map((t) => t.title), readAt: new Date(now()).toISOString(), ...(changed ? { changedAt: new Date(now()).toISOString() } : {}), error: null });
       return plan;
     } catch (e) { await db.update(key, (c) => ({ ...(c || {}), error: e.message, failedAt: new Date(now()).toISOString() }), {}); return null; }
   }

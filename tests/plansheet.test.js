@@ -79,3 +79,30 @@ test('the share email sets the sheet once; missing key in Render is reported, no
 test('a file name pasted instead of the key gives a clear fix-it message', async () => {
   await assert.rejects(googleToken('project-2a69d5e9-b568-43d4-928-abc123.json', { fetchFn: async () => ({}) }), /isn't the key file's contents — it starts with "project-2a69…"/);
 });
+
+test('cheaper: on a re-read only the tabs that changed go to the AI', async () => {
+  const { generateKeyPairSync: gk } = await import('node:crypto');
+  const { privateKey } = gk('rsa', { modulusLength: 2048 });
+  const sa = JSON.stringify({ client_email: 'r@p.iam.gserviceaccount.com', private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }) });
+  const tabs = { 'This week': [['Truck', 'Region'], ['2403', 'Northeast']], 'Next week': [['Truck', 'Region'], ['2612', 'California']] };
+  let ai = 0;
+  const fetchFn = async (url, o) => {
+    if (/oauth2/.test(url)) return { ok: true, json: async () => ({ access_token: 't' }) };
+    if (/fields=/.test(url)) return { ok: true, json: async () => ({ properties: { title: 'Plan' }, sheets: Object.keys(tabs).map((title, index) => ({ properties: { title, index } })) }) };
+    if (/batchGet/.test(url)) return { ok: true, json: async () => ({ valueRanges: Object.values(tabs).map((values) => ({ values })) }) };
+    ai += 1;
+    const body = JSON.parse(o.body).messages[0].content;
+    const truck = /2403/.test(body) && /Northeast/.test(body) ? '2403' : '2612';
+    return { ok: true, json: async () => ({ content: [{ text: JSON.stringify({ trucks: [{ truck, region: /2403/.test(body) ? 'Northeast' : 'California' }] }) }] }) };
+  };
+  const db = memDb();
+  await db.set('taPlanSheetCfg', { sheetId: ID });
+  const p = initPlanSheet({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, getBoard: async () => ({ trips: [] }), env: { NODE_ENV: 'test', GOOGLE_SERVICE_ACCOUNT_JSON: sa, ANTHROPIC_API_KEY: 'k' }, fetchFn });
+  assert.deepEqual((await p.refresh()).map((r) => r.truck), ['2403', '2612']);
+  assert.equal(ai, 2);
+  await p.refresh();
+  assert.equal(ai, 2, 'nothing changed → no AI');
+  tabs['Next week'] = [['Truck', 'Region'], ['2612', 'California'], ['2615', 'Midwest']];
+  await p.refresh();
+  assert.equal(ai, 3, 'only the changed tab');
+});

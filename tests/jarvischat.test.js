@@ -27,7 +27,7 @@ test('a dispatcher asks about a load: Jarvis looks it up with a tool and answers
   assert.equal(r.status, 200); assert.match(r.body.answer, /Cranbury/);
   const toolResult = h.claude.sent[1].messages.at(-1).content[0];
   assert.equal(toolResult.type, 'tool_result'); assert.match(toolResult.content, /New Jersey Turnpike/);
-  assert.match(h.claude.sent[0].system, /Rosa, a dispatcher/);
+  assert.match(txt(h.claude.sent[0].system), /Rosa, a dispatcher/);
   assert.ok(TOOLS.some((t) => t.name === 'propose_action'));
   const th = await h.call('GET /jarvis/threads/:id', {}, { id: r.body.threadId });
   assert.deepEqual(th.body.messages.map((m) => m.role), ['user', 'assistant']);
@@ -63,10 +63,12 @@ test('uploads: a trip sheet is read and filed; another document is stored and ca
   const r = await h.call('POST /jarvis/chat', { message: 'This is the damaged pallet photo', files: [{ filename: 'trip sheet 624520.pdf', mediaType: 'application/pdf', dataBase64: 'JVBE' }, { filename: 'pallet.jpg', mediaType: 'image/jpeg', dataBase64: '/9j/' }] });
   assert.match(r.body.uploads[0].result, /trip sheet read and filed for 624520/);
   assert.equal(r.body.uploads[1].docId, '991');
-  assert.match(h.claude.sent[0].messages.at(-1).content, /\[Uploaded: .*pallet\.jpg → not a trip sheet or rate con.*docId 991/);
+  assert.match(txt(h.claude.sent[0].messages.at(-1).content), /\[Uploaded: .*pallet\.jpg → not a trip sheet or rate con.*docId 991/);
   assert.deepEqual(linked[0].links, [{ docId: '991', trips: ['624399'] }]);
 });
 
+// the request is cached (system / last message as blocks) — read it as text
+const txt = (v) => (Array.isArray(v) ? v.map((b) => b.text || '').join('') : String(v || ''));
 import { truckNow } from '../jarvischat.js';
 test('every load Jarvis lists says where the truck is, rolling or stopped, and the next stop', () => {
   const now = Date.parse('2026-10-08T16:00:00Z');
@@ -82,7 +84,7 @@ test('every load Jarvis lists says where the truck is, rolling or stopped, and t
 test('voice: a spoken turn asks for a short answer; speech is transcribed only with a key', async () => {
   const h = setup([say('Truck 724 is near Cranbury, New Jersey, rolling 64.')]);
   await h.call('POST /jarvis/chat', { message: 'where is 624399', voice: true });
-  assert.match(h.claude.sent[0].system, /SPOKEN conversation/);
+  assert.match(txt(h.claude.sent[0].system), /SPOKEN conversation/);
   const off = setup([]);
   assert.equal((await off.call('GET /jarvis/voice')).body.serverStt, false);
   const no = await off.call('POST /jarvis/transcribe', { audio: 'AAAA', mimeType: 'audio/webm' });
@@ -110,8 +112,38 @@ test('customer mode (emails from customers / brokers): only look-up tools, nothi
   assert.deepEqual(customerSafe({ trip: '1', location: 'I-95', driverPhone: '305', rate: 2500, notes: ['x'], stops: [{ city: 'Lombard', contactEmail: 'a@b.c' }] }), { trip: '1', location: 'I-95', stops: [{ city: 'Lombard' }] });
   const h = setup([useTool('propose_action', { type: 'text_driver', trip: '624399', message: 'hi' }), say('What is your PO number?')]);
   const r = await h.chat.turn({ mode: 'customer', user: { id: 'email:ana@mayesh.com', name: 'Ana <ana@mayesh.com>' }, threadId: 'abcdef012345', text: 'where are my flowers' });
-  assert.match(h.claude.sent[0].system, /answering an email from Ana/);
+  assert.match(txt(h.claude.sent[0].system), /answering an email from Ana/);
   assert.deepEqual(h.claude.sent[0].tools.map((t) => t.name).sort(), ['find_load', 'load_details', 'loads_to_place', 'staff_directory', 'update_email']);
   assert.match(h.claude.sent[1].messages.at(-1).content[0].content, /Not available/);
   assert.equal(r.actions.length, 0, 'a customer can never make Jarvis contact anyone');
+});
+
+import { pickModel, trimHistory, withCache } from '../jarvischat.js';
+
+test('cheaper: routine questions and email answers use the light model; planning / several loads use the heavy one', () => {
+  const env = {};
+  assert.equal(pickModel({ text: 'where is 624318?' }, env), 'claude-haiku-4-5-20251001');
+  assert.equal(pickModel({ mode: 'staff_email', text: 'why is it late and should we swap trucks?' }, env), 'claude-haiku-4-5-20251001');
+  assert.equal(pickModel({ mode: 'customer', text: 'where is my load' }, env), 'claude-haiku-4-5-20251001');
+  assert.equal(pickModel({ text: 'which trucks should cover the Northeast tomorrow?' }, env), 'claude-sonnet-5-5');
+  assert.equal(pickModel({ text: 'status of 624318, 624320 and 624325' }, env), 'claude-sonnet-5-5');
+  assert.equal(pickModel({ text: 'hi', uploads: [{}] }, env), 'claude-sonnet-5-5');
+  assert.equal(pickModel({ text: 'where is 624318?' }, { JARVIS_CHAT_ROUTING: 'off' }), 'claude-sonnet-5-5');
+});
+
+test('cheaper: only the last 6 turns go with each question, older long answers shortened', () => {
+  const msgs = Array.from({ length: 20 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: `${i} ${'x'.repeat(i === 10 ? 3000 : 10)}` }));
+  const h = trimHistory(msgs);
+  assert.equal(h.length, 12);
+  assert.equal(h[0].content.startsWith('8 '), true);
+  assert.ok(h[2].content.length <= 1501, 'old long answer shortened');
+});
+
+test('cheaper: instructions, tools and the conversation so far are marked for prompt caching', () => {
+  const c = withCache({ system: 'S', tools: [{ name: 'a' }, { name: 'b' }], messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: [{ type: 'text', text: 'ok' }] }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: '1', content: 'x' }] }] });
+  assert.deepEqual(c.system, [{ type: 'text', text: 'S', cache_control: { type: 'ephemeral' } }]);
+  assert.deepEqual(c.tools[1].cache_control, { type: 'ephemeral' });
+  assert.equal(c.tools[0].cache_control, undefined);
+  assert.deepEqual(c.messages[2].content[0].cache_control, { type: 'ephemeral' });
+  assert.equal(c.messages[0].content, 'hi', 'earlier messages untouched');
 });
