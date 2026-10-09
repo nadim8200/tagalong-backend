@@ -87,3 +87,21 @@ test('follow-up loop: 30 min late → one reply in the chain; then departed → 
   clock = plan + 60 * 60000; await f.run();
   assert.equal(sent.length, 2, 'departure told once');
 });
+
+import { tripsInAnswer, isStatusAsk, cleanAnswer } from '../inbox.js';
+
+test('a free-text answer about board loads still gets the standard update', () => {
+  const a = 'Nadim, 4 Ever Roses has two loads. Trip 624480, truck 2011: delivered. Trip 624559 is behind. Bill 123456 is not a trip.';
+  assert.deepEqual(tripsInAnswer(a, new Set(['624480', '624559'])), ['624480', '624559']);
+});
+
+test('"locate and provide status" is answered by the reply, not a to-do', () => {
+  assert.ok(isStatusAsk({ kind: 'task', message: 'Locate and provide status update on 4 Ever Roses load to Nadim Tellez.' }));
+  assert.ok(!isStatusAsk({ kind: 'task', message: 'Send the rate con to RXO' }));
+  assert.ok(!isStatusAsk({ kind: 'text_driver', message: 'where are you?' }));
+});
+
+test('model-written "Done from your email" lists and offer endings are removed', () => {
+  const t = 'Two loads on the board.\n\nIf you want, I can text the driver on 624559.\n\n**Done from your email:**\n- To-do: x — which load?';
+  assert.equal(cleanAnswer(t), 'Two loads on the board.');
+});
