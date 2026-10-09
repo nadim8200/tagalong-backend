@@ -115,7 +115,7 @@ test('a dispatcher email with a pasted trip sheet and a delayed pickup: sheet re
 });
 
 import { isInternal, isPacketEmail } from '../inbox.js';
-function harness({ messages, triageOut, draftText = 'Hi, the truck is in Robeson County, NC. Next stop Kinston ETA Wed 10:00 AM (estimate). — Jarvis', board, docsList = [], cfg = {}, packets = null, driver = null }) {
+function harness({ messages, triageOut, draftText = 'Hi, the truck is in Robeson County, NC. Next stop Kinston ETA Wed 10:00 AM (estimate). — Jarvis', board, docsList = [], cfg = {}, packets = null, driver = null, etaWatch = null }) {
   const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us', ANTHROPIC_API_KEY: 'k' };
   const calls = [];
   const fetchFn = async (url, opts = {}) => {
@@ -132,7 +132,7 @@ function harness({ messages, triageOut, draftText = 'Hi, the truck is in Robeson
   const db = memDb();
   if (Object.keys(cfg).length) db.set('taInboxCfg', cfg);
   const docs = { enabled: true, storeDocs: async () => [{ id: 1 }], linkDocs: async () => {}, listDocs: async () => docsList, readDocs: async ({ ids }) => ids.map((id) => ({ id, mediaType: 'application/pdf', data: Buffer.from('%PDF') })) };
-  const inbox = initInbox({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: (q, r, n) => n(), db, docs, env, fetchFn, getBoard: async () => ({ trips: board }), packets, driver });
+  const inbox = initInbox({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: (q, r, n) => n(), db, docs, env, fetchFn, getBoard: async () => ({ trips: board }), packets, driver, etaWatch });
   return { inbox, calls, db };
 }
 const LOAD = { trip: { tripNumber: '623869', status: 'DEPSHIP', powerUnit: '2008', trailer: '7141' }, freightBills: [{ billNumber: 'B180400', endZoneDescription: 'BLOOMFIELD, CT, 06002' }], _ratecon: { data: { broker: 'RXO', loadNumber: 'RXO 24261611', brokerEmail: 'ops@rxo.com' } }, _samsara: { location: 'I 95, Robeson County, NC', gpsAt: '2026-10-07T12:00:00Z', speedMph: 64 } };
@@ -225,4 +225,31 @@ test('outbound\'s trip-sheet email: notes and tasks for the named loads are save
   assert.deepEqual(texts, [{ trip: '623869', message: 'Pick up 2 more pallets in Ocala.' }]);
   const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
   assert.equal(e.instructionResults.find((r) => r.message === 'No load named').trip, '623869');
+});
+
+test('bounces and out-of-office replies are filed quietly — no reply, no to-dos, never "instructions"', async () => {
+  const { autoNotice, bouncedAddresses, isInternal } = await import('../inbox.js');
+  assert.equal(autoNotice('MicrosoftExchange329e@floridabeauty.us', 'Undeliverable: Location update'), 'bounce');
+  assert.equal(autoNotice('emily@chrobinson.com', 'Automatic reply: Location update'), 'auto_reply');
+  assert.equal(autoNotice('rosa@floridabeauty.us', 'ETA every 3 hours'), null);
+  assert.equal(isInternal('MicrosoftExchange329e@floridabeauty.us'), false);
+  assert.deepEqual(bouncedAddresses('Your message to e.meese@redwoodlogistics.com couldn\'t be delivered. jarvis@floridabeauty.us', ['jarvis@floridabeauty.us']), ['e.meese@redwoodlogistics.com']);
+  const h = harness({ messages: [msg({ subject: 'Undeliverable: Location update — Trip 623869', from: { emailAddress: { name: 'Microsoft Outlook', address: 'MicrosoftExchange329e@floridabeauty.us' } }, body: { contentType: 'text', content: 'Your message to e.meese@redwoodlogistics.com couldn\'t be delivered.' } })], triageOut: { summary: 'x', attachments: [], refs: {}, actions: [{ kind: 'other', title: 'junk' }], reply: { needed: true }, instructions: [{ kind: 'task', message: 'junk' }] }, board: [LOAD] });
+  await h.inbox.poll();
+  const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
+  assert.equal(e.status, 'handled'); assert.equal(e.auto, 'bounce'); assert.deepEqual(e.bounced, ['e.meese@redwoodlogistics.com']);
+  const tasks = (await h.db.get('taLoadTasks:florida-beauty', {}))['623869'] || [];
+  assert.deepEqual(tasks.map((t) => t.id), ['bounce_e.meese@redwoodlogistics.com'], 'one "fix this contact" to-do, no junk');
+});
+
+test('staff: "ETA every 3 hours on Native" → Jarvis schedules updates for that customer\'s loads', async () => {
+  const added = [];
+  const etaWatch = { add: async (req) => { added.push(req); return { ok: true, watch: { id: 'w1', trips: ['623869'], to: req.to, everyHours: req.everyHours } }; } };
+  const ask = { summary: 'ETA updates', attachments: [], refs: {}, actions: [], reply: { needed: false }, instructions: [{ kind: 'eta_updates', customers: ['Native', 'Produce Junction'], trips: [], to: [], everyHours: 3 }] };
+  const h = harness({ messages: [msg({ subject: 'ETA every 3 hours', from: { emailAddress: { name: 'Nadim Tellez', address: 'ntellez@floridabeauty.us' } }, body: { contentType: 'text', content: 'Send me the ETA every 3 hours for Native and Produce Junction until delivered.' } })], triageOut: ask, board: [LOAD], etaWatch });
+  await h.inbox.poll();
+  assert.deepEqual(added[0].customers, ['Native', 'Produce Junction']);
+  assert.deepEqual(added[0].to, ['ntellez@floridabeauty.us'], 'no address given → the sender');
+  const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
+  assert.match(e.instructionResults[0].sent, /ETA every 3h to ntellez@floridabeauty.us — loads 623869/);
 });

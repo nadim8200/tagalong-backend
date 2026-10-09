@@ -60,6 +60,7 @@ import { initDbpo } from './dbpo.js';
 import { initRateCon } from './ratecon.js';
 import { sendMail, mailConfig, setMailGuard } from './mailer.js';
 import { initTraining } from './training.js';
+import { initEtaWatch } from './etawatch.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -694,6 +695,8 @@ const pushRules = initPushRules(app, { requireAdmin, db, push, listDispatchers: 
 const training = initTraining(app, { requireAuth: requireDispatch, requireAdmin, db, sendDirect: (m) => sendMail(m, { env: process.env, direct: true }) });
 setMailGuard((m) => training.mailGuard(m));
 setSmsGuard((m) => training.hold('text', m));
+// scheduled ETA updates ("ETA every 3 hours on Native until delivered")
+const etaWatch = initEtaWatch(app, { requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }) });
 const docs = initDocuments(app, { requireAuth: requireDispatch, db });
 // Geofence stop tracking (validated Samsara address boundaries only).
 const stopVisits = initStopVisits({ db, env: process.env, listAddresses, tokenFrom: samsaraTokenFrom });
@@ -719,7 +722,7 @@ const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, comms
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
 // Jarvis reaching a driver (asked by staff in an email or in the chat): the TagAlong app first (OC drivers), else a text — consent / STOP rules apply
 const driverHooks = { text: async (site, trip, message, by) => { const a = await driverLinks.messageDriver(site, trip, message, by).catch(() => ({ skipped: true })); return a && a.sent ? a : comms.textDriverAuto(site, trip, message, by); }, call: async (site, trip, by) => { try { return { called: true, ...(await voice.placeCall(String(trip), { purpose: 'check', by })) }; } catch (e) { return { skipped: e.message }; } } };
-const inbox = initInbox(app, { help, requireAuth: requireDispatch, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []), packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
+const inbox = initInbox(app, { etaWatch, training, help, requireAuth: requireDispatch, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []), packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   // our staff can ask Jarvis (by email) to text or call a driver — same consent / STOP rules
   driver: driverHooks });
 // customer & broker profiles (Customers tab): built from the loads, edited / verified by dispatch
@@ -746,7 +749,7 @@ jarvisChat = initJarvisChat(app, { requireAuth: requireDispatch, db, env: proces
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });
-initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); } });
+initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and

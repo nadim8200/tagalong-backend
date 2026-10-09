@@ -84,28 +84,51 @@ export function buildFlowerReport(rows, now = Date.now()) {
   const n = { late: count('LATE'), risk: count('AT RISK'), ok: count('ON TIME'), nogps: count('NO GPS'), notleft: count('NOT LEFT'), bd: count('BREAKDOWN') };
   const when = new Date(now).toLocaleString('en-US', { timeZone: TZ, weekday: 'short', month: '2-digit', day: '2-digit', hour: 'numeric', minute: '2-digit' });
   const subject = `Flower loads update — ${when} · ${n.late + n.bd ? `${n.late + n.bd} late` : 'none late'}, ${n.risk} at risk, ${n.ok} on time`;
-  const chip = (s) => `<span style="display:inline-block;padding:1px 7px;border-radius:9px;background:${COLOR[s]};color:#fff;font-size:11px;font-weight:bold">${s}</span>`;
-  const th = (x) => `<th style="text-align:left;padding:5px 8px;border-bottom:2px solid #ccc;font-size:12px">${x}</th>`;
-  const td = (x, extra = '') => `<td style="padding:5px 8px;border-bottom:1px solid #eee;font-size:12px;vertical-align:top;${extra}">${x}</td>`;
-  const row = (r) => `<tr>${[
-    chip(r.state),
-    `<b>${esc(r.trip)}</b><br><span style="color:#666">Truck ${esc(r.truck)}${r.trailer ? ` · Trl ${esc(r.trailer)}` : ''}</span>`,
-    `${esc(r.from)}${r.drivers ? `<br><span style="color:#666">${esc(r.drivers)}</span>` : ''}`,
-    `${esc(r.now)}<br><span style="color:#666">${esc(r.status)}</span>`,
-    `${esc(r.next)}<br><b>${esc(r.nextEta)}</b>${r.nextAppt ? `<br><span style="color:#666">appt ${esc(r.nextAppt)}</span>` : ''}`,
-    `${esc(r.final)}${r.finalEta ? `<br>${esc(r.finalEta)}` : ''}<br><span style="color:#666">${esc(r.progress)}</span>`,
-    `${r.why ? `<span style="color:#b91c1c">${esc(r.why)}</span>` : ''}${r.other.length ? `${r.why ? '<br>' : ''}${r.other.map(esc).join('<br>')}` : ''}`,
-  ].map((x, i) => td(x, i === 6 ? 'max-width:320px;white-space:normal' : 'white-space:nowrap')).join('')}</tr>`;
-  const html = `<div style="font-family:Arial,sans-serif;font-size:14px">
-<p>Good day,</p>
-<p>Here is how the flower loads are running as of ${esc(when)} (Eastern):</p>
-<p><b>${rows.length} loads</b> · ${chip('LATE')} ${n.late + n.bd}${n.bd ? ` (${n.bd} breakdown)` : ''} &nbsp; ${chip('AT RISK')} ${n.risk} &nbsp; ${chip('ON TIME')} ${n.ok}${n.notleft ? ` &nbsp; ${chip('NOT LEFT')} ${n.notleft}` : ''}${n.nogps ? ` &nbsp; ${chip('NO GPS')} ${n.nogps}` : ''}</p>
-<table cellspacing="0" style="border-collapse:collapse">
-<tr>${['', 'Trip', 'From / drivers', 'Truck now', 'Next stop · ETA', 'Last stop', 'Late / issues'].map(th).join('')}</tr>
-${sorted.map(row).join('\n')}
-</table>
-<p style="color:#666;font-size:12px">ETAs and appointments are in each delivery's local time. They are estimates (55 mph, drivers' hours, time at each stop) and may change with traffic, weather or road conditions. LATE = will miss or already missed an appointment; AT RISK = may miss a due time.</p>
-<p>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>`;
+  // Phone-first: one card per load, grouped by what needs attention. Email-safe (tables + inline styles).
+  const chip = (st, big = false) => `<span style="display:inline-block;padding:${big ? '3px 10px' : '2px 8px'};border-radius:10px;background:${COLOR[st]};color:#ffffff;font-size:${big ? 12 : 11}px;font-weight:bold;letter-spacing:.3px">${st}</span>`;
+  const GROUPS = [
+    ['Late', ['BREAKDOWN', 'LATE'], 'Will miss or already missed an appointment.'],
+    ['At risk', ['AT RISK'], 'May miss a due time, or the pickup is on hold.'],
+    ['Not left yet', ['NOT LEFT'], ''],
+    ['No GPS', ['NO GPS'], 'No live position — mostly outside carriers without a check-in yet.'],
+    ['On time', ['ON TIME'], ''],
+  ];
+  const line = (icon, label, value) => (value ? `<tr><td style="padding:3px 0;width:22px;vertical-align:top;font-size:14px">${icon}</td><td style="padding:3px 0;font-size:14px;color:#1f2937;line-height:1.35"><span style="color:#6b7280">${label}</span> ${value}</td></tr>` : '');
+  const card = (r) => {
+    const issues = [r.why, ...r.other].filter(Boolean).slice(0, 3);
+    return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;margin:0 0 10px;background:#ffffff;border:1px solid #e5e7eb;border-left:5px solid ${COLOR[r.state]};border-radius:8px">
+<tr><td style="padding:10px 12px">
+  <div style="font-size:16px;color:#111827;margin-bottom:2px">${chip(r.state)} &nbsp;<b>Trip ${esc(r.trip)}</b></div>
+  <div style="font-size:13px;color:#6b7280;margin-bottom:6px">Truck ${esc(r.truck || '—')}${r.trailer ? ` · Trailer ${esc(r.trailer)}` : ''}${r.drivers ? ` · ${esc(r.drivers)}` : ''}</div>
+  <table role="presentation" cellspacing="0" cellpadding="0" width="100%">
+    ${line('📍', 'Now:', `<b>${esc(r.now)}</b>${r.status ? ` <span style="color:#6b7280">· ${esc(r.status)}</span>` : ''}`)}
+    ${line('➡️', 'Next:', r.next && r.next !== '—' && `${esc(r.next)}${r.nextEta && r.nextEta !== '—' ? ` — ETA <b>${esc(r.nextEta)}</b>` : ''}${r.nextAppt ? `<br><span style="color:#6b7280">appointment ${esc(r.nextAppt)}</span>` : ''}`)}
+    ${line('🏁', 'Final:', r.final && r.final !== cityOf(r.next) ? `${esc(r.final)}${r.finalEta ? ` — ${esc(r.finalEta)}` : ''}` : '')}
+    ${line('🚚', 'From:', `${esc(r.from)}${r.progress ? ` <span style="color:#6b7280">· ${esc(r.progress)}</span>` : ''}`)}
+  </table>
+  ${issues.length ? `<div style="margin-top:8px;padding:7px 9px;background:#fef2f2;border-radius:6px;font-size:13px;color:#991b1b;line-height:1.35">${issues.map((x) => `• ${esc(x)}`).join('<br>')}</div>` : ''}
+</td></tr></table>`;
+  };
+  // on-time loads: one compact line each
+  const okLine = (r) => `<tr><td style="padding:7px 0;border-bottom:1px solid #f1f5f9;font-size:13px;color:#1f2937;line-height:1.35"><b>Trip ${esc(r.trip)}</b> <span style="color:#6b7280">· Truck ${esc(r.truck || '—')}</span><br>📍 ${esc(r.now)}${r.next && r.next !== '—' ? `<br>➡️ ${esc(r.next)}${r.nextEta && r.nextEta !== '—' ? ` — <b>${esc(r.nextEta)}</b>` : ''}` : ''}</td></tr>`;
+  const section = ([title, states, note]) => {
+    const list = sorted.filter((r) => states.includes(r.state));
+    if (!list.length) return '';
+    const head = `<div style="margin:18px 0 8px;font-size:15px;font-weight:bold;color:#111827">${chip(states[states.length - 1], true)} &nbsp;${esc(title)} (${list.length})</div>${note ? `<div style="margin:-4px 0 8px;font-size:12px;color:#6b7280">${esc(note)}</div>` : ''}`;
+    return states.includes('ON TIME') ? `${head}<table role="presentation" width="100%" cellspacing="0" cellpadding="0">${list.map(okLine).join('')}</table>` : head + list.map(card).join('');
+  };
+  const pill = (label, value, color) => `<td style="padding:4px"><div style="background:${color};color:#ffffff;border-radius:8px;padding:8px 4px;text-align:center"><div style="font-size:20px;font-weight:bold;line-height:1">${value}</div><div style="font-size:11px;margin-top:3px">${label}</div></div></td>`;
+  const html = `<div style="background:#f3f4f6;padding:12px 0;font-family:Arial,Helvetica,sans-serif">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:10px"><tr><td style="padding:16px 14px">
+  <div style="font-size:20px;font-weight:bold;color:#111827">🌸 Flower loads update</div>
+  <div style="font-size:13px;color:#6b7280;margin:2px 0 12px">${esc(when)} (Eastern) · ${rows.length} loads</div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>
+    ${pill('Late', n.late + n.bd, COLOR.LATE)}${pill('At risk', n.risk, COLOR['AT RISK'])}${pill('On time', n.ok, COLOR['ON TIME'])}${n.notleft ? pill('Not left', n.notleft, COLOR['NOT LEFT']) : ''}${n.nogps ? pill('No GPS', n.nogps, COLOR['NO GPS']) : ''}
+  </tr></table>
+  ${GROUPS.map(section).join('\n')}
+  <div style="margin-top:16px;font-size:12px;color:#6b7280;line-height:1.4">ETAs and appointments are in each delivery's local time. They are estimates (55 mph, drivers' hours, time at each stop) and may change with traffic, weather or road conditions.</div>
+  <div style="margin-top:10px;font-size:13px;color:#374151">Jarvis — AI Dispatcher · Florida Beauty Flora</div>
+</td></tr></table></div>`;
   return { subject, html, rows: sorted, counts: n, at: now };
 }
 

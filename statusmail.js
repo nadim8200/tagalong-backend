@@ -235,6 +235,12 @@ function stopsNow(item) {
   return stopsOf(item).map((s) => (!s.delivered && ms[`delivered:${s.key}`] && ms[`delivered:${s.key}`].src !== 'GPS' ? { ...s, delivered: true, deliveredAt: s.deliveredAt || ms[`delivered:${s.key}`].at, byDriver: true } : s));
 }
 
+// Is the whole load delivered (every stop, or TruckMate says done)? Pure.
+export function isDelivered(item) {
+  const stops = stopsNow(item);
+  return (stops.length > 0 && stops.every((s) => s.delivered)) || DONE.test(String(tripOf(item).status || ''));
+}
+
 // Truck, trailer, driver names and "trailer loaded" on the load right now. Pure.
 export function assignmentOf(item) {
   const t = tripOf(item);
