@@ -30,7 +30,13 @@ export const sheetIdFrom = (text) => (String(text || '').match(/docs\.google\.co
 
 // Service-account login → access token (Google OAuth JWT bearer). Pure-ish (needs fetch).
 export async function googleToken(saJson, { fetchFn = globalThis.fetch, now = Date.now() } = {}) {
-  const sa = typeof saJson === 'string' ? JSON.parse(saJson) : saJson;
+  let sa = saJson;
+  if (typeof saJson === 'string') {
+    const raw = saJson.trim();
+    try { sa = JSON.parse(raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8')); }   // the file's contents (or base64 of it)
+    catch { throw new Error(`GOOGLE_SERVICE_ACCOUNT_JSON in Render isn't the key file's contents — it starts with "${raw.slice(0, 12)}…". Open the downloaded .json file in TextEdit and paste everything inside it (it starts with { and "type": "service_account").`); }
+  }
+  if (!sa || !sa.client_email || !sa.private_key) throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON is missing client_email / private_key — paste the whole service account key file.');
   const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const iat = Math.floor(now / 1000);
   const head = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/spreadsheets.readonly', aud: 'https://oauth2.googleapis.com/token', iat, exp: iat + 3600 })}`;

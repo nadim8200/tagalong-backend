@@ -75,3 +75,7 @@ test('the share email sets the sheet once; missing key in Render is reported, no
   assert.equal(await p.refresh(), null);
   assert.match((await db.get('taPlanSheet:florida-beauty', {})).error, /GOOGLE_SERVICE_ACCOUNT_JSON/);
 });
+
+test('a file name pasted instead of the key gives a clear fix-it message', async () => {
+  await assert.rejects(googleToken('project-2a69d5e9-b568-43d4-928-abc123.json', { fetchFn: async () => ({}) }), /isn't the key file's contents — it starts with "project-2a69…"/);
+});
