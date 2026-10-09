@@ -83,7 +83,7 @@ export function readDecision(text, count) {
   return nums.length ? nums : Array.from({ length: count }, (_, i) => i + 1);
 }
 
-export function initFollowThrough(app, { requireAuth, db, sendMail, etaWatch = null, driver = null, docs = null, getBoard = null, now = () => Date.now() }) {
+export function initFollowThrough(app, { requireAuth, db, sendMail, playbook = null, etaWatch = null, driver = null, docs = null, getBoard = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const cfgKey = 'taFollowCfg';
   const key = `taFollow:${SITE}`;              // trip → { rcSentFor, podTo, podSent, closeout }
@@ -221,10 +221,12 @@ ${offerBlock(items, token)}`) });
       const open = [...live.keys()].map((trip) => ({ trip, list: (tasks[trip] || []).filter((x) => !x.done) })).filter((x) => x.list.length);
       const waitingRc = Object.entries(book).filter(([, f]) => f.closeout && ['needed', 'requested'].includes(f.closeout.status));
       const emails = (((await db.get(`taEmails:${site}`, { list: [] })) || {}).list || []).filter((e) => e.status === 'new' && (e.trips || []).length && !e.auto && t - Date.parse(e.at) > 2 * H).slice(0, 20);
-      if (open.length || waitingRc.length || emails.length) {
+      const routines = playbook ? await playbook.routines() : [];
+      if (open.length || waitingRc.length || emails.length || routines.length) {
         await sendMail({ to: cfg.to, subject: `Follow-through — ${day}: ${open.length} load${open.length === 1 ? '' : 's'} with open to-dos, ${waitingRc.length} revised rate con${waitingRc.length === 1 ? '' : 's'} missing, ${emails.length} email${emails.length === 1 ? '' : 's'} waiting`,
           html: wrap(`${waitingRc.length ? `<p><b>💲 Revised rate cons still missing</b></p><ul>${waitingRc.map(([trip, f]) => `<li>Trip ${esc(trip)} — ${esc(f.closeout.extras.map((x) => x.kind.replace('_', ' ')).join(', '))} (${esc(f.closeout.status)})</li>`).join('')}</ul>` : ''}
 ${emails.length ? `<p><b>📧 Emails about loads still waiting on us (2 h+)</b></p><ul>${emails.map((e) => `<li>Trip ${esc(e.trips.join(', '))} — ${esc(e.from.name || e.from.address)}: ${esc(e.subject)}</li>`).join('')}</ul>` : ''}
+${routines.length ? `<p><b>🔁 Routines (what you taught me)</b></p><ul>${routines.map((r) => `<li>${esc(r.title)}${r.schedule ? ` — ${esc(r.schedule)}` : ''}: ${esc(r.do)}</li>`).join('')}</ul>` : ''}
 ${open.length ? `<p><b>✅ Open to-dos on loads</b></p><ul>${open.map((x) => `<li><b>Trip ${esc(x.trip)}</b>: ${x.list.slice(0, 4).map((y) => esc(y.title)).join(' · ')}${x.list.length > 4 ? ` (+${x.list.length - 4})` : ''}</li>`).join('')}</ul>` : ''}`) });
       }
     }

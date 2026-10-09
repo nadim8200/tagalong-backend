@@ -5,7 +5,9 @@
 // first update right away, then every N hours (current location, next stop, ETA),
 // and a last "delivered" email — then stops on its own.
 // ---------------------------------------------------------------
-import { renderEvent, stopsOf, isDelivered } from './statusmail.js';
+import { stopsOf, isDelivered } from './statusmail.js';
+import { buildUpdateFor } from './updateemail.js';
+import { isInternal } from './inbox.js';
 
 const H = 3600000;
 const SITE = 'florida-beauty';
@@ -27,17 +29,10 @@ export function loadsForCustomer(name, items = []) {
   }).map(tripNo).filter(Boolean);
 }
 
-export function initEtaWatch(app, { requireAuth, db, sendMail }) {
+export function initEtaWatch(app, { requireAuth, db, sendMail, docs = null }) {
   const enabled = !!(db && db.enabled);
   const key = `taEtaWatch:${SITE}`;
   let last = { items: [], geo: () => null };
-
-  async function sendFor(w, item, kind, ctx) {
-    const mail = renderEvent({ kind }, item, ctx);
-    if (!mail) return false;
-    await sendMail({ to: w.to, subject: `${kind === 'delivered' ? '✅ ' : ''}${mail.subject}${w.label ? ` · ${w.label}` : ''}`, html: mail.html });
-    return true;
-  }
 
   // create: trips and/or customer names → the loads; first update goes now
   async function add({ trips = [], customers = [], to = [], everyHours = 3, by = 'dispatch', label = '' }, items = last.items) {
@@ -62,13 +57,19 @@ export function initEtaWatch(app, { requireAuth, db, sendMail }) {
     const out = [];
     for (const w of list) {
       if (only && w.id !== only) { out.push(w); continue; }
-      for (const trip of w.trips) {
-        if (w.done[trip]) continue;
-        const item = items.find((it) => tripNo(it) === trip);
-        if (!item) { if (Date.parse(w.createdAt) < now - 2 * 24 * H) w.done[trip] = 'left the board'; continue; }   // finished / closed
+      const pending = w.trips.filter((t) => !w.done[t]);
+      for (const t of pending) if (!items.some((it) => tripNo(it) === t) && Date.parse(w.createdAt) < now - 2 * 24 * H) w.done[t] = 'left the board';
+      const present = pending.filter((t) => items.some((it) => tripNo(it) === t));
+      const newlyDelivered = present.filter((t) => isDelivered(items.find((it) => tripNo(it) === t)));
+      const due = !w.lastSent || now - Date.parse(w.lastSent) >= w.everyHours * H;
+      if (present.length && (due || newlyDelivered.length)) {
         try {
-          if (isDelivered(item)) { await sendFor(w, item, 'delivered', { geo, now }); w.done[trip] = new Date(now).toISOString(); } // eslint-disable-line no-await-in-loop
-          else if (!w.sent[trip] || now - Date.parse(w.sent[trip]) >= w.everyHours * H) { if (await sendFor(w, item, 'location', { geo, now })) w.sent[trip] = new Date(now).toISOString(); } // eslint-disable-line no-await-in-loop
+          // one delivery update for all the loads on this schedule (internal format when every recipient is our staff)
+          const audience = w.to.every((x) => isInternal(x)) ? 'internal' : 'customer';
+          const u = await buildUpdateFor({ db, docs, site: SITE, items, trips: present, customer: w.label || null, audience, now }); // eslint-disable-line no-await-in-loop
+          await sendMail({ to: w.to, subject: u.subject, html: u.html, text: u.text }); // eslint-disable-line no-await-in-loop
+          const iso = new Date(now).toISOString();
+          w.lastSent = iso; present.forEach((t) => { w.sent[t] = iso; }); newlyDelivered.forEach((t) => { w.done[t] = iso; });
         } catch (e) { w.error = e.message; }
       }
       if (!w.trips.every((t) => w.done[t])) out.push(w);

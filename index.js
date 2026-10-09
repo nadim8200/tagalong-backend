@@ -62,6 +62,7 @@ import { sendMail, mailConfig, setMailGuard } from './mailer.js';
 import { initTraining } from './training.js';
 import { initEtaWatch } from './etawatch.js';
 import { initFollowThrough } from './followthrough.js';
+import { initPlaybook } from './playbook.js';
 
 const {
   TRACCAR_URL = 'https://gps.dynamicsbpo.com',
@@ -696,9 +697,9 @@ const pushRules = initPushRules(app, { requireAdmin, db, push, listDispatchers: 
 const training = initTraining(app, { requireAuth: requireDispatch, requireAdmin, db, sendDirect: (m) => sendMail(m, { env: process.env, direct: true }) });
 setMailGuard((m) => training.mailGuard(m));
 setSmsGuard((m) => training.hold('text', m));
-// scheduled ETA updates ("ETA every 3 hours on Native until delivered")
-const etaWatch = initEtaWatch(app, { requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }) });
 const docs = initDocuments(app, { requireAuth: requireDispatch, db });
+// scheduled ETA updates ("ETA every 3 hours on Native until delivered")
+const etaWatch = initEtaWatch(app, { requireAuth: requireDispatch, db, docs, sendMail: (m) => sendMail(m, { env: process.env }) });
 // Geofence stop tracking (validated Samsara address boundaries only).
 const stopVisits = initStopVisits({ db, env: process.env, listAddresses, tokenFrom: samsaraTokenFrom });
 // Outside carriers (OC): carrier list, OC marks, check calls / email check-ins.
@@ -719,19 +720,21 @@ driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
 helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, pushRules, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) },
   sms: { live: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } }, send: (to, text) => rc.sendSms('__shared', { to, text }) } });
-const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, comms, ringcentral: rc, env: process.env });
+const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env });
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
 // Jarvis reaching a driver (asked by staff in an email or in the chat): the TagAlong app first (OC drivers), else a text — consent / STOP rules apply
 const driverHooks = { text: async (site, trip, message, by) => { const a = await driverLinks.messageDriver(site, trip, message, by).catch(() => ({ skipped: true })); return a && a.sent ? a : comms.textDriverAuto(site, trip, message, by); }, call: async (site, trip, by) => { try { return { called: true, ...(await voice.placeCall(String(trip), { purpose: 'check', by })) }; } catch (e) { return { skipped: e.message }; } } };
+// Jarvis' playbook: what staff teach it by email ("TRAINING: …")
+const playbook = initPlaybook(app, { requireAuth: requireDispatch, db, env: process.env });
 // load follow-through: rate-con instructions to dispatch, Jarvis' offers (reply YES), revised rate cons after delivery
-const follow = initFollowThrough(app, { requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), etaWatch, driver: driverHooks, docs, getBoard: (site) => truckmate.buildBoard(site) });
-const inbox = initInbox(app, { follow, etaWatch, training, help,
+const follow = initFollowThrough(app, { playbook, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), etaWatch, driver: driverHooks, docs, getBoard: (site) => truckmate.buildBoard(site) });
+const inbox = initInbox(app, { playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
     text: `[Email from ${from.name || ''} <${from.address}>]\nSubject: ${subject || ''}\n\n${String(text || '').slice(0, 3500)}`,
   } : {
-    user: { id: `email:${String(from.address || '').toLowerCase()}`, name: from.name || from.address, email: from.address },
+    mode: 'staff_email', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: from.name || from.address, email: from.address },
     threadId,
     text: `[Email to Jarvis from ${from.name || ''} <${from.address}> — Florida Beauty Flora staff]\nSubject: ${subject || ''}\n\n${String(text || '').slice(0, 3500)}\n\n(Answer this email for them. Look everything up with the tools — loads_to_place for a city / state, find_load for a trip, truck, trailer or customer. Start with a one-line summary, then one short bullet per load: trip, truck, where it is now, next stop and ETA (local time), delivered or not.${(done || []).length ? ` Already done from this email, don't repeat: ${done.join('; ')}.` : ''})`,
   }) : null), requireAuth: requireDispatch, db, docs, comms, env: process.env, getBoard: (site) => truckmate.buildBoard(site), rateCons: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileRateCon(site, pages, opts) : null), tripSheets: (site, pages, opts) => (manifestsApi ? manifestsApi.readAndFileSheets(site, pages, opts) : []), packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
@@ -758,7 +761,7 @@ pickupFollow = initPickupFollow(app, { requireAuth: requireDispatch, db, ringcen
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
-jarvisChat = initJarvisChat(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
+jarvisChat = initJarvisChat(app, { playbook, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });

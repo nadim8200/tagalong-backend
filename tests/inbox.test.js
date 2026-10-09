@@ -115,7 +115,7 @@ test('a dispatcher email with a pasted trip sheet and a delayed pickup: sheet re
 });
 
 import { isInternal, isPacketEmail } from '../inbox.js';
-function harness({ messages, triageOut, draftText = 'Hi, the truck is in Robeson County, NC. Next stop Kinston ETA Wed 10:00 AM (estimate). — Jarvis', board, docsList = [], cfg = {}, packets = null, driver = null, etaWatch = null, askJarvis = null }) {
+function harness({ messages, triageOut, draftText = 'Hi, the truck is in Robeson County, NC. Next stop Kinston ETA Wed 10:00 AM (estimate). — Jarvis', board, docsList = [], cfg = {}, packets = null, driver = null, etaWatch = null, askJarvis = null, training = null, playbook = null }) {
   const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us', ANTHROPIC_API_KEY: 'k' };
   const calls = [];
   const fetchFn = async (url, opts = {}) => {
@@ -132,7 +132,7 @@ function harness({ messages, triageOut, draftText = 'Hi, the truck is in Robeson
   const db = memDb();
   if (Object.keys(cfg).length) db.set('taInboxCfg', cfg);
   const docs = { enabled: true, storeDocs: async () => [{ id: 1 }], linkDocs: async () => {}, listDocs: async () => docsList, readDocs: async ({ ids }) => ids.map((id) => ({ id, mediaType: 'application/pdf', data: Buffer.from('%PDF') })) };
-  const inbox = initInbox({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: (q, r, n) => n(), db, docs, env, fetchFn, getBoard: async () => ({ trips: board }), packets, driver, etaWatch, askJarvis });
+  const inbox = initInbox({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: (q, r, n) => n(), db, docs, env, fetchFn, getBoard: async () => ({ trips: board }), packets, driver, etaWatch, askJarvis, training, playbook });
   return { inbox, calls, db };
 }
 const LOAD = { trip: { tripNumber: '623869', status: 'DEPSHIP', powerUnit: '2008', trailer: '7141' }, freightBills: [{ billNumber: 'B180400', endZoneDescription: 'BLOOMFIELD, CT, 06002' }], _ratecon: { data: { broker: 'RXO', loadNumber: 'RXO 24261611', brokerEmail: 'ops@rxo.com' } }, _samsara: { location: 'I 95, Robeson County, NC', gpsAt: '2026-10-07T12:00:00Z', speedMph: 64 } };
@@ -263,11 +263,9 @@ test('a staff question by email ("update on deliveries to Lombard IL") is answer
   const h = harness({ messages: [msg({ subject: 'Update', from: { emailAddress: { name: 'Nadim Tellez', address: 'ntellez@floridabeauty.us' } }, body: { contentType: 'text', content: 'I need an update on deliveries to Lombard IL' } })], triageOut: q, board: [LOAD], askJarvis });
   await h.inbox.poll();
   assert.match(asked[0].text, /Lombard IL/);
-  const sent = h.calls.filter((c) => /sendMail$/.test(c.url));
-  assert.equal(sent.length, 1);
-  const body = JSON.parse(sent[0].body).message;
-  assert.equal(body.toRecipients[0].emailAddress.address, 'ntellez@floridabeauty.us');
-  assert.match(body.body.content, /<b>1 load<\/b> to Lombard, IL/);
+  const sent = h.calls.filter((c) => /\/messages\/[^/]+\/reply$/.test(c.url));
+  assert.equal(sent.length, 1, 'answered in the same email thread');
+  assert.match(JSON.parse(sent[0].body).comment, /<b>1 load<\/b> to Lombard, IL/);
   const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
   assert.equal(e.status, 'replied');
   // an outside sender's question is never answered this way — it waits as a draft
@@ -297,4 +295,39 @@ test('a customer asks by email without a load number → Jarvis asks back, and t
   assert.equal(asked[1].threadId, e.jarvisThread, 'continues the conversation');
   e = (await h2.db.get('taEmails:florida-beauty', { list: [] })).list.find((x) => x.id === 'c2');
   assert.equal(e.status, 'replied', 'auto-send on → answered by email');
+});
+
+test('Re-draft with AI: a staff question (or an email not on a load) is answered by Jarvis searching the whole board', async () => {
+  const routes = {};
+  const asked = [];
+  const env = { NODE_ENV: 'test', ANTHROPIC_API_KEY: 'k', MAIL_FROM: 'jarvis@floridabeauty.us' };
+  const db = memDb();
+  await db.set('taEmails:florida-beauty', { list: [{ id: 'old1', from: { name: 'Nadim', address: 'ntellez@floridabeauty.us' }, subject: 'Update', text: 'I need an update on deliveries to Lombard IL', trips: [], status: 'new', at: '2026-10-09T00:10:00Z' }] });
+  initInbox({ get: () => {}, put: () => {}, post: (p, ...h) => { routes[p] = h.at(-1); } }, { requireAuth: (q, r, n) => n(), db, env, getBoard: async () => ({ trips: [LOAD] }), askJarvis: async (q) => { asked.push(q); return { answer: '**1 load** to Lombard, IL — 624520' }; } });
+  let out; const res = { json: (j) => { out = j; }, status() { return this; } };
+  await routes['/truckmate/emails/:id/draft']({ params: { id: 'old1' }, query: {} }, res);
+  assert.equal(asked[0].mode, 'staff');
+  assert.equal(out.draft, '**1 load** to Lombard, IL — 624520');
+});
+
+test('training mode: a reply in an email thread goes to the test addresses, never the real sender', async () => {
+  const askJarvis = async () => ({ answer: 'Your load is in Indiana.', update: null });
+  const q = { summary: 'Where', attachments: [], refs: {}, actions: [], reply: { needed: true, kind: 'status_eta', documents: [] }, instructions: [] };
+  const h = harness({ messages: [msg({ subject: 'my flowers', from: { emailAddress: { name: 'Ana', address: 'ana@mayesh.com' } }, body: { contentType: 'text', content: 'Where are my flowers?' } })], triageOut: q, board: [LOAD], askJarvis, cfg: { autoSend: true }, training: { active: async () => ({ on: true, to: ['test@floridabeauty.us'] }), cfg: async () => ({ to: ['test@floridabeauty.us'] }) } });
+  await h.inbox.poll();
+  assert.equal(h.calls.filter((c) => /\/reply$/.test(c.url)).length, 0, 'no direct Outlook reply');
+  assert.equal(h.calls.filter((c) => /sendMail$/.test(c.url)).length, 1, 'sent through the guarded path');
+});
+
+test('a TRAINING email from staff teaches Jarvis (no live action) and gets a "what I learned" reply', async () => {
+  const learned = [];
+  const playbook = { all: async () => [], remove: async () => {}, text: async () => '', learn: async (q) => { learned.push(q); return { lessons: [{ id: 'pb1', title: 'RXO check calls', when: 'RXO loads', do: 'Send updates every 2 hours.', schedule: null }], questions: [] }; } };
+  const h = harness({ messages: [msg({ subject: 'TRAINING: RXO', from: { emailAddress: { name: 'Nadim', address: 'ntellez@floridabeauty.us' } }, body: { contentType: 'text', content: 'RXO wants check calls every 2 hours on every load.' } })], triageOut: { summary: 'x', attachments: [], refs: {}, actions: [{ kind: 'other', title: 'should not happen' }], reply: { needed: true }, instructions: [{ kind: 'eta_updates', customers: ['RXO'] }] }, board: [LOAD], playbook });
+  await h.inbox.poll();
+  assert.equal(learned.length, 1);
+  const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
+  assert.equal(e.training, true); assert.deepEqual(e.learned, ['pb1']); assert.equal(e.status, 'handled');
+  assert.ok(!h.calls.some((c) => c.url.includes('anthropic.com')), 'not triaged as a live request');
+  const reply = h.calls.find((c) => /\/reply$/.test(c.url));
+  assert.match(JSON.parse(reply.body).comment, /RXO check calls/);
 });

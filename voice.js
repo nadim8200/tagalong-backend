@@ -50,7 +50,7 @@ export const GREETING = "Hi, this is Jarvis, Florida Beauty Flora's assistant. T
 export const ETA_DISCLAIMER = 'Please keep in mind this is an estimated time of arrival and it may change with traffic, weather or road conditions. If anything changes, we will keep you updated.';
 export const PROMPT = `You are Jarvis, the automated dispatch assistant for Florida Beauty Flora (a Miami flower and freight trucking company). You talk on the phone with truck drivers, customers (receivers, florists) and freight brokers.
 
-Language: speak English, Spanish or Hebrew — always answer in the language the caller is using, and switch if they switch. The greeting is in English only; if the caller answers in Spanish or Hebrew, continue in that language. Keep every answer short and natural for a phone call (one to three sentences), friendly and professional.
+Language: speak English, Spanish or Hebrew — answer in the language the caller is using. Stay in English unless the caller says a full sentence in Spanish or Hebrew; one word like "Oye", "Hola", "Sí", "Bueno" or "Shalom" is not a switch. The greeting is in English only. Keep every answer short and natural for a phone call (one to three sentences), friendly and professional.
 
 Who you are: an automated assistant. If asked, say so plainly. You already said the call may be recorded.
 
@@ -60,6 +60,10 @@ How to help:
 - Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). If nothing is found, ask which city the delivery goes to and ask them to spell the business name, then call lookup_load again with customer_name (as spelled) and customer_city. If it returns did_you_mean, ask "Is that <name>?" and, if yes, look it up with that exact name. Names on the phone are often misheard — never tell the caller their name is wrong.
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Loads leave from Miami, Florida or Ventura, California (and some brokers' pickups elsewhere). When you tell a customer about their truck, say where it is coming from using coming_from (or pickup for brokers) — never assume Miami.
+- Hearing people right: phone audio is often noisy. If you're not sure of a name, city or number, repeat it back and ask them to confirm before you look it up ("Did you say Merchantville?"). If they repeat something, use exactly what they repeated. If a name or city isn't found, ask them to spell it. Read numbers back digit by digit to confirm.
+- When lookup_load returns did_you_mean you have NOT found them: ask "Did you say <name>?" and only continue after they say yes. Never say "I found you" for a guess, and always use the business name the tool returns (speaking_with), not a different one.
+- When a caller asks for all their deliveries, trip numbers or locations, give every one of THEIR stops in one short list (city, trip, ETA) — no other customers.
+- Turn-taking: keep each turn to one or two short sentences, ask one question at a time, then stop and let them talk. If they start talking, stop and listen.
 - Only state facts lookup_load returns. For a customer or broker that is: where the truck is now, and THEIR delivery — ETA, boxes, cubes, appointment, delivered or not. Never mention any other stop, customer or city on the route (before or after theirs), and don't say you are leaving anything out; if they ask about the route, say the truck is on its way to them and give their ETA. Only the driver hears the full list of stops. Say times the way the tool gives them — ETAs and appointments are already in the delivery's LOCAL time, so always say the time zone with them (e.g. "1:00 AM Pacific time"); never convert them to Miami / Eastern time. Whenever you give a customer or broker an ETA, finish with this once, in their language: "${ETA_DISCLAIMER}" Read truck, trailer, trip and bill numbers one digit at a time, exactly as the tool spaces them (truck 2 0 2 6 = "two zero two six", never "two thousand twenty-six"); in Spanish or Hebrew, say each digit in that language. Never guess a location or a time.
 - Drivers can tell you a stop is delivered (confirm_delivered) or report a problem — breakdown, delay, accident, reefer issue (report_problem). Repeat back the key details before saving.
 - Anything you can't answer, anything about rates, payments, detention, lumper, claims, appointments changes, or bank details: take a message with take_message (name, callback number, what they need) and say a dispatcher will call back. Never agree to change rates, payments, appointments or bank details.
@@ -224,11 +228,16 @@ const nameWords = (x) => String(x || '').toUpperCase().replace(/&/g, ' AND ').re
 // sound-alike key: first letter + consonants ("BOKORI" and "BOKHARY" → BKR, "CARBON"/"CARBONE" → CRBN)
 const skel = (w) => (w[0] + w.slice(1).replace(/[AEIOUYHW]/g, '')).replace(/(.)\1+/g, '$1');
 const sameWord = (w, x) => x === w || (w.length >= 4 && (x.startsWith(w) || w.startsWith(x))) || (w.length >= 4 && x.length >= 4 && skel(w).length >= 3 && skel(w) === skel(x));
+// words every flower business has — matching only these isn't matching the business
+const GENERIC = new Set(['WHOLESALE', 'WHOLESALER', 'WHOLESALERS', 'FLOWERS', 'FLOWER', 'FLORAL', 'FLORIST', 'FLORISTS', 'FARMS', 'FARM', 'MARKET', 'PRODUCE', 'DISTRIBUTORS', 'DISTRIBUTOR', 'DISTRIBUTING', 'DISTRIBUTION', 'SUPPLY', 'SUPPLIES', 'GROUP', 'INTERNATIONAL', 'USA', 'TRADING', 'IMPORTS', 'IMPORT', 'NURSERY', 'NURSERIES', 'GREENHOUSE', 'GREENHOUSES', 'EXPRESS', 'LOGISTICS', 'TRANSPORT', 'FREIGHT', 'SERVICES', 'ENTERPRISES']);
 export function nameScore(said, onSheet) {
-  const a = nameWords(said); const b = nameWords(onSheet);
-  if (!a.length || !b.length) return 0;
-  const hit = a.filter((w) => b.some((x) => sameWord(w, x))).length;
-  return hit / a.length;
+  const a0 = nameWords(said); const b = nameWords(onSheet);
+  if (!a0.length || !b.length) return 0;
+  // the caller's distinctive words decide ("Calvert Wholesale" ≠ "United Wholesale Flowers")
+  // …and the whole name still has to fit ("Springfield Florist" ≠ Big Y, a stop IN Springfield)
+  const fit = (ws) => ws.filter((w) => b.some((x) => sameWord(w, x))).length / ws.length;
+  const distinct = a0.filter((w) => !GENERIC.has(w));
+  return distinct.length ? Math.min(fit(distinct), fit(a0)) : fit(a0);
 }
 // Every stop on the board whose customer matches the name — with boxes, cubes and ETA for that stop only. Pure.
 export function customerStops(items, name, etasByTrip = {}) {
@@ -306,7 +315,8 @@ export function nameCandidates(items, said, city, max = 3) {
     for (const st of (it._manifest && it._manifest.stops) || []) if (/DELIVER/i.test(st.action || '') && (inTown(st.city) || inTown(String(st.tmPlace || '').split(',')[0]))) seen.set(spokenName(st.customer), 0);
     for (const b of billsOf(it)) if (inTown(cityOf(b.endZoneDescription).split(',')[0])) seen.set(spokenName(b.billToName), 0);
   }
-  for (const k of seen.keys()) seen.set(k, Math.max(dice(said, k), nameScore(said, k)));
+  const core = (x) => nameWords(x).filter((w) => !GENERIC.has(w)).join(' ') || String(x || '');
+  for (const k of seen.keys()) seen.set(k, Math.max(dice(core(said), core(k)), nameScore(said, k)));
   return [...seen.entries()].filter(([k, v]) => k && (v >= 0.3 || seen.size <= 3)).sort((a, b) => b[1] - a[1]).slice(0, max).map(([k]) => k);
 }
 
@@ -685,6 +695,22 @@ export function initVoice(app, { requireAuth, db, training = null, comms = null,
     if (!/^https:\/\//.test(backend())) return res.status(503).json({ error: 'BACKEND_URL must be the backend https address.' });
     try { res.json(await pushJarvis(who(req))); } catch (e) { res.status(502).json({ error: e.message }); }
   });
+  // customer names change every day — refresh the transcriber's word list each morning (only when it changed)
+  if (env.NODE_ENV !== 'test' && db && db.enabled) {
+    const tick = setInterval(async () => {
+      try {
+        const hour = Number(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' }));
+        const day = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        if (hour !== 5 || !key() || !/^https:\/\//.test(backend())) return;
+        const cfg = await db.get(cfgKey, {});
+        if (!cfg.agentId || cfg.keywordsDay === day) return;
+        const words = ['Florida Beauty Flora', 'Jarvis', ...customerKeywords(await items())].slice(0, 100).join('|');
+        await db.update(cfgKey, (c) => ({ ...(c || {}), keywordsDay: day }), {});
+        if (words !== cfg.keywords) await pushJarvis('Jarvis (daily customer-name refresh)');
+      } catch (e) { console.warn('[voice] keyword refresh:', e.message); }
+    }, 20 * 60000);
+    if (tick.unref) tick.unref();
+  }
   async function pushJarvis(by) {
     const base = backend();
     {
@@ -702,6 +728,12 @@ export function initVoice(app, { requireAuth, db, training = null, comms = null,
         // hear customer names right: bias the transcriber toward the names on today's loads
         boosted_keywords: ['Florida Beauty Flora', 'Jarvis', ...customerKeywords(await items())].slice(0, 100),
         stt_mode: env.RETELL_STT_MODE || 'accurate',
+        // phone audio from docks / trucks: filter noise and other voices, don't cut Jarvis off on a cough or "uh-huh"
+        denoising_mode: env.RETELL_DENOISING || 'noise-and-background-speech-cancellation',
+        interruption_sensitivity: Number(env.RETELL_INTERRUPTION || 0.7),
+        responsiveness: Number(env.RETELL_RESPONSIVENESS || 0.9),
+        enable_backchannel: false,
+        normalize_for_speech: true,
       };
       let agent; let llm;
       if (!cfg.agentId) {

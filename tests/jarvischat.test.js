@@ -111,7 +111,7 @@ test('customer mode (emails from customers / brokers): only look-up tools, nothi
   const h = setup([useTool('propose_action', { type: 'text_driver', trip: '624399', message: 'hi' }), say('What is your PO number?')]);
   const r = await h.chat.turn({ mode: 'customer', user: { id: 'email:ana@mayesh.com', name: 'Ana <ana@mayesh.com>' }, threadId: 'abcdef012345', text: 'where are my flowers' });
   assert.match(h.claude.sent[0].system, /answering an email from Ana/);
-  assert.deepEqual(h.claude.sent[0].tools.map((t) => t.name).sort(), ['find_load', 'load_details', 'loads_to_place']);
+  assert.deepEqual(h.claude.sent[0].tools.map((t) => t.name).sort(), ['find_load', 'load_details', 'loads_to_place', 'update_email']);
   assert.match(h.claude.sent[1].messages.at(-1).content[0].content, /Not available/);
   assert.equal(r.actions.length, 0, 'a customer can never make Jarvis contact anyone');
 });

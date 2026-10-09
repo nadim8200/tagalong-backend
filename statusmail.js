@@ -28,6 +28,7 @@
 import { sendMail, mailConfig } from './mailer.js';
 import { haversineMi, estimateArrival, MIAMI_TERMINAL, MIAMI_YARDS } from './watchtower.js';
 import { fmtLocal } from './localtime.js';
+import { buildUpdateFor } from './updateemail.js';
 
 const H = 3600000;
 const PICKED = /^(depship|depshp|pickd|intran|enroute|enrt|arrcons|arrcon|depcons|depcon|delvd|deliv|cmplt|complete)/i;
@@ -435,7 +436,7 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
   return { subject, html, text };
 }
 
-export function initStatusMail(app, { requireAuth, db, comms = null, ringcentral = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initStatusMail(app, { requireAuth, db, docs = null, comms = null, ringcentral = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const cfgKey = 'taStatusMailCfg';
   const key = (site) => `taStatusMail:${site}`;      // { adopted, trips: { trip: { sent, log } } }
@@ -456,14 +457,21 @@ export function initStatusMail(app, { requireAuth, db, comms = null, ringcentral
 
   async function deliver(site, trip, item, ev, ctx, { by = 'AI Dispatcher (automatic)', to = null } = {}) {
     const cfg = await settings();
-    const mail = renderEvent(ev, item, ctx);
+    let mail;
+    if (['location', 'late', 'delivered'].includes(ev.kind)) {
+      // updates use the standard delivery-update format (customer version, live data)
+      const rc = (item && item._ratecon && (item._ratecon.data || item._ratecon)) || {};
+      const cust = (billsOf(item).find((b) => b.billToName) || {}).billToName || rc.broker || null;
+      const u = await buildUpdateFor({ db, docs, site, items: [item], trips: [trip], customer: cust, audience: 'customer', now: (ctx && ctx.now) || Date.now(), extraRef: rc.loadNumber ? `Load ${rc.loadNumber}` : `Trip ${trip}` });
+      mail = { subject: u.subject, html: u.html, text: u.text };
+    } else mail = renderEvent(ev, item, ctx);
     if (!mail) return { status: 'skipped' };
     const rcpts = to || recipients(item, cfg);
     let status = 'sent'; let error = null;
     if (!rcpts.length) status = 'not sent — no customer email on file';
     else if (!mailConfig(env).ready) status = 'not sent — Outlook not connected yet';
     else {
-      try { await sendMail({ to: rcpts, subject: mail.subject, html: mail.html }, { env, fetchFn }); } catch (e) { status = 'failed'; error = e.message; }
+      try { await sendMail({ to: rcpts, subject: mail.subject, html: mail.html, text: mail.text }, { env, fetchFn }); } catch (e) { status = 'failed'; error = e.message; }
     }
     const at = new Date().toISOString();
     if (status === 'sent' && comms && comms.log) await comms.log(site, trip, { type: 'email', dir: 'out', auto: true, at, to: rcpts.join(', '), subject: mail.subject, text: mail.text.slice(0, 600), by, noThread: true });

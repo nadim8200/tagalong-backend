@@ -45,6 +45,14 @@ test('the assigned email has truck, trailer, driver name + phone, location and p
   assert.equal(stopsOf(load())[1].number, 2);
 });
 
+// what the fake Outlook received — JSON, or MIME (text + HTML) decoded to the same shape
+function readSent(opts) {
+  if (!/text\/plain/.test(String((opts.headers || {})['Content-Type'] || ''))) return JSON.parse(opts.body);
+  const mime = Buffer.from(opts.body, 'base64').toString('utf8');
+  const subj = (mime.match(/^Subject: =\?UTF-8\?B\?([^?]+)\?=/m) || [])[1];
+  const to = ((mime.match(/^To: (.*)$/m) || [])[1] || '').split(/,\s*/).filter(Boolean);
+  return { message: { subject: subj ? Buffer.from(subj, 'base64').toString('utf8') : '', toRecipients: to.map((address) => ({ emailAddress: { address } })) }, mime };
+}
 function memDb() {
   const m = new Map();
   return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => { m.set(k, JSON.parse(JSON.stringify(v))); }, update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
@@ -55,7 +63,7 @@ test('first run adopts silently; later events email the customer list and log on
   const sent = [];
   const fetchFn = async (url, opts) => {
     if (url.includes('oauth2')) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) };
-    sent.push(JSON.parse(opts.body)); return { ok: true, status: 202, json: async () => ({}) };
+    sent.push(readSent(opts)); return { ok: true, status: 202, json: async () => ({}) };
   };
   const db = memDb();
   await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });

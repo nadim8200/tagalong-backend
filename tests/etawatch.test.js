@@ -12,22 +12,25 @@ test('customer names find their running loads', () => {
   assert.deepEqual(loadsForCustomer('xx', items), []);
 });
 
-test('ETA updates: first one now, again after N hours, a last "delivered" one, then it stops', async () => {
+test('ETA updates: one combined delivery update now, again after N hours, a last one when delivered, then it stops', async () => {
   const db = memDb(); const sent = [];
   const app = { get: () => {}, delete: () => {} };
   const w = initEtaWatch(app, { requireAuth: () => {}, db, sendMail: async (m) => { sent.push(m); } });
   let items = [load('624102', 'NATIVE FLOWER CO'), load('624103', 'PRODUCE JUNCTION INC')];
   const r = await w.add({ customers: ['Native', 'Produce Junction'], to: ['ntellez@floridabeauty.us'], everyHours: 3, by: 'Nadim' }, items);
   assert.equal(r.ok, true); assert.deepEqual(r.watch.trips.sort(), ['624102', '624103']);
-  assert.equal(sent.length, 2); assert.match(sent[0].subject, /^Location update/); assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']);
+  assert.equal(sent.length, 1, 'both loads in one email');
+  assert.match(sent[0].subject, /^Native & Produce Junction \| 0 delivered · 0 delayed \| /);
+  assert.match(sent[0].html, /Delivery update/); assert.match(sent[0].text, /Trip 624102/); assert.match(sent[0].text, /Trip 624103/);
+  assert.match(sent[0].html, /internal/, 'all recipients are staff → internal version');
   const t0 = Date.now();
   await w.run({ items, now: t0 + 60 * 60000 });
-  assert.equal(sent.length, 2, 'not yet 3 hours');
+  assert.equal(sent.length, 1, 'not yet 3 hours');
   await w.run({ items, now: t0 + 3.1 * 3600000 });
-  assert.equal(sent.length, 4);
+  assert.equal(sent.length, 2);
   items = [load('624102', 'NATIVE FLOWER CO', true), load('624103', 'PRODUCE JUNCTION INC', true)];
   await w.run({ items, now: t0 + 4 * 3600000 });
-  assert.equal(sent.length, 6); assert.match(sent[5].subject, /^✅ Load delivered/);
+  assert.equal(sent.length, 3); assert.match(sent[2].subject, /\| 2 delivered · 0 delayed \|/);
   assert.deepEqual(await db.get('taEtaWatch:florida-beauty', []), [], 'all delivered → the schedule ends');
   assert.equal((await w.add({ customers: ['Nobody Here'], to: ['x@y.com'] }, items)).ok, false);
 });

@@ -436,3 +436,11 @@ test('every Jarvis call lands in the Calls & texts log with both numbers and the
   assert.deepEqual({ id: recorded[0].id, from: recorded[0].from, to: recorded[0].to, ourLine: recorded[0].ourLine, minutes: recorded[0].minutes, recording: recorded[0].recording }, { id: 'call:cz', from: '+17815550123', to: '+17862040122', ourLine: '+17862040122', minutes: 2, recording: 'https://x/r.wav' });
   assert.match(recorded[0].transcript, /Where is my truck\?/);
 });
+
+test('names: "Calvert Wholesale" never matches "United Wholesale Flowers" just because both say Wholesale', () => {
+  assert.equal(nameScore('Calvert Wholesale', 'UNITED WHOLESALE FLOWERS MIDDLETOWN NJ'), 0);
+  assert.equal(nameScore('Calvert Wholesale', 'CALVERTS WHOLESALE'), 1);
+  assert.ok(nameScore('Springfield Florist', 'BIG Y APPOINTMENT SPRINGFIELD') < 0.75);
+  const items = [{ trip: { tripNumber: '1' }, freightBills: [{ billToName: 'UNITED WHOLESALE FLOWERS', endZoneDescription: 'MIDDLETOWN, NJ, 07748' }, { billToName: 'CALVERTS WHOLESALE', endZoneDescription: 'MIDDLETOWN, NJ, 07748' }] }];
+  assert.deepEqual(nameCandidates(items, 'Calvert Wholesale', 'Middletown')[0], 'Calverts Wholesale', 'the closest name first, not the one sharing "Wholesale"');
+});
