@@ -55,6 +55,7 @@ export const TOOLS = [
   { name: 'update_email', description: 'EMAIL REPLIES ONLY: when the email asks where loads are / their status / ETAs, list the trips that answer it (and dispatch follow-ups). The reply is then built from live data in the standard delivery-update format — do not write the load details yourself.', input_schema: { type: 'object', properties: { customer: { type: 'string', description: 'Customer / receiver name the update is about (as on the loads), or the place' }, destination: { type: 'string', description: 'Delivery city / state if the question was about a place' }, trips: { type: 'array', items: { type: 'string' } }, followUps: { type: 'array', items: { type: 'object', properties: { issue: { type: 'string' }, next: { type: 'string' }, owner: { type: 'string' }, status: { type: 'string', enum: ['Pending', 'Completed'] } } } } }, required: ['trips'] } },
   { name: 'staff_directory', description: 'Florida Beauty employees by name, department or role (billing, payroll, claims, maintenance, sales, IT…): name, department and extension. Cell phones are never available.', input_schema: { type: 'object', properties: { name_or_department: { type: 'string' } }, required: ['name_or_department'] } },
   { name: 'load_details', description: 'Everything about one load: status, truck/trailer/drivers, live location, every stop with ETA (local time), appointments, rate con, trip sheet, open alerts, to-dos, notes and transfers, holds, emails count.', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
+  { name: 'next_loads', description: 'Next loads: rate cons dispatch (Gus, the dispatch GM) sent for trucks to run once they finish their current trip — truck, broker, load number, pickup → delivery, rate, notes, and whether TruckMate / a trip sheet confirms it. Optional truck number. Use for "what does truck 2403 do next?" or "which rate cons came in today?".', input_schema: { type: 'object', properties: { truck: { type: 'string' } } } },
   { name: 'alerts', description: 'Open alerts (late, stopped, reefer, engine, unscheduled stops, holds…). Optional severity: critical | warning.', input_schema: { type: 'object', properties: { severity: { type: 'string' } } } },
   { name: 'conversations', description: 'What was said with a load\'s driver: texts, replies, app messages and Jarvis phone calls (summaries / transcripts).', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
   { name: 'emails', description: 'Emails in the Jarvis inbox — for one load (trip) or the ones still waiting for a reply.', input_schema: { type: 'object', properties: { trip: { type: 'string' } } } },
@@ -101,7 +102,7 @@ export function customerSafe(x) {
 // Voice conversation in Ask Jarvis: the answer is read out loud, so keep it short.
 export const SPOKEN = `\n\nThis turn is a SPOKEN conversation (the dispatcher talks, your answer is read aloud): answer in 1-3 short plain sentences, no lists, tables, markdown or emojis. Say truck and trailer numbers as written. If there's more, give the key point and say the full detail is on screen. Anything that needs the dispatcher's Confirm: say it's waiting for their Confirm on screen.`;
 
-export function initJarvisChat(app, { requireAuth, db, playbook = null, directory = null, getBoard, docs = null, packets = null, driver = null, voice = null, reports = {}, mail = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initJarvisChat(app, { requireAuth, db, nextLoads = null, playbook = null, directory = null, getBoard, docs = null, packets = null, driver = null, voice = null, reports = {}, mail = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const threadsKey = (uid) => `taJarvisChat:${uid}`;
   const actionsKey = `taJarvisActions:${SITE}`;
@@ -133,6 +134,12 @@ export function initJarvisChat(app, { requireAuth, db, playbook = null, director
         if (hit) return { found: true, trip: tripNo(hit.item), matchedBy: hit.by };
         const names = customerStops(all, q, (await watch()).etas || {});
         return names.length ? { found: true, byCustomerName: names.map((x) => ({ trip: x.trip, customer: x.customer, city: x.city })) } : { found: false };
+      }
+      case 'next_loads': {
+        const want = String(input.truck || '').replace(/[^0-9A-Z]/gi, '').replace(/^0+/, '').toUpperCase();
+        const list = nextLoads ? await nextLoads.list() : [];
+        const rows = list.filter((n) => !want || n.truck === want).map((n) => ({ truck: n.truck || 'not identified yet', broker: n.rc.broker, loadNumber: n.rc.loadNumber, bill: n.rc.bill, pickup: n.rc.pickup, delivery: n.rc.delivery, rate: n.rc.rateText || n.rc.rate, notes: n.rc.notes, truckFrom: n.truckHow, tmTrip: n.trip, sentBy: n.from, at: n.at }));
+        return { nextLoads: rows, note: rows.length ? 'Rate cons for after the current run. Verified only when TruckMate has the trip (see load_details on the truck\'s current trip).' : (want ? `No next load on file for truck ${want}.` : 'No next loads on file.') };
       }
       case 'loads_to_place': {
         const raw = String(input.place || '').toUpperCase().replace(/[^A-Z ,]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -177,6 +184,7 @@ export function initJarvisChat(app, { requireAuth, db, playbook = null, director
           hold: it._hold || null, tasks: (it._tasks || []).filter((t) => !t.done).map((t) => t.title),
           notes: notes.slice(-15).map((x) => ({ at: x.at, by: x.by, kind: x.kind, text: x.text, transfer: x.transfer || undefined })),
           driverChat: it._ocChat || null, pickupFollow: it._pickupFollow || null,
+          nextLoads: (it._nextLoad || []).map((n) => ({ truck: n.truck, broker: n.rc.broker, loadNumber: n.rc.loadNumber, bill: n.rc.bill, pickup: n.rc.pickup, delivery: n.rc.delivery, rate: n.rc.rateText || n.rc.rate, notes: n.rc.notes, verified: n.verified ? `${n.verified.by}${n.verified.trip ? ` trip ${n.verified.trip}` : ''}` : 'not yet in TruckMate', sentBy: n.from, at: n.at })),
         };
       }
       case 'alerts': {

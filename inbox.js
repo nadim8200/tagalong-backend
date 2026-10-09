@@ -26,6 +26,7 @@ import { graph, mailConfig, sendMail } from './mailer.js';
 import { contactsFor } from './statusmail.js';
 import { buildUpdateFor, renderFollowUpNote } from './updateemail.js';
 import { tripBlock, renderOutboundFollowUp, ackKey, validateZone } from './followupmail.js';
+import { batchBlocks, truckFor } from './nextloads.js';
 import { recipientFor } from './comms.js';
 import { isTrainingEmail, removals } from './playbook.js';
 import { fmtLocal } from './localtime.js';
@@ -122,6 +123,15 @@ export function isInternal(address, env = process.env) {
   return !!dom && ours.includes(dom);
 }
 // The nightly trip-sheet email ("OUTBOUND 10 TRIP SHEETS…", "Trip sheets 10/07"). Pure.
+// A batch of rate cons from our dispatch GM (or any staff email with several rate-con files):
+// read like a packet — every page, several rate cons per PDF — as NEXT loads. Pure.
+export const NEXT_LOAD_SENDERS = (env = process.env) => String(env.NEXT_LOAD_SENDERS || 'gus@floridabeauty.us').toLowerCase().split(/[,;\s]+/).filter(Boolean);
+export const isRateConBatch = (from, subject, text, attachments = [], env = process.env) => {
+  const files = attachments.filter((a) => /pdf|image/i.test(a.contentType || '')).length;
+  if (!files || !isInternal(from, env)) return false;
+  const gm = NEXT_LOAD_SENDERS(env).includes(String(from || '').toLowerCase());
+  return (gm && files >= 2) || (files >= 2 && /rate\s*-?\s*con|ratecon|\bRCs?\b|confirmations?|tenders?|next loads?|loads? for/i.test(`${subject} ${String(text || '').slice(0, 1500)}`));
+};
 export const isPacketEmail = (subject, attachments = []) => /trip\s*-?\s*sheets?|manifests?|outbound|salidas|despachos?/i.test(String(subject || '')) && attachments.some((a) => /pdf|image/i.test(a.contentType || ''));
 
 // What the AI may say about a load. Pure.
@@ -225,7 +235,7 @@ export function expandInstructions(list = []) {
 // "2026-10-08T23:00" → "Thu Oct 8, 11:00 PM". Pure.
 export const fmtWall = (w) => { const d = new Date(`${w}:00Z`); return isNaN(d) ? String(w) : d.toLocaleString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
 
-export function initInbox(app, { requireAuth, db, meetWatch = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initInbox(app, { requireAuth, db, meetWatch = null, nextLoads = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const key = (site) => `taEmails:${site}`;          // { list: [email…], status }
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
@@ -366,7 +376,8 @@ export function initInbox(app, { requireAuth, db, meetWatch = null, docs = null,
       if (m.hasAttachments || /cid:/i.test(String((m.body && m.body.content) || ''))) { try { attachments = await saveAttachments(site, m.id, trips[0] || null, { store: !packetLike }); } catch (e) { console.warn('[inbox] attachments:', e.message); } } // eslint-disable-line no-await-in-loop
       if (attachments.length && trips.length > 1 && docs.linkDocs) await docs.linkDocs({ site, kind: 'email', links: attachments.map((a) => ({ docId: a.docId, trips })) }); // eslint-disable-line no-await-in-loop
       const email = { id: m.id, conversationId: m.conversationId || null, from, subject: String(m.subject || '').slice(0, 300), at: m.receivedDateTime, text, attachments: attachments.map(({ bytes, ...a }) => a), trips, why: matches.map((x) => x.why), status: 'new', replies: [] };
-      email.packet = isPacketEmail(email.subject, attachments);
+      email.rcBatch = !isPacketEmail(email.subject, attachments) && isRateConBatch(from.address, email.subject, text, attachments, env);
+      email.packet = isPacketEmail(email.subject, attachments) || email.rcBatch;
       // a staff member TRAINING Jarvis → learn from it (not a live request) and say what was learned
       if (playbook && isInternal(from.address, env) && isTrainingEmail(email.subject, text)) {
         const store0 = ((await db.get(key(site), { list: [] })) || {}).list || []; // eslint-disable-line no-await-in-loop
@@ -435,7 +446,7 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
           const a = attachments[i];
           if (!a || !rateCons) continue;
           try {
-            const f = await rateCons(site, [{ dataBase64: a.bytes, mediaType: a.contentType, filename: a.name }], { labels: [refs.bill], docIds: [a.docId], by: `Jarvis (email from ${from.name || from.address})`, source: 'email', filename: a.name, hintTrip: trips.length === 1 ? trips[0] : null }); // eslint-disable-line no-await-in-loop
+            const f = await rateCons(site, [{ dataBase64: a.bytes, mediaType: a.contentType, filename: a.name }], { labels: [refs.bill], docIds: [a.docId], by: `Jarvis (email from ${from.name || from.address})`, source: 'email', filename: a.name, hintTrip: trips.length === 1 ? trips[0] : null, exact: NEXT_LOAD_SENDERS(env).includes(String(from.address || '').toLowerCase()) }); // eslint-disable-line no-await-in-loop
             if (f) {
               email.rateCons.push({ name: a.name, trip: f.trip, matchedBy: f.matchedBy, broker: f.record.broker || null, pendingId: f.pendingId || null });
               if (f.trip && !trips.includes(f.trip)) { trips.push(f.trip); email.why.push(`rate con ${f.matchedBy}`); }
@@ -470,14 +481,14 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
         const by = `Jarvis (email from ${from.name || from.address})`;
         try {
           if (packets) {
-            const r = await packets(site, files, { by }); // eslint-disable-line no-await-in-loop
-            if (r) { email.packetResult = { trips: (r.trips || []).length, rateCons: (r.rateCons || []).length, kept: r.kept || 0, skipped: r.skipped || 0 }; email.tripSheets = r.trips || []; }
+            const r = await packets(site, files, { by, exact: !!email.rcBatch }); // eslint-disable-line no-await-in-loop
+            if (r) { email.packetResult = { trips: (r.trips || []).length, rateCons: (r.rateCons || []).length, kept: r.kept || 0, skipped: r.skipped || 0 }; email.tripSheets = r.trips || []; email.batchRateCons = (r.rateCons || []).map((x) => ({ trip: x.trip || null, pendingId: x.pendingId || null })); }
           } else {
             email.tripSheets = (await tripSheets(site, files, { docIds: tsIdx.map((i) => attachments[i].docId), by, hintTrip: trips.length === 1 ? trips[0] : null })) || []; // eslint-disable-line no-await-in-loop
           }
           // a pasted sheet belongs to this email's load; a whole night's packet is not "about" every trip in it
           if (!email.packet) for (const g2 of email.tripSheets) if (g2.trip && !trips.includes(g2.trip)) { trips.push(g2.trip); email.why.push('trip sheet in the email'); }
-          if (email.packet) { email.status = 'handled'; email.handledBy = 'Jarvis (trip sheets read)'; email.reply = { needed: false, kind: 'none', documents: [] }; }
+          if (email.packet) { email.status = 'handled'; email.handledBy = email.rcBatch ? 'Jarvis (rate cons read — next loads)' : 'Jarvis (trip sheets read)'; email.reply = { needed: false, kind: 'none', documents: [] }; }
         } catch (e) { email.packetError = e.message; console.warn('[inbox] trip sheets:', e.message); }
       }
       fresh.push(email);
@@ -521,6 +532,31 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
   async function afterArrival(site, e, items) {
     const done = [];
     const staff = isInternal(e.from.address, env);
+    // rate cons from our staff → next loads for the trucks (a batch from the GM, or single ones)
+    if (staff && nextLoads && ((e.batchRateCons || []).length || (e.rateCons || []).length)) {
+      try {
+        const entries = [...(e.batchRateCons || []), ...(e.rateCons || []).map((r) => ({ trip: r.trip || null, pendingId: r.pendingId || null }))];
+        const got = (await nextLoads.consider(site, entries, { items, emailText: e.text, from: e.from.name || e.from.address, emailId: e.id, subject: e.subject })).filter((x) => x.id);
+        if (got.length) {
+          await update(site, e.id, (x) => ({ ...x, nextLoads: got.map((n) => ({ id: n.id, truck: n.truck, load: n.rc.loadNumber, broker: n.rc.broker })) }));
+          if (mailConfig(env).ready) {
+            const out = renderOutboundFollowUp({ heading: `Next loads — ${got.length} rate con${got.length === 1 ? '' : 's'} read`, blocks: batchBlocks(got) });
+            try { await sendReply(site, e, out.summary, [], 'Jarvis (next loads)', out); } catch (err) { console.warn('[inbox] next loads reply:', err.message); }
+          }
+        }
+      } catch (err) { console.warn('[inbox] next loads:', err.message); }
+    }
+    // a reply naming the truck for a rate con Jarvis couldn't place
+    if (staff && nextLoads && e.conversationId) {
+      const earlier = (((await db.get(key(site), { list: [] })) || {}).list || []).filter((x) => x.id !== e.id && x.conversationId === e.conversationId && (x.nextLoads || []).some((n) => !n.truck));
+      for (const x of earlier) {
+        for (const n of x.nextLoads.filter((y) => !y.truck)) {
+          const lone = x.nextLoads.filter((y) => !y.truck).length === 1;
+          const hit = truckFor({ loadNumber: n.load }, { emailText: e.text }) || (lone ? (() => { const m = String(e.text || '').match(/\b(?:truck|trk|unit)?\s*#?\s*(\d{3,5})\b/i); return m ? { truck: m[1] } : null; })() : null);
+          if (hit) { await nextLoads.assign(n.id, hit.truck, e.from.name || e.from.address); await update(site, x.id, (y) => ({ ...y, nextLoads: y.nextLoads.map((z) => (z.id === n.id ? { ...z, truck: hit.truck } : z)) })); done.push({ kind: 'note', trip: null, message: `Next load ${n.load || ''} set on truck ${hit.truck}`, sent: 'saved' }); } // eslint-disable-line no-await-in-loop
+        }
+      }
+    }
     // a reply in a chain where Jarvis asked something (which load? what time? not departed yet) → finish it
     const before = e.conversationId ? (((await db.get(key(site), { list: [] })) || {}).list || []).filter((x) => x.id !== e.id && x.conversationId === e.conversationId && !x.followedUp && ((x.instructionResults || []).some((r) => r.skipped) || (x.asks || []).some((a) => a.open))) : [];
     if (staff && before.length && !e.packet) {

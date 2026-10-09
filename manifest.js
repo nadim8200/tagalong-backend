@@ -570,7 +570,9 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
   //  2. the broker's load / PO / reference numbers inside TruckMate's bills (trace numbers)
   //  3. the truck number, narrowed by where it delivers / picks up
   //  4. pickup city → delivery city when only one active load runs that lane
-  function matchRateCon(rc, labels, board, sheets, saved = {}) {
+  // exact: only bill / reference / load-number matches — never truck, trailer or route guesses
+  // (next-load rate cons name a truck that is still on another trip).
+  function matchRateCon(rc, labels, board, sheets, saved = {}, { exact = false } = {}) {
     const items = [...board];
     const billsOf2 = (it) => it.freightBills || it.orders || (it.trip || {}).freightBills || [];
     for (const lab of labels.filter(Boolean)) {
@@ -595,6 +597,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       const prev = Object.entries(saved || {}).filter(([, r]) => r && norm(r.loadNumber) === ln && (!rc.broker || !r.broker || norm(r.broker).slice(0, 5) === norm(rc.broker).slice(0, 5)));
       if (prev.length === 1 && board.has(prev[0][0])) return { trip: prev[0][0], matchedBy: `revised rate con — load ${rc.loadNumber} is already on this trip` };
     }
+    if (exact) return null;
     const dropCities = (rc.deliveries || []).map((d) => cityKey2(d && d.city)).filter(Boolean);
     const pickCities = (rc.pickups || []).map((d) => cityKey2(d && d.city)).filter(Boolean);
     const tripCities = (it) => { const t = it.trip || it; return { to: new Set([cityKey2(t.destZoneDesc), ...billsOf2(it).map((b) => cityKey2(b.endZoneDescription))].filter(Boolean)), from: cityKey2(t.origZoneDesc) }; };
@@ -623,14 +626,14 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
   // One read rate con → its load (matched like a dispatcher would) or the waiting list.
   // hintTrip: the load the email / upload already points at, used when nothing on the
   // rate con itself decides it.
-  async function fileRateCon(site, rc, { labels = [], docIds = [], by = 'AI Dispatcher', source = 'packet', filename = null, pageCount = 1, board = null, sheets = null, hintTrip = null } = {}) {
+  async function fileRateCon(site, rc, { labels = [], docIds = [], by = 'AI Dispatcher', source = 'packet', filename = null, pageCount = 1, board = null, sheets = null, hintTrip = null, exact = false } = {}) {
     const brd = board || await boardIndex(site);
     const shs = sheets || Object.values((await db.get(storeKey(site), {})) || {});
     const savedRcs = (db && db.enabled) ? ((await db.get(`taTruckMateRateCon:${site}`, {})) || {}) : {};
-    let m = matchRateCon(rc, [...labels, rc.fbfBillNumber], brd, shs, savedRcs);
-    if (!m && hintTrip && brd.has(String(hintTrip))) m = { trip: String(hintTrip), matchedBy: source === 'email' ? 'the trip / bill number in the email' : 'the load it was uploaded to' };
+    let m = matchRateCon(rc, [...labels, rc.fbfBillNumber], brd, shs, savedRcs, { exact });
+    if (!m && !exact && hintTrip && brd.has(String(hintTrip))) m = { trip: String(hintTrip), matchedBy: source === 'email' ? 'the trip / bill number in the email' : 'the load it was uploaded to' };
     const bill = rc.fbfBillNumber || labels.find(Boolean) || null;
-    const record = { ...rc, fbfBillNumber: bill ? billKey(bill) : null, filename, pageCount, uploadedAt: new Date().toISOString(), uploadedBy: by, source };
+    const record = { ...rc, fbfBillNumber: bill ? billKey(bill) : null, filename, pageCount, uploadedAt: new Date().toISOString(), uploadedBy: by, source, ...(exact ? { nextLoadBatch: true } : {}) };
     if (m) {
       if (docs && docs.enabled && docs.retypeDocs && docIds.length) { try { record.version = await docs.retypeDocs({ site, ids: docIds, kind: 'ratecon', trip: m.trip }); record.docIds = docIds; } catch (e) { record.docError = e.message; } }
       record.matchedBy = m.matchedBy;
@@ -644,7 +647,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     return { trip: null, matchedBy: null, pendingId: id, record };
   }
 
-  async function readRateConPackets(site, rcUnits, sorted, board, docOf, by, sheets) {
+  async function readRateConPackets(site, rcUnits, sorted, board, docOf, by, sheets, exact = false) {
     const groups = groupRateCons(rcUnits, sorted);
     const read = await pool(groups, 3, async (g) => {
       const pages = g.units.map((u) => ({ dataBase64: u.data, mediaType: u.kind === 'pdf' ? 'application/pdf' : u.mediaType, filename: u.filename }));
@@ -656,7 +659,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     for (const { g, rc } of read) {
       const docIds = g.units.map((u) => docOf(u.file, u.page)).filter(Boolean);
       const filename = `${g.units[0].filename || 'packet'} · page${g.units.length > 1 ? 's' : ''} ${g.units[0].page}${g.units.length > 1 ? `–${g.units[g.units.length - 1].page}` : ''}`;
-      const f = await fileRateCon(site, rc, { labels: [g.rcBill, rc.fbfBillNumber], docIds, by, source: 'packet', filename, pageCount: g.units.length, board, sheets }); // eslint-disable-line no-await-in-loop
+      const f = await fileRateCon(site, rc, { labels: [g.rcBill, rc.fbfBillNumber], docIds, by, source: 'packet', filename, pageCount: g.units.length, board, sheets, exact }); // eslint-disable-line no-await-in-loop
       out.push({ trip: f.trip, matchedBy: f.matchedBy, broker: rc.broker || null, loadNumber: rc.loadNumber || null, bill: f.record.fbfBillNumber, pages: `${g.units[0].page}${g.units.length > 1 ? `–${g.units[g.units.length - 1].page}` : ''}`, instructions: (rc.specialInstructions || []).length, contacts: (rc.contacts || []).length, pendingId: f.pendingId || null });
     }
     return out;
@@ -671,7 +674,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     const sheets = Object.values((await db.get(storeKey(site), {})) || {});
     let n = 0;
     for (const { id, record } of list) {
-      const m = matchRateCon(record, [record.fbfBillNumber], board, sheets);
+      const m = matchRateCon(record, [record.fbfBillNumber], board, sheets, {}, { exact: !!record.nextLoadBatch });   // next-load rate cons: exact matches only
       if (!m) continue;
       const rec = { ...record, matchedBy: m.matchedBy };
       delete rec.pendingId;
@@ -707,7 +710,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
   // Read a batch of trip-sheet pages (a scanned nightly packet, photos…): sort every page,
   // read the trip sheets in full, read the rate cons, drop the rest. Used by the upload
   // screen and by trip-sheet emails. Throws {status, message} on a bad batch.
-  async function processPacket(site, { pages: pagesIn, originalIds = [], batchId = null, by = 'dispatcher' }) {
+  async function processPacket(site, { pages: pagesIn, originalIds = [], batchId = null, by = 'dispatcher', exact = false }) {
     const pages = await readableFiles(pagesIn);                    // iPhone HEIC photos → JPEG
     {
       // 1) every page on its own (a 69-page packet → 69 single pages)
@@ -785,7 +788,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
       const skipped = allPages.filter((pg) => !keepPage(pg, sheetDocIds) && !rcDocIds.has(String(pg.docId)) && pg.type !== 'rate_confirmation');
       let rateCons = [];
       if (rcUnits.length && ratecon && ratecon.enabled) {
-        try { rateCons = await readRateConPackets(site, rcUnits, sorted, board, docOf, by, [...trips, ...Object.values(prevAll)]); } catch (e) { console.warn('[manifest] rate cons:', e.message); }
+        try { rateCons = await readRateConPackets(site, rcUnits, sorted, board, docOf, by, [...trips, ...Object.values(prevAll)], exact); } catch (e) { console.warn('[manifest] rate cons:', e.message); }
       }
       if (docs && docs.enabled && docs.deleteDocs) {
         try { await docs.deleteDocs({ site, ids: skipped.map((pg) => pg.docId).filter((id) => id && !sheetDocIds.has(String(id)) && !rcDocIds.has(String(id))), packetBatch: batchId || null }); } catch (e) { console.warn('[manifest] could not drop skipped pages:', e.message); }
@@ -994,7 +997,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
 
   // The nightly trip-sheet email: store the attached packet (split into pages) and run it
   // through the same reader as an upload. files: [{dataBase64, mediaType, filename}].
-  async function readPacketFromEmail(site, filesIn, { by = 'Jarvis inbox' } = {}) {
+  async function readPacketFromEmail(site, filesIn, { by = 'Jarvis inbox', exact = false } = {}) {
     if (!client || !filesIn.length) return null;
     const files = await readableFiles(filesIn);
     const batchId = `email-${Date.now()}`;
@@ -1006,7 +1009,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
         return mine.length > 1 ? mine : (mine[0] != null ? mine[0] : null);
       });
     }
-    const r = await processPacket(site, { pages: files, originalIds, batchId, by });
+    const r = await processPacket(site, { pages: files, originalIds, batchId, by, exact });
     return { trips: (r.trips || []).map((t) => ({ trip: t.tripNumber, version: t.version, changes: t.changes || [], onBoard: t.onBoard })), rateCons: r.rateCons || [], kept: (r.pages || []).length, skipped: (r.skipped || []).length };
   }
 

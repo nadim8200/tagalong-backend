@@ -93,9 +93,9 @@ export function renderOutboundFollowUp({ heading = 'Flower outbound follow-up', 
   const needs = blocks.filter((b) => b.need).map((b) => b.need);
   const row = (k, v) => `<tr><td style="${F};font-size:13px;color:#4B5563;padding:4px 0 0 0">${esc(k)}</td></tr><tr><td style="${F};font-size:16px;line-height:1.5;color:#111827;padding:0 0 2px 0;word-break:break-word">${v}</td></tr>`;
   const card = (b) => { const t = TONE[b.status.tone]; return `<tr><td style="padding:0 0 16px 0"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border:1px solid #D1D5DB;border-radius:6px" bgcolor="#FFFFFF"><tr><td style="padding:18px 20px">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr><td style="${F};font-size:18px;font-weight:bold;color:${NAVY}">Trip ${esc(b.trip)}</td></tr>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr><td style="${F};font-size:18px;font-weight:bold;color:${NAVY}">${esc(b.title || `Trip ${b.trip}`)}</td></tr>
 <tr><td style="padding:6px 0 4px 0"><span style="${F};display:inline-block;font-size:13px;font-weight:bold;color:${t.fg};background:${t.bg};border:1px solid ${t.bd};border-radius:4px;padding:2px 8px">${esc(b.status.label)}</span></td></tr>
-${row('Scheduled', esc(b.scheduled))}${row('Current status', esc(b.status.text))}${row('Next action', esc(b.next))}${b.details.map((d) => `<tr><td style="${F};font-size:13px;line-height:1.4;color:#4B5563;padding:6px 0 0 0">${esc(d)}</td></tr>`).join('')}</table></td></tr></table></td></tr>`; };
+${row(b.schedLabel || 'Scheduled', esc(b.scheduled))}${row('Current status', esc(b.status.text))}${row('Next action', esc(b.next))}${b.details.map((d) => `<tr><td style="${F};font-size:13px;line-height:1.4;color:#4B5563;padding:6px 0 0 0">${esc(d)}</td></tr>`).join('')}</table></td></tr></table></td></tr>`; };
   const html = `<div style="margin:0;padding:0;background:#F3F4F6" bgcolor="#F3F4F6"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" align="center" style="max-width:600px;margin:0 auto;background:#FFFFFF" bgcolor="#FFFFFF">
 <tr><td style="padding:20px 20px 4px 20px;${F};font-size:20px;font-weight:bold;color:${NAVY}">${esc(heading)}</td></tr>
 <tr><td style="padding:0 20px 12px 20px;${F};font-size:16px;line-height:1.5;color:#1F2937;border-bottom:1px solid #E5E7EB">${esc(summary)}</td></tr>
@@ -105,7 +105,7 @@ ${needs.length ? `<tr><td style="padding:12px 20px 4px 20px;border-top:1px solid
 ${closing ? `<tr><td style="padding:8px 20px;${F};font-size:16px;line-height:1.5;color:#1F2937">${esc(closing)}</td></tr>` : ''}
 <tr><td style="padding:12px 20px 20px 20px;${F};font-size:13px;color:#4B5563;border-top:1px solid #E5E7EB">Jarvis — AI Dispatcher · Florida Beauty Flora</td></tr></table></div>`;
   const text = [heading.toUpperCase(), summary, '',
-    ...groups.flatMap((g) => [`== ${g.title} ==`, ...g.list.flatMap((b) => [`Trip ${b.trip} — ${b.status.label.toUpperCase()}`, `  Scheduled: ${b.scheduled}`, `  Current status: ${b.status.text}`, `  Next action: ${b.next}`, ...b.details.map((d) => `  ${d}`), ''])]),
+    ...groups.flatMap((g) => [`== ${g.title} ==`, ...g.list.flatMap((b) => [`${b.title || `Trip ${b.trip}`} — ${b.status.label.toUpperCase()}`, `  ${b.schedLabel || 'Scheduled'}: ${b.scheduled}`, `  Current status: ${b.status.text}`, `  Next action: ${b.next}`, ...b.details.map((d) => `  ${d}`), ''])]),
     ...extras.map((x) => `${x.title}: ${x.text}`),
     ...(needs.length ? ['STILL NEEDED FROM DISPATCH', ...needs.map((n) => `- ${n}`), 'Reply on this email and Jarvis completes them.', ''] : []),
     ...(closing ? [closing, ''] : []), 'Jarvis — AI Dispatcher · Florida Beauty Flora'].join('\n');
