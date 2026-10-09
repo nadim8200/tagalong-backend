@@ -22,7 +22,7 @@ const cleanTruck = (v) => String(v || '').toUpperCase().replace(/^(TRUCK|TRACTOR
 // Which truck a rate con is for: the rate con (printed / handwritten), else the line in the
 // email that names this load. Only trucks we know (on the board) unless it's labeled "truck".
 // Pure. → { truck, how } | null
-export function truckFor(rc, { emailText = '', trucks = new Set() } = {}) {
+export function truckFor(rc, { emailText = '', trucks = new Set(), single = false } = {}) {
   const known = (t) => t && (trucks.has(t) || !trucks.size);
   const t0 = cleanTruck(rc && rc.truckNumber);
   if (t0 && /^\d{3,5}$/.test(t0)) return { truck: t0, how: 'truck number on the rate con' };
@@ -42,6 +42,11 @@ export function truckFor(rc, { emailText = '', trucks = new Set() } = {}) {
     const rest = keys.reduce((l, k) => l.split(k).join(' '), line);
     const nums = (rest.match(/\b(\d{3,5})\b/g) || []).map(cleanTruck).filter((x) => trucks.has(x));
     if (nums.length === 1 && known(nums[0])) return { truck: nums[0], how: 'next to this load in the email' };
+  }
+  // one rate con in the email and the email names exactly one truck ("This will be for truck # 2604")
+  if (single) {
+    const all = [...new Set([...String(emailText || '').matchAll(new RegExp(labeled.source, 'gi'))].map((m) => cleanTruck(m[1])))];
+    if (all.length === 1) return { truck: all[0], how: 'named in the email' };
   }
   return null;
 }
@@ -92,7 +97,7 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
       const rec = e.pendingId ? ((pending.find((p) => p.id === e.pendingId) || {}).record) : (e.trip ? saved[e.trip] : null);
       if (!rec) continue;
       const matched = e.trip ? items.find((it) => tripNo(it) === e.trip) : null;
-      const found = truckFor(rec, { emailText, trucks }) || (matched && unitOf(matched) ? { truck: unitOf(matched), how: `TruckMate trip ${e.trip}` } : null);
+      const found = truckFor(rec, { emailText, trucks, single: entries.length === 1 }) || (matched && unitOf(matched) ? { truck: unitOf(matched), how: `TruckMate trip ${e.trip}` } : null);
       // already the truck's run in progress → not a "next" load
       if (matched && ROLLING.test(String(tripOf(matched).status || ''))) { out.push({ trip: e.trip, skipped: 'already running' }); continue; }
       const entry = { id: e.pendingId || `t${e.trip}`, truck: found ? found.truck : null, truckHow: found ? found.how : null, trip: e.trip || null, pendingId: e.pendingId || null, rc: brief(rec, rec.docIds || []), from: from || null, emailId, subject: String(subject || '').slice(0, 200), at: new Date(now()).toISOString() };

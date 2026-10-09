@@ -62,3 +62,10 @@ test('verify by trip sheet when TruckMate does not have it yet', () => {
   const n = { truck: '2612', rc: { bill: 'B180401', loadNumber: null } };
   assert.deepEqual(verify(n, [], [{ tripNumber: '624777', truck: '2612', stops: [{ bills: ['B180401'] }] }]), { by: 'trip sheet', trip: '624777' });
 });
+
+test('Gus\'s email: one rate con + "This will be for truck # 2604" → truck 2604 (any line of the email)', () => {
+  const text = '@jarvis@floridabeauty.us\nThis will be for truck # 2604\nLet me know if running late\nAnd update broker with eta\n\nRegards,\nGustavo A. Duarte\nPhone: 305-503-1200 EXT # 250\nCell: 786-402-8448';
+  assert.deepEqual(truckFor({ loadNumber: '108638', broker: 'PTC LOGISTICS LLC' }, { emailText: text, trucks: new Set(['2403']), single: true }), { truck: '2604', how: 'named in the email' });
+  assert.equal(truckFor({ loadNumber: '108638' }, { emailText: text, single: false }), null, 'a batch needs the truck next to its load');
+  assert.equal(truckFor({ loadNumber: '1' }, { emailText: 'truck 2604 and truck 2612', single: true }), null, 'two trucks named → ask');
+});
