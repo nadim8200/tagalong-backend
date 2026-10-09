@@ -49,3 +49,19 @@ test('reaching an employee: their chosen ways; a call while texting is not live;
   await routes['/truckmate/directory/:id/contact']({ params: { id: nobody.id }, body: { message: 'hi' }, user: { admin: true } }, res);
   assert.equal(code, 409);
 });
+
+import { groupFor, cleanGroups, SEED_GROUPS } from '../directory.js';
+
+test('email groups: "dispatch", "the dispatch group", "Dispatches", aliases like billing → Accounting', () => {
+  assert.equal(groupFor(SEED_GROUPS, 'dispatch').email, 'dispatches@floridabeauty.us');
+  assert.equal(groupFor(SEED_GROUPS, 'the dispatch group').name, 'Dispatch');
+  assert.equal(groupFor(SEED_GROUPS, 'Dispatches').name, 'Dispatch');
+  assert.equal(groupFor(SEED_GROUPS, 'billing').name, 'Accounting');
+  assert.equal(groupFor(SEED_GROUPS, 'CS').name, 'Customer Service');
+  assert.equal(groupFor(SEED_GROUPS, 'sales'), null);
+  assert.equal(groupFor([{ name: 'Dispatch', email: 'x@y.com', active: false }], 'dispatch'), null, 'inactive groups are skipped');
+});
+
+test('saving groups keeps only valid emails and trims aliases', () => {
+  assert.deepEqual(cleanGroups([{ name: ' Sales ', email: 'SALES@floridabeauty.us', aliases: 'sales team, quotes' }, { name: '', email: 'x@y.com' }, { name: 'Bad', email: 'nope' }]).map((g) => [g.name, g.email, g.aliases]), [['Sales', 'sales@floridabeauty.us', ['sales team', 'quotes']], ['Bad', '', []]]);
+});

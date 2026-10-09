@@ -141,17 +141,24 @@ test('GPS departed but TruckMate still LOADEDTOGO → one email to dispatches@ +
   let clock = plan - 20 * 60000;
   const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
   const fetchFn = async (url, o) => { if (/token/.test(url)) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) }; mails.push(o.body); return { ok: true, status: 202, json: async () => ({}) }; };
-  const f = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, getBoard: async () => ({ trips: [item] }), env, fetchFn, now: () => clock });
+  const groups = { dispatch: 'dispatches@floridabeauty.us' };
+  const f = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, groupEmail: async (n) => groups[n] || null, getBoard: async () => ({ trips: [item] }), env, fetchFn, now: () => clock });
   await f.run();
   assert.equal(mails.length, 0);
   item._samsara = { speedMph: 47, location: 'State Road 7, Palm Beach County, FL', gpsAt: new Date(plan - 2 * 60000).toISOString() };
+  const fixes = () => mails.map((m) => Buffer.from(m, 'base64').toString('utf8')).filter((m) => /Subject: =\?UTF-8\?B\?/.test(m) && /Update TruckMate/.test(Buffer.from((m.match(/^Subject: =\?UTF-8\?B\?([^?]+)/m) || [])[1] || '', 'base64').toString()));
   clock = plan - 2 * 60000; await f.run();
-  assert.equal(mails.length, 1);
-  const mime = Buffer.from(mails[0], 'base64').toString('utf8');
-  assert.match(mime, /^To: dispatches@floridabeauty\.us, saray@floridabeauty\.us$/m);
+  assert.equal(fixes().length, 1);
+  assert.match(fixes()[0], /^To: dispatches@floridabeauty\.us, saray@floridabeauty\.us$/m);
   clock = plan + 10 * 60000; await f.run();
-  assert.equal(mails.length, 1, 'once per pickup');
-  item.trip.status = 'DEPSHIP';
+  assert.equal(fixes().length, 1, 'once per pickup');
+  // with a Customer Service email group, the group gets it — not the people one by one
+  groups['customer service'] = 'customerservice@floridabeauty.us';
+  const db2 = memDb(); await db2.set('taHelpCfg', await db.get('taHelpCfg', {}));
+  const item2 = { ...item, trip: { ...item.trip, tripNumber: '624626', status: 'LOADEDTOGO' } };
+  const f2 = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db: db2, groupEmail: async (n) => groups[n] || null, getBoard: async () => ({ trips: [item2] }), env, fetchFn, now: () => clock });
+  clock = plan - 2 * 60000; await f2.run();
+  assert.match(fixes()[1], /^To: dispatches@floridabeauty\.us, customerservice@floridabeauty\.us$/m);
 });
 
 test('the fix-TruckMate email says what TruckMate shows and what GPS shows', () => {

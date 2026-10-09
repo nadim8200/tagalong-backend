@@ -744,12 +744,12 @@ const driverHooks = { text: async (site, trip, message, by) => { const a = await
 // Jarvis' playbook: what staff teach it by email ("TRAINING: …")
 const playbook = initPlaybook(app, { requireAuth: requireDispatch, db, env: process.env });
 // load follow-through: rate-con instructions to dispatch, Jarvis' offers (reply YES), revised rate cons after delivery
-const follow = initFollowThrough(app, { playbook, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), etaWatch, driver: driverHooks, docs, getBoard: (site) => truckmate.buildBoard(site) });
+const follow = initFollowThrough(app, { groupEmail: (n) => directory.groupEmail(n), playbook, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), etaWatch, driver: driverHooks, docs, getBoard: (site) => truckmate.buildBoard(site) });
 // meetups ("meet in Fort Pierce"): track the truck to the place, reply on the chain, text the driver to verify
 const meetWatch = initMeetWatch({ db, getBoard: (site) => truckmate.buildBoard(site), textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), replyInThread: (...a) => inbox.replyInThread(...a), env: process.env });
 // next loads: rate cons Gus (dispatch GM) sends for trucks still on a run → on the truck's card
 const nextLoads = initNextLoads({ db, env: process.env });
-const inbox = initInbox(app, { meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
+const inbox = initInbox(app, { groupEmail: (n) => directory.groupEmail(n), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
@@ -779,11 +779,11 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 // fleet managers' TagAlong app.
 const voice = initVoice(app, { training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
-pickupFollow = initPickupFollow(app, { requireAuth: requireDispatch, db, replyInThread: (...a) => inbox.replyInThread(...a), ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+pickupFollow = initPickupFollow(app, { groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, db, replyInThread: (...a) => inbox.replyInThread(...a), ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // reefer temp photos (8 AM / 3 PM / 9:30 PM, hourly reminders) + an email to dispatch on every driver contact
-tempPhotos = initTempPhotos(app, { requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, ringcentral: rc, voice, comms, isInternal, env: process.env });
+tempPhotos = initTempPhotos(app, { groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, ringcentral: rc, voice, comms, isInternal, env: process.env });
 driverLinks.usePhotos((site, trip, info) => tempPhotos.received(site, trip, info));
-const outreach = initOutreach({ db, getBoard: (site) => truckmate.buildBoard(site), isInternal, env: process.env });
+const outreach = initOutreach({ groupEmail: (n) => directory.groupEmail(n), db, getBoard: (site) => truckmate.buildBoard(site), isInternal, env: process.env });
 comms.useOutreach((ev) => outreach.notify(ev));
 voice.useOutreach((ev) => outreach.notify(ev));
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });

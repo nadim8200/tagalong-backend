@@ -159,12 +159,12 @@ export function tmFixNote({ item, plan, dep, now }) {
   return { subject: `Update TruckMate: trip ${tripNo(item)} departed — status still ${t.status || 'blank'}`, html: out.html, text: out.text };
 }
 
-export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral = null, comms = null, voice = null, docs = null, driverLinks = null, replyInThread = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral = null, comms = null, voice = null, docs = null, driverLinks = null, replyInThread = null, groupEmail = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const key = `taPickupFollow:${site}`;
   const cfgKey = 'taPickupFollowCfg';
-  const DEFAULTS = { on: true, to: [], callWhenNoText: true, tmFixTo: ['dispatches@floridabeauty.us'] };
+  const DEFAULTS = { on: true, to: [], callWhenNoText: true, tmFixTo: [] };
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const settings = async () => ({ ...DEFAULTS, ...((enabled && (await db.get(cfgKey, {}))) || {}) });
   const smsLive = async () => { try { const c = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } };
@@ -228,10 +228,11 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     const { subject, html } = followEmail({ item, plan, outcome, convo, summary, link });
     const chainId = (item._pickupAsk && item._pickupAsk.emailId) || (item._sheetEmail && item._sheetEmail.id);
     if (chainId && replyInThread) { const r = await replyInThread(site, chainId, { text: summary, html }).catch(() => null); if (r && r.sent) return { emailed: true, subject, chain: chainId }; }
-    if (!cfg.to.length || !mailConfig(env).ready) return { emailed: false, subject };
+    const toList = cfg.to.length ? cfg.to : (groupEmail ? [await groupEmail('dispatch').catch(() => null)].filter(Boolean) : []);
+    if (!toList.length || !mailConfig(env).ready) return { emailed: false, subject };
     const ids = ((item._manifest && item._manifest.docIds) || []).slice(0, 3);
     const files = docs && docs.readDocs && ids.length ? await docs.readDocs({ site, ids }) : [];
-    await sendMail({ to: cfg.to, subject, html, attachments: files.map((f, i) => ({ name: `trip-sheet-${trip}${files.length > 1 ? `-${i + 1}` : ''}.${/pdf/.test(f.mediaType) ? 'pdf' : 'jpg'}`, contentType: f.mediaType, bytes: f.data })) }, { env, fetchFn });
+    await sendMail({ to: toList, subject, html, attachments: files.map((f, i) => ({ name: `trip-sheet-${trip}${files.length > 1 ? `-${i + 1}` : ''}.${/pdf/.test(f.mediaType) ? 'pdf' : 'jpg'}`, contentType: f.mediaType, bytes: f.data })) }, { env, fetchFn });
     return { emailed: true, subject };
   }
 
@@ -242,9 +243,12 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     const ours = (a) => /@floridabeauty\.us$/i.test(String(a || '').trim());
     const help = (await db.get('taHelpCfg', {})) || {};
     const teams = Array.isArray(help.teams) ? help.teams : [];
-    const cs = teams.filter((tm) => tm && tm.active !== false && /customer.?serv/i.test(`${tm.id} ${tm.name}`)).flatMap((tm) => [tm.email, ...(tm.members || []).map((m) => m && m.email)]);
-    const dir = (((await db.get('taStaffDirectory', {})) || {}).people || []).filter((p) => p && p.active !== false && /customer.?serv/i.test(p.department || '')).map((p) => p.email);
-    return [...new Set([...(cfg.tmFixTo || []), ...cs, ...dir].map((a) => String(a || '').trim().toLowerCase()).filter(ours))];
+    // the email groups first (Employees → Email groups); people only when a team has no group address
+    const gDispatch = groupEmail ? await groupEmail('dispatch').catch(() => null) : null;
+    const gCs = groupEmail ? await groupEmail('customer service').catch(() => null) : null;
+    const cs = gCs ? [gCs] : teams.filter((tm) => tm && tm.active !== false && /customer.?serv/i.test(`${tm.id} ${tm.name}`)).flatMap((tm) => [tm.email, ...(tm.members || []).map((m) => m && m.email)]);
+    const dir = gCs ? [] : (((await db.get('taStaffDirectory', {})) || {}).people || []).filter((p) => p && p.active !== false && /customer.?serv/i.test(p.department || '')).map((p) => p.email);
+    return [...new Set([...(cfg.tmFixTo || []), gDispatch, ...cs, ...dir].map((a) => String(a || '').trim().toLowerCase()).filter(ours))];
   }
 
   // One pass over the board.
@@ -331,7 +335,7 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
       const n = chainNote(evs, now());
       try {
         if (chainId && replyInThread) await replyInThread(site, chainId, { text: n.text, html: n.html, asks: n.asks }); // eslint-disable-line no-await-in-loop
-        else if (!chainId && cfg.to.length && mailConfig(env).ready) await sendMail({ to: cfg.to, subject: evs.length === 1 ? `Trip ${evs[0].trip} — ${evs[0].kind === 'departed' ? 'departed' : 'NOT departed yet'}` : `${evs.length} loads — departure update`, html: n.html, text: n.text }, { env, fetchFn }); // eslint-disable-line no-await-in-loop
+        else if (!chainId && mailConfig(env).ready && (cfg.to.length || groupEmail)) await sendMail({ to: cfg.to.length ? cfg.to : [await groupEmail('dispatch')].filter(Boolean), subject: evs.length === 1 ? `Trip ${evs[0].trip} — ${evs[0].kind === 'departed' ? 'departed' : 'NOT departed yet'}` : `${evs.length} loads — departure update`, html: n.html, text: n.text }, { env, fetchFn }); // eslint-disable-line no-await-in-loop
         done.push({ chain: chainId || 'dispatch', events: evs.map((e) => `${e.trip}:${e.kind}`) });
       } catch (e) { console.warn('[pickup-follow] chain reply:', e.message); }
     }

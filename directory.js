@@ -61,14 +61,37 @@ export function reachPlan(p, { textingLive = false } = {}) {
   };
 }
 
+// Email groups: one address that reaches a whole team (dispatches@ → every dispatcher). Jarvis
+// emails the GROUP when something is for "dispatch / customer service / accounting", and a
+// person directly only when it's for that person. System-only — never shared with callers.
+export const SEED_GROUPS = [
+  { id: 'g-dispatch', name: 'Dispatch', email: 'dispatches@floridabeauty.us', when: 'Load updates, TruckMate fixes, driver issues, rate cons and anything dispatch must act on', aliases: ['dispatcher', 'dispatchers', 'operations'] },
+  { id: 'g-cs', name: 'Customer Service', email: '', when: 'Customer and broker requests, TruckMate entries, status fixes', aliases: ['cs', 'customer care'] },
+  { id: 'g-accounting', name: 'Accounting', email: '', when: 'Invoices, lumper / detention charges, revised rate cons, payments', aliases: ['billing', 'ap', 'ar', 'payroll'] },
+];
+const fold2 = (x) => String(x || '').toLowerCase().replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim().split(' ').map((w) => (w.length > 3 ? w.replace(/(es|s)$/, '') : w)).join(' ');
+// The group a name means ("dispatch", "the dispatch group", "Dispatches", "billing" → Accounting). Pure.
+export function groupFor(groups = [], name = '') {
+  const want = fold2(String(name).replace(/\b(the|group|team|email|department|dept)\b/gi, ' '));
+  if (!want) return null;
+  return (groups || []).find((g) => g && g.active !== false && [g.name, ...(g.aliases || [])].some((n) => fold2(n) === want)) || null;
+}
+export const cleanGroups = (list) => (Array.isArray(list) ? list : []).filter((g) => g && String(g.name || '').trim()).slice(0, 40).map((g, i) => ({
+  id: String(g.id || `g${Date.now().toString(36)}${i}`), name: String(g.name).trim().slice(0, 60),
+  email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(g.email || '').trim()) ? String(g.email).trim().toLowerCase() : '',
+  when: String(g.when || '').slice(0, 200), aliases: (Array.isArray(g.aliases) ? g.aliases : String(g.aliases || '').split(',')).map((a) => String(a).trim()).filter(Boolean).slice(0, 10),
+  active: g.active !== false,
+}));
+
 export function initDirectory(app, { requireAuth, requireAdmin, db, contact = null }) {
   const enabled = !!(db && db.enabled);
   let cache = { at: 0, d: null };
   async function load() {
-    if (!enabled) return { main: MAIN_NUMBER, people: seedPeople() };
+    if (!enabled) return { main: MAIN_NUMBER, people: seedPeople(), groups: SEED_GROUPS };
     if (cache.d && Date.now() - cache.at < 60000) return cache.d;
     let d = await db.get(KEY, null);
-    if (!d) { d = { main: MAIN_NUMBER, people: seedPeople(), seededAt: new Date().toISOString() }; await db.set(KEY, d); }
+    if (!d) { d = { main: MAIN_NUMBER, people: seedPeople(), groups: SEED_GROUPS, seededAt: new Date().toISOString() }; await db.set(KEY, d); }
+    if (!Array.isArray(d.groups)) { d = { ...d, groups: SEED_GROUPS }; await db.set(KEY, d); }
     cache = { at: Date.now(), d };
     return d;
   }
@@ -79,15 +102,25 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
     if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admins only.' });
     const d = await load();
     // dispatchers see what Jarvis may share; admins also see the system-only cell / email
-    res.json({ main: d.main, unclear: isAdmin(req.user) ? UNCLEAR : [], people: d.people.map((p) => (isAdmin(req.user) ? p : { id: p.id, ...publicView(p, d.main), active: p.active })) });
+    res.json({ main: d.main, unclear: isAdmin(req.user) ? UNCLEAR : [], groups: d.groups || [], people: d.people.map((p) => (isAdmin(req.user) ? p : { id: p.id, ...publicView(p, d.main), active: p.active })) });
   });
   app.put('/admin/directory', requireAdmin, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const b = req.body || {};
     const people = (Array.isArray(b.people) ? b.people : []).filter((p) => p && p.name).slice(0, 400).map((p, i) => ({ id: p.id || `s${Date.now().toString(36)}${i}`, name: String(p.name).slice(0, 80), department: String(p.department || 'Other').slice(0, 60), departmentExt: p.departmentExt ? String(p.departmentExt).slice(0, 30) : null, ext: p.ext ? String(p.ext).replace(/[^\d/ ]/g, '').slice(0, 12) || null : null, phone: last10(p.phone), note: p.note ? String(p.note).slice(0, 60) : null, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(p.email || '')) ? String(p.email).toLowerCase() : null, channels: { text: !p.channels || p.channels.text !== false, email: !p.channels || p.channels.email !== false, call: !!(p.channels && p.channels.call) }, active: p.active !== false }));
-    const d = { main: String(b.main || MAIN_NUMBER).slice(0, 20), people, updatedAt: new Date().toISOString() };
+    const cur = await load();
+    const d = { main: String(b.main || MAIN_NUMBER).slice(0, 20), people, groups: Array.isArray(b.groups) ? cleanGroups(b.groups) : (cur.groups || SEED_GROUPS), updatedAt: new Date().toISOString() };
     await db.set(KEY, d); cache = { at: Date.now(), d };
     res.json({ ok: true, count: people.length });
+  });
+
+  app.put('/admin/directory/groups', requireAdmin, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const groups = cleanGroups((req.body || {}).groups);
+    const cur = await load();
+    const d = { ...cur, groups, updatedAt: new Date().toISOString() };
+    await db.set(KEY, d); cache = { at: Date.now(), d };
+    res.json({ ok: true, groups });
   });
 
   // anyone signed in can have Jarvis reach a staff member (they never see the number)
@@ -119,5 +152,8 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
     find: async (q) => { const d = await load(); return findStaff(d.people, q).map((p) => publicView(p, d.main)); },
     mentioned: async (text) => mentionedStaff((await load()).people, text),   // internal: includes phone / email
     main: async () => (await load()).main,
+    groups: async () => ((await load()).groups || []).filter((g) => g.active !== false),
+    // the one address for a group by name ("dispatch", "customer service", "billing"…) or null
+    groupEmail: async (name) => { const g = groupFor((await load()).groups || [], name); return g && g.email ? g.email : null; },
   };
 }

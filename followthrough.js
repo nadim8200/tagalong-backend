@@ -83,13 +83,17 @@ export function readDecision(text, count) {
   return nums.length ? nums : Array.from({ length: count }, (_, i) => i + 1);
 }
 
-export function initFollowThrough(app, { requireAuth, db, sendMail, playbook = null, etaWatch = null, driver = null, docs = null, getBoard = null, now = () => Date.now() }) {
+export function initFollowThrough(app, { requireAuth, db, groupEmail = null, sendMail, playbook = null, etaWatch = null, driver = null, docs = null, getBoard = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const cfgKey = 'taFollowCfg';
   const key = `taFollow:${SITE}`;              // trip → { rcSentFor, podTo, podSent, closeout }
   const offersKey = `taFollowOffers:${SITE}`;  // [{ token, trip, kind, items, status, … }]
   const DEFAULTS = { to: [], instructions: true, closeout: true, digest: true };
-  const settings = async () => ({ ...DEFAULTS, ...((enabled && (await db.get(cfgKey, {}))) || {}) });
+  const settings = async () => {
+    const c = { ...DEFAULTS, ...((enabled && (await db.get(cfgKey, {}))) || {}) };
+    if (!c.to.length && groupEmail) { const g = await groupEmail('dispatch').catch(() => null); if (g) c.to = [g]; }   // the Dispatch email group
+    return c;
+  };
   const wrap = (body) => `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.45;color:#1f2937">${body}<p style="color:#6b7280">Jarvis — AI Dispatcher · Florida Beauty Flora</p></div>`;
   const offerBlock = (items, token) => (items.length ? `<p style="margin-top:14px"><b>I can do these for you:</b></p><ol>${items.map((i) => `<li>${esc(i.label)}</li>`).join('')}</ol><p>Reply <b>YES</b> to do all of them, <b>YES 1 3</b> for some, or <b>NO</b>. (Keep [JV-${token}] in the subject.)</p>` : '');
 

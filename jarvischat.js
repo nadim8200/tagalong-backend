@@ -66,7 +66,7 @@ export const TOOLS = [
   { name: 'set_hold', description: 'Put a load on hold or record that its pickup is delayed / driver or truck changed (the alert then shows the latest departure that still makes the delivery). newPickupAt as YYYY-MM-DDTHH:MM Miami time if known.', input_schema: { type: 'object', properties: { trip: { type: 'string' }, kind: { type: 'string', enum: ['pickup_delayed', 'driver_changed', 'truck_changed', 'delay'] }, note: { type: 'string' }, newPickupAt: { type: 'string' } }, required: ['trip', 'kind', 'note'] } },
   { name: 'clear_hold', description: 'Clear a hold / pickup delay on a load.', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
   { name: 'attach_document', description: 'Attach a document the dispatcher uploaded in this chat to a load (use the docId from the upload result).', input_schema: { type: 'object', properties: { docId: { type: 'string' }, trip: { type: 'string' } }, required: ['docId', 'trip'] } },
-  { name: 'propose_action', description: 'Propose something that reaches people outside the company — the dispatcher must click Confirm before it happens. type: "text_driver" (message to the load\'s driver — app or text), "call_driver" (Jarvis phone call to the driver), "email" (email to contacts on the load).', input_schema: { type: 'object', properties: { type: { type: 'string', enum: ['text_driver', 'call_driver', 'email'] }, trip: { type: 'string' }, message: { type: 'string', description: 'The exact text / email body' }, subject: { type: 'string' }, to: { type: 'array', items: { type: 'string' }, description: 'For email: which contacts (must be on the load)' } }, required: ['type', 'trip'] } },
+  { name: 'propose_action', description: 'Propose something that reaches people outside the company — the dispatcher must click Confirm before it happens. type: "text_driver" (message to the load\'s driver — app or text), "call_driver" (Jarvis phone call to the driver), "email" (email to contacts on the load), "email_group" (email one of OUR email groups — Dispatch, Customer Service, Accounting… — when something is for that team; email a person directly only when it is for that person).', input_schema: { type: 'object', properties: { type: { type: 'string', enum: ['text_driver', 'call_driver', 'email', 'email_group'] }, group: { type: 'string', description: 'For email_group: the group name (e.g. "Dispatch", "Accounting")' }, trip: { type: 'string' }, message: { type: 'string', description: 'The exact text / email body' }, subject: { type: 'string' }, to: { type: 'array', items: { type: 'string' }, description: 'For email: which contacts (must be on the load)' } }, required: ['type'] } },
 ];
 
 export const SYSTEM = (who) => `You are Jarvis, the AI dispatcher for Florida Beauty Flora (Dynamic Dispatch), chatting with ${who}, a dispatcher, inside the dispatch console.
@@ -168,7 +168,8 @@ export function initJarvisChat(app, { requireAuth, db, nextLoads = null, playboo
       case 'staff_directory': {
         const found = directory ? await directory.find(input.name_or_department) : [];
         const main = directory ? await directory.main() : '305-503-1200';
-        return { people: found.map((p) => ({ name: p.name, department: p.department, extension: p.extension, role: p.role })), mainNumber: main, rule: 'Share only name, department and extension (and the main number). Never an employee cell phone or personal email.' };
+        const groups = !ctx.customer && directory && directory.groups ? (await directory.groups()).map((g) => ({ group: g.name, when: g.when || null, hasEmail: !!g.email })) : undefined;   // our staff only
+        return { people: found.map((p) => ({ name: p.name, department: p.department, extension: p.extension, role: p.role })), ...(groups ? { emailGroups: groups, emailGroupRule: 'For something meant for a team (dispatch, customer service, accounting…) email the GROUP with propose_action type email_group; email a person only when it is for that person.' } : {}), mainNumber: main, rule: 'Share only name, department and extension (and the main number). Never an employee cell phone or personal email.' };
       }
       case 'load_details': {
         const it = byTrip(input.trip);
@@ -251,6 +252,16 @@ export function initJarvisChat(app, { requireAuth, db, nextLoads = null, playboo
         return { attached: true, trip: tripNo(it) };
       }
       case 'propose_action': {
+        if (input.type === 'email_group') {
+          const g = directory && directory.groupEmail ? await directory.groupEmail(input.group || '') : null;
+          if (!g) return { proposed: false, error: `No email group called "${input.group || ''}".`, groups: directory && directory.groups ? (await directory.groups()).map((x) => x.name) : [] };
+          if (!String(input.message || '').trim()) return { proposed: false, error: 'Write the message first.' };
+          const it0 = input.trip ? byTrip(input.trip) : null;
+          const a = { id: newId(), at: new Date().toISOString(), by: ctx.user.name, userId: ctx.user.id, threadId: ctx.threadId, type: 'email_group', group: input.group, trip: it0 ? tripNo(it0) : null, message: String(input.message).slice(0, 2000), subject: input.subject || null, to: [g], status: 'proposed' };
+          await db.update(actionsKey, (cur) => [a, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
+          ctx.proposed.push(a);
+          return { proposed: true, id: a.id, to: a.to, note: 'Waiting for the dispatcher to click Confirm.' };
+        }
         const it = byTrip(input.trip);
         if (!it) return { proposed: false, error: `Trip ${input.trip} is not on the live board.` };
         const n = tripNo(it);
@@ -281,7 +292,7 @@ export function initJarvisChat(app, { requireAuth, db, nextLoads = null, playboo
     const history = thread.messages.slice(-16).map((m) => ({ role: m.role, content: m.text }));
     const uploadNote = uploads.length ? `\n\n[Uploaded: ${uploads.map((u) => `${u.name} → ${u.result}${u.docId ? ` (docId ${u.docId})` : ''}`).join('; ')}]` : '';
     const messages = [...history, { role: 'user', content: `${text || ''}${uploadNote}`.trim() }];
-    const ctx = { user, threadId, uploaded: uploads, proposed: [], did: [] };
+    const ctx = { user, threadId, uploaded: uploads, proposed: [], did: [], customer };
     const pbText = playbook && !customer ? await playbook.text() : '';   // what staff taught Jarvis (internal only)
     let answer = '';
     for (let step = 0; step < MAX_STEPS; step++) {
@@ -401,6 +412,10 @@ export function initJarvisChat(app, { requireAuth, db, nextLoads = null, playboo
       try {
         if (a.type === 'text_driver') { const r = driver && driver.text ? await driver.text(SITE, a.trip, a.message, `${user.name} via Jarvis`) : { skipped: 'texting not connected' }; result = { status: r && (r.sent || r.called) ? 'done' : 'not sent', detail: r && (r.via || r.skipped || r.error) }; }
         else if (a.type === 'call_driver') { const r = driver && driver.call ? await driver.call(SITE, a.trip, `${user.name} via Jarvis`) : { skipped: 'calls not connected' }; result = { status: r && r.called ? 'done' : 'not sent', detail: r && (r.skipped || r.callId) }; }
+        else if (a.type === 'email_group') {
+          if (!mail || !mail.ready()) result = { status: 'not sent', detail: 'Outlook (Jarvis mailbox) is not connected yet.' };
+          else { await mail.send({ to: a.to, subject: a.subject || `${a.trip ? `Load ${a.trip} — ` : ''}from ${user.name} (via Jarvis)`, html: String(a.message).split(/\n/).map((l) => l.replace(/&/g, '&amp;').replace(/</g, '&lt;')).join('<br>') }); result = { status: 'done', detail: `Emailed the ${a.group} group (${a.to.join(', ')})` }; }
+        }
         else if (a.type === 'email') {
           if (!mail || !mail.ready()) result = { status: 'not sent', detail: 'Outlook (Jarvis mailbox) is not connected yet.' };
           else { await mail.send({ to: a.to, subject: a.subject || `Load ${a.trip} update — Florida Beauty Flora`, html: String(a.message).split(/\n/).map((l) => l.replace(/&/g, '&amp;').replace(/</g, '&lt;')).join('<br>') }); result = { status: 'done', detail: `emailed ${a.to.join(', ')}` }; }

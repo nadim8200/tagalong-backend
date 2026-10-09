@@ -26,12 +26,13 @@ ${rows.map(([k, v]) => `<tr><td style="padding:4px 20px 0 20px;${F};font-size:13
   return { subject, html, text };
 }
 
-export function initOutreach({ db, getBoard, isInternal = () => true, env = process.env, fetchFn = globalThis.fetch }) {
+export function initOutreach({ db, getBoard, groupEmail = null, isInternal = () => true, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   // the dispatch email: the temp-photo list if set, else the follow-through dispatch group
   const dispatchTo = async () => {
     const own = ((await db.get('taTempPhotosCfg', {})) || {}).to || [];
-    const list = own.length ? own : (((await db.get('taFollowCfg', {})) || {}).to || []);
+    let list = own.length ? own : (((await db.get('taFollowCfg', {})) || {}).to || []);
+    if (!list.length && groupEmail) list = [await groupEmail('dispatch').catch(() => null)].filter(Boolean);   // the Dispatch email group
     return list.filter((a) => isInternal(a, env));
   };
   async function notify(ev) {

@@ -166,7 +166,10 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
     const teams = teamsOf(cfg);
     const picked = req.aiTeams || await aiPick(req, teams);
     req.aiTeams = picked;
-    const to = routeTo(req, cfg, picked, req.forced || []);
+    // a team with no shared email of its own → its email group (Employees → Email groups)
+    let cfgG = cfg;
+    if (directory && directory.groupEmail) { const ts = await Promise.all(teams.map(async (t) => (t && !t.email ? { ...t, email: (await directory.groupEmail(t.name).catch(() => null)) || '' } : t))); cfgG = { ...cfg, teams: ts }; }
+    const to = routeTo(req, cfgG, picked, req.forced || []);
     // the staff member the message is for: email + text, or a Jarvis call while texting isn't live (cells are system-only)
     if (directory && (req.forStaff || []).length) {
       const people = await directory.mentioned((req.forStaff || []).map((p) => p.name).join(', '));
