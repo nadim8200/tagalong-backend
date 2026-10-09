@@ -145,12 +145,26 @@ export function chainNote(events, now) {
   return { text: out.text, html: out.html, asks: late.length ? late.map((e) => `Load ${e.trip} not departed ${Math.round((now - e.plan.ms) / MIN)} min after pickup — asked for a new time`).join(' | ') : null };
 }
 
+// The "fix TruckMate" email: GPS says the truck left, TruckMate still shows it at the shipper. Pure.
+export function tmFixNote({ item, plan, dep, now }) {
+  const t = tripOf(item); const live = item._samsara || {};
+  const driver = (live.driver1Info && live.driver1Info.name) || live.driver1 || (item._oc && item._oc.driverName) || null;
+  const out = renderOutboundFollowUp({ heading: `Update TruckMate — trip ${tripNo(item)} already departed`, blocks: [{
+    trip: tripNo(item), group: 'TruckMate status out of date', sortKey: '0',
+    scheduled: `Pickup${plan.place ? ` · ${plan.place}` : ''} · ${fmt(plan.ms, plan.tz)} (from ${plan.source})`,
+    status: { label: 'TruckMate wrong', tone: 'amber', text: `TruckMate shows ${t.status || 'no status'}, but the truck has left — ${dep.source}${live.location ? ` near ${live.location}` : ''}${live.gpsAt ? ` (GPS ${fmt(Date.parse(live.gpsAt), plan.tz)})` : ''}` },
+    next: 'Please update the status in TruckMate to departed (DEPSHIP) so customer emails, ETAs and the board stay right',
+    need: null, details: [`Truck ${t.powerUnit || '—'} · trailer ${t.trailer || '—'}${driver ? ` · driver ${driver}` : ''}`, `Checked ${fmt(now, plan.tz)}`],
+  }] });
+  return { subject: `Update TruckMate: trip ${tripNo(item)} departed — status still ${t.status || 'blank'}`, html: out.html, text: out.text };
+}
+
 export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral = null, comms = null, voice = null, docs = null, driverLinks = null, replyInThread = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const key = `taPickupFollow:${site}`;
   const cfgKey = 'taPickupFollowCfg';
-  const DEFAULTS = { on: true, to: [], callWhenNoText: true };
+  const DEFAULTS = { on: true, to: [], callWhenNoText: true, tmFixTo: ['dispatches@floridabeauty.us'] };
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const settings = async () => ({ ...DEFAULTS, ...((enabled && (await db.get(cfgKey, {}))) || {}) });
   const smsLive = async () => { try { const c = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } };
@@ -221,6 +235,18 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     return { emailed: true, subject };
   }
 
+  // who fixes TruckMate: dispatches@ + Customer Service (Callback teams "Customer service" and the
+  // Employees tab) — our own addresses only
+  async function tmFixTo() {
+    const cfg = await settings();
+    const ours = (a) => /@floridabeauty\.us$/i.test(String(a || '').trim());
+    const help = (await db.get('taHelpCfg', {})) || {};
+    const teams = Array.isArray(help.teams) ? help.teams : [];
+    const cs = teams.filter((tm) => tm && tm.active !== false && /customer.?serv/i.test(`${tm.id} ${tm.name}`)).flatMap((tm) => [tm.email, ...(tm.members || []).map((m) => m && m.email)]);
+    const dir = (((await db.get('taStaffDirectory', {})) || {}).people || []).filter((p) => p && p.active !== false && /customer.?serv/i.test(p.department || '')).map((p) => p.email);
+    return [...new Set([...(cfg.tmFixTo || []), ...cs, ...dir].map((a) => String(a || '').trim().toLowerCase()).filter(ours))];
+  }
+
   // One pass over the board.
   async function run() {
     const cfg = await settings();
@@ -269,6 +295,15 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
       const dep = departedNow(it, plan, now());
       // departure is sticky for this pickup: a truck slowing down in traffic later has NOT "not departed"
       if (dep && !st.departedAt) st = { ...st, departedAt: new Date(now()).toISOString(), departedBy: dep.source };
+      // GPS says it left but TruckMate still doesn't → ask dispatch + customer service to fix it (once per pickup)
+      if (dep && /^GPS/.test(dep.source) && !STARTED.test(String(tripOf(it).status || '')) && !st.tmFixAt && now() - plan.ms < 12 * 60 * MIN) {
+        st = { ...st, tmFixAt: new Date(now()).toISOString() };
+        try {
+          const to = await tmFixTo(); // eslint-disable-line no-await-in-loop
+          if (to.length && mailConfig(env).ready) { const m = tmFixNote({ item: it, plan, dep, now: now() }); await sendMail({ to, subject: m.subject, html: m.html, text: m.text }, { env, fetchFn }); st.tmFixTo = to; } // eslint-disable-line no-await-in-loop
+        } catch (e) { st.tmFixError = e.message; }
+        done.push({ trip, tmFix: true });
+      }
       const fresh = now() - plan.ms < 6 * 60 * MIN;                     // nothing about pickups long gone
       if (dep && !th.departed) {
         th.departed = new Date(now()).toISOString();
@@ -324,7 +359,8 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const b = req.body || {};
     const to = [...new Set(String(Array.isArray(b.to) ? b.to.join(',') : b.to || '').split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)))].slice(0, 20);
-    res.json(await db.update(cfgKey, (cur) => ({ ...(cur || {}), to, on: b.on !== false, callWhenNoText: b.callWhenNoText !== false, updatedBy: who(req), updatedAt: new Date().toISOString() }), {}));
+    const tmFix = b.tmFixTo == null ? null : [...new Set(String(Array.isArray(b.tmFixTo) ? b.tmFixTo.join(',') : b.tmFixTo).split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[^@\s]+@floridabeauty\.us$/.test(x)))].slice(0, 10);
+    res.json(await db.update(cfgKey, (cur) => ({ ...(cur || {}), to, ...(tmFix ? { tmFixTo: tmFix } : {}), on: b.on !== false, callWhenNoText: b.callWhenNoText !== false, updatedBy: who(req), updatedAt: new Date().toISOString() }), {}));
   });
   console.log(`[pickup-follow] driver pickup follow-up ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
   return { run, overlay };

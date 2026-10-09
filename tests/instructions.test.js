@@ -129,3 +129,34 @@ test('once departed (GPS 47 mph), slowing to 6 mph in traffic later never sends 
   clock = plan + 90 * 60000; await f.run();
   assert.equal(sent.length, 1, 'no "not departed" after it departed');
 });
+
+import { tmFixNote } from '../pickupfollow.js';
+
+test('GPS departed but TruckMate still LOADEDTOGO → one email to dispatches@ + customer service to fix TruckMate', async () => {
+  const db = memDb();
+  await db.set('taHelpCfg', { teams: [{ id: 'customer-service', name: 'Customer service', email: '', members: [{ name: 'Saray', email: 'saray@floridabeauty.us' }, { name: 'Outside', email: 'x@gmail.com' }] }] });
+  const plan = Date.parse('2026-10-09T03:30:00Z');
+  const item = { trip: { tripNumber: '624625', status: 'LOADEDTOGO', powerUnit: '2220', trailer: '2048' }, _samsara: { speedMph: 0 }, _manifest: { pickupAt: '2026-10-08T23:30' } };
+  const mails = [];
+  let clock = plan - 20 * 60000;
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
+  const fetchFn = async (url, o) => { if (/token/.test(url)) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) }; mails.push(o.body); return { ok: true, status: 202, json: async () => ({}) }; };
+  const f = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, getBoard: async () => ({ trips: [item] }), env, fetchFn, now: () => clock });
+  await f.run();
+  assert.equal(mails.length, 0);
+  item._samsara = { speedMph: 47, location: 'State Road 7, Palm Beach County, FL', gpsAt: new Date(plan - 2 * 60000).toISOString() };
+  clock = plan - 2 * 60000; await f.run();
+  assert.equal(mails.length, 1);
+  const mime = Buffer.from(mails[0], 'base64').toString('utf8');
+  assert.match(mime, /^To: dispatches@floridabeauty\.us, saray@floridabeauty\.us$/m);
+  clock = plan + 10 * 60000; await f.run();
+  assert.equal(mails.length, 1, 'once per pickup');
+  item.trip.status = 'DEPSHIP';
+});
+
+test('the fix-TruckMate email says what TruckMate shows and what GPS shows', () => {
+  const m = tmFixNote({ item: { trip: { tripNumber: '624625', status: 'LOADEDTOGO', powerUnit: '2220', trailer: '2048' }, _samsara: { location: 'State Road 7, Palm Beach County, FL', driver1: 'Alexey Garcia' } }, plan: { ms: Date.parse('2026-10-09T03:30:00Z'), place: 'MIAMI TERMINAL', source: 'trip sheet' }, dep: { source: 'GPS: truck moving 47 mph' }, now: Date.parse('2026-10-09T03:28:00Z') });
+  assert.equal(m.subject, 'Update TruckMate: trip 624625 departed — status still LOADEDTOGO');
+  assert.match(m.text, /TruckMate shows LOADEDTOGO, but the truck has left — GPS: truck moving 47 mph near State Road 7, Palm Beach County, FL/);
+  assert.match(m.text, /update the status in TruckMate to departed \(DEPSHIP\)/);
+});
