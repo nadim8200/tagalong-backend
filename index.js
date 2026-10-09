@@ -51,6 +51,8 @@ import { initBrokerTrack } from './brokertrack.js';
 import { initNextLoads } from './nextloads.js';
 import { initPlanSheet } from './plansheet.js';
 import { initPaperwork } from './paperwork.js';
+import { initClients } from './clients.js';
+import { nameScore } from './voice.js';
 import { initMilestones } from './milestones.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
@@ -724,7 +726,9 @@ const carriers = initCarriers(app, { requireAuth: requireDispatch, db });
 const rundowns = initRundowns(app, { requireAuth: requireDispatch, db, docs, env: process.env });
 let truckmate;
 // Calls & texts log by day (who called / was texted, both numbers, what was said)
-const activity = initActivity(app, { requireAuth: requireDispatch, db, push, pushRules, getBoard: (site) => truckmate.buildBoard(site) });
+// the client list (flowers + produce customers): who's calling / emailing, real business names, their loads
+const clients = initClients({ db, score: nameScore });
+const activity = initActivity(app, { clients, requireAuth: requireDispatch, db, push, pushRules, getBoard: (site) => truckmate.buildBoard(site) });
 // "someone needs us to reach out" (calls, emails, texts, driver app) → email + text the right people
 let helpdesk = null;
 const help = { raise: (r) => (helpdesk ? helpdesk.raise(r) : Promise.resolve(null)) };
@@ -757,7 +761,7 @@ const inbox = initInbox(app, { brokerWatch: (site, trip, o) => statusMail.watch(
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
-    text: `[Email from ${from.name || ''} <${from.address}>]\nSubject: ${subject || ''}\n\n${String(text || '').slice(0, 3500)}`,
+    text: `[Email from ${from.name || ''} <${from.address}>]${(() => { const c = clients.byEmail(from.address); return c ? `\n[Sender is on our client list: ${c.name}${c.city ? ` — ${c.city}, ${c.state || ''}` : ''}. Look their loads up by that business name.]` : ''; })()}\nSubject: ${subject || ''}\n\n${String(text || '').slice(0, 3500)}`,
   } : {
     mode: 'staff_email', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: from.name || from.address, email: from.address },
     threadId,
@@ -781,7 +785,7 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
-const voice = initVoice(app, { training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const voice = initVoice(app, { clients, training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, db, replyInThread: (...a) => inbox.replyInThread(...a), ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // paperwork after delivery: POD / BOL from the driver → broker + Billing; Billing's document requests
@@ -795,7 +799,7 @@ voice.useOutreach((ev) => outreach.notify(ev));
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
-jarvisChat = initJarvisChat(app, { planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
+jarvisChat = initJarvisChat(app, { clients, planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });

@@ -14,7 +14,7 @@ export const dayOf = (iso) => new Date(iso || Date.now()).toLocaleDateString('en
 const tripOf = (it) => (it && it.trip) || it || {};
 
 // Who a phone number belongs to. Pure.
-export function whoIs(phone, { profiles = {}, drivers = new Map(), team = [] } = {}) {
+export function whoIs(phone, { profiles = {}, drivers = new Map(), team = [], clients = null } = {}) {
   const P = last10(phone);
   if (!P) return { role: 'unknown' };
   const t = team.find((m) => last10(m.phone) === P);
@@ -24,6 +24,8 @@ export function whoIs(phone, { profiles = {}, drivers = new Map(), team = [] } =
     const c = (p.contacts || []).find((x) => last10(x.phone) === P);
     if (c) return { role: p.type === 'broker' ? 'broker' : 'customer', name: c.name || null, detail: `${p.name}${p.office && (p.office.city || p.office.state) ? ` — ${[p.office.city, p.office.state].filter(Boolean).join(', ')}` : ''}` };
   }
+  const c = clients && clients.byPhone ? clients.byPhone(P) : null;
+  if (c) return { role: 'customer', name: c.name, detail: [c.city, c.state].filter(Boolean).join(', ') || null };
   return { role: 'unknown' };
 }
 
@@ -52,7 +54,7 @@ export function callbackOf(callId, requests = []) {
 }
 const fmt = (p) => { const d = last10(p); return d ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || 'unknown number'); };
 
-export function initActivity(app, { requireAuth, db, getBoard = null, push = null, pushRules = null }) {
+export function initActivity(app, { requireAuth, db, clients = null, getBoard = null, push = null, pushRules = null }) {
   const enabled = !!(db && db.enabled);
   const key = (day) => `taActivity:${SITE}:${day}`;
   const daysKey = `taActivityDays:${SITE}`;
@@ -95,7 +97,7 @@ export function initActivity(app, { requireAuth, db, getBoard = null, push = nul
       }
     } catch { /* board unavailable */ }
     const team = ((help && help.teams) || []).flatMap((t) => (t.members || []).map((m) => ({ ...m, team: t.name })));
-    return { profiles: profiles || {}, drivers, team };
+    return { profiles: profiles || {}, drivers, team, clients };
   }
 
   app.get('/truckmate/activity/days', requireAuth, async (req, res) => {

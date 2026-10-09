@@ -14,7 +14,7 @@ function memDb() {
   const m = new Map();
   return { enabled: true, m, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
 }
-function setup(extraEnv = {}) {
+function setup(extraEnv = {}, opts = {}) {
   const routes = {}; const logged = []; const checkins = []; const retellCalls = [];
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const db = memDb();
@@ -30,7 +30,7 @@ function setup(extraEnv = {}) {
       : url.includes('create-phone-call') ? { call_id: 'call_9', call_status: 'registered' } : {};
     return { ok: true, status: 201, json: async () => body };
   };
-  initVoice(app, { requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: board }), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
+  initVoice(app, { ...(opts.clients ? { clients: opts.clients } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: board }), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
   const hit = async (route, body, { sign = true, user = { name: 'Ana' } } = {}) => {
     const raw = JSON.stringify(body);
     const sig = sign ? await Retell.sign(raw, KEY) : 'v=1,d=bad';
@@ -487,4 +487,34 @@ test('a name Jarvis suggested (did_you_mean) needs the caller\'s yes before anyt
     const confirmed = await v2.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Riccardi Wholesale', caller_confirmed: true }, call: call2 });
     assert.equal(confirmed.out.found, true);
   } finally { board.pop(); }
+});
+
+import { initClients } from '../clients.js';
+
+test('client list: "DBE C Wholesale" in Greensburg is D.B.E.C. WHOLESALE — its load found by client ID; never another customer', async () => {
+  const clients = initClients({ score: nameScore });
+  assert.ok(clients.size() > 1500);
+  assert.equal(clients.byName('DBE C Wholesale', { city: 'Greensburg' })[0].id, '00983');
+  assert.equal(clients.byPhone('(724) 834-6200').name, 'D.B.E.C. WHOLESALE');
+  // the Greensburg delivery is billed to another name, but TruckMate's consignee record carries DBEC's client ID
+  const dbecLoad = { trip: { tripNumber: '624802', status: 'DEPSHIP', powerUnit: '2702' }, freightBills: [{ billNumber: 'B0200003', billToName: 'CHELSEA MARKET - RICCARDI WHOLESALE', consignee: { clientId: '00983', name: 'D.B.E.C. WHOLESALE' }, endZoneDescription: 'GREENSBURG, PA, 15601', pieces: 8 }] };
+  board.push(dbecLoad);
+  try {
+    const v = setup({}, { clients });
+    const r = await v.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'D B E C Wholesale', customer_city: 'Greensburg' }, call: { call_id: 'c90', direction: 'inbound', from_number: '+17245550199' } });
+    assert.equal(r.out.found, true);
+    assert.match(r.out.speaking_with, /D\s?B\s?E\s?C/i);
+    assert.ok(!/Riccardi/i.test(r.out.speaking_with));
+    // calling from DBEC's own number: recognized, asked to confirm first
+    const v2 = setup({}, { clients });
+    const r2 = await v2.hit('POST /retell/fn/lookup_load', { args: {}, call: { call_id: 'c91', direction: 'inbound', from_number: '+17248346200' } });
+    assert.equal(r2.out.found, true);
+    assert.match(r2.out.confirm || '', /Is this/);
+  } finally { board.pop(); }
+  // a client with nothing on the board: said so, no guessing, no contact details read out
+  const v3 = setup({}, { clients });
+  const r3 = await v3.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Sunbelt Wholesale Florists' }, call: { call_id: 'c92', direction: 'inbound', from_number: '+16015550000' } });
+  assert.equal(r3.out.found, false);
+  assert.match(r3.out.say, /one of our customers.*no load for them is on the board/);
+  assert.ok(!/601-?261|trussell/i.test(JSON.stringify(r3.out)));
 });

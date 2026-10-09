@@ -232,6 +232,7 @@ export function findLoad(items, { trip, bill, loadNumber, truck, trailer, phone 
 const STOPWORDS = new Set(['INC', 'LLC', 'LTD', 'CORP', 'CO', 'COMPANY', 'THE', 'AND', 'OF', 'DBA', 'C', 'O']);
 // spelled-out letters are part of the name: "D B E C Wholesale" / "DBE C Wholesale" → "DBEC Wholesale"
 export const joinSpelled = (x) => String(x || '').toUpperCase()
+  .replace(/\b([A-Z])\s*(?:&|\bAND\b|\bN\b|')\s*([A-Z])\b/g, '$1$2')   // initials: "R&W", "R and W", "J & J" → RW / JJ
   .replace(/\b[A-Z](?:[\s.\-]+[A-Z]\b)+/g, (m) => m.replace(/[\s.\-]+/g, ''))
   .replace(/\b([A-Z]{2,3})\s+([A-Z])\b(?!\s*\/)/g, '$1$2');
 const nameWords = (x) => joinSpelled(x).replace(/&/g, ' AND ').replace(/[^A-Z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 1 && !STOPWORDS.has(w));
@@ -248,7 +249,8 @@ export function nameScore(said, onSheet) {
   // …and the whole name still has to fit ("Springfield Florist" ≠ Big Y, a stop IN Springfield)
   const fit = (ws) => ws.filter((w) => b.some((x) => sameWord(w, x))).length / ws.length;
   const distinct = a0.filter((w) => !GENERIC.has(w));
-  if (!distinct.length) return b.every((w) => GENERIC.has(w)) ? fit(a0) : 0;   // "Wholesale" alone isn't a business
+  // "Wholesale" alone isn't a business; an all-generic name ("J & J Wholesale Florist") must be said in full
+  if (!distinct.length) return b.every((w) => GENERIC.has(w)) ? Math.min(fit(a0), b.filter((x) => a0.some((w) => sameWord(w, x))).length / b.length) : 0;
   return Math.min(fit(distinct), fit(a0));
 }
 // Every stop on the board whose customer matches the name — with boxes, cubes and ETA for that stop only. Pure.
@@ -445,7 +447,7 @@ export function brokerView(item, eta) {
   };
 }
 
-export function initVoice(app, { requireAuth, db, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initVoice(app, { requireAuth, db, clients = null, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taRetellCfg';
@@ -502,6 +504,8 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
       const said = a.customer_name || [a.bill_number, a.broker_load_number, a.trip_number, a.truck_number, a.trailer_number].find(isName) || null;
       if (said && call.call_id) callName.set(call.call_id, said);
       let known = said ? null : ((await db.get(bookKey, {}))[last10(callerPhone(call))] || null);   // called before from this phone
+      // a number on the client list → that business (confirmed with the caller before anything is shared)
+      if (!said && !known && clients) { const c = clients.byPhone(callerPhone(call)); if (c) known = { name: c.name, client: c.id }; }
       if (known) { const d = findLoad(await items(), { phone: callerPhone(call) }); if (d && d.role === 'driver') known = null; }
       const name = said || (call.call_id && callName.get(call.call_id)) || (known && known.name) || null;   // remembered from earlier in the call
       const numbers = [a.trip_number, a.bill_number, a.broker_load_number, a.truck_number, a.trailer_number].some((v) => v && !isName(v));
@@ -511,7 +515,17 @@ export function initVoice(app, { requireAuth, db, training = null, directory = n
         // a name Jarvis itself suggested → only after the caller said yes to "Is that …?"
         const guessed = said && call.call_id && (callGuess.get(call.call_id) || new Set()).has(String(said).toUpperCase());
         if (guessed && !a.caller_confirmed) return reply({ found: false, did_you_mean: [said], say: `Not confirmed yet. Ask exactly: "Is that ${said}?" Only if they clearly say yes, call lookup_load again with customer_name "${said}" and caller_confirmed true. If no, ask them to spell their business name. Share nothing about any load until then.` });
-        const stops = customerStops(all, name, etas);
+        let stops = customerStops(all, name, etas);
+        // not on the board by that name → the client list: the business's real name, then its loads by client ID / name / phone
+        const client = !stops.length && clients ? (clients.byName(name, { city: a.customer_city })[0] || null) : null;
+        if (client) {
+          const mine = clients.loads(all, client);
+          stops = mine.flatMap((it) => customerStops([it], clients.nameOnLoad(it, client), etas));
+          if (!stops.length && !mine.length) {
+            if (call.call_id) callName.set(call.call_id, client.name);
+            return reply({ found: false, known_client: spokenName(client.name), say: `${spokenName(client.name)} is one of our customers${client.city ? ` (${spokenName(client.city)}, ${client.state || ''})` : ''}, but no load for them is on the board right now — it may already be delivered or not dispatched yet. Ask for a trip, bill or PO number, or take a message for customer service. Never read out the customer's phone or email.` });
+          }
+        }
         if (!stops.length) {
           // a broker calling by company name ("RXO", "Red Lab")
           const theirs = all.filter((it) => { const rc = rcOf(it); return rc && rc.broker && nameScore(name, rc.broker) >= 0.75; });
