@@ -82,3 +82,17 @@ test('calls show their callback request: open → "call back needed", then who h
   await routes['/truckmate/activity/call/:callId']({ params: { callId: 'abc' }, query: { at: '2026-10-08T15:01:00Z' } }, res);
   assert.equal(out.id, 'call:abc');
 });
+
+import { entriesFor } from '../activity.js';
+
+test('profile history: calls (with recording) and texts on the customer\'s numbers, or calls where they gave the name', () => {
+  const list = [
+    { id: 'call:a', kind: 'call', direction: 'inbound', from: '+16175551212', to: '+13055031200', at: '2026-10-09T14:00:00Z', recording: 'https://r/a.wav' },
+    { id: 't1', kind: 'text', dir: 'out', from: '+13055031200', to: '(617) 555-1212', at: '2026-10-09T15:00:00Z', text: 'Your load is on the way' },
+    { id: 'call:b', kind: 'call', direction: 'inbound', from: '+19995550000', at: '2026-10-08T14:00:00Z', role: 'customer', name: 'Chelsea Market - Direct Flowers of Boston, Inc.' },
+    { id: 'call:c', kind: 'call', direction: 'inbound', from: '+18885550000', at: '2026-10-08T15:00:00Z', name: 'Somebody Else' },
+    { id: 'app1', kind: 'app', dir: 'in', from: '6175551212', at: '2026-10-09T16:00:00Z' },
+  ];
+  const got = entriesFor(list, { phones: ['6175551212'], name: 'CHELSEA MARKET - DIRECT FLOWERS OF BOSTON INC' });
+  assert.deepEqual(got.map((e) => e.id), ['t1', 'call:a', 'call:b']);
+});

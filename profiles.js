@@ -90,6 +90,33 @@ export function mergeInto(store, found, trip, now = new Date().toISOString()) {
   return all;
 }
 
+// Florida Beauty's client list (TruckMate client report, clients.js) → customer profiles: every client
+// gets a profile with its delivery city and its phone(s) / emails as contacts (source "client list").
+// Never marked status-email or authorized caller — a dispatcher ticks those. Pure.
+export function fromClientList(list = []) {
+  return list.filter((c) => c && c.name).map((c) => {
+    const who = (c.contacts || []).filter(Boolean).join(', ') || null;
+    const phones = [...new Set([c.phone, ...(c.phones || [])].map(last10).filter(Boolean))];
+    return {
+      key: profileKey('customer', c.name), type: 'customer', name: cleanName(c.name), office: null, clientId: c.id || null, inactive: !!c.inactive,
+      locations: [[c.city, c.state].filter(Boolean).join(', ')].filter(Boolean),
+      contacts: [...phones.map((ph, i) => ({ name: i === 0 ? who : null, role: 'customer', email: null, phone: ph, source: 'client list' })),
+        ...(c.emails || []).map((e) => ({ name: null, role: 'customer', email: String(e).toLowerCase().trim(), phone: null, source: 'client list' }))],
+    };
+  });
+}
+export function mergeClientList(store, list, now = new Date().toISOString()) {
+  const found = fromClientList(list);
+  let all = mergeInto(store, found, null, now);
+  const byKey = new Map(Object.values(all).map((p) => [p.key, p]));
+  for (const f of found) {
+    const p = byKey.get(f.key); if (!p) continue;
+    if (f.clientId) p.clientId = f.clientId;
+    if (!(p.sources || []).includes('client list')) p.sources = [...(p.sources || []), 'client list'];
+  }
+  return all;
+}
+
 // Can this phone get a customer's delivery details from Jarvis? Pure.
 // → { ok, why, profile }  (strict off, or the profile has no numbers yet → ok)
 export function phoneAllowed({ profiles, settings = {}, customerName, phone }) {
@@ -147,7 +174,7 @@ export function applyCsv(profiles, rows, by = 'upload', now = new Date().toISOSt
   return { profiles: all, updated, created, contacts };
 }
 
-export function initProfiles(app, { requireAuth, db, getBoard = null, env = process.env }) {
+export function initProfiles(app, { requireAuth, db, getBoard = null, env = process.env, clientList = null }) {
   const enabled = !!(db && db.enabled);
   const key = `taProfiles:${SITE}`;
   const cfgKey = `taProfilesCfg:${SITE}`;
@@ -157,7 +184,19 @@ export function initProfiles(app, { requireAuth, db, getBoard = null, env = proc
   const save = async (fn) => { const v = await db.update(key, (cur) => fn({ ...(cur || {}) }), {}); cache = { ...cache, at: Date.now(), all: v }; return v; };
 
   // build / refresh profiles from the live board (and older saved per-customer emails)
+  // the client list goes in once (and again when the list changes); later edits by dispatch are kept
+  async function importClients() {
+    const list = clientList ? clientList() : [];
+    if (!enabled || !list.length) return 0;
+    const mark = `taProfilesClientList:${SITE}`;
+    const sig = `${list.length}:${list.map((c) => c.id).join(',').length}`;
+    if (((await db.get(mark, {})) || {}).sig === sig) return 0;
+    await save((all) => mergeClientList(all, list));
+    await db.set(mark, { sig, at: new Date().toISOString(), clients: list.length });
+    return list.length;
+  }
   async function sync() {
+    await importClients().catch((e) => console.warn('[profiles] client list:', e.message));
     if (!enabled || !getBoard) return 0;
     const board = await getBoard(SITE);
     const legacy = ((await db.get('taStatusMailCfg', {})) || {}).customers || {};

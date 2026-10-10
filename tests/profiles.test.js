@@ -65,3 +65,22 @@ test('customer status emails go to profile contacts marked "Status emails"', () 
   assert.ok(c.some((x) => x.email === 'maria@bokhary.com' && x.sources.includes('customer profile')));
   assert.ok(!c.some((x) => x.phone === '7815550000' && x.sources.includes('customer profile')));
 });
+
+import { fromClientList, mergeClientList } from '../profiles.js';
+
+test('client list → customer profiles: phones + emails as contacts, merged into the profile built from loads', () => {
+  const list = [{ id: '00412', name: 'CHELSEA MARKET - DIRECT FLOWERS OF BOSTON INC', city: 'CHELSEA', state: 'MA', phone: '6175551212', fax: '6175550000', phones: ['617-555-3434'], emails: ['Orders@DirectFlowers.com'], contacts: ['MIKE'] },
+    { id: '01967', name: "HILL'S WHOLESALE -LITTLE FLOYD", city: 'LONGVIEW', state: 'TX', phone: '9037588300', phones: [], emails: [], contacts: [] }];
+  const f = fromClientList(list);
+  assert.deepEqual(f[0].contacts.map((c) => [c.name, c.phone, c.email]), [['MIKE', '6175551212', null], [null, '6175553434', null], [null, null, 'orders@directflowers.com']]);
+  // the profile TruckMate already made for this customer gets the contacts (no duplicate profile)
+  const store = mergeInto({}, [{ key: profileKey('customer', 'CHELSEA MARKET - DIRECT FLOWERS OF BOSTON INC'), type: 'customer', name: 'CHELSEA MARKET - DIRECT FLOWERS OF BOSTON INC', office: null, locations: ['CHELSEA, MA'], contacts: [] }], '624709');
+  const all = Object.values(mergeClientList(store, list));
+  assert.equal(all.length, 2);
+  const p = all.find((x) => x.clientId === '00412');
+  assert.equal(p.contacts.length, 3);
+  assert.ok(p.contacts.every((c) => !c.authorized && !c.statusEmails), 'dispatch ticks status emails / authorized callers');
+  assert.deepEqual(p.loads.map((l) => l.trip), ['624709']);
+  // running it again adds nothing
+  assert.equal(Object.values(mergeClientList(Object.fromEntries(all.map((x) => [x.id, x])), list)).find((x) => x.clientId === '00412').contacts.length, 3);
+});

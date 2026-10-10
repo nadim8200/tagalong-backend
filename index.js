@@ -770,7 +770,7 @@ const inbox = initInbox(app, { brokerWatch: (site, trip, o) => statusMail.watch(
   // our staff can ask Jarvis (by email) to text or call a driver — same consent / STOP rules
   driver: driverHooks });
 // customer & broker profiles (Customers tab): built from the loads, edited / verified by dispatch
-const profiles = initProfiles(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const profiles = initProfiles(app, { clientList: () => clients.all(), requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 let tempPhotos = null;    // reefer temp photos for trailers we can't read live (set below)
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
 let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers overlay)

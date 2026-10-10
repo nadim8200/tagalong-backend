@@ -103,7 +103,7 @@ test('broker updates only when asked: current location now, then at 8/12/4 AM-PM
   await sm.process('fb', { trips: [picked] }, { geo, now: T - 1800000 });
   await sm.process('fb', { trips: [picked] }, { geo, now: T + 5 * 3600000 });
   assert.equal(chains.length, 0, 'no automatic location updates any more');
-  await sm.watch('fb', '900200', { emailId: 'ask1', by: 'Rosa' });
+  await sm.watch('fb', '900200', { emailId: 'ask1', by: 'Rosa', at: new Date(T - 60000).toISOString() });
   await sm.process('fb', { trips: [picked] }, { geo, now: T });
   assert.equal(chains.length, 1, 'current location right away');
   assert.deepEqual([chains[0].to, chains[0].cc], [['ana@rosebrokers.com'], ['tracking@rosebrokers.com']]);

@@ -52,6 +52,20 @@ export function callbackOf(callId, requests = []) {
   const r = hits.find((x) => x.status !== 'handled') || hits[0];
   return r ? { id: r.id, status: r.status === 'handled' ? 'handled' : 'open', need: r.need || null, urgent: !!r.urgent, handledBy: r.handledBy || null, handledAt: r.handledAt || null, owner: r.owner || null, dueAt: r.dueAt || null, teams: (r.sent && r.sent.teams) || [] } : null;
 }
+// A customer's / broker's calls and texts: entries with one of its phone numbers (either side), or a
+// call where the caller gave its name. Newest first. Pure.
+const normCo = (s) => String(s || '').toUpperCase().replace(/\b(LLC|INC|CORP|CO|LTD)\b\.?/g, ' ').replace(/[^A-Z0-9& ]+/g, ' ').replace(/\s+/g, ' ').trim();
+export function entriesFor(list = [], { phones = [], name = '' } = {}) {
+  const P = new Set(phones.map(last10).filter(Boolean));
+  const N = normCo(name);
+  return list.filter((e) => {
+    if (!e || (e.kind !== 'call' && e.kind !== 'text')) return false;
+    if (e.role === 'team' || e.role === 'driver') return false;
+    const other = e.kind === 'call' ? (e.direction === 'outbound' ? e.to : e.from) : (e.dir === 'in' ? e.from : e.to);
+    if (P.has(last10(other))) return true;
+    return !!(N && N.length >= 4 && [e.name, e.detail].some((x) => normCo(x) === N));
+  }).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+}
 const fmt = (p) => { const d = last10(p); return d ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || 'unknown number'); };
 
 export function initActivity(app, { requireAuth, db, clients = null, getBoard = null, push = null, pushRules = null }) {
@@ -118,6 +132,21 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
       return { ...e, otherPhone: other || null, role: w.role, name: e.name || w.name || null, detail: e.detail || w.detail || null, callback };
     }).filter((e) => (type === 'all' || e.role === type || (type === 'callback' && e.callback && e.callback.status === 'open')) && (!q || JSON.stringify([e.name, e.detail, e.otherPhone, e.trip, e.summary, e.text, e.transcript]).toLowerCase().includes(q)));
     res.json({ day, entries: out.sort((a, b) => String(b.at).localeCompare(String(a.at))) });
+  });
+
+  // a customer / broker profile's history: every call (recording + transcript) and text with its numbers
+  app.get('/truckmate/activity/for-profile/:id', requireAuth, async (req, res) => {
+    const p = ((await db.get(`taProfiles:${SITE}`, {})) || {})[String(req.params.id)];
+    if (!p) return res.status(404).json({ error: 'Not found.' });
+    const phones = (p.contacts || []).map((c) => c.phone).filter(Boolean);
+    const days = Object.keys((await db.get(daysKey, {})) || {}).sort().reverse().slice(0, Math.min(365, Number(req.query.days) || 120));
+    const out = [];
+    for (const d of days) {
+      const list = (await db.get(key(d), [])) || []; // eslint-disable-line no-await-in-loop
+      out.push(...entriesFor(list, { phones, name: p.name }));
+      if (out.length >= 200) break;
+    }
+    res.json({ phones: phones.length, entries: out.slice(0, 200).map((e) => ({ ...e, otherPhone: e.kind === 'call' ? (e.direction === 'outbound' ? e.to : e.from) : (e.dir === 'in' ? e.from : e.to) })) });
   });
 
   // one call (for a callback request: "hear the call / read the transcript")

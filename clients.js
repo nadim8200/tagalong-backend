@@ -79,6 +79,7 @@ export function initClients({ db = null, score }) {
   refresh().catch(() => {});
   return {
     size: () => list.length,
+    all: () => list,
     byId: (x) => idx.byId(x), byPhone: (x) => idx.byPhone(x), byEmail: (x) => idx.byEmail(x),
     byName: (s, o) => idx.byName(s, o),
     loads: (items, c) => clientLoads(items, c, score),

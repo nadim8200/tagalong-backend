@@ -795,9 +795,9 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
 
   console.log(`[status-mail] customer status emails for ${DEFAULTS.prefixes.join('/')} loads ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
   // "@Jarvis please update the broker on this load" → 6 location updates a day + every milestone, until delivered
-  async function watch(site, trip, { emailId = null, by = null } = {}) {
+  async function watch(site, trip, { emailId = null, by = null, at = null } = {}) {
     if (!enabled) return { ok: false };
-    await db.update(watchKey(site), (cur) => ({ ...(cur || {}), [String(trip)]: { since: new Date().toISOString(), emailId, by } }), {});
+    await db.update(watchKey(site), (cur) => ({ ...(cur || {}), [String(trip)]: { since: at || new Date().toISOString(), emailId, by } }), {});
     return { ok: true, times: (await settings()).watchTimes || DEFAULTS.watchTimes };
   }
   app.get('/truckmate/broker-watch', requireAuth, async (req, res) => res.json((await db.get(watchKey(String(req.query.site || 'florida-beauty')), {})) || {}));
