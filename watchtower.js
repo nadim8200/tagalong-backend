@@ -336,7 +336,11 @@ function routeEtas(f, ctx) {
     if (!g) return null;
     pts.set(st.key, g);
   }
-  const o = ctx.origin;
+  // stops in order from where THIS trip picked up (Oxnard / Ventura loads run west → east; Miami loads the
+  // other way) — the Miami terminal only when the trip's origin can't be placed
+  const oz = zipOf(f.origin);
+  const og = oz ? ctx.geo(oz) : null;
+  const o = og || ctx.origin;
   const fromOrigin = (st) => haversineMi(o.lat, o.lng, pts.get(st.key).lat, pts.get(st.key).lng);
   const sorted = [...open].sort((a, b) => ((a.seq != null ? a.seq : 999) - (b.seq != null ? b.seq : 999)) || (fromOrigin(a) - fromOrigin(b)));
   // stops the truck already drove past → most likely delivered; never route back to them

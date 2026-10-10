@@ -99,3 +99,20 @@ test('trip sheet "drivers will leave at 20:30": ETAs start at departure, no late
   assert.ok(e.stops[0].etaMs - e.leavesAt > 13 * 3600000, 'clock starts at 20:30');
   assert.deepEqual(evaluateBoard({ trips: [it] }, c).filter((a) => a.code === 'late-risk'), []);
 });
+
+// Trip 624647: Oxnard CA → San Antonio (delivered) → Houston → Kenner → Biloxi → Pensacola → … → Miami.
+// The team is on I-10 in Guadalupe County TX. Stops must run from Oxnard, not from the Miami terminal.
+test('a West Coast trip is routed from its own origin: Houston next (not Miami first)', () => {
+  const G = { 93035: { lat: 34.17, lng: -119.22 }, 77040: { lat: 29.87, lng: -95.53 }, 70062: { lat: 29.99, lng: -90.25 }, 39532: { lat: 30.47, lng: -88.85 }, 32505: { lat: 30.45, lng: -87.26 }, 33122: { lat: 25.8, lng: -80.31 }, 33126: { lat: 25.78, lng: -80.29 }, 78217: { lat: 29.54, lng: -98.42 } };
+  const b = (n, zone, del) => ({ billNumber: n, billToName: 'X', endZoneDescription: zone, pieces: 5, deliverBy: '2026-10-09T00:00:00', ...(del ? { actualDelivery: del } : {}) });
+  const it = {
+    trip: { tripNumber: '624647', status: 'DEPCONS', powerUnit: '2219', driver2: 'Y', origZoneDesc: 'OXNARD, CA, 93035', destZoneDesc: 'MIAMI, FL, 33122' },
+    freightBills: [b('C978178', 'MIAMI, FL, 33122'), b('C978180', 'MIAMI, FL, 33126'), b('C978182', 'HOUSTON, TX, 77040'), b('C978184', 'SAN ANTONIO, TX, 78217', '2026-10-10T10:12:35'),
+      b('C978193', 'BILOXI, MS, 39532'), b('C978194', 'PENSACOLA, FL, 32505'), b('C978198', 'KENNER, LA, 70062')],
+    _samsara: { gpsAt: '2026-10-10T15:13:52Z', speedMph: 60, lat: 29.6, lng: -97.9, location: 'West Interstate 10, Guadalupe County, TX', hos: { driveLeftMin: 400, shiftLeftMin: 500 } },
+  };
+  const e = boardEtas({ trips: [it] }, { now: Date.parse('2026-10-10T15:14:00Z'), geo: (z) => G[z] || null, unitState: () => ({}) })['624647'];
+  assert.deepEqual(e.stops.map((x) => x.zip), ['77040', '70062', '39532', '32505', '33122', '33126']);
+  assert.ok(e.stops[0].miles < 220, `Houston is ~170 mi away (${e.stops[0].miles})`);
+  assert.ok(e.stops[0].etaMs < Date.parse('2026-10-10T21:00:00Z'), 'Houston this afternoon, not Wednesday');
+});
