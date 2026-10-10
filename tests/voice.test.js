@@ -30,7 +30,7 @@ function setup(extraEnv = {}, opts = {}) {
       : url.includes('create-phone-call') ? { call_id: 'call_9', call_status: 'registered' } : {};
     return { ok: true, status: 201, json: async () => body };
   };
-  initVoice(app, { ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: board }), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
+  initVoice(app, { ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: board }), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
   const hit = async (route, body, { sign = true, user = { name: 'Ana' } } = {}) => {
     const raw = JSON.stringify(body);
     const sig = sign ? await Retell.sign(raw, KEY) : 'v=1,d=bad';
@@ -572,4 +572,25 @@ test('prompt: a misheard "ETA" ("a new TA") is an ETA request, and ETA is a boos
   const { BASE_WORDS } = await import('../voice.js');
   assert.match(PROMPT, /"a new TA".*mean "I need an ETA"/);
   assert.ok(BASE_WORDS.includes('ETA'));
+});
+
+test('employee phones get any ETA: past the authorized-numbers rule, by name or by number', async () => {
+  const clients = initClients({ score: nameScore });
+  const directory = { load: async () => ({ people: [{ name: 'Frank Ducassi', phone: '305-748-5611' }] }) };
+  const profiles = { allowed: async () => ({ ok: false }), anyLoad: async () => false };
+  const ash = { trip: { tripNumber: '624803', status: 'DEPSHIP', powerUnit: '2703' }, freightBills: [{ billNumber: 'B0200004', billToName: 'ASHLAND ADDISON', endZoneDescription: 'CHICAGO, IL, 60612', pieces: 12 }] };
+  board.push(ash);
+  try {
+    const v = setup({}, { clients, directory, profiles });
+    const staff = { call_id: 'c97', direction: 'inbound', from_number: '+13057485611' };
+    const r1 = await v.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: staff });
+    assert.equal(r1.out.found, true);
+    assert.match(r1.out.caller_is, /Florida Beauty staff/);
+    const r2 = await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '624803' }, call: { ...staff, call_id: 'c98' } });
+    assert.equal(r2.out.found, true);
+    assert.match(r2.out.caller_is, /Florida Beauty staff/);
+    // a customer's unauthorized number still gets nothing
+    const r3 = await setup({}, { clients, directory, profiles }).hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: { call_id: 'c99', direction: 'inbound', from_number: '+13125550177' } });
+    assert.equal(r3.out.found, false);
+  } finally { board.pop(); }
 });
