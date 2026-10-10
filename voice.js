@@ -44,6 +44,13 @@ const norm = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const cityOf = (s) => String(s || '').replace(/,?\s*\d{5}(-\d{4})?\s*$/, '').trim();
 const fmt = (ms) => (ms ? new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' Eastern' : null);
 
+// An employee calling (phone on the Employees list): by first name, with the time of day (Miami time). Pure.
+export function staffGreeting(name, now = Date.now()) {
+  const h = Number(new Date(now).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' }));
+  const part = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+  const first = String(name || '').trim().split(/\s+/)[0];
+  return `${part}${first ? `, ${first}` : ''}! This is Jarvis — this call may be recorded. How can I help you today?`;
+}
 export const GREETING = "Hi, this is Jarvis, Florida Beauty Flora's assistant. This call may be recorded. How can I help you?";
 
 // Said once, right after giving a customer or broker an ETA (in the caller's language).
@@ -516,6 +523,23 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
     } catch { /* keep the plain wording */ }
     return { found: false, private: true, saved_for_other_customer: true, say: `Do NOT share anything about the load. Say: "We're sorry — this phone number is saved for another customer in our system, so I can't give updates from it. Please contact ${who}, to update your contact information, and then you'll be able to get ETAs through the automated system." Then offer to take a message (take_message with their name, company and callback number). Never say which customer the number is saved for.` };
   }
+  // Incoming call, before Jarvis answers: an employee's phone → greet them by name. Anyone else (or a
+  // request we can't verify) → the normal greeting. Only the first name is used; no phone is ever read out.
+  app.post('/retell/inbound', async (req, res) => {
+    const plain = { call_inbound: {} };
+    try {
+      const sig = req.get('x-retell-signature');
+      const raw = req.rawBody || JSON.stringify(req.body || {});
+      let ok = false;
+      try { ok = !!(key() && sig && (await Retell.verify(raw, key(), sig))); } catch { ok = false; }
+      if (!ok) return res.json(plain);
+      const from = ((req.body && (req.body.call_inbound || req.body)) || {}).from_number;
+      const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
+      const me = last10(from).length === 10 ? people.find((x) => x && x.phone && last10(x.phone) === last10(from)) : null;
+      if (!me) return res.json(plain);
+      return res.json({ call_inbound: { dynamic_variables: { greeting: staffGreeting(me.name), call_context: `This is an incoming call from ${me.name}, Florida Beauty staff (their phone is on the Employees list). Help them with any load — they may get any ETA.` } } });
+    } catch { return res.json(plain); }
+  });
   app.post('/retell/fn/lookup_load', verified, async (req, res) => {
     const a = argsOf(req); const call = callOf(req);
     const reply = (j) => {
@@ -842,7 +866,7 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
       let phone = null;
       if (env.RETELL_FROM_NUMBER && published != null) {
         const ag = [{ agent_id: agent.agent_id, agent_version: 'latest_published', weight: 1 }];
-        try { await retell(`/update-phone-number/${encodeURIComponent(e164(env.RETELL_FROM_NUMBER))}`, { method: 'PATCH', body: { inbound_agents: ag, outbound_agents: ag } }); phone = 'latest_published'; }
+        try { await retell(`/update-phone-number/${encodeURIComponent(e164(env.RETELL_FROM_NUMBER))}`, { method: 'PATCH', body: { inbound_agents: ag, outbound_agents: ag, inbound_webhook_url: `${base}/retell/inbound` } }); phone = 'latest_published'; }
         catch (e) { console.warn('[voice] phone number:', e.message); phone = `not updated: ${e.message}`; }
       }
       const next = { llmId: llm.llm_id, agentId: agent.agent_id, llmVersion: llm.version ?? null, agentVersion: agent.version ?? null, published, phone, at: new Date().toISOString(), by, keywords: agentBody.boosted_keywords.join('|') };

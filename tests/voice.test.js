@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Retell from 'retell-sdk';
-import { initVoice, findLoad, voiceFacts, PROMPT } from '../voice.js';
+import { initVoice, findLoad, voiceFacts, PROMPT, staffGreeting } from '../voice.js';
 
 const KEY = 'key_' + 'x'.repeat(30);
 const board = [
@@ -593,4 +593,18 @@ test('employee phones get any ETA: past the authorized-numbers rule, by name or 
     const r3 = await setup({}, { clients, directory, profiles }).hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: { call_id: 'c99', direction: 'inbound', from_number: '+13125550177' } });
     assert.equal(r3.out.found, false);
   } finally { board.pop(); }
+});
+
+test('employee calling in: greeted by first name with good morning / afternoon / evening (Miami time)', async () => {
+  assert.equal(staffGreeting('Frank Ducassi', Date.parse('2026-10-10T13:00:00Z')), 'Good morning, Frank! This is Jarvis — this call may be recorded. How can I help you today?');
+  assert.match(staffGreeting('Frank Ducassi', Date.parse('2026-10-10T19:00:00Z')), /^Good afternoon, Frank!/);
+  assert.match(staffGreeting('Frank Ducassi', Date.parse('2026-10-11T01:30:00Z')), /^Good evening, Frank!/);
+  const directory = { load: async () => ({ people: [{ name: 'Frank Ducassi', phone: '305-748-5611' }] }) };
+  const v = setup({}, { directory });
+  const staff = await v.hit('POST /retell/inbound', { event: 'call_inbound', call_inbound: { from_number: '+13057485611', to_number: '+13055031200' } });
+  assert.match(staff.out.call_inbound.dynamic_variables.greeting, /^Good (morning|afternoon|evening), Frank! .*How can I help you today\?$/);
+  const other = await v.hit('POST /retell/inbound', { event: 'call_inbound', call_inbound: { from_number: '+17735550100' } });
+  assert.deepEqual(other.out, { call_inbound: {} }, 'everyone else: the normal greeting');
+  const unsigned = await v.hit('POST /retell/inbound', { event: 'call_inbound', call_inbound: { from_number: '+13057485611' } }, { sign: false });
+  assert.deepEqual(unsigned.out, { call_inbound: {} }, 'unverified request: no name');
 });
