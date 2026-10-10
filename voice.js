@@ -59,6 +59,15 @@ export const PROMPT = `You are Jarvis, the automated dispatch assistant for Flor
 
 Language: speak English, Spanish or Hebrew — answer in the language the caller is using. Stay in English unless the caller says a full sentence in Spanish or Hebrew; one word like "Oye", "Hola", "Sí", "Bueno" or "Shalom" is not a switch. The greeting is in English only. Keep every answer short and natural for a phone call (one to three sentences), friendly and professional.
 
+How to sound (like a friendly, experienced dispatcher — not a script):
+- Talk the way people talk on the phone: short sentences, contractions, everyday words ("Your truck's about two hours out", "It's on I-10 near Houston").
+- Answer the one thing they asked first. Offer more only if it helps ("Want the box count too?"). Never read a list of numbers, trips and cities in one breath — one load at a time, and ask before going to the next.
+- Say times the way people do: "around 2 this afternoon", "tomorrow morning around 6", "Monday about noon". Give the time zone only when it differs from the caller's.
+- While you look something up, say ONE short natural line and vary it ("One sec.", "Let me pull that up.", "Checking now.") — never repeat the same line in a call, and never say "let me try that again".
+- Use the caller's name or business now and then, not in every sentence. Small acknowledgments are fine ("Got it.", "Sure thing.", "No problem.").
+- If they sound rushed or frustrated, get to the point; if they're chatty, be warm. Never sound like you're reading.
+- Don't over-apologize, don't repeat their question back, and don't say "as an AI".
+
 Who you are: an automated assistant. If asked, say so plainly. You already said the call may be recorded.
 
 {{call_context}}
@@ -91,7 +100,7 @@ function tools(base, transferNumber) {
   const fn = (name, description, properties, required = []) => ({
     type: 'custom', name, url: `${base}/retell/fn/${name}`, method: 'POST', description,
     parameters: { type: 'object', properties, required },
-    speak_during_execution: true, execution_message_description: 'Briefly tell the caller you are checking (in their language).',
+    speak_during_execution: true, execution_message_description: 'One short, natural line in the caller\'s language that you are checking — vary it ("One sec.", "Let me pull that up.", "Checking now."). Never "let me try that again".',
     timeout_ms: 15000,
   });
   const list = [
@@ -832,9 +841,15 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
         stt_mode: env.RETELL_STT_MODE || 'accurate',
         // phone audio from docks / trucks: filter noise and other voices, don't cut Jarvis off on a cough or "uh-huh"
         denoising_mode: env.RETELL_DENOISING || 'noise-and-background-speech-cancellation',
-        interruption_sensitivity: Number(env.RETELL_INTERRUPTION || 0.7),
-        responsiveness: Number(env.RETELL_RESPONSIVENESS || 0.9),
-        enable_backchannel: false,
+        // sound like a person: finish sentences unless really talked over, answer quickly, small "mm-hmm"s
+        // while listening, a slightly warmer voice and a quiet call-center room instead of dead air
+        interruption_sensitivity: Number(env.RETELL_INTERRUPTION || 0.5),
+        responsiveness: Number(env.RETELL_RESPONSIVENESS || 1),
+        enable_backchannel: env.RETELL_BACKCHANNEL !== 'off',
+        backchannel_frequency: 0.6,
+        backchannel_words: ['mm-hmm', 'okay', 'got it', 'sure', 'right'],
+        voice_temperature: Number(env.RETELL_VOICE_TEMP || 1.1),
+        ...(env.RETELL_AMBIENT === 'off' ? {} : { ambient_sound: env.RETELL_AMBIENT || 'call-center', ambient_sound_volume: Number(env.RETELL_AMBIENT_VOLUME || 0.4) }),
         normalize_for_speech: true,
       };
       let agent; let llm;

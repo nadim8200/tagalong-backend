@@ -111,6 +111,9 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   assert.equal(llm.default_dynamic_variables.greeting, "Hi, this is Jarvis, Florida Beauty Flora's assistant. This call may be recorded. How can I help you?");
   assert.equal(agent.webhook_url, 'https://tagalong-backend-fdzx.onrender.com/retell/webhook');
   assert.equal(agent.stt_mode, 'accurate'); assert.ok(agent.boosted_keywords.includes('Florida Beauty Flora'));
+  // sounds like a person: finishes sentences, quick, "mm-hmm"s, warmer voice, quiet call-center room
+  assert.deepEqual([agent.interruption_sensitivity, agent.responsiveness, agent.enable_backchannel, agent.ambient_sound], [0.5, 1, true, 'call-center']);
+  assert.ok(agent.ambient_sound_volume <= 0.5);
   assert.equal(v.retellCalls[0].auth, `Bearer ${KEY}`);
   // the agent runs the exact new LLM version, that version is published, the number answers with it
   assert.deepEqual(agent.response_engine, { type: 'retell-llm', llm_id: 'llm_1', version: 0 });
@@ -571,6 +574,7 @@ test('saved caller numbers: list, change to a real client name, remove', async (
 test('prompt: a misheard "ETA" ("a new TA") is an ETA request, and ETA is a boosted word', async () => {
   const { BASE_WORDS } = await import('../voice.js');
   assert.match(PROMPT, /"a new TA".*mean "I need an ETA"/);
+  assert.match(PROMPT, /How to sound/);
   assert.ok(BASE_WORDS.includes('ETA'));
 });
 
