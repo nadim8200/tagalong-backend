@@ -57,6 +57,7 @@ Who you are: an automated assistant. If asked, say so plainly. You already said 
 {{call_context}}
 
 How to help:
+- "ETA" (estimated time of arrival) is the most common request. Speech-to-text often mishears it: "a new TA", "new TA", "an E T A", "eat a", "E.T.A.", "the TA", "need a TA" all mean "I need an ETA" — when they want to know when their delivery arrives. Never ask what "TA" means or guess "temperature alert" / "trailer assignment". Any words after it are usually their business name ("I need a new TA, Carbone" = ETA for Carbone) — call lookup_load with that customer_name right away.
 - Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). If nothing is found, ask which city the delivery goes to and ask them to spell the business name, then call lookup_load again with customer_name (as spelled) and customer_city. If it returns did_you_mean, ask "Is that <name>?" and, if yes, look it up with that exact name. Names on the phone are often misheard — never tell the caller their name is wrong.
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Loads leave from Miami, Florida or Ventura, California (and some brokers' pickups elsewhere). When you tell a customer about their truck, say where it is coming from using coming_from (or pickup for brokers) — never assume Miami.
@@ -308,7 +309,7 @@ export function spokenName(raw) {
 // Every customer name (and delivery town) on the board, most frequent first — fed to
 // Retell's speech-to-text so it hears "Bokhary" instead of "Bokori". Pure.
 // words every call uses — so speech-to-text hears "load", not "loan"
-export const BASE_WORDS = ['Florida Beauty Flora', 'Jarvis', 'load', 'trip number', 'bill number', 'trailer', 'POD', 'BOL', 'rate confirmation'];
+export const BASE_WORDS = ['Florida Beauty Flora', 'Jarvis', 'ETA', 'load', 'trip number', 'bill number', 'trailer', 'POD', 'BOL', 'rate confirmation'];
 export function customerKeywords(items, max = 100) {
   const n = new Map();
   const add = (w) => { const k = String(w || '').trim(); if (k.length >= 3) n.set(k, (n.get(k) || 0) + 1); };

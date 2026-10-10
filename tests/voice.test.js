@@ -567,3 +567,9 @@ test('saved caller numbers: list, change to a real client name, remove', async (
   await v.hit('POST /truckmate/caller-numbers/:phone/remove', { params: { phone: '7735550100' } });
   assert.deepEqual(await v.db.get('taJarvisCallers:florida-beauty', {}), {});
 });
+
+test('prompt: a misheard "ETA" ("a new TA") is an ETA request, and ETA is a boosted word', async () => {
+  const { BASE_WORDS } = await import('../voice.js');
+  assert.match(PROMPT, /"a new TA".*mean "I need an ETA"/);
+  assert.ok(BASE_WORDS.includes('ETA'));
+});
