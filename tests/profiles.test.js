@@ -84,3 +84,26 @@ test('client list → customer profiles: phones + emails as contacts, merged int
   // running it again adds nothing
   assert.equal(Object.values(mergeClientList(Object.fromEntries(all.map((x) => [x.id, x])), list)).find((x) => x.clientId === '00412').contacts.length, 3);
 });
+
+import { initProfiles } from '../profiles.js';
+function memDb(seed = {}) { const m = new Map(Object.entries(seed)); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } }; }
+
+test('profiles sync only merges loads that changed since the last run ("Update from loads" re-merges all)', async () => {
+  let writes = 0;
+  const db = memDb(); const upd = db.update; db.update = async (...a) => { writes++; return upd(...a); };
+  const it = { trip: { tripNumber: '700001', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'C1', billToName: 'KUHN FLOWERS', endZoneDescription: 'JACKSONVILLE, FL, 32205', consignee: { name: 'KUHN FLOWERS', phone: '9045551212' } }] };
+  const board = { trips: [it] };
+  const noop = () => {};
+  const p = initProfiles({ get: noop, post: noop, put: noop, delete: noop }, { requireAuth: noop, db, getBoard: async () => board, env: { NODE_ENV: 'test' } });
+  await p.sync();
+  assert.ok(Object.values(await db.get('taProfiles:florida-beauty', {})).some((x) => x.name === 'KUHN FLOWERS'));
+  const w1 = writes;
+  await p.sync();
+  assert.equal(writes, w1, 'nothing changed → no rewrite of the profile set');
+  board.trips = [{ ...it, freightBills: [...it.freightBills, { billNumber: 'C2', billToName: 'DALSIMER FLORIST', endZoneDescription: 'DEERFIELD BEACH, FL, 33441' }] }];
+  await p.sync();
+  assert.ok(writes > w1, 'a changed load is merged');
+  const w2 = writes;
+  await p.sync({ force: true });
+  assert.ok(writes > w2, 'Update from loads always re-merges');
+});

@@ -69,8 +69,9 @@ export function fromLoad(item, prefixes = ['B', 'R']) {
 // Fold what the loads say into the saved profiles (never touching anything a person edited). Pure.
 export function mergeInto(store, found, trip, now = new Date().toISOString()) {
   const all = { ...store };
+  const byKey = new Map(Object.values(all).map((x) => [x.key, x]));
   for (const f of found) {
-    let p = Object.values(all).find((x) => x.key === f.key) || (f.type === 'broker' && !f.office ? null : null);
+    let p = byKey.get(f.key) || null;
     if (!p) {
       const id = newId();
       p = { id, key: f.key, type: f.type, name: f.name, office: f.office, locations: [], contacts: [], aliases: [], notes: '', verified: null, edited: false, loads: [], createdAt: now, sources: [] };
@@ -85,7 +86,7 @@ export function mergeInto(store, found, trip, now = new Date().toISOString()) {
     }
     if (trip && !p.loads.some((x) => x.trip === trip)) p.loads = [{ trip, at: now }, ...p.loads].slice(0, 25);
     p.updatedAt = now;
-    all[p.id] = p;
+    all[p.id] = p; byKey.set(p.key, p);
   }
   return all;
 }
@@ -195,15 +196,26 @@ export function initProfiles(app, { requireAuth, db, getBoard = null, env = proc
     await db.set(mark, { sig, at: new Date().toISOString(), clients: list.length });
     return list.length;
   }
-  async function sync() {
+  // what each load last said about its customers / broker — a load that hasn't changed isn't merged again
+  // (the profile set is ~3,500 with the client list; re-merging it all every 10 min wasted memory)
+  const seenLoads = new Map();
+  let legacyDone = false;
+  async function sync({ force = false } = {}) {
     await importClients().catch((e) => console.warn('[profiles] client list:', e.message));
     if (!enabled || !getBoard) return 0;
     const board = await getBoard(SITE);
-    const legacy = ((await db.get('taStatusMailCfg', {})) || {}).customers || {};
+    const changed = [];
+    for (const it of (board && board.trips) || []) {
+      const f = fromLoad(it); const sig = JSON.stringify(f); const n0 = tripNo(it);
+      if (!force && seenLoads.get(n0) === sig) continue;
+      changed.push([n0, f, sig]);
+    }
+    if (!changed.length && legacyDone && !force) return 0;
+    const legacy = legacyDone && !force ? {} : (((await db.get('taStatusMailCfg', {})) || {}).customers || {});
     let n = 0;
     await save((all) => {
       let cur = all;
-      for (const it of (board && board.trips) || []) { const f = fromLoad(it); n += f.length; cur = mergeInto(cur, f, tripNo(it)); }
+      for (const [trip, f] of changed) { n += f.length; cur = mergeInto(cur, f, trip); }
       // emails typed in "Customer status emails" before profiles existed
       for (const [cust, emails] of Object.entries(legacy)) {
         cur = mergeInto(cur, [{ key: profileKey('customer', cust), type: 'customer', name: cust, office: null, locations: [], contacts: (emails || []).map((e) => ({ email: e, role: 'customer', source: 'saved emails' })) }], null);
@@ -212,6 +224,9 @@ export function initProfiles(app, { requireAuth, db, getBoard = null, env = proc
       }
       return cur;
     });
+    for (const [trip, , sig] of changed) seenLoads.set(trip, sig);
+    if (seenLoads.size > 2000) for (const k of [...seenLoads.keys()].slice(0, seenLoads.size - 2000)) seenLoads.delete(k);
+    legacyDone = true;
     return n;
   }
   if (enabled && env.NODE_ENV !== 'test') {
@@ -261,7 +276,7 @@ export function initProfiles(app, { requireAuth, db, getBoard = null, env = proc
     await save((all) => { result = applyCsv(all, rows, who(req)); return result.profiles; });
     res.json({ rows: rows.length, created: result.created, updated: result.updated, contacts: result.contacts });
   });
-  app.post('/truckmate/profiles/sync', requireAuth, async (req, res) => { try { res.json({ ok: true, seen: await sync() }); } catch (e) { res.status(500).json({ error: e.message }); } });
+  app.post('/truckmate/profiles/sync', requireAuth, async (req, res) => { try { res.json({ ok: true, seen: await sync({ force: true }) }); } catch (e) { res.status(500).json({ error: e.message }); } });
   app.post('/truckmate/profiles', requireAuth, async (req, res) => {
     const b = req.body || {};
     const type = b.type === 'broker' ? 'broker' : 'customer';

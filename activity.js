@@ -143,10 +143,11 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
     const out = [];
     for (const d of days) {
       const list = (await db.get(key(d), [])) || []; // eslint-disable-line no-await-in-loop
-      out.push(...entriesFor(list, { phones, name: p.name }));
+      out.push(...entriesFor(list, { phones, name: p.name }).map(({ transcript, ...e }) => ({ ...e, transcript: transcript ? 1 : null })));
       if (out.length >= 200) break;
     }
-    res.json({ phones: phones.length, entries: out.slice(0, 200).map((e) => ({ ...e, otherPhone: e.kind === 'call' ? (e.direction === 'outbound' ? e.to : e.from) : (e.dir === 'in' ? e.from : e.to) })) });
+    // transcripts stay out of the list (they're up to 60 KB each) — the page loads one when it's opened
+    res.json({ phones: phones.length, entries: out.slice(0, 200).map(({ transcript, ...e }) => ({ ...e, hasTranscript: !!transcript, otherPhone: e.kind === 'call' ? (e.direction === 'outbound' ? e.to : e.from) : (e.dir === 'in' ? e.from : e.to) })) });
   });
 
   // one call (for a callback request: "hear the call / read the transcript")

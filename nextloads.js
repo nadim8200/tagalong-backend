@@ -179,6 +179,7 @@ export function verify(entry, items = [], sheets = []) {
 export function initNextLoads({ db, env = process.env, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const key = `taNextLoads:${SITE}`;
+  let etaCache = null;
 
   // Rate cons from an email (single or batch). entries: [{ trip, pendingId }] from the filer.
   async function consider(site, entries, { items = [], emailText = '', from = null, emailId = null, subject = '' } = {}) {
@@ -212,7 +213,11 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
     const tm = tmNextTrips(trips);
     let etas = null; let geoZip = null;
     if (tm.size && enabled) {
-      try { etas = ((await db.get(`taWatch:${site}`, {})) || {}).etas || {}; geoZip = (await db.get('taGeoZip', {})) || {}; } catch { etas = null; }
+      // the live-ETA record is big and Watchtower only rewrites it once a minute → reuse it for 60 s
+      if (!etaCache || now() - etaCache.at > 60000 || etaCache.site !== site) {
+        try { etaCache = { at: now(), site, etas: ((await db.get(`taWatch:${site}`, {})) || {}).etas || {}, geo: (await db.get('taGeoZip', {})) || {} }; } catch { etaCache = null; }
+      }
+      if (etaCache) { etas = etaCache.etas; geoZip = etaCache.geo; }
     }
     for (const it of trips) {
       const n = tm.get(tripNo(it)); if (!n) continue;
