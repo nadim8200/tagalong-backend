@@ -42,7 +42,7 @@ test('admins create dispatchers; dispatchers sign in and reach dispatch; custome
   const login = await call('POST /auth/dispatcher/login', { body: { email: 'rosa@floridabeauty.us', password: 'secret123' } });
   assert.equal(login.status, 200); assert.equal(login.body.role, 'dispatcher');
   const exp = jwt.decode(login.body.token).exp - jwt.decode(login.body.token).iat;
-  assert.equal(exp, 30 * 24 * 3600, 'dispatcher sessions last 30 days');
+  assert.equal(exp, 7 * 24 * 3600, 'dispatcher sessions last 7 days');
   // guarding a dispatch route
   const guard = async (token) => { let ok = false; let status = 200; const res = { status(c) { status = c; return this; }, json() {} }; await api.requireDispatch({ headers: { authorization: `Bearer ${token}` } }, res, () => { ok = true; }); return ok ? 200 : status; };
   assert.equal(login.body.mustChange, true, 'first sign-in: set your own password');

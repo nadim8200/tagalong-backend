@@ -26,6 +26,8 @@
 // per-agent logins would need a real auth layer — a later step.
 // ---------------------------------------------------------------
 
+import { timingSafeEqual } from 'crypto';
+
 const KEY = 'dbpoRegistros';
 const CLAIM_TTL_MS = 15 * 60 * 1000;   // a claim goes stale after 15 min of no save
 const HIST_MAX = 50;
@@ -40,14 +42,16 @@ const CAMPOS = new Set([
 
 const clean = (v) => (v === undefined ? undefined : (v === '' ? null : v));
 
-export function initDbpo(app, { db }) {
+export function initDbpo(app, { db, requireAuth = null }) {
   const TOKEN = String(process.env.DBPO_TOKEN || '').trim();
 
-  // token gate for every /dbpo route
+  // Health-screening call records: NEVER open. A signed-in administrator, or (for a separate agent
+  // tool) the DBPO_TOKEN header when one is set. No sign-in and no token → refused.
   function gate(req, res, next) {
-    if (!TOKEN) return next();
-    if (String(req.headers['x-dbpo-token'] || '') === TOKEN) return next();
-    return res.status(401).json({ error: 'Token inválido.' });
+    const sent = String(req.headers['x-dbpo-token'] || '');
+    if (TOKEN && sent && sent.length === TOKEN.length && timingSafeEqual(Buffer.from(sent), Buffer.from(TOKEN))) return next();
+    if (requireAuth) return requireAuth(req, res, next);
+    return res.status(401).json({ error: 'Acceso restringido.' });
   }
 
   const doc = (req) => String(req.params.doc || '').trim();
@@ -147,5 +151,5 @@ export function initDbpo(app, { db }) {
     }
   });
 
-  console.log('[dbpo] call workspace routes ready' + (TOKEN ? ' (token-gated)' : ' (open — set DBPO_TOKEN to gate)'));
+  console.log(`[dbpo] call workspace routes ready (admin sign-in${TOKEN ? ' or DBPO_TOKEN' : ''} required)`);
 }

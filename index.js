@@ -15,6 +15,7 @@
 // Broker/family accounts are stored server-side inside Traccar (a host device's
 // attributes) — no separate database needed. Passwords are salted+hashed.
 // ---------------------------------------------------------------
+import { loginGuardMiddleware, sessionTooOld, STAFF_SESSION_DAYS } from './loginguard.js';
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -127,7 +128,8 @@ const cookieOpts = {
   maxAge: 180 * 24 * 60 * 60 * 1000, // stay signed in ~6 months
 };
 const traccarHeaders = { Authorization: `Bearer ${TRACCAR_TOKEN}`, Accept: 'application/json' };
-const issue = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: '180d' }); // long-lived so users aren't re-entering creds
+// customers stay signed in (~6 months); administrators get a short session (see loginguard.js)
+const issue = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: payload && payload.admin ? `${STAFF_SESSION_DAYS}d` : '180d' });
 // set the cookie AND return the token so the client can also send it as a
 // header (needed when frontend + backend are on different domains).
 const setSession = (res, user) => { const t = issue(user); res.cookie(COOKIE, t, cookieOpts); return t; };
@@ -186,6 +188,9 @@ const uid = (p) => `${p}${Date.now()}${Math.floor(Math.random() * 1e4)}`;
 const norm = (e) => String(e || '').toLowerCase().trim();
 
 // ---- owner / admin login (verified by Traccar) ----
+// password guessing → locked out (every sign-in / reset route)
+app.use(/^\/auth\/(?:[a-z]+\/)?(?:login|reset|forgot|password-reset)$/, loginGuardMiddleware());
+
 app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'Email and password required.' });
@@ -287,8 +292,11 @@ function requireAuth(req, res, next) {
   let token = req.cookies[COOKIE];
   if (!token) { const h = req.headers.authorization || ''; if (h.startsWith('Bearer ')) token = h.slice(7); }
   if (!token) return res.status(401).json({ error: 'Not signed in.' });
-  try { req.user = jwt.verify(token, JWT_SECRET); next(); }
+  try { req.user = jwt.verify(token, JWT_SECRET); }
   catch { return res.status(401).json({ error: 'Session expired.' }); }
+  // admin / dispatcher tokens older than 7 days (incl. ones issued before this rule) → sign in again
+  if (sessionTooOld(req.user)) return res.status(401).json({ error: 'Session expired.' });
+  return next();
 }
 app.get('/auth/me', requireAuth, (req, res) => res.json(req.user));
 
@@ -811,7 +819,7 @@ initCarChat(app, { requireAuth, env: process.env });
 initNotify(app, { requireAuth, db, pool: db.pool, env: process.env, ringcentral: rc });
 
 // Dynamic BPO campaign portal — live call workspace (claims + per-lead updates).
-initDbpo(app, { db });
+initDbpo(app, { db, requireAuth: requireAdmin });
 
 // AI dispatcher — read uploaded rate confirmations (broker instructions).
 

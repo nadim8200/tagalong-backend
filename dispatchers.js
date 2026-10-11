@@ -87,7 +87,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
       if (!d || !verifyPassword(pw, d.pass)) return res.status(401).json({ error: 'Wrong email or password.' });
       if (d.active === false) return res.status(401).json({ error: 'This dispatcher account is turned off. Ask an admin.' });
       const user = { id: d.id, email: d.email, name: d.name, role: 'dispatcher' };
-      const token = sign(user, '30d');
+      const token = sign(user, '7d');
       setCookie(res, token);
       const at = new Date().toISOString();
       const seen = { at, ip: String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim() || null, device: String(req.headers['user-agent'] || '').slice(0, 160) || null };
