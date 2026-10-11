@@ -122,6 +122,11 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   assert.ok(num.url.endsWith('%2B13055550000'));
   assert.deepEqual(num.body.inbound_agents, [{ agent_id: 'agent_1', agent_version: 'latest_published', weight: 1 }]);
   assert.equal(r.out.published, 0);
+  // the number is asked to accept US, Canada and Puerto Rico (787 / 939) in a separate step
+  const ctry = v.retellCalls.find((c) => c.url.includes('/update-phone-number/') && c.body && c.body.allowed_inbound_country_list);
+  assert.deepEqual(ctry.body.allowed_inbound_country_list, ['US', 'CA', 'PR']);
+  assert.deepEqual(ctry.body.allowed_outbound_country_list, ['US', 'CA', 'PR']);
+  assert.deepEqual(r.out.countries.asked, ['US', 'CA', 'PR']);
   // second update: same agent/LLM, voice picked in Retell is kept
   await v.hit('POST /voice/setup', {});
   const upd = v.retellCalls.filter((c) => c.url.includes('/update-agent/agent_1')).at(-1);
