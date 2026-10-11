@@ -46,8 +46,14 @@ export function loginGuardMiddleware(guard = loginGuard()) {
 
 // Admin and dispatcher sessions are short; customers' app sessions stay long. Pure.
 export const STAFF_SESSION_DAYS = 7;
-export function sessionTooOld(user, nowSec = Math.floor(Date.now() / 1000)) {
+// The owner's own login stays signed in (~6 months) — only these emails (LONG_SESSION_EMAILS in Render
+// can replace the list, comma-separated).
+export const longSessionEmails = (env = process.env) => String(env.LONG_SESSION_EMAILS || 'ntellez@floridabeauty.us,nadim8200@outlook.com')
+  .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+export const keepsLongSession = (user, env = process.env) => !!(user && user.email && longSessionEmails(env).includes(String(user.email).trim().toLowerCase()));
+export function sessionTooOld(user, nowSec = Math.floor(Date.now() / 1000), env = process.env) {
   if (!user || !user.iat) return false;
+  if (keepsLongSession(user, env)) return false;
   const staff = user.admin || user.role === 'admin' || user.role === 'dispatcher';
   return staff && nowSec - user.iat > STAFF_SESSION_DAYS * 86400;
 }

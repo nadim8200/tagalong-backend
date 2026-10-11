@@ -15,7 +15,7 @@
 // Broker/family accounts are stored server-side inside Traccar (a host device's
 // attributes) — no separate database needed. Passwords are salted+hashed.
 // ---------------------------------------------------------------
-import { loginGuardMiddleware, sessionTooOld, STAFF_SESSION_DAYS } from './loginguard.js';
+import { loginGuardMiddleware, sessionTooOld, STAFF_SESSION_DAYS, keepsLongSession } from './loginguard.js';
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -67,6 +67,7 @@ import { initRingCentral, setSmsGuard } from './ringcentral.js';
 import { initTruckMate } from './truckmate.js';
 import { initCarChat } from './carChat.js';
 import { initDbpo } from './dbpo.js';
+import { initArtis } from './artis.js';
 import { initRateCon } from './ratecon.js';
 import { sendMail, mailConfig, setMailGuard } from './mailer.js';
 import { initTraining } from './training.js';
@@ -129,7 +130,7 @@ const cookieOpts = {
 };
 const traccarHeaders = { Authorization: `Bearer ${TRACCAR_TOKEN}`, Accept: 'application/json' };
 // customers stay signed in (~6 months); administrators get a short session (see loginguard.js)
-const issue = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: payload && payload.admin ? `${STAFF_SESSION_DAYS}d` : '180d' });
+const issue = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: payload && payload.admin && !keepsLongSession(payload) ? `${STAFF_SESSION_DAYS}d` : '180d' });
 // set the cookie AND return the token so the client can also send it as a
 // header (needed when frontend + backend are on different domains).
 const setSession = (res, user) => { const t = issue(user); res.cookie(COOKIE, t, cookieOpts); return t; };
@@ -807,7 +808,8 @@ voice.useOutreach((ev) => outreach.notify(ev));
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
-jarvisChat = initJarvisChat(app, { clients, planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
+const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, env: process.env });
+jarvisChat = initJarvisChat(app, { artis, clients, planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });

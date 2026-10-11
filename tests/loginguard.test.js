@@ -47,3 +47,10 @@ test('BPO health-screening records are never open: no sign-in and no token → r
   gate({ headers: {} }, { status: (c) => { code = c; return { json() {} }; } }, () => { passed = true; });
   assert.equal(passed, false); assert.equal(code, 401);
 });
+
+test('the owner\'s own login keeps its long session; other admins still end after 7 days', () => {
+  const now = 1_800_000_000; const old = now - 30 * 86400;
+  assert.equal(sessionTooOld({ admin: true, email: 'NTellez@floridabeauty.us', iat: old }, now, {}), false);
+  assert.equal(sessionTooOld({ admin: true, email: 'frank@floridabeauty.us', iat: old }, now, {}), true);
+  assert.equal(sessionTooOld({ admin: true, email: 'frank@floridabeauty.us', iat: old }, now, { LONG_SESSION_EMAILS: 'frank@floridabeauty.us' }), false);
+});
