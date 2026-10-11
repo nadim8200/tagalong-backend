@@ -97,3 +97,29 @@ test('missing boxes on a load a customer asked about → one email to the team, 
   assert.match(sent[0].subject, /Missing boxes — CAGGIANO'S MEDFORD \* · trip 624900 \(28 not scanned\)/);
   assert.match(missingEmail(list).html, /told the customer only how many boxes are loaded/);
 });
+
+import { leftShort } from '../artis.js';
+
+test('a truck that LEFT with boxes not scanned (10 expected, 9 scanned) → one email to Nadim, never twice', async () => {
+  const now = Date.parse('2026-10-11T22:00:00Z');
+  const one = [{ consigneeId: '03373', consignee: "CAGGIANO'S MEDFORD", boxes: 10, scanned: 9, missing: 1, cubes: 10 }];
+  const left = { ...loading, trip: { ...loading.trip, status: 'DEPSHIP' }, _times: { statusHistory: [...loading._times.statusHistory, { status: 'DEPSHIP', at: '2026-10-11T21:30:00Z' }] } };
+  // still loading → not this email (that's the "before it leaves" alert)
+  assert.equal(leftShort({ ...loading, _artis: loadBoxes(loading, () => one, now) }, now), null);
+  const x = leftShort({ ...left, _artis: loadBoxes(left, () => one, now) }, now);
+  assert.deepEqual([x.trip, x.truck, x.missing], ['624900', '2602', 1]);
+  // left two days ago → too old to email now
+  assert.equal(leftShort({ ...left, _artis: loadBoxes(left, () => one, now) }, now + 2 * 86400000), null);
+
+  const sent = []; const store = new Map();
+  const db = { enabled: true, get: async (k, fb) => (store.has(k) ? store.get(k) : fb), set: async (k, v) => store.set(k, v), update: async (k, fn, fb) => { const v = fn(store.has(k) ? store.get(k) : fb); store.set(k, v); return v; } };
+  const app = { get: () => {}, post: () => {} };
+  const a = initArtis(app, { requireAuth: () => {}, db, sendMail: async (m) => sent.push(m), env: { NODE_ENV: 'test', ARTIS_API_USER: 'u', ARTIS_API_PASSWORD: 'p' }, now: () => now });
+  a._byDate.set('2026-10-11', one);
+  await a.overlay('fb', [{ ...left }]); await new Promise((r) => setTimeout(r, 10));
+  await a.overlay('fb', [{ ...left }]); await new Promise((r) => setTimeout(r, 10));
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']);
+  assert.match(sent[0].subject, /Truck 2602 left with missing boxes — trip 624900 \(1 not scanned\)/);
+  assert.match(sent[0].html, /CAGGIANO'S MEDFORD \(03373\)<\/td><td>10<\/td><td>9<\/td><td><b>1<\/b>/);
+});

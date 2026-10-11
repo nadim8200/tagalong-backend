@@ -97,7 +97,30 @@ export function loadBoxes(it, summaryFor, now = Date.now()) {
   };
 }
 
-export function initArtis(app, { requireAuth, requireAdmin = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+// A truck that LEFT (departed the shipper within the last 12 h) with boxes for its customers still not
+// scanned → { trip, truck, departedAt, missing, stops } | null. Pure.
+export function leftShort(it, now = Date.now()) {
+  const a = it && it._artis;
+  if (!a || !(a.missing > 0)) return null;
+  if (!ROLLING.test(String(tripOf(it).status || ''))) return null;
+  const dep = ((it._times && it._times.statusHistory) || []).find((x) => /^DEPSHIP/i.test(String(x.status || '')) && x.at);
+  const at = dep ? Date.parse(dep.at) : NaN;
+  if (Number.isNaN(at) || now - at > 12 * 3600000 || at > now + 600000) return null;
+  return { trip: String(tripOf(it).tripNumber || ''), truck: String(tripOf(it).powerUnit || '') || null, departedAt: new Date(at).toISOString(), shipDate: a.shipDate, missing: a.missing, boxes: a.boxes, scanned: a.scanned, stops: (a.stops || []).filter((c) => c.missing > 0) };
+}
+export function leftShortEmail(x) {
+  const when = new Date(x.departedAt).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const rows = x.stops.map((c) => `<tr><td>${c.consignee}${c.consigneeId ? ` (${c.consigneeId})` : ''}</td><td>${c.boxes}</td><td>${c.scanned}</td><td><b>${c.missing}</b></td></tr>`).join('');
+  return {
+    subject: `Truck ${x.truck || '?'} left with missing boxes — trip ${x.trip} (${x.missing} not scanned)`,
+    html: `<p>Trip <b>${x.trip}</b>${x.truck ? ` · truck <b>${x.truck}</b>` : ''} departed ${when} ET with <b>${x.missing}</b> box${x.missing === 1 ? '' : 'es'} not scanned in ARTIS (${x.scanned} of ${x.boxes} scanned, ship date ${x.shipDate}).</p>
+<table border="1" cellpadding="6" cellspacing="0"><tr><th>Customer</th><th>Expected</th><th>Scanned</th><th>Missing</th></tr>${rows}</table>
+<p>Check whether the boxes are still at the terminal or went on another truck.</p>`,
+    text: `Trip ${x.trip} truck ${x.truck || '?'} left ${when} ET — ${x.missing} box(es) not scanned: ${x.stops.map((c) => `${c.consignee} ${c.scanned}/${c.boxes}`).join(', ')}`,
+  };
+}
+
+export function initArtis(app, { requireAuth, requireAdmin = null, db = null, sendMail = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const cache = new Map();   // "path?query" → { at, data }
   async function get(path, query = {}) {
     const cfg = artisConfig(env);
@@ -159,13 +182,35 @@ export function initArtis(app, { requireAuth, requireAdmin = null, env = process
     setTimeout(() => { refresh().catch(() => {}); }, 30000).unref?.();
     const tick = setInterval(() => { refresh().catch(() => {}); }, 10 * MIN); if (tick.unref) tick.unref();
   }
+  // a truck that left short → one email per trip (to ARTIS_LEFT_SHORT_TO — Nadim for the test)
+  const leftTo = () => String(env.ARTIS_LEFT_SHORT_TO || 'ntellez@floridabeauty.us').split(',').map((x) => x.trim()).filter(Boolean);
+  async function notifyLeftShort(list) {
+    if (!list.length || !db || !db.enabled || !sendMail) return 0;
+    let fresh = [];
+    await db.update('taArtisLeftShort', (cur) => {
+      const a = { ...(cur || {}) };
+      fresh = list.filter((x) => !a[x.trip]);
+      for (const x of fresh) a[x.trip] = { at: new Date(now()).toISOString(), missing: x.missing };
+      for (const [k, v] of Object.entries(a)) if (Date.parse(v.at) < now() - 14 * 86400000) delete a[k];
+      return a;
+    }, {});
+    for (const x of fresh) { try { await sendMail({ to: leftTo(), ...leftShortEmail(x) }); } catch (e) { console.warn('[artis] left-short email:', e.message); } } // eslint-disable-line no-await-in-loop
+    return fresh.length;
+  }
   async function overlay(site, trips) {
     if (!byDate.size) return;
-    for (const it of trips) { const b = loadBoxes(it, (d) => byDate.get(d) || null, now()); if (b) it._artis = b; }
+    const short = [];
+    for (const it of trips) {
+      const b = loadBoxes(it, (d) => byDate.get(d) || null, now());
+      if (!b) continue;
+      it._artis = b;
+      const x = leftShort(it, now()); if (x) short.push(x);
+    }
+    if (short.length) notifyLeftShort(short).catch((e) => console.warn('[artis] left-short:', e.message));
   }
 
   console.log(`[artis] Florida Beauty EDI ${artisConfig(env).ready ? 'connected (read-only)' : 'off — needs ARTIS_API_USER / ARTIS_API_PASSWORD'}`);
-  return { ready: () => artisConfig(env).ready, cargo, dayOfService, overlay, refresh, _byDate: byDate };
+  return { ready: () => artisConfig(env).ready, cargo, dayOfService, overlay, refresh, notifyLeftShort, _byDate: byDate };
 }
 
 // ---- missing boxes on a load a customer asked about → the team gets an email (never the customer) ----

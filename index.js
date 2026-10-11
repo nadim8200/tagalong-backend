@@ -793,7 +793,7 @@ const profiles = initProfiles(app, { clientList: () => clients.all(), requireAut
 let tempPhotos = null;    // reefer temp photos for trailers we can't read live (set below)
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
 let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers overlay)
-const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, env: process.env });
+const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), env: process.env });
 // Missing boxes a customer asked about → email Frank Ducassi, Sebastian Manotas, Ronen and Nadim (Employees
 // emails; ARTIS_MISSING_TO in Render can replace the list, comma-separated addresses)
 const missingBoxes = initMissingBoxes({ db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: async () => {
