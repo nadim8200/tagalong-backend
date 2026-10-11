@@ -51,3 +51,17 @@ test('Samsara correlate: per-driver clocks with source time and ELD vehicle; zer
   assert.equal(live.engineLoadPct, null);
   assert.equal(live.sourceAt, '2026-10-03T03:00:00.000Z');
 });
+
+import { missingTrips } from '../manifest.js';
+
+test('a 5-trip packet that came back with 2: the other 3 trips are found and read again', () => {
+  const u = (k) => ({ key: k });
+  const groups = [[u('1:1'), u('1:2')], [u('1:3')], [u('1:4'), u('1:5')], [u('1:6')], [u('1:7')]];
+  const sorted = new Map([['1:1', { type: 'manifest', tripNumber: '624762' }], ['1:2', { type: 'manifest_continuation' }], ['1:3', { type: 'manifest', tripNumber: '624749' }],
+    ['1:4', { type: 'manifest', tripNumber: 'TRIP # 624770' }], ['1:5', { type: 'manifest_continuation' }], ['1:6', { type: 'manifest', tripNumber: '624771' }], ['1:7', { type: 'manifest', tripNumber: '624772' }]]);
+  const results = [{ trips: [{ tripNumber: '624762' }, { tripNumber: '624749' }] }];
+  const miss = missingTrips(groups, sorted, results);
+  assert.deepEqual(miss.map((x) => x.trip), ['624770', '624771', '624772']);
+  assert.equal(miss[0].units.length, 2, 'a trip is re-read with its continuation page');
+  assert.deepEqual(missingTrips(groups, sorted, [...results, { trips: [{ tripNumber: '624770' }, { tripNumber: '624771' }, { tripNumber: '624772' }] }]), []);
+});

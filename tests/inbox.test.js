@@ -153,7 +153,7 @@ test('the nightly trip-sheet email: the attached packet goes through the packet 
   await h.inbox.poll();
   assert.equal(got.length, 1); assert.equal(got[0].files[0].filename, '10-07-2026.pdf');
   const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
-  assert.deepEqual(e.packetResult, { trips: 2, rateCons: 1, kept: 12, skipped: 57 }); assert.equal(e.status, 'handled');
+  assert.deepEqual(e.packetResult, { trips: 2, rateCons: 1, kept: 12, skipped: 57, unread: [] }); assert.equal(e.status, 'handled');
 });
 
 test('a broker asks where the truck is + POD + rate con: drafted with live facts; POD and rate con picked, never the trip sheet; auto-sent when on', async () => {
@@ -343,4 +343,16 @@ test('two inbox checks at once (slow trip-sheet packet, or two servers during a 
   await h2.inbox.poll();
   assert.equal(learned.length, 1, 'claimed elsewhere → skipped');
   assert.equal(((await h.db.get('taEmails:florida-beauty', { list: [] })).list || []).length, 1);
+});
+
+import { packetInstructions } from '../inbox.js';
+
+test('forwarded trip-sheet packet: "packet received — details to be extracted" is not an instruction; real ones still run', () => {
+  const list = [
+    { kind: 'task', message: 'Trip sheet packet received from Nadim — details to be extracted from attachment 3545_001.pdf' },
+    { kind: 'text_driver', trip: '624762', message: 'Call when you leave' },
+    { kind: 'note', trip: '624749', message: 'Driver Rene confirmed' },
+  ];
+  assert.deepEqual(packetInstructions(list, true).map((x) => x.kind), ['text_driver', 'note']);
+  assert.equal(packetInstructions(list, false).length, 3, 'normal emails unchanged');
 });

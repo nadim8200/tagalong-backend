@@ -246,6 +246,15 @@ export const isStatusAsk = (ins) => !!ins && (ins.kind === 'task' || ins.kind ==
 // Free-text answers: drop any "done from your email" list or offer-to-help ending the model wrote. Pure.
 export const cleanAnswer = (t) => String(t || '').split(/\n\s*\**\s*(?:done from your email|already done from this email)\b/i)[0].split('\n').filter((l) => !/^\s*(if you (want|'d like)|let me know if)/i.test(l)).join('\n').trim();
 // one instruction about several loads → one per load (a lone trip stays as it is). Pure.
+// A trip-sheet / rate-con packet (e.g. someone forwarding Rosa's sheets): the packet IS the work — it's
+// filed by the trip-sheet reader. Lines that only describe the packet ("trip sheet packet received —
+// details to be extracted") are not instructions; real ones (text a driver, email a group…) still run. Pure.
+const PACKET_SELF = /(trip\s*-?\s*sheets?|manifests?|packet|rate\s*con(firmation)?s?|attach(ed|ment)|pdf|scan(ned)?|extract|to be (read|filed|entered|processed)|forward(ed)?)/i;
+export function packetInstructions(list = [], packet = false) {
+  if (!packet) return list;
+  return (list || []).filter((ins) => !(ins && /^(note|task)$/.test(ins.kind) && !ins.trip && PACKET_SELF.test(`${ins.text || ''} ${ins.message || ''} ${ins.title || ''} ${ins.note || ''}`)));
+}
+
 export function expandInstructions(list = []) {
   const out = [];
   for (const ins of list || []) {
@@ -514,7 +523,7 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
           help.raise({ source: 'email', ref: m.id, role, from: { name: from.name, email: from.address, phone: h.callbackPhone || null, company: c && c.company }, trip: trips[0] || null, need: String(h.summary || email.summary || email.subject).slice(0, 400), said: `Subject: ${email.subject}\n${text.slice(0, 1500)}`, urgent: !!h.urgent }).catch(() => {});
         }
         email.reply = t.reply && typeof t.reply === 'object' ? { needed: !!t.reply.needed, kind: String(t.reply.kind || 'none'), documents: Array.isArray(t.reply.documents) ? t.reply.documents.map(String).slice(0, 5) : [] } : null;
-        email.instructions = isInternal(from.address, env) ? parseInstructions(t.instructions) : [];
+        email.instructions = isInternal(from.address, env) ? packetInstructions(parseInstructions(t.instructions), email.packet) : [];
         for (const trip of trips) await addTasks(site, trip, email, email.actions); // eslint-disable-line no-await-in-loop
       }
       // trip sheets: the nightly trip-sheet email (every PDF / photo attached), or a sheet pasted into any email
@@ -527,7 +536,7 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
         try {
           if (packets) {
             const r = await packets(site, files, { by, exact: !!email.rcBatch }); // eslint-disable-line no-await-in-loop
-            if (r) { email.packetResult = { trips: (r.trips || []).length, rateCons: (r.rateCons || []).length, kept: r.kept || 0, skipped: r.skipped || 0 }; email.tripSheets = r.trips || []; email.batchRateCons = (r.rateCons || []).map((x) => ({ trip: x.trip || null, pendingId: x.pendingId || null })); }
+            if (r) { email.packetResult = { trips: (r.trips || []).length, rateCons: (r.rateCons || []).length, kept: r.kept || 0, skipped: r.skipped || 0, unread: r.unread || [] }; if ((r.unread || []).length) email.packetError = `Could not read trip sheet${r.unread.length === 1 ? '' : 's'} ${r.unread.join(', ')} in this email — re-run the email or re-send those pages.`; email.tripSheets = r.trips || []; email.batchRateCons = (r.rateCons || []).map((x) => ({ trip: x.trip || null, pendingId: x.pendingId || null })); }
           } else {
             email.tripSheets = (await tripSheets(site, files, { docIds: tsIdx.map((i) => attachments[i].docId), by, hintTrip: trips.length === 1 ? trips[0] : null })) || []; // eslint-disable-line no-await-in-loop
           }
@@ -885,6 +894,18 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     const e = (((await db.get(key(site), { list: [] })) || {}).list || []).find((x) => x.id === String(req.params.id));
     if (!e) return res.status(404).json({ error: 'not found' });
     if (!isInternal(e.from && e.from.address, env)) return res.status(400).json({ error: 'Only emails from our own staff carry instructions.' });
+    // a trip-sheet / rate-con packet: read every attached page again (fetched from Outlook) — files trips missed before
+    if (e.packet && packets) {
+      try {
+        const atts = await saveAttachments(site, e.id, null, { store: false });
+        const files = atts.filter((a) => /pdf|image/i.test(a.contentType || '')).map((a) => ({ dataBase64: a.bytes, mediaType: a.contentType, filename: a.name }));
+        if (!files.length) return res.status(422).json({ error: 'No trip-sheet pages found on that email any more.' });
+        const r = await packets(site, files, { by: `Jarvis (re-run of ${e.from.name || e.from.address}'s email)`, exact: !!e.rcBatch });
+        const sheets = (r && r.trips) || [];
+        await update(site, e.id, (x) => ({ ...x, tripSheets: sheets, packetResult: { ...(x.packetResult || {}), trips: sheets.length, unread: (r && r.unread) || [] }, packetError: r && (r.unread || []).length ? `Could not read trip sheet(s) ${r.unread.join(', ')} — re-send those pages.` : null }));
+        return res.json({ ok: true, packet: true, trips: sheets.map((x) => x.trip), unread: (r && r.unread) || [] });
+      } catch (err) { return res.status(502).json({ error: `Could not re-read the trip sheets: ${err.message}` }); }
+    }
     const t = await triage(e, []).catch(() => null);
     if (!t) return res.status(503).json({ error: 'Could not re-read the email right now.' });
     const instructions = parseInstructions(t.instructions);
