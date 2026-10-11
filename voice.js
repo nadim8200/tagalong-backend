@@ -74,6 +74,8 @@ Who you are: an automated assistant. If asked, say so plainly. You already said 
 
 How to help:
 - "ETA" (estimated time of arrival) is the most common request. Speech-to-text often mishears it: "a new TA", "new TA", "an E T A", "eat a", "E.T.A.", "the TA", "need a TA" all mean "I need an ETA" — when they want to know when their delivery arrives. Never ask what "TA" means or guess "temperature alert" / "trailer assignment". Any words after it are usually their business name ("I need a new TA, Carbone" = ETA for Carbone) — call lookup_load with that customer_name right away.
+- When a delivery has boxes_loaded (from ARTIS), you may tell the customer how many of their boxes are loaded (e.g. "you have 316 boxes on the truck"). Never say boxes are missing, short or not scanned — the team handles that.
+- Florida Beauty staff (caller_is staff) can ask about ARTIS — boxes received / scanned / missing per customer and ship date, and days of service: use boxes_check.
 - Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). If nothing is found, ask which city the delivery goes to and ask them to spell the business name, then call lookup_load again with customer_name (as spelled) and customer_city. If it returns did_you_mean, ask "Is that <name>?" and, if yes, look it up with that exact name. Names on the phone are often misheard — never tell the caller their name is wrong.
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Loads leave from Miami, Florida or Ventura, California (and some brokers' pickups elsewhere). When you tell a customer about their truck, say where it is coming from using coming_from (or pickup for brokers) — never assume Miami.
@@ -113,6 +115,10 @@ function tools(base, transferNumber) {
       customer_name: { type: 'string', description: 'A flower customer / receiver calling about THEIR delivery by business name, e.g. "Springfield Florist", "Johnson\'s Wholesale Florist". If they spelled it, pass the spelled name.' },
       customer_city: { type: 'string', description: 'The city / town the caller says their delivery goes to, e.g. "Waltham"' },
       caller_confirmed: { type: 'boolean', description: 'true ONLY when you asked "Is that <name from did_you_mean>?" and the caller clearly said yes' },
+    }),
+    fn('boxes_check', 'STAFF ONLY (caller_is Florida Beauty staff): ARTIS boxes received / scanned / missing per customer for a ship date. Never use for customers.', {
+      customer: { type: 'string', description: 'Customer name or ARTIS consignee ID (optional — all customers if empty)' },
+      ship_date: { type: 'string', description: 'YYYY-MM-DD (optional — today if empty)' },
     }),
     fn('take_message', 'Save a message for a human dispatcher (shows on the load and alerts dispatch).', {
       message: { type: 'string', description: 'What the caller needs, in English, one or two sentences' },
@@ -305,11 +311,29 @@ export function customerStops(items, name, etasByTrip = {}) {
       out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: b.pieces != null ? `${b.pieces} boxes` : null, cubes: b.cubes != null ? b.cubes : null, appointment: null, delivered: !!b.actualDelivery, ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !b.actualDelivery && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate' });
     }
   }
+  // ARTIS: how many of THIS customer's boxes were scanned at our terminal for the load
+  const boxFor = (x) => {
+    const it = items.find((i) => tripNo(i) === x.trip);
+    const st = it && it._artis && (it._artis.stops || []).find((c) => nameScore(x.customer || '', c.consignee || '') >= 0.75 || nameScore(c.consignee || '', x.customer || '') >= 0.75);
+    // ARTIS has the right box count (the trip sheet can be off) — and customers only hear what's loaded
+    return st ? { boxes: `${st.scanned} boxes`, boxes_loaded: `${st.scanned} box${st.scanned === 1 ? '' : 'es'} loaded for them` } : {};
+  };
   return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 6).map(({ score, ...x }) => ({
-    ...x,
+    ...x, ...boxFor(x),
     ...(!x.delivered && !x.truck_already_passed && !x.estimated_arrival ? { eta_note: 'No ETA available right now — do NOT estimate or guess a time. Say dispatch will call back with the ETA, and take a message.' } : {}),
     ...(etasByTrip[x.trip] && etasByTrip[x.trip].leavesAt && !x.delivered ? { truck_leaves_terminal_at: fmt(etasByTrip[x.trip].leavesAt) } : {}),
   }));
+}
+
+// The asked-about customers' ARTIS boxes still missing on their loads (for the team — never the caller). Pure.
+export function missingFor(items, stops) {
+  const out = [];
+  for (const x of stops || []) {
+    const it = (items || []).find((i) => tripNo(i) === x.trip);
+    const st = it && it._artis && (it._artis.stops || []).find((c) => c.missing > 0 && (nameScore(x.customer || '', c.consignee || '') >= 0.75 || nameScore(c.consignee || '', x.customer || '') >= 0.75));
+    if (st && !out.some((o) => o.trip === x.trip && o.consignee === st.consignee)) out.push({ trip: x.trip, truck: x.truck || null, shipDate: it._artis.shipDate, consignee: st.consignee, consigneeId: st.consigneeId, boxes: st.boxes, scanned: st.scanned, missing: st.missing });
+  }
+  return out;
 }
 
 // ---- hearing customer names right ----
@@ -467,7 +491,7 @@ export function brokerView(item, eta) {
   };
 }
 
-export function initVoice(app, { requireAuth, db, clients = null, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initVoice(app, { requireAuth, db, missingBoxes = null, artis = null, clients = null, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taRetellCfg';
@@ -549,6 +573,18 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
       return res.json({ call_inbound: { dynamic_variables: { greeting: staffGreeting(me.name), call_context: `This is an incoming call from ${me.name}, Florida Beauty staff (their phone is on the Employees list). Help them with any load — they may get any ETA.` } } });
     } catch { return res.json(plain); }
   });
+  // staff only (phone on the Employees list): ARTIS boxes received / missing, days of service
+  app.post('/retell/fn/boxes_check', verified, async (req, res) => {
+    const a = argsOf(req); const call = callOf(req);
+    try {
+      const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
+      const staff = people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      if (!staff) return res.json({ ok: false, say: 'That information is for Florida Beauty staff only. Offer to take a message.' });
+      if (!artis || !artis.ready()) return res.json({ ok: false, say: 'ARTIS is not connected right now. Offer to have dispatch check.' });
+      const r = await artis.cargo({ date: a.ship_date || undefined, customer: a.customer || '' });
+      return res.json(spokenNumbers({ ok: true, ship_date: r.date, customers: r.consignees, boxes: r.boxes, scanned: r.scanned, missing: r.missing, list: r.list.slice(0, 8).map((c) => ({ customer: spokenName(c.consignee || ''), boxes: c.boxes, scanned: c.scanned, missing: c.missing })), say: 'Give the totals first, then the customers with missing boxes. Keep it short.' }));
+    } catch (e) { return res.json({ ok: false, say: `ARTIS lookup failed (${e.message}). Offer to have dispatch check.` }); }
+  });
   app.post('/retell/fn/lookup_load', verified, async (req, res) => {
     const a = argsOf(req); const call = callOf(req);
     const reply = (j) => {
@@ -612,6 +648,7 @@ export function initVoice(app, { requireAuth, db, clients = null, training = nul
           if (!ok.ok) return reply({ found: false, private: true, say: `For privacy, updates on ${spokenName(stops[0].customer)} deliveries only go to the phone numbers they authorized. Do not share any details of the load. Offer to take a message (take_message with their name and callback number) so customer service calls them back on an authorized number.` });
         }
         if (said && !staffPhone) await remember(callerPhone(call), stops[0].customer);
+        if (!staffPhone && missingBoxes) missingBoxes(missingFor(all, stops), { caller: callerPhone(call), callId: call.call_id || null }).catch(() => {});
         const trips = [...new Set(stops.map((x) => x.trip))];
         const loads = trips.map((n) => customerView(all.find((it) => tripNo(it) === n), etas[n], stops.filter((x) => x.trip === n)));
         if (staffPhone) return reply({ found: true, matched_by: 'customer name', caller_is: STAFF_IS, loads, say: STAFF_RULE });

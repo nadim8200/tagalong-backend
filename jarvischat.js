@@ -244,7 +244,8 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, clients = n
           hold: it._hold || null, tasks: (it._tasks || []).filter((t) => !t.done).map((t) => t.title),
           notes: notes.slice(-15).map((x) => ({ at: x.at, by: x.by, kind: x.kind, text: x.text, transfer: x.transfer || undefined })),
           driverChat: it._ocChat || null, pickupFollow: it._pickupFollow || null,
-          nextInTruckMate: it._tmNext || [],   // trips TruckMate already has assigned to this truck after this one
+          nextInTruckMate: it._tmNext || [],
+          artisBoxes: it._artis || null,   // ARTIS: boxes per customer (always the right count), scanned / missing, trip sheet differences   // trips TruckMate already has assigned to this truck after this one
           nextLoads: (it._nextLoad || []).map((n) => ({ truck: n.truck, broker: n.rc.broker, loadNumber: n.rc.loadNumber, bill: n.rc.bill, pickup: n.rc.pickup, delivery: n.rc.delivery, rate: n.rc.rateText || n.rc.rate, notes: n.rc.notes, verified: n.verified ? `${n.verified.by}${n.verified.trip ? ` trip ${n.verified.trip}` : ''}` : 'not yet in TruckMate', sentBy: n.from, at: n.at })),
         };
       }

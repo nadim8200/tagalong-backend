@@ -34,6 +34,69 @@ export function summarizeCargo(rows = []) {
     .sort((a, b) => b.missing - a.missing || String(a.consignee).localeCompare(String(b.consignee)));
 }
 
+// ---- tying ARTIS boxes to the loads on the board ----
+const tripOf = (it) => (it && it.trip) || it || {};
+const billsOf = (it) => (it && (it.freightBills || it.orders)) || tripOf(it).freightBills || [];
+const id5 = (x) => { const d = String(x ?? '').trim(); return /^\d{1,6}$/.test(d) ? d.padStart(5, '0') : d.toUpperCase(); };
+const normCo = (s) => String(s || '').toUpperCase().replace(/[*]/g, ' ').replace(/\b(LLC|INC|CORP|CO|LTD)\b\.?/g, ' ').replace(/[^A-Z0-9& ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const LOADING = /^(LOADINGMAN|LOADEDTOGO|ARRSHIP|DEPSHIP)/i;
+export const ROLLING = /^(DEPSHIP|ARRCONS|DEPCONS|INTRAN|ENROUTE)/i;
+const DONE = /^(delvd|deliv|del$|cmplt|complete|canc|void)/i;
+
+// Which ship date a load's boxes belong to: the day it started loading at the terminal, else (not loading
+// yet) today. Pure.
+export function shipDateOf(it, now = Date.now()) {
+  const h = ((it && it._times && it._times.statusHistory) || []).find((x) => LOADING.test(String(x.status || '')) && x.at);
+  if (h) return ymd(new Date(h.at));
+  const st = String(tripOf(it).status || '');
+  if (ROLLING.test(st) || DONE.test(st)) { const c = it && it._times && it._times.createdAt; return c ? ymd(new Date(c)) : null; }
+  return ymd(new Date(now));
+}
+// The customers on a load (client IDs + names from the bills). Pure.
+export function loadCustomers(it) {
+  const ids = new Set(); const names = new Set();
+  for (const b of billsOf(it)) {
+    for (const r of [b.consignee, b.billToCustomer]) {
+      if (!r || typeof r !== 'object') continue;
+      for (const v of [r.clientId, r.clientID, r.customerId, r.code, r.id]) if (v != null && v !== '') ids.add(id5(v));
+      const n = r.name || r.clientName || r.customerName; if (n) names.add(normCo(n));
+    }
+    if (b.billToName) names.add(normCo(b.billToName));
+  }
+  return { ids, names };
+}
+// ARTIS boxes for one load: its customers' cargo on its ship date, and whether boxes are missing while the
+// load hasn't left. Pure. summaryFor(date) → summarizeCargo list | null
+export function loadBoxes(it, summaryFor, now = Date.now()) {
+  const date = shipDateOf(it, now);
+  const list = date ? summaryFor(date) : null;
+  if (!list || !list.length) return null;
+  const { ids, names } = loadCustomers(it);
+  const stops = list.filter((c) => (c.consigneeId && ids.has(id5(c.consigneeId))) || (c.consignee && names.has(normCo(c.consignee))));
+  if (!stops.length) return null;
+  const tot = stops.reduce((a, c) => ({ boxes: a.boxes + c.boxes, scanned: a.scanned + c.scanned }), { boxes: 0, scanned: 0 });
+  const st = String(tripOf(it).status || '');
+  const notLeft = !ROLLING.test(st) && !DONE.test(st);
+  const missing = Math.max(0, tot.boxes - tot.scanned);
+  const short = stops.filter((c) => c.missing > 0);
+  // the trip sheet's box count per customer vs ARTIS — ARTIS is always the right count
+  const same = (a, b) => { const x = normCo(a); const y = normCo(b); return !!(x && y && (x === y || x.startsWith(y) || y.startsWith(x))); };
+  const sheet = ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && x.pieces != null);
+  const sheetDiffs = stops.map((c) => {
+    const rows = sheet.filter((x) => same(x.customer, c.consignee));
+    if (!rows.length) return null;
+    const n = rows.reduce((a, x) => a + (Number(x.pieces) || 0), 0);
+    return n !== c.boxes ? { consignee: c.consignee, sheet: n, artis: c.boxes } : null;
+  }).filter(Boolean);
+  return {
+    sheetDiffs,
+    shipDate: date, boxes: tot.boxes, scanned: tot.scanned, missing,
+    stops: stops.map((c) => ({ consigneeId: c.consigneeId, consignee: c.consignee, boxes: c.boxes, scanned: c.scanned, missing: c.missing, cubes: c.cubes })),
+    // before the truck leaves: boxes for a customer on it still not scanned
+    alert: notLeft && missing > 0 ? `${missing} box${missing === 1 ? '' : 'es'} not scanned yet — ${short.map((c) => `${c.consignee} ${c.scanned}/${c.boxes}`).join(', ')}` : null,
+  };
+}
+
 export function initArtis(app, { requireAuth, requireAdmin = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const cache = new Map();   // "path?query" → { at, data }
   async function get(path, query = {}) {
@@ -82,6 +145,60 @@ export function initArtis(app, { requireAuth, requireAdmin = null, env = process
     try { res.json(await cargo({ date: String(req.query.date || '') || undefined, customer: String(req.query.q || '') })); } catch (e) { fail(res, e); }
   });
 
+  // yesterday / today / tomorrow kept fresh in the background, so the board never waits on ARTIS
+  const byDate = new Map();   // date → summarizeCargo list
+  async function refresh() {
+    if (!artisConfig(env).ready) return;
+    const t = now();
+    for (const d of [-1, 0, 1].map((k) => ymd(new Date(t + k * 86400000)))) {
+      try { byDate.set(d, summarizeCargo(rowsOf(await get('/artis/api/cargo/received', { shipDate: d })))); } catch (e) { console.warn('[artis] refresh', d, e.message); } // eslint-disable-line no-await-in-loop
+    }
+    for (const k of [...byDate.keys()]) if (Date.parse(k) < t - 3 * 86400000) byDate.delete(k);
+  }
+  if (env.NODE_ENV !== 'test') {
+    setTimeout(() => { refresh().catch(() => {}); }, 30000).unref?.();
+    const tick = setInterval(() => { refresh().catch(() => {}); }, 10 * MIN); if (tick.unref) tick.unref();
+  }
+  async function overlay(site, trips) {
+    if (!byDate.size) return;
+    for (const it of trips) { const b = loadBoxes(it, (d) => byDate.get(d) || null, now()); if (b) it._artis = b; }
+  }
+
   console.log(`[artis] Florida Beauty EDI ${artisConfig(env).ready ? 'connected (read-only)' : 'off — needs ARTIS_API_USER / ARTIS_API_PASSWORD'}`);
-  return { ready: () => artisConfig(env).ready, cargo, dayOfService };
+  return { ready: () => artisConfig(env).ready, cargo, dayOfService, overlay, refresh, _byDate: byDate };
+}
+
+// ---- missing boxes on a load a customer asked about → the team gets an email (never the customer) ----
+export const MISSING_TEAM = ['Frank Ducassi', 'Sebastian Manotas', 'Ronen', 'Nadim'];
+// Pure: the email for a list of { trip, truck, shipDate, consignee, consigneeId, boxes, scanned, missing }.
+export function missingEmail(list, { caller = null } = {}) {
+  const rows = list.map((m) => `<tr><td>${m.trip}</td><td>${m.truck || '—'}</td><td>${m.consignee}${m.consigneeId ? ` (${m.consigneeId})` : ''}</td><td>${m.scanned} of ${m.boxes}</td><td><b>${m.missing}</b></td><td>${m.shipDate}</td></tr>`).join('');
+  const first = list[0];
+  return {
+    subject: `Missing boxes — ${first.consignee} · trip ${first.trip} (${first.missing} not scanned)`,
+    html: `<p>A customer asked about their delivery and ARTIS shows boxes not scanned for them. Jarvis told the customer only how many boxes are loaded — <b>not</b> that any are missing.</p>
+<table border="1" cellpadding="6" cellspacing="0"><tr><th>Trip</th><th>Truck</th><th>Customer</th><th>Scanned</th><th>Missing</th><th>Ship date</th></tr>${rows}</table>
+${caller ? `<p>Caller: ${caller}</p>` : ''}<p>Please find / scan the missing boxes or follow up with the customer.</p>`,
+    text: list.map((m) => `Trip ${m.trip} · ${m.consignee}: ${m.scanned}/${m.boxes} scanned, ${m.missing} missing (ship date ${m.shipDate})`).join('\n'),
+  };
+}
+export function initMissingBoxes({ db, sendMail, recipients, now = () => Date.now() }) {
+  const key = 'taArtisMissingSent';
+  return async function notify(list, { caller = null } = {}) {
+    if (!list || !list.length || !db || !db.enabled) return { sent: false };
+    const day = new Date(now()).toISOString().slice(0, 10);
+    let fresh = [];
+    await db.update(key, (cur) => {
+      const a = { ...(cur || {}) };
+      fresh = list.filter((m) => !a[`${day}|${m.trip}|${m.consigneeId || m.consignee}`]);
+      for (const m of fresh) a[`${day}|${m.trip}|${m.consigneeId || m.consignee}`] = { at: new Date(now()).toISOString(), missing: m.missing };
+      for (const k of Object.keys(a)) if (k.slice(0, 10) < new Date(now() - 7 * 86400000).toISOString().slice(0, 10)) delete a[k];
+      return a;
+    }, {});
+    if (!fresh.length) return { sent: false, already: true };
+    const to = (await recipients()).filter(Boolean);
+    if (!to.length) { console.warn('[artis] missing boxes: no team emails found'); return { sent: false }; }
+    await sendMail({ to, ...missingEmail(fresh, { caller }) });
+    return { sent: true, to, count: fresh.length };
+  };
 }

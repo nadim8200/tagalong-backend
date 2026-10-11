@@ -67,7 +67,8 @@ import { initRingCentral, setSmsGuard } from './ringcentral.js';
 import { initTruckMate } from './truckmate.js';
 import { initCarChat } from './carChat.js';
 import { initDbpo } from './dbpo.js';
-import { initArtis } from './artis.js';
+import { initArtis, initMissingBoxes, MISSING_TEAM } from './artis.js';
+import { findStaff } from './directory.js';
 import { initRateCon } from './ratecon.js';
 import { sendMail, mailConfig, setMailGuard } from './mailer.js';
 import { initTraining } from './training.js';
@@ -743,7 +744,16 @@ let helpdesk = null;
 const help = { raise: (r) => (helpdesk ? helpdesk.raise(r) : Promise.resolve(null)) };
 const driverLinks = initDriverLinks(app, { training, help, requireAuth: requireDispatch, db, carriers, ringcentral: rc, docs, push, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // driver calls / texts on a load, and their replies (RingCentral)
-const comms = initComms(app, { help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+// an employee texting Jarvis (phone on the Employees list) → the same answers as Ask Jarvis, as a short text
+const staffAsk = async ({ phone, text }) => {
+  const d = (s2) => String(s2 || '').replace(/\D+/g, '').slice(-10);
+  const me = ((await directory.load().catch(() => ({ people: [] }))).people || []).find((p) => p && p.phone && d(p.phone) === d(phone));
+  if (!me || !jarvisChat || !String(text || '').trim()) return null;
+  const r = await jarvisChat.turn({ mode: 'staff_email', user: { id: `sms:${d(phone)}`, name: me.name, email: me.email || null }, threadId: `sms-${d(phone)}`,
+    text: `[Text message from ${me.name}, Florida Beauty staff. Answer as a short text message: plain words, 1–3 sentences, no links or tables.]\n\n${String(text).slice(0, 1000)}` });
+  return r && r.answer ? r.answer : null;
+};
+const comms = initComms(app, { staffAsk: (...a) => staffAsk(...a), help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
 helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, pushRules, directory, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) },
@@ -783,7 +793,18 @@ const profiles = initProfiles(app, { clientList: () => clients.all(), requireAut
 let tempPhotos = null;    // reefer temp photos for trailers we can't read live (set below)
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
 let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers overlay)
-truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
+const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, env: process.env });
+// Missing boxes a customer asked about → email Frank Ducassi, Sebastian Manotas, Ronen and Nadim (Employees
+// emails; ARTIS_MISSING_TO in Render can replace the list, comma-separated addresses)
+const missingBoxes = initMissingBoxes({ db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: async () => {
+  if (process.env.ARTIS_MISSING_TO) return process.env.ARTIS_MISSING_TO.split(',').map((x) => x.trim()).filter(Boolean);
+  const people = ((await directory.load().catch(() => ({ people: [] }))).people) || [];
+  const found = MISSING_TEAM.map((n) => (findStaff(people, n, 1)[0] || {}).email || (n === 'Nadim' ? 'ntellez@floridabeauty.us' : null));
+  const miss = MISSING_TEAM.filter((n, i) => !found[i]);
+  if (miss.length) console.warn('[artis] missing boxes — no email on Employees for:', miss.join(', '));
+  return [...new Set(found.filter(Boolean).map((e) => String(e).toLowerCase()))];
+} });
+truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => artis.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
@@ -794,7 +815,7 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
-const voice = initVoice(app, { clients, training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const voice = initVoice(app, { artis, missingBoxes, clients, training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, db, replyInThread: (...a) => inbox.replyInThread(...a), ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // paperwork after delivery: POD / BOL from the driver → broker + Billing; Billing's document requests
@@ -808,7 +829,6 @@ voice.useOutreach((ev) => outreach.notify(ev));
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
-const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, env: process.env });
 jarvisChat = initJarvisChat(app, { artis, clients, planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },

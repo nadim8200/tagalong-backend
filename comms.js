@@ -64,7 +64,7 @@ export function recipientFor(item, which = 1, phoneConsent = {}) {
   return { phone: info.phone, name: info.name, consent: phoneConsent[last10(info.phone)] || null, kind: 'company' };
 }
 
-export function initComms(app, { requireAuth, db, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, help = null, activity = null, env = process.env }) {
+export function initComms(app, { requireAuth, db, staffAsk = null, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, help = null, activity = null, env = process.env }) {
   const enabled = !!(db && db.enabled);
   const logKey = (site) => `taTripComms:${site}`;
   const askKey = (site) => `taCommsAsks:${site}`;
@@ -248,6 +248,18 @@ export function initComms(app, { requireAuth, db, ringcentral = null, carriers =
       const { trips, confirm } = kw ? { trips: [], confirm: null } : routeReply(r, { asks, driverPhones });
       if (!trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: null }); // eslint-disable-line no-await-in-loop
       if (trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: trips.join(', ') }); // eslint-disable-line no-await-in-loop
+      // an employee (phone on the Employees list) texting Jarvis a question → Jarvis texts the answer back
+      if (!kw && staffAsk) {
+        try {
+          const ans = await staffAsk({ phone: r.from, text: r.text }); // eslint-disable-line no-await-in-loop
+          if (ans) {
+            const reply = String(ans).slice(0, 1200);
+            await ringcentral.sendSms('__shared', { to: r.from, text: reply }); // eslint-disable-line no-await-in-loop
+            await thread(site, r.from, { type: 'text', kind: 'staff-answer', to: r.from, text: reply, by: 'AI Dispatcher (Jarvis)' }); // eslint-disable-line no-await-in-loop
+            continue;
+          }
+        } catch (e) { console.warn('[comms] staff question:', e.message); }
+      }
       // a text asking for a call back / help → email / text the right people now
       if (!kw && help && help.raise && wantsContact(r.text)) {
         help.raise({ source: 'text', ref: r.id, role: driverPhones.has(last10(r.from)) ? 'driver' : 'unknown', from: { phone: r.from }, trip: trips[0] || null, need: String(r.text).slice(0, 400), said: r.text }).catch(() => {});

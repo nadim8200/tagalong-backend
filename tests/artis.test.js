@@ -41,3 +41,59 @@ test('ARTIS not set up / login refused → a clear message, nothing thrown at th
   assert.equal(out.connected, false);
   assert.match(out.error, /refused/);
 });
+
+import { loadBoxes, shipDateOf } from '../artis.js';
+import { opsRisks, planEmail } from '../plansheet.js';
+import { customerStops } from '../voice.js';
+
+const caggiano = [{ consigneeId: '03373', consignee: "CAGGIANO'S MEDFORD *", boxes: 316, scanned: 288, missing: 28, cubes: 461.05 }, { consigneeId: '03810', consignee: 'FALL RIVER FLORIST SUPPLY', boxes: 111, scanned: 111, missing: 0, cubes: 160 }];
+const loading = { trip: { tripNumber: '624900', status: 'LOADEDTOGO', powerUnit: '2602' }, _times: { statusHistory: [{ status: 'LOADINGMAN', at: '2026-10-11T12:00:00Z' }, { status: 'LOADEDTOGO', at: '2026-10-11T15:00:00Z' }] },
+  freightBills: [{ billNumber: 'M1', billToName: "CAGGIANO'S MEDFORD *", endZoneDescription: 'MEDFORD, MA, 02155', consignee: { clientId: '3373', name: "CAGGIANO'S MEDFORD" } }] };
+
+test('boxes on a load: its customers (client ID) on its ship date; missing boxes before it leaves → alert', () => {
+  assert.equal(shipDateOf(loading), '2026-10-11');
+  const b = loadBoxes(loading, (d) => (d === '2026-10-11' ? caggiano : null), Date.parse('2026-10-11T16:00:00Z'));
+  assert.deepEqual([b.boxes, b.scanned, b.missing], [316, 288, 28]);
+  assert.match(b.alert, /28 boxes not scanned yet — CAGGIANO'S MEDFORD \* 288\/316/);
+  // once the truck has left, no "before it leaves" alert
+  const gone = { ...loading, trip: { ...loading.trip, status: 'DEPSHIP' } };
+  assert.equal(loadBoxes(gone, () => caggiano, Date.parse('2026-10-11T18:00:00Z')).alert, null);
+  // a load for nobody in ARTIS → nothing
+  assert.equal(loadBoxes({ ...loading, freightBills: [{ billToName: 'SOMEONE ELSE' }] }, () => caggiano), null);
+});
+
+test('missing boxes reach the Operations check email and the phone answer', () => {
+  const it = { ...loading, _artis: loadBoxes(loading, () => caggiano, Date.parse('2026-10-11T16:00:00Z')) };
+  const rk = opsRisks([it], { now: Date.parse('2026-10-11T16:00:00Z') });
+  assert.equal(rk.boxes.length, 1);
+  assert.match(planEmail([], { risks: rk, now: Date.parse('2026-10-11T16:00:00Z') }).html, /28 not scanned/);
+  const stops = customerStops([it], "Caggiano's Medford", {});
+  assert.equal(stops[0].boxes_loaded, '288 boxes loaded for them');
+  assert.ok(!/missing|not scanned|316/.test(JSON.stringify(stops[0])), 'the customer never hears about missing boxes');
+});
+
+import { missingFor } from '../voice.js';
+import { initMissingBoxes, missingEmail } from '../artis.js';
+
+test('trip sheet vs ARTIS: a different box count is flagged, ARTIS is the right one', () => {
+  const withSheet = { ...loading, _manifest: { stops: [{ action: 'DELIVER', customer: "CAGGIANO'S MEDFORD", pieces: 300 }] } };
+  const b = loadBoxes(withSheet, () => caggiano, Date.parse('2026-10-11T16:00:00Z'));
+  assert.deepEqual(b.sheetDiffs, [{ consignee: "CAGGIANO'S MEDFORD *", sheet: 300, artis: 316 }]);
+  const rk = opsRisks([{ ...withSheet, _artis: b }], { now: Date.parse('2026-10-11T16:00:00Z') });
+  assert.match(rk.boxes[0].text, /Trip sheet says 300 boxes .* ARTIS has 316 \(ARTIS is correct/);
+});
+
+test('missing boxes on a load a customer asked about → one email to the team, never again that day', async () => {
+  const it = { ...loading, _artis: loadBoxes(loading, () => caggiano, Date.parse('2026-10-11T16:00:00Z')) };
+  const list = missingFor([it], customerStops([it], "Caggiano's Medford", {}));
+  assert.deepEqual(list.map((m) => [m.trip, m.missing]), [['624900', 28]]);
+  const sent = []; const store = new Map();
+  const db = { enabled: true, update: async (k, fn, fb) => { const v = fn(store.has(k) ? store.get(k) : fb); store.set(k, v); return v; } };
+  const notify = initMissingBoxes({ db, sendMail: async (m) => sent.push(m), recipients: async () => ['frank@x.com', 'sebastian@x.com', 'ronen@x.com', 'ntellez@floridabeauty.us'], now: () => Date.parse('2026-10-11T16:00:00Z') });
+  await notify(list, { caller: '+13055550100' });
+  await notify(list, { caller: '+13055550100' });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to.length, 4);
+  assert.match(sent[0].subject, /Missing boxes — CAGGIANO'S MEDFORD \* · trip 624900 \(28 not scanned\)/);
+  assert.match(missingEmail(list).html, /told the customer only how many boxes are loaded/);
+});

@@ -190,7 +190,11 @@ export function opsRisks(items = [], { now = Date.now(), etas = {}, horizonH = 1
     nextLate.push({ trip: n.trip, truck: unitOf(it), current: tripNo(it), from: n.from, state: tm.state, lateMin: tm.lateMin || 0, slackMin: tm.slackMin || 0, summary: tm.summary || '' });
   }
   nextLate.sort((a, b) => (b.lateMin - a.lateMin) || (a.slackMin - b.slackMin));
-  return { late, pickups, nextLate };
+  // ARTIS: boxes for customers on a truck that hasn't left yet, still not scanned at the terminal
+  const boxes = items.filter((it) => it._artis && (it._artis.alert || (it._artis.sheetDiffs || []).length)).map((it) => ({ trip: tripNo(it), truck: unitOf(it) || null, shipDate: it._artis.shipDate, missing: it._artis.missing, scanned: it._artis.scanned, boxes: it._artis.boxes,
+    text: [it._artis.alert, ...(it._artis.sheetDiffs || []).map((d) => `Trip sheet says ${d.sheet} boxes for ${d.consignee}; ARTIS has ${d.artis} (ARTIS is correct — fix the sheet)`)].filter(Boolean).join(' · ') }))
+    .sort((a, b) => b.missing - a.missing);
+  return { late, pickups, nextLate, boxes };
 }
 
 // The planning email for Gus: by region, problems first. Pure.
@@ -213,10 +217,12 @@ export function planEmail(rows, { now = Date.now(), title = 'Planning sheet', ri
     scheduled: `${p.place || 'shipper'} · ${fmt(p.pickupMs)} ET (from ${p.source})`, status: { label: p.pickupMs < now ? 'Late pickup' : 'At risk', tone: 'red', text: p.why.join(' · ') }, next: 'Dispatch: confirm with the driver / reassign or move the pickup', need: null, details: p.location ? [`Truck now near ${p.location}`] : [] }));
   const nextBlocks = (rk.nextLate || []).map((x) => ({ trip: x.trip, title: `Next trip ${x.trip}${x.truck ? ` · truck ${x.truck}` : ''}`, group: '2 · Pickups at risk', sortKey: `1z${x.state === 'late' ? 0 : 1}${String(99999 - x.lateMin).padStart(5, '0')}`, schedLabel: 'Next load',
     scheduled: `After trip ${x.current}${x.from ? ` · picks up ${x.from}` : ''}`, status: { label: x.state === 'late' ? `${hm(x.lateMin)} late` : 'Tight', tone: x.state === 'late' ? 'red' : 'amber', text: x.summary }, next: 'Dispatch: check the plan for this truck — swap trucks or move the appointment', need: null, details: ['From the live ETA of the current trip + HOS drive time (TruckMate next trip)'] }));
+  const boxBlocks = (rk.boxes || []).map((x) => ({ trip: x.trip, title: `Trip ${x.trip}${x.truck ? ` · truck ${x.truck}` : ''}`, group: '2 · Pickups at risk', sortKey: `1y${String(99999 - x.missing).padStart(5, '0')}`, schedLabel: 'Boxes',
+    scheduled: `Ship date ${x.shipDate} · ${x.scanned} of ${x.boxes} boxes scanned (ARTIS)`, status: { label: x.missing ? `${x.missing} not scanned` : 'Sheet ≠ ARTIS', tone: 'amber', text: x.text }, next: x.missing ? 'Terminal: find / scan the missing boxes before the truck leaves' : 'Dispatch: correct the trip sheet box count to match ARTIS', need: null, details: ['From ARTIS cargo received'] }));
   const planBlocks = blocks.map((b) => ({ ...b, group: `3 · ${b.group}`, sortKey: `2${b.sortKey}` }));
   const bad = rows.filter((a) => a.tone === 'red').length;
   const atRisk = rk.pickups.length + (rk.nextLate || []).length;
-  const all = [...lateBlocks, ...pickBlocks, ...nextBlocks, ...planBlocks.filter((b) => b.status.tone !== 'green'), ...planBlocks.filter((b) => b.status.tone === 'green')];
+  const all = [...lateBlocks, ...pickBlocks, ...nextBlocks, ...boxBlocks, ...planBlocks.filter((b) => b.status.tone !== 'green'), ...planBlocks.filter((b) => b.status.tone === 'green')];
   const out = renderOutboundFollowUp({ heading: `Operations check — ${rk.late.length} late · ${atRisk} pickup${atRisk === 1 ? '' : 's'} at risk · ${bad} plan problem${bad === 1 ? '' : 's'}`, blocks: all, closing: `Live board + Samsara ETAs${rows.length ? ` + "${title}" (read-only)` : ''}, ${fmt(now)} ET. Pickups checked for the next 18 hours.` });
   return { subject: `Operations check | ${rk.late.length} late · ${atRisk} pickups at risk · ${bad} plan | ${new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' })}`, html: out.html, text: out.text };
 }
