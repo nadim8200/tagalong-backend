@@ -209,6 +209,7 @@ export function initArtis(app, { requireAuth, requireAdmin = null, db = null, se
     for (const x of fresh) { try { await sendMail({ to, ...leftShortEmail(x) }); } catch (e) { console.warn('[artis] left-short email:', e.message); } } // eslint-disable-line no-await-in-loop
     return fresh.length;
   }
+  const lastLoads = new Map();   // trip → the load as last seen with ARTIS boxes (for "send me this alert again")
   async function overlay(site, trips) {
     if (!byDate.size) return;
     const short = [];
@@ -216,10 +217,25 @@ export function initArtis(app, { requireAuth, requireAdmin = null, db = null, se
       const b = loadBoxes(it, (d) => byDate.get(d) || null, now());
       if (!b) continue;
       it._artis = b;
+      lastLoads.set(String(tripOf(it).tripNumber || ''), it);
+      if (lastLoads.size > 600) lastLoads.delete(lastLoads.keys().next().value);
       const x = leftShort(it, now()); if (x) short.push(x);
     }
     if (short.length) notifyLeftShort(short).catch((e) => console.warn('[artis] left-short:', e.message));
   }
+
+  // admin: send the "truck left — boxes not received" email for one trip again, to the person asking (to check
+  // how it reads). Ignores the once-per-trip rule; never goes to the alert list.
+  app.post('/truckmate/artis/left-short/:trip/send', requireAdmin || requireAuth, async (req, res) => {
+    const it = lastLoads.get(String(req.params.trip));
+    if (!it || !it._artis) return res.status(404).json({ error: 'That trip has no ARTIS boxes on the board right now.' });
+    const dep = ((it._times && it._times.statusHistory) || []).find((h) => /^DEPSHIP/i.test(String(h.status || '')) && h.at);
+    const x = leftShort(it, dep ? Date.parse(dep.at) + 60000 : now());
+    if (!x) return res.status(409).json({ error: it._artis.missing ? 'The truck has not left yet.' : 'No boxes missing on this trip.' });
+    const to = [(req.user && req.user.email) || ''].filter((a) => /@/.test(a));
+    if (!to.length || !sendMail) return res.status(400).json({ error: 'No email for your login.' });
+    try { await sendMail({ to, ...leftShortEmail(x) }); res.json({ sent: true, to, subject: leftShortEmail(x).subject }); } catch (e) { res.status(502).json({ error: e.message }); }
+  });
 
   console.log(`[artis] Florida Beauty EDI ${artisConfig(env).ready ? 'connected (read-only)' : 'off — needs ARTIS_API_USER / ARTIS_API_PASSWORD'}`);
   return { ready: () => artisConfig(env).ready, cargo, dayOfService, overlay, refresh, notifyLeftShort, _byDate: byDate };

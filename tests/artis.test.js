@@ -146,3 +146,17 @@ test('624670 (Sara checked it): 27 boxes never received from the shippers — pe
     assert.ok(!/another truck|still at the terminal/.test(m.html));
   });
 });
+
+test('admin "send me this alert again": the left-short email for one trip, to the person asking only', async () => {
+  const routes = {}; const sent = [];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const now = Date.parse('2026-10-12T22:00:00Z');
+  const a = initArtis(app, { requireAuth: (q, r, n) => n(), sendMail: async (m) => sent.push(m), env: { NODE_ENV: 'test', ARTIS_API_USER: 'u', ARTIS_API_PASSWORD: 'p' }, now: () => now });
+  a._byDate.set('2026-10-12', [{ consigneeId: '09273', consignee: 'WESTLAND FLORAL', boxes: 84, scanned: 57, missing: 27, shippers: [{ shipper: 'SUNBURST FARMS', boxes: 54, scanned: 30, missing: 24 }] }]);
+  const trip = { trip: { tripNumber: '624670', status: 'DEPSHIP', powerUnit: '650' }, _times: { statusHistory: [{ status: 'LOADINGMAN', at: '2026-10-12T14:00:00Z' }, { status: 'DEPSHIP', at: '2026-10-12T16:24:00Z' }] },
+    freightBills: [{ consignee: { clientId: '09273', name: 'WESTLAND FLORAL' } }] };
+  await a.overlay('fb', [trip]);
+  let out; await routes['POST /truckmate/artis/left-short/:trip/send'].at(-1)({ params: { trip: '624670' }, user: { email: 'ntellez@floridabeauty.us' } }, { json: (j) => { out = j; }, status: () => ({ json: (j) => { out = j; } }) });
+  assert.equal(out.sent, true); assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']);
+  assert.match(sent[0].subject, /Truck 650 left — 27 boxes not received from the shipper — trip 624670/);
+});
