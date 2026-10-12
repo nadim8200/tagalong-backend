@@ -33,6 +33,17 @@ export function transferPlan(it) {
   return { trip: tripNo(it), from: String(m.truck), to: String(to), trailer: String(m.trailer || tripOf(it).trailer || '') || null };
 }
 
+// TruckMate already shows the transfer done: the load is on the transfer truck and, after the trailer was
+// dropped / spotted (SPTLD), it departed again. Pure. → ISO time | null
+export function doneInTruckMate(it, plan) {
+  if (!plan || unitKey(tripOf(it).powerUnit) !== unitKey(plan.to)) return null;
+  const hist = ((it._times && it._times.statusHistory) || []).filter((h) => h && h.at).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  const spot = hist.findIndex((h) => /^SPTLD/i.test(String(h.status || '')));
+  if (spot < 0) return null;
+  const dep = hist.slice(spot + 1).find((h) => /^(DEPSHIP|DEPCONS|ARRCONS)/i.test(String(h.status || '')));
+  return dep ? dep.at : null;
+}
+
 // Where the two trucks are relative to each other. Pure. pos: { lat, lng, speedMph, location, at }
 export function transferStatus(a, b) {
   const has = (p) => p && p.lat != null && p.lng != null;
@@ -134,6 +145,15 @@ export function initTransferWatch({ db, env = process.env, sendMail, recipients,
       if (prev && prev.outcome && prev.outcome.status === 'done') continue;
       const a = pos(plan.from); const b = pos(plan.to);
       const s = transferStatus(a, b);
+      // TruckMate already shows it done → end the watch (a quiet note if we never reported on it)
+      const tmDone = doneInTruckMate((board.trips || []).find((x) => tripNo(x) === plan.trip), plan);
+      if (tmDone) {
+        const outcome = { status: 'done', source: 'TruckMate', summary: `TruckMate shows trailer ${plan.trailer || ''} on truck ${plan.to} and rolling since ${new Date(tmDone).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: '2-digit' })} ET.`, at: tmDone };
+        if (prev && prev.startedAt) await mail('outcome', plan, a, b, s, { outcome }).catch(() => {}); // eslint-disable-line no-await-in-loop
+        all[plan.trip] = { ...(prev || {}), from: plan.from, to: plan.to, outcome };
+        done.push({ trip: plan.trip, actions: prev && prev.startedAt ? ['report_outcome'] : [], distanceMi: s.distanceMi });
+        continue;
+      }
       const { state, actions } = step(prev, s, now());
       state.from = plan.from; state.to = plan.to; state.last = { distanceMi: s.distanceMi, aRolling: s.aRolling, bRolling: s.bRolling, at: new Date(now()).toISOString() };
       for (const act of actions) {

@@ -61,3 +61,16 @@ test('report email shows both trucks, rolling or stopped, and the distance', () 
   assert.match(e.html, /4504<\/b><\/td><td>Macon, GA<\/td><td>stopped/);
   assert.match(e.html, /87.4 mi/);
 });
+
+import { doneInTruckMate } from '../transferwatch.js';
+
+test('a transfer TruckMate already shows done (624773: spotted, then 4504 departed) is not watched — no emails', async () => {
+  const doneItem = { ...item, _times: { statusHistory: [{ status: 'DEPSHIP', at: '2026-10-11T21:11:34Z' }, { status: 'SPTLD', at: '2026-10-12T06:46:38Z' }, { status: 'DEPSHIP', at: '2026-10-12T06:48:39Z' }] } };
+  assert.equal(doneInTruckMate(doneItem, transferPlan(doneItem)), '2026-10-12T06:48:39Z');
+  assert.equal(doneInTruckMate(item, transferPlan(item)), null);
+  const store = new Map(); const sent = [];
+  const db = { enabled: true, get: async (k, fb) => (store.has(k) ? store.get(k) : fb), update: async (k, fn, fb) => { const v = fn(store.has(k) ? store.get(k) : fb); store.set(k, v); return v; } };
+  const w = initTransferWatch({ db, sendMail: async (m) => sent.push(m), recipients: async () => ['x@y.com'], livePos: () => ({ ...MIAMI, speedMph: 50 }) });
+  await w.process('fb', { trips: [doneItem] }); await w.process('fb', { trips: [doneItem] });
+  assert.equal(sent.length, 0);
+});
