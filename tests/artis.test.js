@@ -54,7 +54,7 @@ test('boxes on a load: its customers (client ID) on its ship date; missing boxes
   assert.equal(shipDateOf(loading), '2026-10-11');
   const b = loadBoxes(loading, (d) => (d === '2026-10-11' ? caggiano : null), Date.parse('2026-10-11T16:00:00Z'));
   assert.deepEqual([b.boxes, b.scanned, b.missing], [316, 288, 28]);
-  assert.match(b.alert, /28 boxes not scanned yet — CAGGIANO'S MEDFORD \* 288\/316/);
+  assert.match(b.alert, /28 boxes not received from the shipper yet — CAGGIANO'S MEDFORD \* 288\/316/);
   // once the truck has left, no "before it leaves" alert
   const gone = { ...loading, trip: { ...loading.trip, status: 'DEPSHIP' } };
   assert.equal(loadBoxes(gone, () => caggiano, Date.parse('2026-10-11T18:00:00Z')).alert, null);
@@ -66,7 +66,7 @@ test('missing boxes reach the Operations check email and the phone answer', () =
   const it = { ...loading, _artis: loadBoxes(loading, () => caggiano, Date.parse('2026-10-11T16:00:00Z')) };
   const rk = opsRisks([it], { now: Date.parse('2026-10-11T16:00:00Z') });
   assert.equal(rk.boxes.length, 1);
-  assert.match(planEmail([], { risks: rk, now: Date.parse('2026-10-11T16:00:00Z') }).html, /28 not scanned/);
+  assert.match(planEmail([], { risks: rk, now: Date.parse('2026-10-11T16:00:00Z') }).html, /28 not received/);
   const stops = customerStops([it], "Caggiano's Medford", {});
   assert.equal(stops[0].boxes_loaded, '288 boxes loaded for them');
   assert.ok(!/missing|not scanned|316/.test(JSON.stringify(stops[0])), 'the customer never hears about missing boxes');
@@ -94,7 +94,7 @@ test('missing boxes on a load a customer asked about → one email to the team, 
   await notify(list, { caller: '+13055550100' });
   assert.equal(sent.length, 1);
   assert.equal(sent[0].to.length, 4);
-  assert.match(sent[0].subject, /Missing boxes — CAGGIANO'S MEDFORD \* · trip 624900 \(28 not scanned\)/);
+  assert.match(sent[0].subject, /Boxes not received from the shipper — CAGGIANO'S MEDFORD \* · trip 624900 \(28\)/);
   assert.match(missingEmail(list).html, /told the customer only how many boxes are loaded/);
 });
 
@@ -120,6 +120,29 @@ test('a truck that LEFT with boxes not scanned (10 expected, 9 scanned) → one 
   await a.overlay('fb', [{ ...left }]); await new Promise((r) => setTimeout(r, 10));
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']);
-  assert.match(sent[0].subject, /Truck 2602 left with missing boxes — trip 624900 \(1 not scanned\)/);
-  assert.match(sent[0].html, /CAGGIANO'S MEDFORD \(03373\)<\/td><td>10<\/td><td>9<\/td><td><b>1<\/b>/);
+  assert.match(sent[0].subject, /Truck 2602 left — 1 box not received from the shipper — trip 624900/);
+  assert.match(sent[0].html, /CAGGIANO'S MEDFORD \(03373\)<\/td><td>—<\/td><td>10<\/td><td>9<\/td><td><b>1<\/b>/);
+});
+
+
+test('624670 (Sara checked it): 27 boxes never received from the shippers — per shipper, "verify if rejected or contact the shipper"', () => {
+  const rows = [
+    ...Array.from({ length: 30 }, (_, i) => ({ consigneeId: '09273', consigneeName: 'WESTLAND FLORAL', farmName: 'AMERICAN FLORAL CARGO', cargoQty: 1, scannedQty: i < 27 ? 1 : 0 })),
+    ...Array.from({ length: 54 }, (_, i) => ({ consigneeId: '09273', consigneeName: 'WESTLAND FLORAL', farmName: 'SUNBURST FARMS', cargoQty: 1, scannedQty: i < 30 ? 1 : 0 })),
+  ];
+  const [w] = summarizeCargo(rows);
+  assert.deepEqual([w.boxes, w.scanned, w.missing], [84, 57, 27]);
+  assert.deepEqual(w.shippers.map((x) => [x.shipper, x.boxes, x.scanned, x.missing]), [['SUNBURST FARMS', 54, 30, 24], ['AMERICAN FLORAL CARGO', 30, 27, 3]]);
+  const trip = { trip: { tripNumber: '624670', status: 'DEPSHIP', powerUnit: '650', trailer: '7323' }, _times: { statusHistory: [{ status: 'DEPSHIP', at: '2026-10-12T16:24:00Z' }] },
+    freightBills: [{ billNumber: 'M5039998', consignee: { clientId: '09273', name: 'WESTLAND FLORAL' } }] };
+  const now = Date.parse('2026-10-12T16:52:00Z');
+  const x = leftShort({ ...trip, _artis: loadBoxes(trip, () => [w], now) }, now);
+  return import('../artis.js').then(({ leftShortEmail }) => {
+    const m = leftShortEmail(x);
+    assert.equal(m.subject, 'Truck 650 left — 27 boxes not received from the shipper — trip 624670');
+    assert.match(m.html, /WESTLAND FLORAL \(09273\)<\/td><td>SUNBURST FARMS<\/td><td>54<\/td><td>30<\/td><td><b>24<\/b>/);
+    assert.match(m.html, /AMERICAN FLORAL CARGO<\/td><td>30<\/td><td>27<\/td><td><b>3<\/b>/);
+    assert.match(m.html, /Verify whether they were rejected, or contact the shipper/);
+    assert.ok(!/another truck|still at the terminal/.test(m.html));
+  });
 });

@@ -27,10 +27,15 @@ export function summarizeCargo(rows = []) {
     c.boxes += Number(r.cargoQty) || 0; c.scanned += Number(r.scannedQty) || 0;
     c.cubes += Number(r.cargoCubes) || 0; c.scannedCubes += Number(r.scannedCubes) || 0; c.lines += 1;
     if (r.farmName) c.farms.add(String(r.farmName)); if (r.productDescription) c.products.add(String(r.productDescription));
+    // per shipper / farm: who sent what, and what never arrived at the terminal
+    const sh = String(r.shipperName || r.shipper || r.farmName || '').trim() || 'Unknown shipper';
+    c.byShipper = c.byShipper || new Map();
+    const b = c.byShipper.get(sh) || { shipper: sh, boxes: 0, scanned: 0 };
+    b.boxes += Number(r.cargoQty) || 0; b.scanned += Number(r.scannedQty) || 0; c.byShipper.set(sh, b);
     by.set(k, c);
   }
   const r2 = (x) => Math.round(x * 100) / 100;
-  return [...by.values()].map((c) => ({ ...c, cubes: r2(c.cubes), scannedCubes: r2(c.scannedCubes), missing: Math.max(0, c.boxes - c.scanned), farms: [...c.farms].slice(0, 12), products: [...c.products].slice(0, 8) }))
+  return [...by.values()].map((c) => ({ ...c, shippers: [...(c.byShipper || new Map()).values()].map((x) => ({ ...x, missing: Math.max(0, x.boxes - x.scanned) })).sort((a, b) => b.missing - a.missing), byShipper: undefined, cubes: r2(c.cubes), scannedCubes: r2(c.scannedCubes), missing: Math.max(0, c.boxes - c.scanned), farms: [...c.farms].slice(0, 12), products: [...c.products].slice(0, 8) }))
     .sort((a, b) => b.missing - a.missing || String(a.consignee).localeCompare(String(b.consignee)));
 }
 
@@ -91,9 +96,10 @@ export function loadBoxes(it, summaryFor, now = Date.now()) {
   return {
     sheetDiffs,
     shipDate: date, boxes: tot.boxes, scanned: tot.scanned, missing,
-    stops: stops.map((c) => ({ consigneeId: c.consigneeId, consignee: c.consignee, boxes: c.boxes, scanned: c.scanned, missing: c.missing, cubes: c.cubes })),
+    stops: stops.map((c) => ({ consigneeId: c.consigneeId, consignee: c.consignee, boxes: c.boxes, scanned: c.scanned, missing: c.missing, cubes: c.cubes, shippers: (c.shippers || []).filter((x) => x.missing > 0) })),
     // before the truck leaves: boxes for a customer on it still not scanned
-    alert: notLeft && missing > 0 ? `${missing} box${missing === 1 ? '' : 'es'} not scanned yet — ${short.map((c) => `${c.consignee} ${c.scanned}/${c.boxes}`).join(', ')}` : null,
+    // "not scanned" in ARTIS = never received at our terminal from the shipper (not left behind)
+    alert: notLeft && missing > 0 ? `${missing} box${missing === 1 ? '' : 'es'} not received from the shipper yet — ${short.map((c) => `${c.consignee} ${c.scanned}/${c.boxes}${(c.shippers || []).filter((x) => x.missing > 0).length ? ` (${c.shippers.filter((x) => x.missing > 0).map((x) => `${x.shipper} ${x.missing}`).join(', ')})` : ''}`).join(', ')}` : null,
   };
 }
 
@@ -110,13 +116,17 @@ export function leftShort(it, now = Date.now()) {
 }
 export function leftShortEmail(x) {
   const when = new Date(x.departedAt).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  const rows = x.stops.map((c) => `<tr><td>${c.consignee}${c.consigneeId ? ` (${c.consigneeId})` : ''}</td><td>${c.boxes}</td><td>${c.scanned}</td><td><b>${c.missing}</b></td></tr>`).join('');
+  const rows = x.stops.flatMap((c) => {
+    const sh = (c.shippers || []).filter((s2) => s2.missing > 0);
+    return sh.length ? sh.map((s2) => `<tr><td>${c.consignee}${c.consigneeId ? ` (${c.consigneeId})` : ''}</td><td>${s2.shipper}</td><td>${s2.boxes}</td><td>${s2.scanned}</td><td><b>${s2.missing}</b></td></tr>`)
+      : [`<tr><td>${c.consignee}${c.consigneeId ? ` (${c.consigneeId})` : ''}</td><td>—</td><td>${c.boxes}</td><td>${c.scanned}</td><td><b>${c.missing}</b></td></tr>`];
+  }).join('');
   return {
-    subject: `Truck ${x.truck || '?'} left with missing boxes — trip ${x.trip} (${x.missing} not scanned)`,
-    html: `<p>Trip <b>${x.trip}</b>${x.truck ? ` · truck <b>${x.truck}</b>` : ''} departed ${when} ET with <b>${x.missing}</b> box${x.missing === 1 ? '' : 'es'} not scanned in ARTIS (${x.scanned} of ${x.boxes} scanned, ship date ${x.shipDate}).</p>
-<table border="1" cellpadding="6" cellspacing="0"><tr><th>Customer</th><th>Expected</th><th>Scanned</th><th>Missing</th></tr>${rows}</table>
-<p>Check whether the boxes are still at the terminal or went on another truck.</p>`,
-    text: `Trip ${x.trip} truck ${x.truck || '?'} left ${when} ET — ${x.missing} box(es) not scanned: ${x.stops.map((c) => `${c.consignee} ${c.scanned}/${c.boxes}`).join(', ')}`,
+    subject: `Truck ${x.truck || '?'} left — ${x.missing} box${x.missing === 1 ? '' : 'es'} not received from the shipper — trip ${x.trip}`,
+    html: `<p>Trip <b>${x.trip}</b>${x.truck ? ` · truck <b>${x.truck}</b>` : ''} departed ${when} ET. ARTIS shows <b>${x.missing}</b> ${x.missing === 1 ? 'box that was' : 'boxes that were'} never received at our terminal (${x.scanned} of ${x.boxes} received, ship date ${x.shipDate}).</p>
+<table border="1" cellpadding="6" cellspacing="0"><tr><th>Customer</th><th>Shipper</th><th>Expected (EDI)</th><th>Received</th><th>Not received</th></tr>${rows}</table>
+<p><b>Verify whether they were rejected, or contact the shipper.</b></p>`,
+    text: `Trip ${x.trip} truck ${x.truck || '?'} left ${when} ET — ${x.missing} box(es) not received from the shipper: ${x.stops.map((c) => `${c.consignee} ${c.scanned}/${c.boxes}`).join(', ')}. Verify whether they were rejected, or contact the shipper.`,
   };
 }
 
@@ -221,11 +231,11 @@ export function missingEmail(list, { caller = null } = {}) {
   const rows = list.map((m) => `<tr><td>${m.trip}</td><td>${m.truck || '—'}</td><td>${m.consignee}${m.consigneeId ? ` (${m.consigneeId})` : ''}</td><td>${m.scanned} of ${m.boxes}</td><td><b>${m.missing}</b></td><td>${m.shipDate}</td></tr>`).join('');
   const first = list[0];
   return {
-    subject: `Missing boxes — ${first.consignee} · trip ${first.trip} (${first.missing} not scanned)`,
-    html: `<p>A customer asked about their delivery and ARTIS shows boxes not scanned for them. Jarvis told the customer only how many boxes are loaded — <b>not</b> that any are missing.</p>
-<table border="1" cellpadding="6" cellspacing="0"><tr><th>Trip</th><th>Truck</th><th>Customer</th><th>Scanned</th><th>Missing</th><th>Ship date</th></tr>${rows}</table>
-${caller ? `<p>Caller: ${caller}</p>` : ''}<p>Please find / scan the missing boxes or follow up with the customer.</p>`,
-    text: list.map((m) => `Trip ${m.trip} · ${m.consignee}: ${m.scanned}/${m.boxes} scanned, ${m.missing} missing (ship date ${m.shipDate})`).join('\n'),
+    subject: `Boxes not received from the shipper — ${first.consignee} · trip ${first.trip} (${first.missing})`,
+    html: `<p>A customer asked about their delivery and ARTIS shows boxes for them that were never received at our terminal. Jarvis told the customer only how many boxes are loaded — <b>not</b> that any are missing.</p>
+<table border="1" cellpadding="6" cellspacing="0"><tr><th>Trip</th><th>Truck</th><th>Customer</th><th>Received</th><th>Not received</th><th>Ship date</th></tr>${rows}</table>
+${caller ? `<p>Caller: ${caller}</p>` : ''}<p><b>Verify whether they were rejected, or contact the shipper.</b></p>`,
+    text: list.map((m) => `Trip ${m.trip} · ${m.consignee}: ${m.scanned}/${m.boxes} received, ${m.missing} not received from the shipper (ship date ${m.shipDate})`).join('\n'),
   };
 }
 export function initMissingBoxes({ db, sendMail, recipients, now = () => Date.now() }) {

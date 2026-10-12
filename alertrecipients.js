@@ -7,10 +7,10 @@ import { findStaff } from './directory.js';
 
 const KEY = 'taAlertRecipients';
 export const ALERTS = [
-  { key: 'artis_left_short', label: 'Truck left with missing boxes', when: 'A truck departed with boxes for its customers not scanned in ARTIS (once per trip).', defaults: ['ntellez@floridabeauty.us'] },
+  { key: 'artis_left_short', label: 'Truck left — boxes not received from the shipper', when: 'A truck departed while ARTIS shows boxes for its customers never received at our terminal (once per trip): verify if rejected or contact the shipper.', defaults: ['ntellez@floridabeauty.us'] },
   { key: 'transfer', label: 'Truck transfer', when: 'A trip sheet plans a truck change (e.g. 734 → 4504): planned, every 2 h while apart (rolling or stopped, distance), when the trucks are together, and the driver\'s answer on whether the transfer is done.', defaults: ['ntellez@floridabeauty.us'] },
   { key: 'reefer_temp', label: 'Reefer temperature (internal)', when: 'Every reefer temperature photo from a driver, and any live reading held back from a broker because it is off the rate con range. The broker never gets these automatically — dispatch decides.', defaults: ['Dispatch', 'Luis Jimenez', 'Gustavo'] },
-  { key: 'artis_missing_call', label: 'Customer asked about a load with missing boxes', when: 'A customer called about their delivery and ARTIS shows boxes not scanned for them (the customer is only told what is loaded).', defaults: ['Frank Ducassi', 'Sebastian Manotas', 'Ronen', 'Nadim'] },
+  { key: 'artis_missing_call', label: 'Customer asked about a load with boxes not received', when: 'A customer called about their delivery and ARTIS shows boxes for them never received at our terminal (the customer is only told what is loaded).', defaults: ['Frank Ducassi', 'Sebastian Manotas', 'Ronen', 'Nadim'] },
 ];
 const isEmail = (x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(x || '').trim());
 
