@@ -34,3 +34,23 @@ test('the email: late first, counts in the subject, estimate disclaimer', () => 
   assert.deepEqual(rep.rows.map((r) => r.trip), ['624481', '624482', '624480']);
   assert.match(rep.html, /in each delivery's local time/);
 });
+
+import { generalRow, buildGeneralFollowUp, regionOf } from '../flowerreport.js';
+
+test('Flowers general follow-up: the team table — regions, temp / picture, status, location, next stop with miles', () => {
+  const now = Date.parse('2026-10-11T10:34:00Z');
+  const fl = { trip: { tripNumber: '624773', status: 'DEPCONS', powerUnit: '4504', trailer: '7137', origZoneDesc: 'MIAMI TERMINAL', destZoneDesc: 'MEDFORD, MA, 02155' },
+    _times: { statusHistory: [{ status: 'DEPSHIP', at: '2026-10-11T21:11:34Z' }] }, _samsara: { location: 'I-75, Cordele, GA, 31015', speedMph: 63 }, _tempPhotos: { got: true },
+    _manifest: { stops: [{ action: 'DELIVER', customer: "CAGGIANO'S MEDFORD *", city: 'MEDFORD', state: 'MA' }] } };
+  const r = generalRow(fl, { stops: [{ label: 'MEDFORD, MA, 02155', miles: 1193 }] });
+  assert.deepEqual([r.region, r.departure, r.truck, r.trailer, r.temp, r.picture, r.status, r.location, r.next], ['FLOWERS (FLORIDA)', '11-oct', '4504', '7137', 'Temp requested', 'Yes', 'Rolling', 'Cordele, GA', "CAGGIANO'S MEDFORD * - 1193 mi"]);
+  const mw = { trip: { tripNumber: '1', status: 'ARRCONS', powerUnit: '840', trailer: '7343', origZoneDesc: 'MIAMI TERMINAL', destZoneDesc: 'LOMBARD, IL, 60148' }, _samsara: { location: 'Lombard, IL', speedMph: 0, tempF: 36, setpointF: 36, reeferRunMode: 'Continuous' } };
+  const r2 = generalRow(mw, { stops: [{ label: 'LOMBARD, IL, 60148', miles: 0 }] });
+  assert.deepEqual([r2.region, r2.temp, r2.picture, r2.status], ['MIDWEST FLOWERS', '36F CONT', 'NA', 'At delivery']);
+  assert.equal(regionOf({ trip: { origZoneDesc: 'VENTURA TERMINAL', destZoneDesc: 'ATLANTA, GA' } }), 'CALIFORNIA');
+  assert.equal(regionOf({ trip: { origZoneDesc: 'MIAMI TERMINAL', destZoneDesc: 'GILA BEND, AZ' } }), 'WEST FLOWERS');
+  const e = buildGeneralFollowUp([r, r2], now);
+  assert.equal(e.subject, 'FLOWERS GENERAL FOLLOW UP 10-11-2026');
+  assert.ok(e.html.indexOf('FLOWERS (FLORIDA)') < e.html.indexOf('MIDWEST FLOWERS'));
+  assert.match(e.html, /DEPARTURE DATE.*TRUCK.*TRAILER.*TEMPERATURE.*PICTURE SENT\?.*STATUS.*LOCATION.*NEXT STOP/s);
+});

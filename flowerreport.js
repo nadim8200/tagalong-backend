@@ -132,6 +132,75 @@ export function buildFlowerReport(rows, now = Date.now()) {
   return { subject, html, rows: sorted, counts: n, at: now };
 }
 
+// ---- "Flowers general follow-up": the dispatch team's table (one row per load, grouped by region) ----
+const MIDWEST = new Set(['IL', 'IN', 'MI', 'OH', 'WI', 'MN', 'IA', 'MO', 'KS', 'NE', 'ND', 'SD', 'KY']);
+const WEST = new Set(['TX', 'AZ', 'NM', 'CO', 'NV', 'UT', 'OK', 'AR', 'LA', 'WY', 'MT', 'ID', 'OR', 'WA', 'CA']);
+const stateOf = (s) => { const m = String(s || '').match(/,\s*([A-Z]{2})\b/); return m ? m[1] : ''; };
+export const REGIONS = ['ALBERTSON FLOWERS', 'FLOWERS (FLORIDA)', 'MIDWEST FLOWERS', 'WEST FLOWERS', 'CALIFORNIA'];
+// Which section a load goes in. Pure.
+export function regionOf(it) {
+  const t = tripOf(it); const m = it._manifest || {};
+  const load = (m.stops || []).find((x) => /^LOAD/i.test(x.action || ''));
+  const origin = `${t.origZoneDesc || ''} ${load ? `${load.customer || ''} ${load.city || ''} ${load.state || ''}` : ''}`;
+  if (/VENTURA|OXNARD|CALIFORNIA|,\s*CA\b|\bCA\b/i.test(origin) && !/MIAMI/i.test(origin)) return 'CALIFORNIA';
+  if (billsOf(it).some((b) => /ALBERTSON/i.test(String(b.billToName || ''))) || (m.stops || []).some((x) => /ALBERTSON/i.test(String(x.customer || '')))) return 'ALBERTSON FLOWERS';
+  const lastDel = (m.stops || []).filter((x) => /DELIVER/i.test(x.action || '')).pop();
+  const st = stateOf(t.destZoneDesc) || String((lastDel && lastDel.state) || '').toUpperCase();
+  if (MIDWEST.has(st)) return 'MIDWEST FLOWERS';
+  if (WEST.has(st)) return 'WEST FLOWERS';
+  return 'FLOWERS (FLORIDA)';
+}
+const MON = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const dayMon = (ms) => { const d = new Date(new Date(ms).toLocaleString('en-US', { timeZone: TZ })); return `${d.getDate()}-${MON[d.getMonth()]}`; };
+// One row of the table. Pure.
+export function generalRow(it, eta = null) {
+  const t = tripOf(it); const live = it._samsara || {}; const m = it._manifest || {};
+  const dep = ((it._times && it._times.statusHistory) || []).find((h) => /^DEPSHIP/i.test(String(h.status || '')) && h.at);
+  const depMs = dep ? Date.parse(dep.at) : (m.dateLoaded ? Date.parse(`${m.dateLoaded}T12:00:00-05:00`) : null);
+  const oc = it._oc || null;
+  const truck = oc ? `OC${oc.truck ? ` ${oc.truck}` : ''}${oc.driverPhone ? ` - ${oc.driverPhone}` : ''}` : String(t.powerUnit || m.truck || '');
+  const tracked = live.tempF != null;
+  const mode = /start|stop/i.test(String(live.reeferRunMode || '')) ? 'S/S' : 'CONT';
+  const temp = tracked ? `${Math.round(live.setpointF != null ? live.setpointF : live.tempF)}F ${mode}` : 'Temp requested';
+  const tp = it._tempPhotos || null;
+  const picture = tracked ? 'NA' : tp && tp.got ? 'Yes' : 'No';
+  const stops = (eta && eta.stops) || [];
+  const next = stops[0] || null;
+  const sheetName = (label) => { const c = town(cityOf(label)); const h = (m.stops || []).find((x) => /DELIVER/i.test(x.action || '') && (town(x.tmPlace || x.city) === c || town(x.city) === c)); return h ? h.customer : null; };
+  const bill = (label) => { const c = town(cityOf(label)); const b = billsOf(it).find((x) => town(x.endZoneDescription) === c); return b ? String(b.billToName || '').replace(/\s*\*\s*$/, '') : null; };
+  const nextName = next ? (sheetName(next.label) || bill(next.label) || cityOf(next.label)) : null;
+  const moving = live.speedMph != null && live.speedMph > 5;
+  const duty = String((live.hos && live.hos.status) || '');
+  const atStop = next && next.miles != null && next.miles <= 2 && !moving;
+  const status = /^(ARRCONS)/i.test(String(t.status || '')) || atStop ? 'At delivery' : moving ? 'Rolling' : /sleeper|offduty|off duty/i.test(duty) ? 'Resting' : live.speedMph != null ? 'Stopped' : 'No GPS';
+  const where = live.location ? String(live.location).split(',').map((x) => x.trim()).filter((x) => !/^\d{5}/.test(x)).slice(-2).join(', ') : '—';
+  return {
+    trip: tripNo(it), region: regionOf(it), departure: depMs ? dayMon(depMs) : '—', depMs: depMs || 0,
+    truck, trailer: String(t.trailer || m.trailer || '') || '****', temp, picture, status,
+    location: status === 'At delivery' && nextName ? nextName : where,
+    next: next ? `${nextName}${next.miles != null ? ` - ${Math.round(next.miles)} mi` : ''}` : '—',
+  };
+}
+// The whole email (same look as the team's manual one). Pure.
+export function buildGeneralFollowUp(rows, now = Date.now()) {
+  const date = new Date(now).toLocaleDateString('en-US', { timeZone: TZ, month: '2-digit', day: '2-digit', year: 'numeric' }).replace(/\//g, '-');
+  const subject = `FLOWERS GENERAL FOLLOW UP ${date}`;
+  const th = (x) => `<th style="padding:6px 8px;font-size:11px;font-weight:bold;text-align:center;border-bottom:1px solid #9ca3af;white-space:nowrap">${x}</th>`;
+  const td = (x, extra = '') => `<td style="padding:6px 8px;font-size:12px;text-align:center;border-bottom:1px solid #e5e7eb;${extra}">${esc(x)}</td>`;
+  const COLS = ['DEPARTURE DATE', 'TRUCK', 'TRAILER', 'TEMPERATURE', 'PICTURE SENT?', 'STATUS', 'LOCATION', 'NEXT STOP'];
+  const body = REGIONS.map((reg) => {
+    const list = rows.filter((r) => r.region === reg).sort((a, b) => a.depMs - b.depMs || a.trip.localeCompare(b.trip));
+    const head = `<tr><td colspan="${COLS.length}" style="padding:8px;font-size:11px;font-weight:bold;text-align:center;background:#e5e7eb">${reg}</td></tr>`;
+    return head + list.map((r) => `<tr>${td(r.departure)}${td(r.truck)}${td(r.trailer)}${td(r.temp)}${td(r.picture)}${td(r.status, r.status === 'Rolling' ? 'color:#047857' : r.status === 'At delivery' ? 'color:#1d4ed8' : '')}${td(r.location)}${td(r.next)}</tr>`).join('');
+  }).join('');
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#111827">
+<p>Good day,</p><p>Flowers general follow-up — ${esc(new Date(now).toLocaleString('en-US', { timeZone: TZ, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))} ET.</p>
+<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;width:100%"><tr>${COLS.map(th).join('')}</tr>${body}</table>
+<p style="font-size:12px;color:#6b7280">Temperature: the reefer set point and mode (CONT = continuous, S/S = start-stop) when we can read it; "Temp requested" when the driver is asked for photos. Next stop miles are from the truck's live position.</p>
+<p>Thanks,<br>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>`;
+  return { subject, html, rows };
+}
+
 export function initFlowerReport(app, { requireAuth, db, getBoard, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
@@ -145,11 +214,12 @@ export function initFlowerReport(app, { requireAuth, db, getBoard, env = process
     const open = Object.values((watch && watch.alerts) || {}).filter((a) => !a.resolvedAt);
     const etas = (watch && watch.etas) || {};
     const rows = ((board && board.trips) || []).filter(isFlowerLoad).map((it) => flowerRow(it, etas[tripNo(it)], open.filter((a) => a.trip === tripNo(it)), now()));
-    return buildFlowerReport(rows, now());
+    const general = buildGeneralFollowUp(((board && board.trips) || []).filter(isFlowerLoad).map((it) => generalRow(it, etas[tripNo(it)])), now());
+    return { ...buildFlowerReport(rows, now()), general };
   }
   async function send(by) {
     const cfg = await settings();
-    const rep = await make();
+    const rep = (await make()).general;   // the team's table layout (FLOWERS GENERAL FOLLOW UP)
     const r = await sendMail({ to: cfg.to, subject: rep.subject, html: rep.html }, { env, fetchFn });
     await db.update(cfgKey, (cur) => ({ ...(cur || {}), lastSentAt: new Date(now()).toISOString(), lastSentBy: by, lastSubject: rep.subject }), {});
     return { ...r, sentTo: cfg.to, subject: rep.subject };
