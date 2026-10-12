@@ -160,3 +160,28 @@ test('admin "send me this alert again": the left-short email for one trip, to th
   assert.equal(out.sent, true); assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']);
   assert.match(sent[0].subject, /Truck 650 left — 27 boxes not received from the shipper — trip 624670/);
 });
+
+// 624773 (EDI report by consignee, 10/08–10/12): Davis Macon 16 shipped 10/09 + 240 shipped 10/11 = 256 = the trip sheet
+test('earlier ship dates count only when they make the total EXACTLY the trip sheet count', async () => {
+  const { loadBoxes } = await import('../artis.js');
+  const davis = (boxes, scanned = boxes) => ({ consigneeId: '03929', consignee: 'DAVIS WHOLESALE -MACON', boxes, scanned, missing: boxes - scanned, cubes: 1, shippers: [] });
+  const at = Date.parse('2026-10-12T20:00:00Z');
+  const load = (sheetPieces, bills = [{ billToName: 'DAVIS WHOLESALE -MACON' }]) => ({ trip: { tripNumber: '624773', status: 'ARRCONS' },
+    _times: { statusHistory: [{ status: 'LOADINGMAN', at: '2026-10-11T18:42:34Z' }] }, freightBills: bills,
+    ...(sheetPieces != null ? { _manifest: { stops: [{ action: 'DELIVER', customer: 'DAVIS WHOLESALE -MACON', pieces: sheetPieces }] } } : {}) });
+  // 10/10 had 30 boxes for Davis that went on another truck — 240 + 30 ≠ 256, so they stay out
+  const days = { '2026-10-11': [davis(240)], '2026-10-10': [davis(30)], '2026-10-09': [davis(16)] };
+  const b = loadBoxes(load(256), (d) => days[d] || null, at);
+  assert.equal(b.boxes, 256); assert.equal(b.scanned, 256); assert.equal(b.missing, 0);
+  assert.deepEqual(b.stops[0].shipDates, ['2026-10-11', '2026-10-09']);
+  assert.deepEqual(b.sheetDiffs, []);                          // sheet and ARTIS agree — no false flag
+  // the sheet says 250: no combination of earlier days makes exactly 250 → nothing added, the difference is flagged
+  const off = loadBoxes(load(250), (d) => days[d] || null, at);
+  assert.equal(off.boxes, 240);
+  assert.deepEqual(off.sheetDiffs, [{ consignee: 'DAVIS WHOLESALE -MACON', sheet: 250, artis: 240 }]);
+  // no trip sheet yet → the TruckMate bills are the count to match
+  const bills = [{ billToName: 'DAVIS WHOLESALE -MACON', pieces: 16 }, { billToName: 'DAVIS WHOLESALE -MACON', pieces: 240 }];
+  assert.equal(loadBoxes(load(null, bills), (d) => days[d] || null, at).boxes, 256);
+  // nothing to match against → only the load's own ship date
+  assert.equal(loadBoxes(load(null), (d) => days[d] || null, at).boxes, 240);
+});

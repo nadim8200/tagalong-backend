@@ -31,6 +31,7 @@ export const digitByDigit = (v) => (v == null ? v : String(v).replace(/\s+/g, ''
 const SPELL_KEYS = new Set(['truck', 'trailer', 'trip', 'bill', 'billNumber']);
 export function spokenNumbers(x) {
   if (Array.isArray(x)) return x.map(spokenNumbers);
+  if (typeof x === 'string') return sayStates(x);
   if (!x || typeof x !== 'object') return x;
   const out = {};
   for (const [k, v] of Object.entries(x)) out[k] = SPELL_KEYS.has(k) && (typeof v === 'string' || typeof v === 'number') ? digitByDigit(v) : spokenNumbers(v);
@@ -76,10 +77,10 @@ How to help:
 - "ETA" (estimated time of arrival) is the most common request. Speech-to-text often mishears it: "a new TA", "new TA", "an E T A", "eat a", "E.T.A.", "the TA", "need a TA" all mean "I need an ETA" — when they want to know when their delivery arrives. Never ask what "TA" means or guess "temperature alert" / "trailer assignment". Any words after it are usually their business name ("I need a new TA, Carbone" = ETA for Carbone) — call lookup_load with that customer_name right away.
 - When a delivery has boxes_loaded (from ARTIS), you may tell the customer how many of their boxes are loaded (e.g. "you have 316 boxes on the truck"). Never say boxes are missing, short or not scanned — the team handles that.
 - Florida Beauty staff (caller_is staff) can ask about ARTIS — boxes received / scanned / missing per customer and ship date, and days of service: use boxes_check.
-- Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). If nothing is found, ask which city the delivery goes to and ask them to spell the business name, then call lookup_load again with customer_name (as spelled) and customer_city. If it returns did_you_mean, ask "Is that <name>?" and, if yes, look it up with that exact name. Names on the phone are often misheard — never tell the caller their name is wrong.
+- Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). If nothing is found and the caller is NOT staff, ask which city the delivery goes to and ask them to spell the business name, then call lookup_load again with customer_name (as spelled) and customer_city. If it returns did_you_mean, ask "Is that <name>?" and, if yes, look it up with that exact name. Names on the phone are often misheard — never tell the caller their name is wrong.
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Loads leave from Miami, Florida or Ventura, California (and some brokers' pickups elsewhere). When you tell a customer about their truck, say where it is coming from using coming_from (or pickup for brokers) — never assume Miami.
-- Hearing people right: phone audio is often noisy. If you're not sure of a name, city or number, repeat it back and ask them to confirm before you look it up ("Did you say Merchantville?"). If they repeat something, use exactly what they repeated. If a name or city isn't found, ask them to spell it. Read numbers back digit by digit to confirm.
+- Hearing people right: phone audio is often noisy. If you're not sure of a name, city or number, repeat it back and ask them to confirm before you look it up ("Did you say Merchantville?"). If they repeat something, use exactly what they repeated. If a name or city isn't found, ask them to spell it (never staff — for staff, ask for another part of the name or a trip / truck number). Read numbers back digit by digit to confirm.
 - When lookup_load returns did_you_mean you have NOT found them: ask "Is that <name>?" and only continue after they clearly say yes — then call lookup_load again with that customer_name and caller_confirmed true. If they say no, ask them to spell it. Never tell a caller about a business they didn't confirm is theirs.
 - When a caller spells their business name letter by letter ("D B E C Wholesale"), pass the letters exactly as spelled in customer_name — they are part of the name. Never say "I found you" for a guess, and always use the business name the tool returns (speaking_with), not a different one.
 - When a caller asks for all their deliveries, trip numbers or locations, give every one of THEIR stops in one short list (city, trip, ETA) — no other customers.
@@ -257,17 +258,30 @@ export function findLoad(items, { trip, bill, loadNumber, truck, trailer, phone 
 }
 
 // ---- flower customers calling by name ----
-const STOPWORDS = new Set(['INC', 'LLC', 'LTD', 'CORP', 'CO', 'COMPANY', 'THE', 'AND', 'OF', 'DBA', 'C', 'O']);
+const STOPWORDS = new Set(['INC', 'LLC', 'LTD', 'CORP', 'CO', 'COMPANY', 'THE', 'AND', 'OF', 'DBA', 'C', 'O',
+  // what callers say around a name ("I'm Mid Georgia Wholesale", "this is …", "calling from …")
+  'IM', 'ITS', 'THIS', 'IS', 'CALLING', 'FROM', 'HI', 'HELLO', 'HEY', 'UM', 'UH', 'MY', 'ABOUT']);
+// callers say the state, sheets abbreviate it ("Mid Georgia Wholesale" = MID-GA WHOLESALE FLORIST)
+const STATES = { ALABAMA: 'AL', ARIZONA: 'AZ', ARKANSAS: 'AR', CALIFORNIA: 'CA', COLORADO: 'CO', CONNECTICUT: 'CT', DELAWARE: 'DE', FLORIDA: 'FL', GEORGIA: 'GA', ILLINOIS: 'IL', INDIANA: 'IN', IOWA: 'IA', KANSAS: 'KS', KENTUCKY: 'KY', LOUISIANA: 'LA', MAINE: 'ME', MARYLAND: 'MD', MASSACHUSETTS: 'MA', MICHIGAN: 'MI', MINNESOTA: 'MN', MISSISSIPPI: 'MS', MISSOURI: 'MO', NEBRASKA: 'NE', NEVADA: 'NV', 'NEW HAMPSHIRE': 'NH', 'NEW JERSEY': 'NJ', 'NEW MEXICO': 'NM', 'NEW YORK': 'NY', 'NORTH CAROLINA': 'NC', 'SOUTH CAROLINA': 'SC', OHIO: 'OH', OKLAHOMA: 'OK', OREGON: 'OR', PENNSYLVANIA: 'PA', 'RHODE ISLAND': 'RI', TENNESSEE: 'TN', TEXAS: 'TX', VERMONT: 'VT', VIRGINIA: 'VA', 'WEST VIRGINIA': 'WV', WASHINGTON: 'WA', WISCONSIN: 'WI', ALASKA: 'AK', HAWAII: 'HI', IDAHO: 'ID', MONTANA: 'MT', 'NORTH DAKOTA': 'ND', 'SOUTH DAKOTA': 'SD', UTAH: 'UT', WYOMING: 'WY', 'PUERTO RICO': 'PR' };
+// …and Jarvis says them in full ("Warwick, GA" → "Warwick, Georgia")
+const STATE_NAME = Object.fromEntries(Object.entries(STATES).map(([n, c]) => [c, n.toLowerCase().replace(/\b[a-z]/g, (l) => l.toUpperCase())]));
+// two-letter codes that are also words or names ("IN", "OR", "ME", "OK", "HI", "AL", "LA", "DE", "CO", "ID") — only after a comma
+const WORDLIKE = new Set(['IN', 'OR', 'ME', 'OK', 'HI', 'AL', 'LA', 'DE', 'CO', 'ID', 'MA', 'PA']);
+export const sayStates = (x) => String(x).replace(/,\s*([A-Z]{2})\b(?![A-Za-z'])(?=(\s*[A-Za-z]?))/g, (m, c, next) => (STATE_NAME[c] && !(WORDLIKE.has(c) && /[A-Za-z]/.test(next)) ? `, ${STATE_NAME[c]}` : m));
+const STATE_RE = new RegExp(`\\b(${Object.keys(STATES).sort((a, b) => b.length - a.length).join('|')})\\b`, 'g');
 // spelled-out letters are part of the name: "D B E C Wholesale" / "DBE C Wholesale" → "DBEC Wholesale"
 export const joinSpelled = (x) => String(x || '').toUpperCase()
   .replace(/\b([A-Z])\s*(?:&|\bAND\b|\bN\b|')\s*([A-Z])\b/g, '$1$2')   // initials: "R&W", "R and W", "J & J" → RW / JJ
   .replace(/\b[A-Z](?:[\s.\-]+[A-Z]\b)+/g, (m) => m.replace(/[\s.\-]+/g, ''))
   .replace(/\b([A-Z]{2,3})\s+([A-Z])\b(?!\s*\/)/g, '$1$2');
-const nameWords = (x) => joinSpelled(x).replace(/&/g, ' AND ').replace(/[^A-Z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 1 && !STOPWORDS.has(w));
+const nameWords = (x) => joinSpelled(x).replace(/&/g, ' AND ').replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').replace(STATE_RE, (m) => STATES[m]).replace(/[^A-Z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 1 && !STOPWORDS.has(w));
 // 0..1: how well a caller's name fits a customer name on a stop
 // sound-alike key: first letter + consonants ("BOKORI" and "BOKHARY" → BKR, "CARBON"/"CARBONE" → CRBN)
 const skel = (w) => (w[0] + w.slice(1).replace(/[AEIOUYHW]/g, '')).replace(/(.)\1+/g, '$1');
-const sameWord = (w, x) => x === w || (w.length >= 4 && (x.startsWith(w) || w.startsWith(x))) || (w.length >= 4 && x.length >= 4 && skel(w).length >= 3 && skel(w) === skel(x));
+// short words heard voiced / unvoiced ("Meet" for MID): same first letter, same consonants once D=T, B=P, G=K, V=F, Z=S
+const voiced = (w) => skel(w).replace(/D/g, 'T').replace(/B/g, 'P').replace(/G/g, 'K').replace(/V/g, 'F').replace(/Z/g, 'S').replace(/(.)\1+/g, '$1');
+const sameWord = (w, x) => x === w || (w.length >= 4 && (x.startsWith(w) || w.startsWith(x))) || (w.length >= 4 && x.length >= 4 && skel(w).length >= 3 && skel(w) === skel(x))
+  || (w.length >= 3 && x.length >= 3 && Math.abs(w.length - x.length) <= 2 && w[0] === x[0] && voiced(w).length >= 2 && voiced(w) === voiced(x));
 // words every flower business has — matching only these isn't matching the business
 const GENERIC = new Set(['WHOLESALE', 'WHOLESALER', 'WHOLESALERS', 'FLOWERS', 'FLOWER', 'FLORAL', 'FLORIST', 'FLORISTS', 'FARMS', 'FARM', 'MARKET', 'PRODUCE', 'DISTRIBUTORS', 'DISTRIBUTOR', 'DISTRIBUTING', 'DISTRIBUTION', 'SUPPLY', 'SUPPLIES', 'GROUP', 'INTERNATIONAL', 'USA', 'TRADING', 'IMPORTS', 'IMPORT', 'NURSERY', 'NURSERIES', 'GREENHOUSE', 'GREENHOUSES', 'EXPRESS', 'LOGISTICS', 'TRANSPORT', 'FREIGHT', 'SERVICES', 'ENTERPRISES']);
 export function nameScore(said, onSheet) {
@@ -281,8 +295,28 @@ export function nameScore(said, onSheet) {
   if (!distinct.length) return b.every((w) => GENERIC.has(w)) ? Math.min(fit(a0), b.filter((x) => a0.some((w) => sameWord(w, x))).length / b.length) : 0;
   return Math.min(fit(distinct), fit(a0));
 }
-// Every stop on the board whose customer matches the name — with boxes, cubes and ETA for that stop only. Pure.
-export function customerStops(items, name, etasByTrip = {}) {
+// A half-heard name still names the business when its rare word matched ("Carbone Dairy" → CARBONE R.I. — "R.I."
+// sounds like "Dairy"): at least half the caller's words fit and one of them is a distinctive word of 5+ letters. Pure.
+export function nearScore(said, onSheet) {
+  const s = nameScore(said, onSheet);
+  if (s >= 0.75 || s < 0.5) return s;
+  const b = nameWords(onSheet);
+  return nameWords(said).some((w) => w.length >= 5 && !GENERIC.has(w) && b.some((x) => sameWord(w, x))) ? s : 0;
+}
+// When TruckMate says a stop was delivered (its wall time at the stop). 00:00:0x is a date-only placeholder. Pure.
+export function deliveredWhen(raws) {
+  const raw = (raws || []).filter(Boolean).map(String).sort().pop();
+  const m = raw && raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/);
+  if (!m) return null;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0)));
+  const day = d.toLocaleString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' });
+  if (!m[4] || (m[4] === '00' && m[5] === '00')) return `${day} (time not recorded)`;
+  return `${day}, ${d.toLocaleString('en-US', { timeZone: 'UTC', hour: 'numeric', minute: '2-digit' })} (local time)`;
+}
+// Every stop on the board whose customer matches the name — with boxes, cubes and ETA for that stop only.
+// near: also half-heard names (nearScore) — for staff, or to ask a customer "Is that …?". Pure.
+export function customerStops(items, name, etasByTrip = {}, { near = false, staff = false } = {}) {
+  const fits = near ? nearScore : nameScore; const min = near ? 0.5 : 0.75;
   const out = [];
   for (const it of items) {
     const t = tripOf(it);
@@ -291,8 +325,8 @@ export function customerStops(items, name, etasByTrip = {}) {
     const sheetStops = ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || ''));
     const seen = new Set();
     for (const st of sheetStops) {
-      const score = nameScore(name, `${st.customer} ${st.city || ''} ${st.tmPlace || ''}`);
-      if (score < 0.75) continue;
+      const score = fits(name, `${st.customer} ${st.city || ''} ${st.tmPlace || ''}`);
+      if (score < min) continue;
       const city = cityOf(`${st.city || ''}, ${st.state || ''}`);
       // the sheet's town can differ from TruckMate's (Pennsauken vs Merchantville) — tmPlace bridges them
       const towns = [st.city, st.tmPlace].filter(Boolean).map((c) => String(c).split(',')[0].trim().toUpperCase());
@@ -302,29 +336,55 @@ export function customerStops(items, name, etasByTrip = {}) {
       const delivered = bills.length ? bills.every((b) => b.actualDelivery) : false;
       const passed = !delivered && !!(eta && eta.passed) && eta.passed.some((x) => (st.zip && x.zip === String(st.zip)) || sameTown(x.label));
       towns.forEach((c) => seen.add(`${c}|${st.customer}`));
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'trip sheet' });
+      // this customer's TruckMate bills at the stop (several customers can share a town, e.g. Chelsea Market)
+      const named = bills.filter((b) => { const n = (b.consignee && (b.consignee.name || b.consignee.clientName)) || b.billToName || ''; return nameScore(n, st.customer) >= 0.75 || nameScore(st.customer, n) >= 0.75; });
+      const billBoxes = named.length ? named.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bills.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'trip sheet', _sheetBoxes: st.pieces != null ? Number(st.pieces) : null, _billBoxes: billBoxes });
     }
-    // TruckMate bills (no trip sheet, or names the sheet didn't have)
+    // TruckMate bills (no trip sheet, or names the sheet didn't have) — one line per customer and town, bills added up
+    const groups = new Map();
     for (const b of billsOf(it)) {
       const nm = (b.consignee && (b.consignee.name || b.consignee.clientName)) || b.billToName;
-      const score = Math.max(nameScore(name, nm), nameScore(name, b.billToName));
-      if (score < 0.75) continue;
+      const score = Math.max(fits(name, nm), fits(name, b.billToName));
+      if (score < min) continue;
       const city = cityOf(b.endZoneDescription);
       if ([...seen].some((k) => k.toUpperCase().startsWith(String(city.split(',')[0]).toUpperCase()))) continue;
+      const k = `${String(nm).toUpperCase()}|${city.toUpperCase()}`;
+      const g = groups.get(k) || { score, nm, city, bills: [] };
+      g.score = Math.max(g.score, score); g.bills.push(b); groups.set(k, g);
+    }
+    for (const { score, nm, city, bills: bs } of groups.values()) {
+      const delivered = bs.every((b) => b.actualDelivery);
       const leg = eta && eta.stops ? eta.stops.find((x) => cityOf(x.label) === city) : null;
-      const passed = !b.actualDelivery && !!(eta && eta.passed) && eta.passed.some((x) => cityOf(x.label) === city);
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: b.pieces != null ? `${b.pieces} boxes` : null, cubes: b.cubes != null ? b.cubes : null, appointment: null, delivered: !!b.actualDelivery, ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !b.actualDelivery && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate' });
+      const passed = !delivered && !!(eta && eta.passed) && eta.passed.some((x) => cityOf(x.label) === city);
+      const counted = bs.filter((b) => b.pieces != null);
+      const pieces = counted.length ? counted.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
+      const cubed = bs.filter((b) => b.cubes != null);
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: pieces != null ? `${pieces} boxes` : null, cubes: cubed.length ? Math.round(cubed.reduce((n, b) => n + Number(b.cubes || 0), 0) * 100) / 100 : null, appointment: null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bs.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate', _sheetBoxes: null, _billBoxes: pieces });
     }
   }
   // ARTIS: how many of THIS customer's boxes were scanned at our terminal for the load
+  // The complete count: TruckMate's bills for the customer (ARTIS only sees some bills — on 624773 Davis Macon
+  // ARTIS had 240 of 256: bill G5042275 isn't in ARTIS), or ARTIS when it has more. ARTIS says what's still
+  // missing — customers only hear what's loaded; staff also hear the sheet count and what wasn't received.
   const boxFor = (x) => {
     const it = items.find((i) => tripNo(i) === x.trip);
     const st = it && it._artis && (it._artis.stops || []).find((c) => nameScore(x.customer || '', c.consignee || '') >= 0.75 || nameScore(c.consignee || '', x.customer || '') >= 0.75);
-    // ARTIS has the right box count (the trip sheet can be off) — and customers only hear what's loaded
-    return st ? { boxes: `${st.scanned} boxes`, boxes_loaded: `${st.scanned} box${st.scanned === 1 ? '' : 'es'} loaded for them` } : {};
+    if (!st && !x._billBoxes) return {};   // nothing better than the sheet's own words ("139 BOXES", "1 LOAD")
+    const total = Math.max(x._billBoxes || 0, (st && st.boxes) || 0) || x._sheetBoxes;
+    if (!total) return {};
+    const missing = Math.min((st && st.missing) || 0, total);
+    const loaded = total - missing;
+    const plural = (n) => `${n} box${n === 1 ? '' : 'es'}`;
+    return { boxes: plural(loaded), boxes_loaded: `${plural(loaded)} loaded for them`,
+      ...(staff ? {
+        ...(x._sheetBoxes != null && x._sheetBoxes !== total ? { boxes_on_trip_sheet: plural(x._sheetBoxes) } : {}),
+        ...(st ? { boxes_scanned_in_artis: `${st.scanned} of ${st.boxes}` } : {}),
+        ...(missing > 0 ? { boxes_not_received: `${plural(missing)} not received from the shipper (ARTIS)` } : {}),
+      } : {}) };
   };
-  return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 6).map(({ score, ...x }) => ({
-    ...x, ...boxFor(x),
+  return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 6).map(({ score, _sheetBoxes, _billBoxes, ...x }) => ({
+    ...x, ...boxFor({ ...x, _sheetBoxes, _billBoxes }),
     ...(!x.delivered && !x.truck_already_passed && !x.estimated_arrival ? { eta_note: 'No ETA available right now — do NOT estimate or guess a time. Say dispatch will call back with the ETA, and take a message.' } : {}),
     ...(etasByTrip[x.trip] && etasByTrip[x.trip].leavesAt && !x.delivered ? { truck_leaves_terminal_at: fmt(etasByTrip[x.trip].leavesAt) } : {}),
   }));
@@ -347,16 +407,18 @@ const SUFFIX = /\b(LLC|L\.L\.C|INC|CORP|CO|COMPANY|LTD|DBA)\b\.?/g;
 export function spokenName(raw) {
   let x = String(raw || '').toUpperCase().replace(/\*/g, ' ');
   x = x.replace(/^.*?MARKET\s*-\s*/, '').replace(/\bC\/O\b.*$/, '').replace(/\bBILLING\b/g, ' ').replace(/-\s*(NY|NJ|FL)\b.*$/, '').replace(SUFFIX, ' ');
+  x = x.replace(/\b([A-Z])\.\s?([A-Z])\b\.?/g, '$1$2');   // "R.I." / "R. I." → RI
   x = x.replace(/[^A-Z0-9&' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  x = x.split(' ').map((w) => (STATE_NAME[w] && !WORDLIKE.has(w) ? STATE_NAME[w].toUpperCase() : w)).join(' ');
   // short acronyms (RXO, TQL, DBG) stay capitals so the voice spells them out
-  return x.split(' ').map((w) => (w.length <= 3 && !['AND', 'THE', 'OF', 'FOR', 'BIG'].includes(w) && /^[A-Z&]+$/.test(w) ? w : w.charAt(0) + w.slice(1).toLowerCase())).join(' ');
+  return x.split(' ').map((w) => (w.length <= 3 && !['AND', 'THE', 'OF', 'FOR', 'BIG', 'MID'].includes(w) && /^[A-Z&]+$/.test(w) ? w : w.charAt(0) + w.slice(1).toLowerCase())).join(' ');
 }
 // Every customer name (and delivery town) on the board, most frequent first — fed to
 // Retell's speech-to-text so it hears "Bokhary" instead of "Bokori". Pure.
 // words every call uses — so speech-to-text hears "load", not "loan"
 // Florida Beauty's own staff (a phone saved on an employee in Employees) can get any load's ETA.
 const STAFF_IS = 'Florida Beauty staff (phone on the Employees list)';
-const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). Do not ask them to confirm a business name, and never read out any employee\'s phone number.';
+const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — the complete count from the TruckMate bills), and only if present: the different trip sheet count (boxes_on_trip_sheet) and boxes not received (boxes_not_received).';
 export const BASE_WORDS = ['Florida Beauty Flora', 'Jarvis', 'ETA', 'load', 'trip number', 'bill number', 'trailer', 'POD', 'BOL', 'rate confirmation'];
 export function customerKeywords(items, max = 100) {
   const n = new Map();
@@ -425,7 +487,21 @@ const CUSTOMER_STATUS = { DISP: 'scheduled, not picked up yet', ASSGN: 'schedule
 // How Jarvis wraps up with a customer, by their business name.
 export const CLOSING_RULE = 'Use speaking_with (their business name) naturally while you help them, e.g. "Thanks, Bokhary Farms." Once you have answered, ask: "Is there anything else I can help you with, <speaking_with>?" If they say no, close warmly: "Thank you for calling Florida Beauty Flora, <speaking_with>. If there is nothing else, feel free to hang up whenever you are ready. Have a great day." Then end the call with end_call.';
 export const CUSTOMER_RULE = `After you give an ETA, add once, in the caller's language: "${ETA_DISCLAIMER}" ${CLOSING_RULE} `
-  + 'Answer only with what is here: where the truck is now and THEIR delivery (ETA, boxes, cubes, delivered or not). Never mention other stops, other customers or other cities on the route, and never say where the truck stops before or after them. If asked about the route, just say the truck is on its way to them and give the ETA — do not say you are hiding anything. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.';
+  + 'Give a customer only: where the truck is now and where it is coming from (coming_from), the truck, trailer and trip number, their total boxes, and the ETA — nothing else (no cubes or appointments). If a delivery has say_exactly, it is delivered: say only that sentence ("Your shipment has been delivered.") — no time, boxes or location. Answer only with what is here. Never mention other stops, other customers or other cities on the route, and never say where the truck stops before or after them. If asked about the route, just say the truck is on its way to them and give the ETA — do not say you are hiding anything. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.';
+// What a CUSTOMER hears: where the truck is now and where it came from, truck, trailer, trip, their total boxes and the ETA — nothing else.
+// Delivered → only "Your shipment has been delivered." (staff get the full view). Pure.
+export const DELIVERED_SAY = 'Your shipment has been delivered.';
+export function customerLean(v) {
+  if (!v || typeof v !== 'object') return v;
+  const one = (d) => (d.delivered
+    ? { customer: d.customer, city: d.city, delivered: true, say_exactly: DELIVERED_SAY }
+    : { customer: d.customer, city: d.city, delivered: false, boxes: d.boxes_loaded ? String(d.boxes_loaded).replace(/ loaded for them$/, '') : d.boxes,
+      estimated_arrival: d.estimated_arrival, eta_note: d.eta_note, truck_already_passed: d.truck_already_passed, note: d.note, truck_leaves_terminal_at: d.truck_leaves_terminal_at });
+  const ds = v.deliveries ? v.deliveries.map(one) : v.your_delivery ? [one(v.your_delivery)] : null;
+  if (ds && ds.every((d) => d.delivered)) return { trip: v.trip, deliveries: ds };
+  return { trip: v.trip, truck: v.truck, trailer: v.trailer, status: v.status, truck_now: v.truck_now, coming_from: v.coming_from, breakdown: v.breakdown,
+    departure_delayed: v.departure_delayed, delay_note: v.delay_note, ...(ds ? { deliveries: ds } : {}), ...(v.ask ? { ask: v.ask } : {}) };
+}
 export function customerView(item, eta, deliveries = null) {
   const f = voiceFacts(item, eta);
   const t = tripOf(item);
@@ -449,7 +525,6 @@ export function customerView(item, eta, deliveries = null) {
 const rcOf = (it) => (it && it._ratecon && (it._ratecon.data || it._ratecon)) || null;
 // Where the load left from, said plainly: the trip sheet's LOAD stop first ("Miami Terminal" →
 // "Miami, Florida"), then the rate con pickup ("live load in Ventura, California"), then TruckMate.
-const STATE_NAME = { FL: 'Florida', CA: 'California', TN: 'Tennessee', NC: 'North Carolina', GA: 'Georgia', NJ: 'New Jersey', NY: 'New York', MI: 'Michigan', IN: 'Indiana', TX: 'Texas', MA: 'Massachusetts', NH: 'New Hampshire', CT: 'Connecticut', PA: 'Pennsylvania', SC: 'South Carolina', VA: 'Virginia', MD: 'Maryland', OH: 'Ohio', IL: 'Illinois', AZ: 'Arizona', OR: 'Oregon', WA: 'Washington' };
 const TERMINALS = [[/MIAMI\s+TERMINAL/i, 'Miami', 'FL'], [/VENTURA\s+TERMINAL/i, 'Ventura', 'CA']];
 const placeSaid = (city, st) => { if (!city) return null; const c = String(city).trim().toLowerCase().replace(/\b[a-z]/g, (x) => x.toUpperCase()); const S = String(st || '').trim().toUpperCase(); return S ? `${c}, ${STATE_NAME[S] || S}` : c; };
 export function originOf(item) {
@@ -617,12 +692,12 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, artis = n
         // a name Jarvis itself suggested → only after the caller said yes to "Is that …?"
         const guessed = said && call.call_id && (callGuess.get(call.call_id) || new Set()).has(String(said).toUpperCase());
         if (guessed && !a.caller_confirmed) return reply({ found: false, did_you_mean: [said], say: `Not confirmed yet. Ask exactly: "Is that ${said}?" Only if they clearly say yes, call lookup_load again with customer_name "${said}" and caller_confirmed true. If no, ask them to spell their business name. Share nothing about any load until then.` });
-        let stops = customerStops(all, name, etas);
+        let stops = customerStops(all, name, etas, { staff: staffPhone });
         // not on the board by that name → the client list: the business's real name, then its loads by client ID / name / phone
         const client = !stops.length && clients ? (clients.byName(name, { city: a.customer_city })[0] || null) : null;
         if (client) {
           const mine = clients.loads(all, client);
-          stops = mine.flatMap((it) => customerStops([it], clients.nameOnLoad(it, client), etas));
+          stops = mine.flatMap((it) => customerStops([it], clients.nameOnLoad(it, client), etas, { staff: staffPhone }));
           if (!stops.length && !mine.length) {
             if (call.call_id) callName.set(call.call_id, client.name);
             return reply({ found: false, known_client: spokenName(client.name), say: `${spokenName(client.name)} is one of our customers${client.city ? ` (${spokenName(client.city)}, ${client.state || ''})` : ''}, but no load for them is on the board right now — it may already be delivered or not dispatched yet. Ask for a trip, bill or PO number, or take a message for customer service. Never read out the customer's phone or email.` });
@@ -637,9 +712,16 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, artis = n
             return reply({ found: true, matched_by: 'broker name', speaking_with: spokenName(rcOf(theirs[0]).broker), ...brokerView(theirs[0], etas[n]), say: BROKER_RULE });
           }
           if (theirs.length > 1) return reply({ found: false, speaking_with: spokenName(rcOf(theirs[0]).broker), say: `${spokenName(rcOf(theirs[0]).broker)} has ${theirs.length} loads with us right now. Ask for their load number (from the rate confirmation), then call lookup_load with broker_load_number.` });
-          const maybe = nameCandidates(all, name, a.customer_city);
+          // half-heard ("Carbone Dairy" = CARBONE R.I.): staff get those stops; customers are asked "Is that …?"
+          const near = customerStops(all, name, etas, { near: true, staff: staffPhone });
+          if (near.length && staffPhone) stops = near;
+        }
+        if (!stops.length) {
+          const nearNames = [...new Set(customerStops(all, name, etas, { near: true }).map((x) => spokenName(x.customer)))];
+          const maybe = [...new Set([...nearNames, ...nameCandidates(all, name, a.customer_city)])].slice(0, 3);
           if (maybe.length && call.call_id) callGuess.set(call.call_id, new Set([...(callGuess.get(call.call_id) || []), ...maybe.map((x) => x.toUpperCase())]));
           if (maybe.length) return reply({ found: false, did_you_mean: maybe, say: `Not found as heard. Ask "Is that ${maybe[0]}?"${maybe.length > 1 ? ' (or one of the others)' : ''} — if yes, call lookup_load again with that exact customer_name.` });
+          if (staffPhone) return reply({ found: false, caller_is: STAFF_IS, say: `No customer on the board sounds like "${name}". Staff don't spell names or give cities: ask for another part of the name (or the business it's under), or the trip, truck or trailer number, and look it up again. Never say it isn't one of our customers.` });
           return reply({ found: false, say: a.customer_city ? `Nothing found for "${name}" in ${a.customer_city}. Ask for the trailer, bill or PO number — or take a message.` : 'Not found as heard. Ask which city the delivery goes to and ask them to spell the business name, then try again with customer_name and customer_city.' });
         }
         const biz = spokenName(stops[0].customer);                        // the real name, not what was misheard
@@ -655,8 +737,12 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, artis = n
         if (said && !staffPhone) await remember(callerPhone(call), stops[0].customer);
         if (!staffPhone && missingBoxes) missingBoxes(missingFor(all, stops), { caller: callerPhone(call), callId: call.call_id || null }).catch(() => {});
         const trips = [...new Set(stops.map((x) => x.trip))];
-        const loads = trips.map((n) => customerView(all.find((it) => tripNo(it) === n), etas[n], stops.filter((x) => x.trip === n)));
-        if (staffPhone) return reply({ found: true, matched_by: 'customer name', caller_is: STAFF_IS, loads, say: STAFF_RULE });
+        const full = trips.map((n) => customerView(all.find((it) => tripNo(it) === n), etas[n], stops.filter((x) => x.trip === n)));
+        const loads = staffPhone ? full : full.map(customerLean);
+        if (staffPhone) {
+          const heard = stops.every((x) => nameScore(name, x.customer) < 0.75 && nameScore(name, `${x.customer} ${x.city || ''}`) < 0.75);
+          return reply({ found: true, matched_by: heard ? 'closest name on the board' : 'customer name', caller_is: STAFF_IS, loads, say: `${heard ? `Closest match to "${name}": say the business name you found (e.g. "I have ${spokenName(stops[0].customer)}") and give its ETA — if it's not the one, they'll tell you. ` : ''}${STAFF_RULE}` });
+        }
         return reply({ found: true, matched_by: known && !said ? 'caller phone (called before as this business)' : 'customer name', speaking_with: biz, ...(known && !said ? { confirm: `Confirm first: "Is this ${biz}?"` } : {}), loads, say: `${trips.length > 1 ? 'They have deliveries on more than one truck — ask which city or trailer number before giving an ETA. ' : ''}${CUSTOMER_RULE}` });
       }
       const hit = findLoad(await items(), { trip: a.trip_number || meta.trip, bill: a.bill_number || a.broker_load_number, loadNumber: a.broker_load_number, truck: a.truck_number, trailer: a.trailer_number, phone: callerPhone(call) });
@@ -683,7 +769,7 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, artis = n
         if (!ok.ok) return reply({ found: false, private: true, say: `For privacy, updates on ${spokenName(mine[0].customer)} deliveries only go to the phone numbers they authorized. Do not share any details of the load. Offer to take a message so customer service calls them back on an authorized number.` });
       }
       if (mine.length && said) await remember(callerPhone(call), mine[0].customer);
-      return reply({ found: true, matched_by: mine.length ? `${hit.by} + customer name` : hit.by, ...(mine.length ? { speaking_with: spokenName(mine[0].customer) } : {}), ...customerView(hit.item, eta, mine), say: CUSTOMER_RULE });
+      return reply({ found: true, matched_by: mine.length ? `${hit.by} + customer name` : hit.by, ...(mine.length ? { speaking_with: spokenName(mine[0].customer) } : {}), ...customerLean(customerView(hit.item, eta, mine)), say: CUSTOMER_RULE });
     } catch (e) { reply({ found: false, say: `Lookup failed (${e.message}). Take a message instead.` }); }
   });
 

@@ -72,12 +72,63 @@ export function loadCustomers(it) {
 }
 // ARTIS boxes for one load: its customers' cargo on its ship date, and whether boxes are missing while the
 // load hasn't left. Pure. summaryFor(date) → summarizeCargo list | null
+// A load can carry a customer's boxes from EARLIER ship dates (624773: Davis Macon 240 shipped 10/11 + 16 held
+// from 10/09 = the 256 on its trip sheet). Earlier days (up to LOOKBACK) are added only when they make the total
+// EXACTLY the trip sheet's count for that customer (no sheet yet → its TruckMate bills); no exact match → nothing
+// is added. ARTIS box lines carry no trip or bill number, so the sheet's count is the proof. Pure.
+const LOOKBACK = 5;
+const dayBefore = (d, k) => ymd(new Date(Date.parse(`${d}T12:00:00Z`) - k * 86400000));
+const sameCo = (a, b) => { const x = normCo(a); const y = normCo(b); return !!(x && y && (x === y || x.startsWith(y) || y.startsWith(x))); };
+function sheetTotalFor(it, c) {
+  const rows = ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && x.pieces != null && sameCo(x.customer, c.consignee));
+  return rows.length ? rows.reduce((n, x) => n + (Number(x.pieces) || 0), 0) : null;
+}
+function billTotalFor(it, c) {
+  const bs = billsOf(it).filter((b) => [b.consignee, b.billToCustomer].some((r) => r && typeof r === 'object' && [r.clientId, r.clientID, r.customerId, r.code, r.id].some((v) => v != null && v !== '' && c.consigneeId && id5(v) === id5(c.consigneeId)))
+    || (c.consignee && [b.billToName, b.consignee && (b.consignee.name || b.consignee.clientName)].some((n) => n && normCo(n) === normCo(c.consignee))));
+  const counted = bs.filter((b) => b.pieces != null);
+  return counted.length ? counted.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
+}
+function addDay(a, c, d) {
+  const sh = new Map((a.shippers || []).map((x) => [x.shipper, { ...x }]));
+  for (const x of c.shippers || []) { const y = sh.get(x.shipper) || { shipper: x.shipper, boxes: 0, scanned: 0, missing: 0 }; y.boxes += x.boxes; y.scanned += x.scanned; y.missing += x.missing; sh.set(x.shipper, y); }
+  const r2 = (x) => Math.round(x * 100) / 100;
+  return { ...a, boxes: a.boxes + c.boxes, scanned: a.scanned + c.scanned, missing: a.missing + c.missing, cubes: r2((a.cubes || 0) + (c.cubes || 0)), scannedCubes: r2((a.scannedCubes || 0) + (c.scannedCubes || 0)),
+    shippers: [...sh.values()].sort((x, y) => y.missing - x.missing), shipDates: [...(a.shipDates || []), d] };
+}
 export function loadBoxes(it, summaryFor, now = Date.now()) {
   const date = shipDateOf(it, now);
-  const list = date ? summaryFor(date) : null;
-  if (!list || !list.length) return null;
+  if (!date) return null;
   const { ids, names } = loadCustomers(it);
-  const stops = list.filter((c) => (c.consigneeId && ids.has(id5(c.consigneeId))) || (c.consignee && names.has(normCo(c.consignee))));
+  const mine = (c) => (c.consigneeId && ids.has(id5(c.consigneeId))) || (c.consignee && names.has(normCo(c.consignee)));
+  const keyOf = (c) => (c.consigneeId ? id5(c.consigneeId) : normCo(c.consignee));
+  const byKey = new Map();
+  for (const c of (summaryFor(date) || []).filter(mine)) byKey.set(keyOf(c), { ...c, shipDates: [date] });
+  // the customer's boxes on earlier ship dates
+  const earlier = new Map();   // key → [{ d, c }] newest first
+  for (let k = 1; k <= LOOKBACK; k++) {
+    const d = dayBefore(date, k);
+    for (const c of (summaryFor(d) || []).filter(mine)) if (c.boxes > 0) earlier.set(keyOf(c), [...(earlier.get(keyOf(c)) || []), { d, c }]);
+  }
+  for (const [key, days] of earlier) {
+    const cur = byKey.get(key);
+    const ref = cur || days[0].c;
+    const target = sheetTotalFor(it, ref) ?? billTotalFor(it, ref);
+    const have = cur ? cur.boxes : 0;
+    if (target == null || have >= target) continue;
+    // the fewest, most recent earlier days whose boxes add up EXACTLY to what's still unaccounted for
+    let pick = null;
+    for (let m = 1; m < (1 << days.length); m++) {
+      const set = days.filter((_, i) => m & (1 << i));
+      if (set.reduce((n, x) => n + x.c.boxes, 0) !== target - have) continue;
+      if (!pick || set.length < pick.length) pick = set;
+    }
+    if (!pick) continue;
+    let acc = cur || null;
+    for (const { d, c } of pick) acc = acc ? addDay(acc, c, d) : { ...c, shipDates: [d] };
+    byKey.set(key, acc);
+  }
+  const stops = [...byKey.values()].sort((a, b) => b.missing - a.missing || String(a.consignee).localeCompare(String(b.consignee)));
   if (!stops.length) return null;
   const tot = stops.reduce((a, c) => ({ boxes: a.boxes + c.boxes, scanned: a.scanned + c.scanned }), { boxes: 0, scanned: 0 });
   const st = String(tripOf(it).status || '');
@@ -85,7 +136,7 @@ export function loadBoxes(it, summaryFor, now = Date.now()) {
   const missing = Math.max(0, tot.boxes - tot.scanned);
   const short = stops.filter((c) => c.missing > 0);
   // the trip sheet's box count per customer vs ARTIS — ARTIS is always the right count
-  const same = (a, b) => { const x = normCo(a); const y = normCo(b); return !!(x && y && (x === y || x.startsWith(y) || y.startsWith(x))); };
+  const same = sameCo;
   const sheet = ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && x.pieces != null);
   const sheetDiffs = stops.map((c) => {
     const rows = sheet.filter((x) => same(x.customer, c.consignee));
@@ -96,7 +147,7 @@ export function loadBoxes(it, summaryFor, now = Date.now()) {
   return {
     sheetDiffs,
     shipDate: date, boxes: tot.boxes, scanned: tot.scanned, missing,
-    stops: stops.map((c) => ({ consigneeId: c.consigneeId, consignee: c.consignee, boxes: c.boxes, scanned: c.scanned, missing: c.missing, cubes: c.cubes, shippers: (c.shippers || []).filter((x) => x.missing > 0) })),
+    stops: stops.map((c) => ({ consigneeId: c.consigneeId, consignee: c.consignee, boxes: c.boxes, scanned: c.scanned, missing: c.missing, cubes: c.cubes, ...(c.shipDates && c.shipDates.length > 1 ? { shipDates: c.shipDates } : {}), shippers: (c.shippers || []).filter((x) => x.missing > 0) })),
     // before the truck leaves: boxes for a customer on it still not scanned
     // "not scanned" in ARTIS = never received at our terminal from the shipper (not left behind)
     alert: notLeft && missing > 0 ? `${missing} box${missing === 1 ? '' : 'es'} not received from the shipper yet — ${short.map((c) => `${c.consignee} ${c.scanned}/${c.boxes}${(c.shippers || []).filter((x) => x.missing > 0).length ? ` (${c.shippers.filter((x) => x.missing > 0).map((x) => `${x.shipper} ${x.missing}`).join(', ')})` : ''}`).join(', ')}` : null,
@@ -183,10 +234,14 @@ export function initArtis(app, { requireAuth, requireAdmin = null, db = null, se
   async function refresh() {
     if (!artisConfig(env).ready) return;
     const t = now();
-    for (const d of [-1, 0, 1].map((k) => ymd(new Date(t + k * 86400000)))) {
+    // today / tomorrow / yesterday every time; the older days (held boxes riding later trucks) once an hour
+    const older = !refresh.olderAt || t - refresh.olderAt > 60 * MIN;
+    if (older) refresh.olderAt = t;
+    const days = [0, 1, -1, ...(older ? [-2, -3, -4, -5, -6] : [])];
+    for (const d of days.map((k) => ymd(new Date(t + k * 86400000)))) {
       try { byDate.set(d, summarizeCargo(rowsOf(await get('/artis/api/cargo/received', { shipDate: d })))); } catch (e) { console.warn('[artis] refresh', d, e.message); } // eslint-disable-line no-await-in-loop
     }
-    for (const k of [...byDate.keys()]) if (Date.parse(k) < t - 3 * 86400000) byDate.delete(k);
+    for (const k of [...byDate.keys()]) if (Date.parse(k) < t - 8 * 86400000) byDate.delete(k);
   }
   if (env.NODE_ENV !== 'test') {
     setTimeout(() => { refresh().catch(() => {}); }, 30000).unref?.();

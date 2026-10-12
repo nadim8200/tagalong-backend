@@ -192,7 +192,7 @@ test('a business name in the wrong box still searches trip-sheet customers', asy
   const [guard, handler] = routes['POST /retell/fn/lookup_load'];
   await guard(req, res, () => handler(req, res));
   assert.equal(out.found, true); assert.equal(out.matched_by, 'customer name');
-  assert.equal(out.loads[0].deliveries[0].boxes, '139 boxes'); assert.equal(out.loads[0].deliveries[0].cubes, 187.71);
+  assert.equal(out.loads[0].deliveries[0].boxes, '139 boxes'); assert.equal(out.loads[0].deliveries[0].cubes, undefined);   // customers: total boxes only
 });
 
 test('a customer name together with a trip number answers for THAT customer stop, not the whole load', async () => {
@@ -246,7 +246,7 @@ test('customers never hear the other stops; the name said earlier in the call pi
   const byTrailer = await ask({ trailer_number: '2029' });                 // same call, now by trailer
   const text = JSON.stringify(byTrailer);
   assert.ok(!/KINSTON|ALCOCK|next_stop|stops_remaining/.test(text), text);
-  assert.equal(byTrailer.deliveries[0].city, 'WALTHAM, MA');
+  assert.equal(byTrailer.deliveries[0].city, 'WALTHAM, Massachusetts');
   assert.match(byTrailer.truck_now, /Miami/);
   assert.match(byTrailer.say, /Never mention other stops/);
 });
@@ -283,7 +283,7 @@ test('a caller who found their stop before is recognized by phone next time', as
   assert.equal((await ask({ customer_name: 'Bokhary Farms' }, 'a')).found, true);
   const again = await ask({}, 'b');                                                // next call, says nothing yet
   assert.equal(again.found, true); assert.match(again.confirm, /Is this Bokhary Farms\?/);
-  assert.equal(again.loads[0].deliveries[0].city, 'WALTHAM, MA');
+  assert.equal(again.loads[0].deliveries[0].city, 'WALTHAM, Massachusetts');
 });
 
 import { digitByDigit } from '../voice.js';
@@ -616,4 +616,93 @@ test('employee calling in: greeted by first name with good morning / afternoon /
   assert.deepEqual(other.out, { call_inbound: {} }, 'everyone else: the normal greeting');
   const unsigned = await v.hit('POST /retell/inbound', { event: 'call_inbound', call_inbound: { from_number: '+13057485611' } }, { sign: false });
   assert.deepEqual(unsigned.out, { call_inbound: {} }, 'unverified request: no name');
+});
+
+// call 10/12: staff asked for "Mid Georgia Wholesale" (heard "I'm meet Georgia Wholesale") and "Carbone Dairy" (CARBONE R.I.) on trip 624773
+test('names: state words, fillers, sound-alikes and half-heard names', async () => {
+  const { nameScore, nearScore, customerStops } = await import('../voice.js');
+  assert.equal(nameScore('Mid Georgia Wholesale', 'MID-GA WHOLESALE FLORIST LLC'), 1);
+  assert.equal(nameScore("I'm meet Georgia Wholesale", 'MID-GA WHOLESALE FLORIST LLC'), 1);
+  assert.ok(nameScore('Davis Wholesale', 'MID-GA WHOLESALE FLORIST LLC') < 0.75);
+  assert.ok(nameScore('Carbone Dairy', 'CHELSEA MARKET - CARBONE R.I CO') < 0.75);
+  assert.equal(nearScore('Carbone Dairy', 'CHELSEA MARKET - CARBONE R.I CO'), 0.5);
+  assert.equal(nearScore('Joe Dairy', 'CHELSEA MARKET - CARBONE R.I CO'), 0);
+  const items = [{ trip: { tripNumber: '624773', powerUnit: '734' }, _manifest: { stops: [
+    { action: 'DELIVER', customer: 'MID-GA WHOLESALE FLORIST LLC', city: 'WARWICK', state: 'GA', pieces: 98 },
+    { action: 'DELIVER', customer: 'CHELSEA MARKET - CARBONE R.I CO CHELSEA', city: 'CHELSEA', state: 'MA', pieces: 16 },
+  ] } }];
+  assert.equal(customerStops(items, 'Meet Georgia Wholesale')[0].customer, 'MID-GA WHOLESALE FLORIST LLC');
+  assert.equal(customerStops(items, 'Carbone Dairy').length, 0);
+  assert.equal(customerStops(items, 'Carbone Dairy', {}, { near: true })[0].customer, 'CHELSEA MARKET - CARBONE R.I CO CHELSEA');
+});
+
+test('Jarvis says states in full: names ("MID-GA", "R.I.") and "City, ST"', async () => {
+  const { spokenName, spokenNumbers, nameScore } = await import('../voice.js');
+  assert.equal(spokenName('MID-GA WHOLESALE FLORIST LLC'), 'Mid Georgia Wholesale Florist');
+  assert.equal(spokenName('CHELSEA MARKET - CARBONE R.I CO'), 'Carbone Rhode Island');
+  // a name Jarvis offered ("Is that Carbone Rhode Island?") still finds the stop
+  assert.equal(nameScore('Carbone Rhode Island', 'CHELSEA MARKET - CARBONE R.I CO'), 1);
+  const out = spokenNumbers({ city: 'Warwick, GA', eta: 'Thu 3:00 PM in Chelsea, MA', x: 'Tulsa, OK', say: 'ok, IN this', trip: '624773' });
+  assert.equal(out.city, 'Warwick, Georgia');
+  assert.equal(out.eta, 'Thu 3:00 PM in Chelsea, Massachusetts');
+  assert.equal(out.x, 'Tulsa, Oklahoma');
+  assert.equal(out.say, 'ok, IN this');
+});
+
+// call 10/12: Hanan asked "when did I receive each" — Jarvis had "delivered" but no time
+test('delivered stops carry when they were delivered (stop-local time; 00:00 = date only)', async () => {
+  const { deliveredWhen, customerStops } = await import('../voice.js');
+  assert.equal(deliveredWhen(['2026-10-12T10:14:29']), 'Mon, Oct 12, 10:14 AM (local time)');
+  assert.equal(deliveredWhen(['2026-10-12T00:00:01']), 'Mon, Oct 12 (time not recorded)');
+  assert.equal(deliveredWhen([null, '2026-10-12T09:00:00', '2026-10-12T10:14:29']), 'Mon, Oct 12, 10:14 AM (local time)');
+  assert.equal(deliveredWhen([]), null);
+  const items = [{ trip: { tripNumber: '624773', powerUnit: '4504' }, freightBills: [{ billToName: 'DAVIS WHOLESALE -MACON', endZoneDescription: 'MACON, GA, 31201', pieces: 78, actualDelivery: '2026-10-12T10:14:29' }],
+    _manifest: { stops: [{ action: 'DELIVER', customer: 'DAVIS WHOLESALE -MACON', city: 'MACON', state: 'GA', pieces: 256 }] } }];
+  const [st] = customerStops(items, 'Davis Wholesale');
+  assert.equal(st.delivered, true);
+  assert.equal(st.delivered_at, 'Mon, Oct 12, 10:14 AM (local time)');
+});
+
+// Davis Macon on 624773 (real): sheet 256, TruckMate bills 256, ARTIS 240/240 — bill G5042275 (16) isn't in ARTIS
+test('box count: TruckMate bills are the complete count; ARTIS only takes off what was not received', async () => {
+  const { customerStops } = await import('../voice.js');
+  const load = (artis) => [{ trip: { tripNumber: '624773', powerUnit: '4504' },
+    freightBills: [
+      { billNumber: 'G5042275', billToName: 'DAVIS WHOLESALE -MACON', endZoneDescription: 'MACON, GA, 31201', pieces: 16 },
+      { billNumber: 'M5042388', billToName: 'DAVIS WHOLESALE -MACON', endZoneDescription: 'MACON, GA, 31201', pieces: 240 },
+      { billNumber: 'M5042385', billToName: 'HASON CORP', endZoneDescription: 'MACON, GA, 31201', pieces: 32 },
+    ],
+    _manifest: { stops: [{ action: 'DELIVER', customer: 'DAVIS WHOLESALE -MACON', city: 'MACON', state: 'GA', pieces: 256 }] },
+    _artis: { stops: [{ consignee: 'DAVIS WHOLESALE -MACON', ...artis }] } }];
+  // all of ARTIS's boxes scanned → the whole 256 went on the truck
+  const ok = customerStops(load({ boxes: 240, scanned: 240, missing: 0 }), 'Davis Wholesale', {}, { staff: true })[0];
+  assert.equal(ok.boxes_loaded, '256 boxes loaded for them');
+  assert.equal(ok.boxes_on_trip_sheet, undefined);          // the sheet agrees
+  assert.equal(ok.boxes_not_received, undefined);
+  assert.equal(ok.boxes_scanned_in_artis, '240 of 240');
+  // ARTIS says 10 never arrived → 246 loaded; staff hear why, customers only the loaded count
+  const short = load({ boxes: 240, scanned: 230, missing: 10 });
+  const staff = customerStops(short, 'Davis Wholesale', {}, { staff: true })[0];
+  assert.equal(staff.boxes_loaded, '246 boxes loaded for them');
+  assert.match(staff.boxes_not_received, /^10 boxes not received/);
+  const cust = customerStops(short, 'Davis Wholesale')[0];
+  assert.equal(cust.boxes, '246 boxes');
+  assert.equal(cust.boxes_not_received, undefined);
+  assert.equal(cust.boxes_scanned_in_artis, undefined);
+  assert.ok(!JSON.stringify(cust).includes('_billBoxes'));
+});
+
+test('customers hear location, truck, trailer, trip, total boxes and ETA — delivered is only "Your shipment has been delivered."', async () => {
+  const { customerLean, DELIVERED_SAY } = await import('../voice.js');
+  const view = { trip: '624773', truck: '4504', trailer: '7137', status: 'on the way', truck_now: 'Greenville, SC', as_of: 'x', moving: true, coming_from: 'Miami, Florida',
+    deliveries: [{ customer: 'SPRINGFIELD FLORIST', city: 'SPRINGFIELD, MA', boxes: '81 boxes', boxes_loaded: '81 boxes loaded for them', cubes: 113.23, appointment: '2026-10-13 08:00', delivered: false, estimated_arrival: 'Tue, Oct 13, 8:39 PM Eastern' }] };
+  const lean = customerLean(view);
+  assert.deepEqual(Object.keys(lean).filter((k) => lean[k] !== undefined).sort(), ['coming_from', 'deliveries', 'status', 'trailer', 'trip', 'truck', 'truck_now']);
+  const d = lean.deliveries[0];
+  assert.equal(d.boxes, '81 boxes');
+  assert.equal(d.estimated_arrival, 'Tue, Oct 13, 8:39 PM Eastern');
+  assert.equal(d.cubes, undefined); assert.equal(d.appointment, undefined);
+  const done = customerLean({ ...view, deliveries: [{ ...view.deliveries[0], delivered: true, delivered_at: 'Mon, Oct 12, 10:14 AM (local time)', estimated_arrival: null }] });
+  assert.deepEqual(done, { trip: '624773', deliveries: [{ customer: 'SPRINGFIELD FLORIST', city: 'SPRINGFIELD, MA', delivered: true, say_exactly: DELIVERED_SAY }] });
+  assert.equal(DELIVERED_SAY, 'Your shipment has been delivered.');
 });
