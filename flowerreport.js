@@ -201,7 +201,7 @@ export function buildGeneralFollowUp(rows, now = Date.now()) {
   return { subject, html, rows };
 }
 
-export function initFlowerReport(app, { requireAuth, db, getBoard, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initFlowerReport(app, { requireAuth, db, getBoard, photos = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taFlowerReportCfg';
@@ -220,7 +220,10 @@ export function initFlowerReport(app, { requireAuth, db, getBoard, env = process
   async function send(by) {
     const cfg = await settings();
     const rep = (await make()).general;   // the team's table layout (FLOWERS GENERAL FOLLOW UP)
-    const r = await sendMail({ to: cfg.to, subject: rep.subject, html: rep.html }, { env, fetchFn });
+    // the drivers' latest reefer temperature photos for the loads in it, attached
+    const inReport = new Set(rep.rows.map((r) => r.trip));
+    const pics = photos ? (await photos().catch(() => [])).filter((p) => inReport.has(String(p.trip))) : [];
+    const r = await sendMail({ to: cfg.to, subject: rep.subject, html: rep.html, attachments: pics.map(({ name, contentType, bytes }) => ({ name, contentType, bytes })) }, { env, fetchFn });
     await db.update(cfgKey, (cur) => ({ ...(cur || {}), lastSentAt: new Date(now()).toISOString(), lastSentBy: by, lastSubject: rep.subject }), {});
     return { ...r, sentTo: cfg.to, subject: rep.subject };
   }

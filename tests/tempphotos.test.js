@@ -13,13 +13,13 @@ test('only rolling loads whose reefer temp we cannot read live', () => {
   assert.equal(needsTempPhotos({ trip: { status: 'DISP' } }), false, 'not loaded yet');
 });
 
-test('photo windows: 8 AM, 3 PM, 9:30 PM in the truck local time', () => {
+test('photo windows: one per shift — day from 8 AM, night from 9:30 PM, in the truck local time', () => {
   assert.equal(truckZone({ _samsara: { location: 'I-10, Tucson, AZ' } }), 'America/Phoenix');
   assert.equal(truckZone({ _samsara: { location: 'US 9, Sayreville, NJ' } }), 'America/New_York');
   assert.equal(truckZone({}), 'America/New_York');
   assert.equal(currentSlot(ET('2026-10-09T07:59:00'), 'America/New_York').key, '2026-10-08 night');
-  assert.equal(currentSlot(ET('2026-10-09T08:00:00'), 'America/New_York').key, '2026-10-09 am');
-  assert.equal(currentSlot(ET('2026-10-09T16:10:00'), 'America/New_York').key, '2026-10-09 pm');
+  assert.equal(currentSlot(ET('2026-10-09T08:00:00'), 'America/New_York').key, '2026-10-09 day');
+  assert.equal(currentSlot(ET('2026-10-09T16:10:00'), 'America/New_York').key, '2026-10-09 day');
   assert.equal(currentSlot(ET('2026-10-09T21:30:00'), 'America/New_York').key, '2026-10-09 night');
   // 9:00 AM ET is 6:00 AM in California → still last night's window there
   assert.equal(currentSlot(ET('2026-10-09T09:00:00'), 'America/Los_Angeles').key, '2026-10-08 night');
@@ -33,10 +33,10 @@ test('ask once per window, then a reminder every hour until the photo comes (pau
   assert.equal(decide(st, slot, ET('2026-10-09T09:05:00')), 'remind');
   assert.equal(decide(st, slot, ET('2026-10-09T09:05:00'), { sleeping: true }), null);
   assert.equal(decide({ ...st, gotAt: 'x' }, slot, ET('2026-10-09T10:00:00')), null);
-  assert.match(askText('ask', { name: 'Frankie Patterson', trip: '624626', slot, link: 'https://x/l?photo=temp' }), /Hi Frankie.*photo of the reefer temperature display \(morning check, 8:00 AM\)\. Send it here: https:\/\/x\/l\?photo=temp/);
+  assert.match(askText('ask', { name: 'Frankie Patterson', trip: '624626', slot, link: 'https://x/l?photo=temp' }), /Hi Frankie.*photo of the reefer temperature display \(day check, 8:00 AM\)\. Send it here: https:\/\/x\/l\?photo=temp/);
 });
 
-test('loop: app driver asked at 8 AM, reminded hourly, photo → email to dispatch only (no broker)', async () => {
+test('loop: asked at 8 AM, reminded hourly, every ask emailed on one thread, photo on the same thread — dispatch only (no broker)', async () => {
   const db = memDb();
   await db.set('taFollowCfg', { to: ['dispatch@floridabeauty.us', 'ops@broker.com'] });
   const item = { trip: { tripNumber: '624626', status: 'DEPSHIP', powerUnit: '2403', trailer: 'R55' }, _oc: { driverName: 'Frankie' } };
@@ -49,13 +49,15 @@ test('loop: app driver asked at 8 AM, reminded hourly, photo → email to dispat
   assert.deepEqual(await t.received('florida-beauty', '624626', { docIds: [] }), { counted: false });
   const r = await t.received('florida-beauty', '624626', { docIds: [7], via: 'TagAlong app', by: 'Frankie (app)' });
   assert.equal(r.counted, true);
-  assert.equal(mails.length, 1);
+  assert.equal(mails.length, 3, 'ask, reminder, photo');
   const to = mails[0].message.toRecipients.map((x) => x.emailAddress.address);
   assert.deepEqual(to, ['dispatch@floridabeauty.us']);
-  assert.match(mails[0].message.subject, /Reefer temp photo — Trip 624626 · truck 2403 · trailer R55 · morning check/);
-  assert.equal(mails[0].message.attachments.length, 1);
-  clock = ET('2026-10-09T10:05:00'); await t.run(); assert.equal(sent.length, 2, 'no reminders once received');
-  clock = ET('2026-10-09T15:01:00'); await t.run(); assert.equal(sent.length, 3, 'asks again at 3 PM');
+  assert.match(mails[0].message.subject, /^Reefer temp photo — Trip 624626 · truck 2403 · trailer R55 · day check Oct 9$/);
+  assert.equal(mails[1].message.subject, `RE: ${mails[0].message.subject}`, 'same thread');
+  assert.equal(mails[2].message.subject, `RE: ${mails[0].message.subject}`, 'the photo on the same thread');
+  assert.equal(mails[2].message.attachments.length, 1);
+  clock = ET('2026-10-09T15:05:00'); await t.run(); assert.equal(sent.length, 2, 'no more asks this shift once received');
+  clock = ET('2026-10-09T21:31:00'); await t.run(); assert.equal(sent.length, 3, 'asks again for the night shift');
 });
 
 test('a photo in the app chat with no open check is not counted', async () => {
@@ -76,4 +78,27 @@ test('photo email carries the load facts', () => {
   const e = photoEmail({ item: { trip: { tripNumber: '1', powerUnit: '9', trailer: 'T' } }, slot: { label: 'night', hm: '21:30' }, at: '2026-10-09T01:40:00Z', by: 'D', count: 2, via: 'upload link' });
   assert.match(e.text, /Check: night \(9:30 PM local\)/);
   assert.match(e.text, /Photos: 2 attached/);
+});
+
+
+import { drivingDriver } from '../tempphotos.js';
+
+test('team truck: the driver who is driving gets the text; no answer → a call', async () => {
+  assert.equal(drivingDriver({ _samsara: { hos: { status: 'sleeperBerth' }, hos2: { status: 'driving' } } }), 2);
+  assert.equal(drivingDriver({ _samsara: { hos: { status: 'driving' }, hos2: { status: 'sleeperBerth' } } }), 1);
+  const db = memDb();
+  await db.set('taFollowCfg', { to: ['dispatch@floridabeauty.us'] });
+  await db.set('taSmsConsent:florida-beauty', { 3055550001: { by: 'x' }, 3055550002: { by: 'x' } });
+  const item = { trip: { tripNumber: '624700', status: 'DEPSHIP', powerUnit: '2403', trailer: 'R1' },
+    _samsara: { driver1Info: { name: 'Ana Uno', phone: '3055550001' }, driver2Info: { name: 'Beto Dos', phone: '3055550002' }, hos: { status: 'sleeperBerth' }, hos2: { status: 'driving' } } };
+  const texts = []; const calls = [];
+  let clock = ET('2026-10-09T08:02:00');
+  const t = initTempPhotos({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, getBoard: async () => ({ trips: [item] }), ringcentral: { configFor: async () => ({ fromNumber: '+13055031200' }), sendSms: async (o, m) => texts.push(m) },
+    voice: { placeCall: async (trip, o) => { calls.push(o); return { ok: true }; } }, env: { NODE_ENV: 'test' }, now: () => clock });
+  await t.run();
+  assert.equal(texts[0].to, '3055550002', 'Beto is driving');
+  clock = ET('2026-10-09T09:03:00'); await t.run();
+  assert.equal(texts.length, 2); assert.equal(calls.length, 1); assert.equal(calls[0].which, 2);
+  clock = ET('2026-10-09T10:04:00'); await t.run();
+  assert.equal(calls.length, 1, 'one call per shift — texts keep going hourly'); assert.equal(texts.length, 3);
 });

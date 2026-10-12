@@ -37,6 +37,7 @@ export function initOutreach({ db, getBoard, groupEmail = null, isInternal = () 
   };
   async function notify(ev) {
     if (!enabled || !ev || !ev.trip || !mailConfig(env).ready) return { emailed: false };
+    if (/^temp-photo/.test(String(ev.kind || ''))) return { emailed: false, own: 'reefer photo thread' };   // those have their own email thread per check
     const to = await dispatchTo();
     if (!to.length) return { emailed: false };
     const item = ((((await getBoard(ev.site || 'florida-beauty')) || {}).trips) || []).find((x) => String(tripOf(x).tripNumber) === String(ev.trip)) || null;
