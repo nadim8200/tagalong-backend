@@ -372,3 +372,26 @@ test('forwarded trip-sheet packet: "packet received — details to be extracted"
   assert.deepEqual(packetInstructions(list, true).map((x) => x.kind), ['text_driver', 'note']);
   assert.equal(packetInstructions(list, false).length, 3, 'normal emails unchanged');
 });
+
+import { pastedPicture } from '../inbox.js';
+
+test('a report pasted as a picture in a trip-sheet email is read with the email (the PDF still goes to the trip-sheet reader)', async () => {
+  const small = Buffer.alloc(40 * 1024, 1).toString('base64');
+  const big = Buffer.alloc(3 * 1024 * 1024, 1).toString('base64');
+  assert.equal(pastedPicture({ contentType: 'image/png', bytes: small }), true);
+  assert.equal(pastedPicture({ contentType: 'image/jpeg', bytes: big }), false, 'a phone photo of a trip sheet is a sheet page');
+  assert.equal(pastedPicture({ contentType: 'application/pdf', bytes: small }), false);
+  const packets = async () => ({ trips: [{ trip: '624773' }], rateCons: [], kept: 1, skipped: 12 });
+  const files = [
+    { '@odata.type': '#microsoft.graph.fileAttachment', name: '3549_001.pdf', contentType: 'application/pdf', size: 900000, contentBytes: Buffer.from('%PDF').toString('base64') },
+    { '@odata.type': '#microsoft.graph.fileAttachment', name: 'image.png', contentType: 'image/png', size: 40000, contentBytes: small },
+  ];
+  const h = harness({ packets, messages: [msg({ id: 'r1', subject: 'Fw: OUTBOUND TRIP SHEET, MIA 10/11/26', from: { emailAddress: { name: 'Saray Trujillo', address: 'strujillo@floridabeauty.us' } }, hasAttachments: true, files, body: '@jarvis please follow up' })],
+    triageOut: { summary: 'Rescue on 624710', refs: { trip: '624710' }, reply: { needed: false, kind: 'none' }, instructions: [{ kind: 'note', trip: '624710', message: 'Gerardo Osorto (5535) rescued trailer 2035 on truck 2011' }], actions: [] } });
+  await h.inbox.poll();
+  const ai = h.calls.find((c) => c.url.includes('anthropic.com') && !JSON.parse(c.body).system);
+  const blocks = JSON.parse(ai.body).messages[0].content;
+  assert.ok(blocks.some((b) => b.type === 'image'), 'the pasted report picture is shown to the AI');
+  assert.ok(!blocks.some((b) => b.type === 'document'), 'the scanned PDF is not (the trip-sheet reader has it)');
+  assert.match(JSON.stringify(blocks), /never answer with a vague/);
+});
