@@ -66,7 +66,7 @@ test('first run adopts silently; later events email the customer list and log on
     sent.push(readSent(opts)); return { ok: true, status: 202, json: async () => ({}) };
   };
   const db = memDb();
-  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
+  await db.set('taStatusMailCfg', { routineMilestones: true, customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
   const logged = [];
   const sm = initStatusMail({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, env, fetchFn, comms: { log: async (s, t, e) => logged.push(e) } });
   await sm.process('fb', { trips: [load()] }, { geo, now: NOW });
@@ -265,4 +265,19 @@ test('SOP: hourly "headed to shipper" before pickup, then "still at the shipper"
   assert.equal(s1.stage, 'Headed to shipper'); assert.match(s1.headline, /^Empty and headed to the shipper — about \d+ mi away\. We'll keep you posted\./);
   assert.equal(sopStage({ kind: 'delivered' }, before, { now: NOW }).attach, 'pod');
   assert.equal(sopStage({ kind: 'picked-up' }, before, { now: NOW }).attach, 'bol');
+});
+
+
+test('by default milestones are not emailed unless someone asked for updates on that load', async () => {
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
+  const sent = [];
+  const fetchFn = async (url, opts) => { if (url.includes('oauth2')) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) }; sent.push(readSent(opts)); return { ok: true, status: 202, json: async () => ({}) }; };
+  const db = memDb();
+  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
+  const sm = initStatusMail({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, env, fetchFn, comms: { log: async () => {} } });
+  await sm.process('fb', { trips: [load()] }, { geo, now: NOW });
+  await sm.process('fb', { trips: [load({ trip: { status: 'DEPSHIP' } })] }, { geo, now: NOW + 60000 });
+  assert.equal(sent.length, 0, 'picked up — nobody asked, nothing sent');
+  const st = await db.get('taStatusMail:fb', { trips: {} });
+  assert.match(JSON.stringify(st), /only when asked/);
 });

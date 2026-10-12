@@ -36,7 +36,7 @@ const ARRIVE = /^arrcon/i;
 const LOADED = /^(loadedtogo|sptld)/i;          // TruckMate: TRAILER NOW LOADED TO GO / SPOTTED LOADED
 const DONE = /^(delvd|deliv|del$|cmplt|complete)/i;
 const DEAD = /^(canc|void)/i;
-export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, locationEvery: 2.5, routineLocation: false, watchTimes: ['08:00', '12:00', '16:00', '20:00', '00:00', '04:00'], useBroker: true, customers: {}, trips: {} };   // location updates only when someone asks Jarvis (broker watch)   // location updates every 2.5 h — only to the rate con contact (cc its tracking email), on the load's email chain, with a live tracking link
+export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, locationEvery: 2.5, routineLocation: false, routineMilestones: false, watchTimes: ['08:00', '12:00', '16:00', '20:00', '00:00', '04:00'], useBroker: true, customers: {}, trips: {} };   // location updates only when someone asks Jarvis (broker watch)   // location updates every 2.5 h — only to the rate con contact (cc its tracking email), on the load's email chain, with a live tracking link
 const MAX_PER_DAY = 15;
 
 const tripOf = (item) => (item && item.trip) || item || {};
@@ -607,7 +607,11 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       }
       const today = rec.log.filter((l) => now - Date.parse(l.at) < 24 * H && l.status === 'sent').length;
       if (today >= MAX_PER_DAY) sendable.length = 0;
-      evs.forEach((ev) => { if (!sendable.includes(ev)) rec.log = [{ kind: ev.kind, stop: ev.number || null, at: nowIso, status: adopting ? 'before setup — not sent' : cfg.enabled === false ? 'off — not sent' : 'combined into the next update' }, ...rec.log].slice(0, 80); });
+      // milestones and delay notices go out only on loads someone asked about ("@Jarvis keep the broker
+      // updated on this load") — never automatically to everyone (routineMilestones turns that back on)
+      const quiet = !watch && cfg.routineMilestones !== true;
+      if (quiet) sendable.length = 0;
+      evs.forEach((ev) => { if (!sendable.includes(ev)) rec.log = [{ kind: ev.kind, stop: ev.number || null, at: nowIso, status: adopting ? 'before setup — not sent' : cfg.enabled === false ? 'off — not sent' : quiet ? 'not sent — only when asked (@Jarvis keep the broker updated)' : 'combined into the next update' }, ...rec.log].slice(0, 80); });
       sendable.forEach((ev) => work.push({ trip, item, ev, rec }));
       next.trips[trip] = rec;
     }
@@ -652,7 +656,7 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
       const everyHours = b.everyHours != null ? Math.min(12, Math.max(1, Number(b.everyHours) || 3)) : cur.everyHours;
       const locationEvery = b.locationEvery != null ? Math.min(12, Math.max(1, Math.round((Number(b.locationEvery) || 2.5) * 2) / 2)) : (cur.locationEvery || 2.5);
       const { seen, outlook, ...keep } = cur; // eslint-disable-line no-unused-vars
-      const next = { ...keep, customers, prefixes: prefixes.length ? prefixes : DEFAULTS.prefixes, everyHours, locationEvery, enabled: b.enabled != null ? !!b.enabled : cur.enabled, routineLocation: b.routineLocation != null ? !!b.routineLocation : cur.routineLocation !== false, useBroker: b.useBroker != null ? !!b.useBroker : cur.useBroker };
+      const next = { ...keep, customers, prefixes: prefixes.length ? prefixes : DEFAULTS.prefixes, everyHours, locationEvery, enabled: b.enabled != null ? !!b.enabled : cur.enabled, routineLocation: b.routineLocation != null ? !!b.routineLocation : cur.routineLocation, routineMilestones: b.routineMilestones != null ? !!b.routineMilestones : !!cur.routineMilestones !== false, useBroker: b.useBroker != null ? !!b.useBroker : cur.useBroker };
       await db.set(cfgKey, next);
       res.json(next);
     } catch (e) { res.status(500).json({ error: e.message }); }
