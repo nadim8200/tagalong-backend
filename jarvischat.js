@@ -119,6 +119,7 @@ export const CUSTOMER_SYSTEM = (who) => `You are Jarvis, the automated dispatche
 - Find their load with the tools: find_load (trip, bill, broker load / PO number, truck, trailer or customer / receiver name) and loads_to_place (a delivery city / state). Never guess.
 - If you can't tell which load or stop they mean, ask ONE short question back (their load / PO number, the delivery city, or the receiver name). Keep asking until it's found — they'll answer by email and the conversation continues.
 - For THEIR stop only: where the truck is now (city, state), whether it's delivered, and the ETA to their stop in that stop's local time, with this note: "This is an estimated time of arrival and may change; if it does, we'll let you know." Never share other customers' names or stops, driver names or phone numbers, rates, or internal notes.
+- Temperature: never state a reefer temperature or reading. If they ask, say we're requesting it and verifying with dispatch, and dispatch will follow up.
 - If they ask for someone at Florida Beauty, use staff_directory and give only the name, department and extension with the main number 305-503-1200 — never a cell phone or personal email.
 - If they need something you can't do (a change, a document you don't have, a problem), say dispatch will follow up shortly.
 - Write the email body only (no subject), short and professional, signed "Jarvis — Florida Beauty Flora Dispatch".
@@ -130,7 +131,7 @@ export const EMAIL_NOTE = `\n\nThis turn answers an EMAIL. If it asks where load
 export function customerSafe(x) {
   if (Array.isArray(x)) return x.map(customerSafe);
   if (!x || typeof x !== 'object') return x;
-  return Object.fromEntries(Object.entries(x).filter(([k]) => !/phone|rate|pay|amount|note|conversation|email|contact|driver|task|hold|alert|broker|ratecon|docs?$|transfer|comms/i.test(k)).map(([k, v]) => [k, customerSafe(v)]));
+  return Object.fromEntries(Object.entries(x).filter(([k]) => !/phone|rate|pay|amount|note|conversation|email|contact|driver|task|hold|alert|broker|ratecon|docs?$|transfer|comms|temp|reefer|setpoint/i.test(k)).map(([k, v]) => [k, customerSafe(v)]));
 }
 
 // Voice conversation in Ask Jarvis: the answer is read out loud, so keep it short.

@@ -30,6 +30,8 @@ const SEV = { critical: 3, warning: 2, info: 1 };
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 const norm = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/^0+(?=\d)/, '');
 const zipOf = (s) => { const m = String(s || '').match(/\b(\d{5})\b/); return m ? m[1] : ''; };
+// A stop with no ZIP ("DEVENS, MA") still gets a map point: looked up once by city + state. Pure.
+export const placeKey = (label) => { const m = String(label || '').match(/^\s*([A-Za-z][A-Za-z .'-]*?),\s*([A-Z]{2})\b/); return m ? `P:${m[1].trim().toUpperCase()}, ${m[2]}` : ''; };
 const fmtMin = (m) => (m == null ? '—' : m >= 60 ? `${Math.floor(m / 60)}h ${Math.round(m % 60)}m` : `${Math.round(m)}m`);
 const fmtTime = (ms) => new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
@@ -161,7 +163,7 @@ function tripFacts(item, now) {
     const label = b.endZoneDescription || b.endZone || '';
     const key = String(b.endZone || label);
     if (!key) continue;
-    const st = stopMap.get(key) || { key, label, zip: zipOf(label) || zipOf(b.endZone), tz: STATE_TZ[stateOf(label)] || 'America/New_York', pieces: 0, bills: 0, delivered: true, apptMs: null, apptNeeded: false };
+    const st = stopMap.get(key) || { key, label, zip: zipOf(label) || zipOf(b.endZone) || placeKey(label), tz: STATE_TZ[stateOf(label)] || 'America/New_York', pieces: 0, bills: 0, delivered: true, apptMs: null, apptNeeded: false };
     st.pieces += num(b.pieces); st.bills += 1;
     st.consignees = [...new Set([...(st.consignees || []), String(b.billToName || b.billNumber || '')])];
     if (!b.actualDelivery) st.delivered = false;
@@ -790,12 +792,13 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
       let hit = null;
       try {
         if (key) {
-          const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${zip}&components=country:US&key=${key}`); // eslint-disable-line no-await-in-loop
+          const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(zip.replace(/^P:/, ''))}&components=country:US&key=${key}`); // eslint-disable-line no-await-in-loop
           const d = await r.json(); // eslint-disable-line no-await-in-loop
           if (d.status === 'OK' && d.results && d.results[0]) hit = d.results[0].geometry.location;
         }
         if (!hit) {
-          const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&postalcode=${zip}`, { headers: { 'User-Agent': 'TagAlong-Watchtower/1.0' } }); // eslint-disable-line no-await-in-loop
+          const q = zip.startsWith('P:') ? `q=${encodeURIComponent(zip.slice(2))}` : `postalcode=${zip}`;
+          const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&${q}`, { headers: { 'User-Agent': 'TagAlong-Watchtower/1.0' } }); // eslint-disable-line no-await-in-loop
           const d = await r.json(); // eslint-disable-line no-await-in-loop
           if (d && d[0]) hit = { lat: Number(d[0].lat), lng: Number(d[0].lon) };
           await new Promise((ok) => setTimeout(ok, 1100)); // eslint-disable-line no-await-in-loop

@@ -761,7 +761,7 @@ helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.en
   sms: { live: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } }, send: (to, text) => rc.sendSms('__shared', { to, text }) } });
 // live tracking link for the rate con contact (one load only; stops once delivered)
 const brokerTrack = initBrokerTrack(app, { db, getBoard: (site) => truckmate.buildBoard(site), env: process.env });
-const statusMail = initStatusMail(app, { requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env,
+const statusMail = initStatusMail(app, { tempTeam: () => alertRecipients.resolve('reefer_temp'),  requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env,
   track: (site, trip) => brokerTrack.linkFor(site, trip),
   chainReply: (site, trip, m) => (inbox ? inbox.replyOnLoadChain(site, trip, m) : { sent: false }) });
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
@@ -816,7 +816,7 @@ pickupFollow = initPickupFollow(app, { groupEmail: (n) => directory.groupEmail(n
 // paperwork after delivery: POD / BOL from the driver → broker + Billing; Billing's document requests
 const paperwork = initPaperwork(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), groupEmail: (n) => directory.groupEmail(n), replyWithDocs: (id, o) => inbox.replyWithDocs(id, o), env: process.env });
 // reefer temp photos (8 AM / 3 PM / 9:30 PM, hourly reminders) + an email to dispatch on every driver contact
-tempPhotos = initTempPhotos(app, { groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, ringcentral: rc, voice, comms, isInternal, env: process.env });
+tempPhotos = initTempPhotos(app, { team: () => alertRecipients.resolve('reefer_temp'), groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, ringcentral: rc, voice, comms, isInternal, env: process.env });
 driverLinks.usePhotos((site, trip, info) => tempPhotos.received(site, trip, info));
 const outreach = initOutreach({ groupEmail: (n) => directory.groupEmail(n), db, getBoard: (site) => truckmate.buildBoard(site), isInternal, env: process.env });
 comms.useOutreach((ev) => outreach.notify(ev));

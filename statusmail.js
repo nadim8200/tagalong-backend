@@ -26,7 +26,8 @@
 // (optionally) the broker email read from the rate con.
 // ---------------------------------------------------------------
 import { sendMail, mailConfig } from './mailer.js';
-import { haversineMi, estimateArrival, MIAMI_TERMINAL, MIAMI_YARDS } from './watchtower.js';
+import { haversineMi, estimateArrival, MIAMI_TERMINAL, MIAMI_YARDS, placeKey } from './watchtower.js';
+import { requiredRange, brokerMayShare } from './temppolicy.js';
 import { fmtLocal } from './localtime.js';
 import { buildUpdateFor } from './updateemail.js';
 
@@ -159,7 +160,7 @@ export function stopsOf(item) {
   for (const b of billsOf(item)) {
     const label = b.endZoneDescription || b.endZone || '';
     if (!label) continue;
-    const st = map.get(label) || { key: label, place: cityOf(label), zip: zipOf(label), customers: [], delivered: true, deliveredAt: null };
+    const st = map.get(label) || { key: label, place: cityOf(label), zip: zipOf(label) || placeKey(label), customers: [], delivered: true, deliveredAt: null };
     if (b.billToName && !st.customers.includes(b.billToName)) st.customers.push(b.billToName);
     if (!b.actualDelivery) st.delivered = false;
     else if (!st.deliveredAt || String(b.actualDelivery) > st.deliveredAt) st.deliveredAt = String(b.actualDelivery);
@@ -492,7 +493,7 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
   return { subject, html, text };
 }
 
-export function initStatusMail(app, { requireAuth, db, docs = null, comms = null, ringcentral = null, track = null, chainReply = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initStatusMail(app, { requireAuth, db, docs = null, comms = null, ringcentral = null, track = null, chainReply = null, tempTeam = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const cfgKey = 'taStatusMailCfg';
   const key = (site) => `taStatusMail:${site}`;      // { adopted, trips: { trip: { sent, log } } }
@@ -510,6 +511,22 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
     const r = contactsOf(item, cfg);
     // status updates: no billing / invoice mailboxes (unless dispatch added them by hand), no garbled duplicates
     return dropGarbled(emailList(r.contacts.filter((c) => c.email && (r.edited || (['customer', 'broker', 'other'].includes(c.role) && (cfg.useBroker || c.sources.some((x) => x !== 'rate con')) && !isBillingMailbox(c.email)))).map((c) => c.email)));
+  }
+
+  async function tempHeldBack(site, trip, item) {
+    const live = item._samsara || {};
+    if (live.tempF == null || live.tempStale) return;
+    const range = requiredRange(item);
+    const ok = brokerMayShare(Math.round(live.tempF), range);
+    if (ok.share) return;
+    let fresh = false;
+    await db.update(`taTempHeld:${site}`, (cur) => { const a = { ...(cur || {}) }; const last = a[trip]; fresh = !last || Date.now() - Date.parse(last) > 6 * H; if (fresh) a[trip] = new Date().toISOString(); return a; }, {});
+    if (!fresh) return;
+    const to = await tempTeam();
+    if (!to.length) return;
+    const t = tripOf(item);
+    await sendMail({ to, subject: `Reefer temperature held back from the broker — Trip ${trip} · truck ${t.powerUnit || '—'} · trailer ${t.trailer || '—'}`,
+      html: `<div style="font-family:Arial,Helvetica,sans-serif"><p><b>Trip ${trip}: reefer reads ${Math.round(live.tempF)}°F${live.setpointF != null ? ` (set ${Math.round(live.setpointF)}°F)` : ''}.</b></p><p>${range ? `The rate con requires ${range.text} (${range.from}) — this is ${ok.why}.` : 'No required temperature on the rate con to check it against.'} The broker update said "verifying temperature with dispatch" — no number was shared.</p><p>Please check with the driver and decide what to tell the broker.</p><p>Jarvis — AI Dispatcher · Florida Beauty Flora</p></div>` }, { env, fetchFn });
   }
 
   async function deliver(site, trip, item, ev, ctx, { by = 'AI Dispatcher (automatic)', to = null } = {}) {
@@ -545,6 +562,8 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
         else await sendMail({ to: rcpts, cc: ccs, subject: mail.subject, html: mail.html, text: mail.text, attachments: files.map((f, i) => ({ name: `${ev.kind === 'delivered' || ev.delivered ? 'POD' : 'BOL'}-${trip}-${i + 1}.${/pdf/.test(f.mediaType) ? 'pdf' : 'jpg'}`, contentType: f.mediaType, bytes: f.data })) }, { env, fetchFn });
       } catch (e) { status = 'failed'; error = e.message; }
     }
+    // a live reefer reading we held back from the broker (off the rate con range) → dispatch gets it, apart
+    if (status === 'sent' && tempTeam) await tempHeldBack(site, trip, item).catch((e) => console.warn('[status-mail] temp to dispatch:', e.message));
     const at = new Date().toISOString();
     if (status === 'sent' && comms && comms.log) await comms.log(site, trip, { type: 'email', dir: 'out', auto: true, at, to: [...rcpts, ...ccs.map((x) => `cc ${x}`)].join(', '), subject: mail.subject, text: mail.text.slice(0, 600), by, noThread: true });
     return { status, error, to: rcpts, cc: ccs, chain, subject: mail.subject, at };

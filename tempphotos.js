@@ -115,14 +115,14 @@ ${rows.map(([k, v]) => `<tr><td style="padding:4px 20px 0 20px;${F};font-size:13
   return { subject, html, text };
 }
 
-export function initTempPhotos(app, { requireAuth, requireAdmin = null, groupEmail = null, db, getBoard, docs = null, driverLinks = null, ringcentral = null, voice = null, comms = null, isInternal = () => true, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initTempPhotos(app, { requireAuth, requireAdmin = null, groupEmail = null, team = null, db, getBoard, docs = null, driverLinks = null, ringcentral = null, voice = null, comms = null, isInternal = () => true, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const key = `taTempPhotos:${SITE}`;
   const cfgKey = 'taTempPhotosCfg';
   const DEFAULTS = { on: true, to: [], everyMin: 60, pauseWhileSleeping: true };
   const settings = async () => ({ ...DEFAULTS, ...((enabled && (await db.get(cfgKey, {}))) || {}) });
   // dispatch email: its own list, else the follow-through dispatch group — our staff only
-  const dispatchTo = async () => { const c = await settings(); let list = c.to.length ? c.to : (((await db.get('taFollowCfg', {})) || {}).to || []); if (!list.length && groupEmail) list = [await groupEmail('dispatch').catch(() => null)].filter(Boolean); return list.filter((a) => isInternal(a, env)); };
+  const dispatchTo = async () => { if (team) { const l = (await team().catch(() => [])).filter((a) => isInternal(a, env)); if (l.length) return l; } const c = await settings(); let list = c.to.length ? c.to : (((await db.get('taFollowCfg', {})) || {}).to || []); if (!list.length && groupEmail) list = [await groupEmail('dispatch').catch(() => null)].filter(Boolean); return list.filter((a) => isInternal(a, env)); };
   const smsLive = async () => { try { const c = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } };
 
   async function contact(item, step, slot, st) {

@@ -40,7 +40,7 @@ test('SOP rows: trailer temperature, map link, miles; completed: clean bill / lu
   const live = { lat: 39.9, lng: -75.1, tempF: 34, setpointF: 34 };
   const s = loadSnapshot(item({ live }), { eta: { stops: [{ label: 'XENIA, OH, 45385', etaMs: NOW + 3600000, apptMs: NOW + 7200000, miles: 61.4 }] }, now: NOW, stage: 'Rolling' });
   const t = renderUpdateEmail({ snaps: [s], now: NOW, headline: "Rolling. We'll keep you posted." }).text;
-  assert.match(t, /Trailer temperature: 34°F · set 34°F/); assert.match(t, /Miles to go: 61 mi/); assert.match(t, /maps\.google\.com\/\?q=39\.9,-75\.1/);
+  assert.match(t, /Trailer temperature: Verifying temperature with dispatch/, 'no required temperature to check it against → the broker never sees the number'); assert.match(t, /Miles to go: 61 mi/); assert.match(t, /maps\.google\.com\/\?q=39\.9,-75\.1/);
   const done = item({ bills: [{ billNumber: 'B1', billToName: 'X', endZoneDescription: 'XENIA, OH, 45385', pieces: 40, actualDelivery: '2026-10-09T10:15:00' }] });
   done._waits = { 'XENIA, OH, 45385': { arrivedAt: '2026-10-09T09:00:00Z', leftAt: '2026-10-09T13:20:00Z', minutes: 260 } };
   const d = loadSnapshot(done, { now: NOW, notes: ['empty, paid lumper $185 cash'] });

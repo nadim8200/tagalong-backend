@@ -116,3 +116,16 @@ test('a West Coast trip is routed from its own origin: Houston next (not Miami f
   assert.ok(e.stops[0].miles < 220, `Houston is ~170 mi away (${e.stops[0].miles})`);
   assert.ok(e.stops[0].etaMs < Date.parse('2026-10-10T21:00:00Z'), 'Houston this afternoon, not Wednesday');
 });
+
+import { placeKey } from '../watchtower.js';
+
+test('a stop with no ZIP ("DEVENS, MA") still gets a map point by city + state (624338 arrived 14 h late without it)', () => {
+  assert.equal(placeKey('DEVENS, MA'), 'P:DEVENS, MA');
+  assert.equal(placeKey('FORT PIERCE, FL, 34982'), 'P:FORT PIERCE, FL');
+  assert.equal(placeKey(''), '');
+  const it = { trip: { tripNumber: '624338', status: 'DEPSHIP', powerUnit: '2405', origZoneDesc: 'VERNON, CA, 90058' }, freightBills: [{ billNumber: 'B180347', billToName: 'FEDEX', endZoneDescription: 'DEVENS, MA', pieces: 1 }],
+    _samsara: { gpsAt: '2026-10-11T22:00:00Z', speedMph: 0, lat: 42.5404, lng: -71.6251, location: 'Hospital Road, Devens, MA', hos: { driveLeftMin: 300, shiftLeftMin: 400 } } };
+  const G = { 'P:DEVENS, MA': { lat: 42.5445, lng: -71.6115 } };
+  const e = boardEtas({ trips: [it] }, { now: Date.parse('2026-10-11T22:03:00Z'), geo: (z) => G[z] || null, unitState: () => ({}) })['624338'];
+  assert.ok(e, 'ETA computed for the city-only stop'); assert.ok(e.stops[0].miles < 3);
+});

@@ -9,6 +9,7 @@
 //   internal — adds driver, hours left, data discrepancies and open to-dos
 // Everything comes from live data; nothing missing is invented.
 // ---------------------------------------------------------------
+import { requiredRange, brokerMayShare, VERIFYING } from './temppolicy.js';
 import { tzOf } from './localtime.js';
 
 const MIN = 60000;
@@ -77,6 +78,11 @@ export function loadSnapshot(item, { eta = null, now = Date.now(), focus = {}, p
     podVerified: pods.some((d) => /proof_of_delivery|pod/i.test(`${d.docType || ''}`)),
     miles: leg && leg.miles != null ? Math.round(leg.miles) : null,
     temp: live.tempF != null && !live.tempStale ? { f: Math.round(live.tempF), set: live.setpointF != null ? Math.round(live.setpointF) : null } : null,
+    // a reefer load we can't read live (FedEx 2–8 °C): say so, and when the driver's photo came in
+    tempNeeded: bills.some((b) => b && b.temperature != null && b.temperature !== ''),
+    tempRange: requiredRange(item),
+    tempPhoto: item._tempPhotos ? { got: !!item._tempPhotos.got, asked: !!item._tempPhotos.asked } : null,
+    resting: live.speedMph != null && live.speedMph <= 5 && /sleeper|off ?duty/i.test(String((live.hos && live.hos.status) || '')),
     mapUrl: live.lat != null && live.lng != null && gpsAge != null && gpsAge < 120 ? `https://maps.google.com/?q=${live.lat},${live.lng}` : null,
     stageLabel: stage || null,
   };
@@ -168,10 +174,16 @@ export function renderUpdateEmail({ audience = 'customer', customer, destination
     add('Delivering to', [s.customer, s.stopCity].filter(Boolean).join(' — '));
     add('Current location', s.location || 'Not available');
     add('Miles to go', s.miles != null && s.miles > 0 ? `${s.miles} mi` : null);
-    add('Movement', s.moving == null ? 'Not available' : s.moving ? `Moving${s.mph ? ` · ${s.mph} mph` : ''}` : 'Stopped');
+    add('Movement', s.moving == null ? 'Not available' : s.moving ? `Moving${s.mph ? ` · ${s.mph} mph` : ''}` : s.resting ? 'Stopped — driver on his required rest (hours of service)' : 'Stopped');
     add('Appointment', s.apptMs != null ? `${etTime(s.apptMs)}${s.apptFrom === 'truckmate-due' ? ' (due time, not a confirmed appointment)' : ''}` : 'No appointment on file');
     add('Estimated arrival', s.verify ? `Being verified — ${s.verify}` : s.etaMs != null ? `${etTime(s.etaMs)}${s.status === 'Delayed' && s.lateMin ? ` · about ${hm(s.lateMin)} after the appointment` : ''}` : 'Being verified');
-    add('Trailer temperature', s.temp ? `${s.temp.f}°F${s.temp.set != null ? ` · set ${s.temp.set}°F` : ''}` : null);
+    // temperature protects the company: the broker / customer sees a live reading only when it matches the
+    // rate con (within 3 °F of its range); otherwise "verifying" — dispatch gets the reading and decides
+    if (internal) {
+      const ok = s.temp ? brokerMayShare(s.temp.f, s.tempRange) : null;
+      add('Trailer temperature', s.temp ? `${s.temp.f}°F${s.temp.set != null ? ` · set ${s.temp.set}°F` : ''}${s.tempRange ? ` · required ${s.tempRange.text} (${s.tempRange.from})` : ''}${ok && !ok.share ? ` · NOT shared with the broker (${ok.why})` : ''}` : s.tempNeeded ? (s.tempPhoto && s.tempPhoto.got ? 'Driver sent the reefer photo this shift (emailed to dispatch)' : 'Reading requested from the driver (photo)') : null);
+    } else if (s.temp && brokerMayShare(s.temp.f, s.tempRange).share) add('Trailer temperature', `${s.temp.f}°F${s.temp.set != null ? ` · set ${s.temp.set}°F` : ''}`);
+    else if (s.temp || s.tempNeeded) add('Trailer temperature', VERIFYING);
     if (s.detentionShipper && s.stageLabel && /loaded/i.test(s.stageLabel)) add('Detention at shipper', `In ${etTime(s.detentionShipper.in)} · Out ${s.detentionShipper.out ? etTime(s.detentionShipper.out) : '—'} · ${hm(s.detentionShipper.min)} — please help us with the detention`);
     add('GPS', s.gpsAge == null ? 'No live GPS' : `Updated ${hm(s.gpsAge)} ago`);
     if (internal) { add('Driver', s.drivers); add('Duty status', s.duty); add('Drive time left', s.driveLeft != null ? hm(s.driveLeft) : null); if (s.discrepancies.length) add('Data check', s.discrepancies.join('; ')); }
