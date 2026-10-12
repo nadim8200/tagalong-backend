@@ -379,6 +379,23 @@ export function initInbox(app, { requireAuth, db, brokerWatch = null, paperwork 
     }, {});
     return mine;
   }
+  // trip-sheet packets read one after another in the background (never two big reads at once)
+  let packetQueue = Promise.resolve();
+  function queuePacket(site, { id, files, by }) {
+    packetQueue = packetQueue.then(async () => {
+      try {
+        const r = await packets(site, files, { by, exact: false });
+        const unread = (r && r.unread) || [];
+        await update(site, id, (x) => ({ ...x, packetPending: false, handledBy: 'Jarvis (trip sheets read)', tripSheets: (r && r.trips) || [],
+          packetResult: r ? { trips: (r.trips || []).length, rateCons: (r.rateCons || []).length, kept: r.kept || 0, skipped: r.skipped || 0, unread } : null,
+          packetError: unread.length ? `Could not read trip sheet${unread.length === 1 ? '' : 's'} ${unread.join(', ')} in this email — re-run the email or re-send those pages.` : null }));
+      } catch (e) {
+        console.warn('[inbox] trip sheets (background):', e.message);
+        await update(site, id, (x) => ({ ...x, packetPending: false, packetError: e.message })).catch(() => {});
+      }
+    });
+    return packetQueue;
+  }
   async function pollOnce(site = 'florida-beauty') {
     if (!enabled || !mailConfig(env).ready) return 0;
     let res;
@@ -393,6 +410,7 @@ export function initInbox(app, { requireAuth, db, brokerWatch = null, paperwork 
     const known = new Set((store.list || []).map((e) => e.id));
     const items = await board(site);
     const fresh = [];
+    const packetJobs = [];
     for (const m of msgs) {
       if (known.has(m.id)) continue;
       if (!(await claim(m.id))) continue;   // another check already has it // eslint-disable-line no-await-in-loop
@@ -534,7 +552,12 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
         const files = tsIdx.map((i) => ({ dataBase64: attachments[i].bytes, mediaType: attachments[i].contentType, filename: attachments[i].name }));
         const by = `Jarvis (email from ${from.name || from.address})`;
         try {
-          if (packets) {
+          if (packets && email.packet && !email.rcBatch && !(email.instructions || []).length) {
+            // a night's trip-sheet packet takes minutes to read — read it in the background so the inbox keeps
+            // moving (new emails show right away); the email shows "reading…" until it's done
+            email.packetPending = true;
+            packetJobs.push({ id: email.id, files, by });
+          } else if (packets) {
             const r = await packets(site, files, { by, exact: !!email.rcBatch }); // eslint-disable-line no-await-in-loop
             if (r) { email.packetResult = { trips: (r.trips || []).length, rateCons: (r.rateCons || []).length, kept: r.kept || 0, skipped: r.skipped || 0, unread: r.unread || [] }; if ((r.unread || []).length) email.packetError = `Could not read trip sheet${r.unread.length === 1 ? '' : 's'} ${r.unread.join(', ')} in this email — re-run the email or re-send those pages.`; email.tripSheets = r.trips || []; email.batchRateCons = (r.rateCons || []).map((x) => ({ trip: x.trip || null, pendingId: x.pendingId || null })); }
           } else {
@@ -542,7 +565,7 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
           }
           // a pasted sheet belongs to this email's load; a whole night's packet is not "about" every trip in it
           if (!email.packet) for (const g2 of email.tripSheets) if (g2.trip && !trips.includes(g2.trip)) { trips.push(g2.trip); email.why.push('trip sheet in the email'); }
-          if (email.packet) { email.status = 'handled'; email.handledBy = email.rcBatch ? 'Jarvis (rate cons read — next loads)' : 'Jarvis (trip sheets read)'; email.reply = { needed: false, kind: 'none', documents: [] }; }
+          if (email.packet) { email.status = 'handled'; email.handledBy = email.rcBatch ? 'Jarvis (rate cons read — next loads)' : email.packetPending ? 'Jarvis (reading the trip sheets…)' : 'Jarvis (trip sheets read)'; email.reply = { needed: false, kind: 'none', documents: [] }; }
         } catch (e) { email.packetError = e.message; console.warn('[inbox] trip sheets:', e.message); }
       }
       fresh.push(email);
@@ -552,6 +575,7 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     // save (and drop any duplicate entries an older version left behind)
     if (fresh.length) await db.update(key(site), (cur) => { const seen = new Set(); const all = [...fresh.reverse(), ...((cur && cur.list) || [])].filter((e) => (seen.has(e.id) ? false : seen.add(e.id))); return { ...(cur || {}), list: all.slice(0, KEEP) }; }, { list: [] });
     for (const e of fresh) { try { await afterArrival(site, e, items); } catch (err) { console.warn('[inbox] reply / instructions:', err.message); } } // eslint-disable-line no-await-in-loop
+    for (const j of packetJobs) queuePacket(site, j);
     return fresh.length;
   }
 
@@ -1058,5 +1082,5 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     if (!e) throw new Error('email not found');
     return sendReply('florida-beauty', e, text, ids.slice(0, 5), 'Jarvis (documents)', null);
   }
-  return { poll, overlay, replyInThread, replyOnLoadChain, replyWithDocs };
+  return { packetsDone: () => packetQueue, poll, overlay, replyInThread, replyOnLoadChain, replyWithDocs };
 }

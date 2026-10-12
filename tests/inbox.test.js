@@ -151,8 +151,24 @@ test('the nightly trip-sheet email: the attached packet goes through the packet 
   const files = [{ '@odata.type': '#microsoft.graph.fileAttachment', name: '10-07-2026.pdf', contentType: 'application/pdf', size: 900000, contentBytes: Buffer.from('%PDF').toString('base64') }];
   const h = harness({ messages: [msg({ id: 'p1', subject: 'OUTBOUND 10 TRIP SHEETS - WED 10/07/26', from: { emailAddress: { name: 'Rosa', address: 'rosa@floridabeauty.us' } }, hasAttachments: true, files })], triageOut: { summary: 'Tonight\'s trip sheets', attachments: [], refs: {}, actions: [], reply: { needed: false } }, board: [LOAD], packets });
   await h.inbox.poll();
+  await h.inbox.packetsDone();
   assert.equal(got.length, 1); assert.equal(got[0].files[0].filename, '10-07-2026.pdf');
   const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
+  assert.deepEqual(e.packetResult, { trips: 2, rateCons: 1, kept: 12, skipped: 57, unread: [] }); assert.equal(e.status, 'handled');
+});
+
+test('a slow trip-sheet read never holds up the inbox: the email shows right away as reading, then gets its result', async () => {
+  const got = [];
+  let release; const gate = new Promise((r) => { release = r; });
+  const packets = async (site, files, opts) => { got.push({ files, opts }); await gate; return { trips: [{ trip: '624520' }, { trip: '624521' }], rateCons: [{}], kept: 12, skipped: 57 }; };
+  const files = [{ '@odata.type': '#microsoft.graph.fileAttachment', name: '10-07-2026.pdf', contentType: 'application/pdf', size: 900000, contentBytes: Buffer.from('%PDF').toString('base64') }];
+  const h = harness({ messages: [msg({ id: 'p1', subject: 'OUTBOUND 10 TRIP SHEETS - WED 10/07/26', from: { emailAddress: { name: 'Rosa', address: 'rosa@floridabeauty.us' } }, hasAttachments: true, files })], triageOut: { summary: 'Tonight\'s trip sheets', attachments: [], refs: {}, actions: [], reply: { needed: false } }, board: [LOAD], packets });
+  await h.inbox.poll();   // returns while the packet is still being read
+  const before = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
+  assert.equal(before.packetPending, true); assert.match(before.handledBy, /reading the trip sheets/);
+  release(); await h.inbox.packetsDone();
+  const e = (await h.db.get('taEmails:florida-beauty', { list: [] })).list[0];
+  assert.equal(e.packetPending, false);
   assert.deepEqual(e.packetResult, { trips: 2, rateCons: 1, kept: 12, skipped: 57, unread: [] }); assert.equal(e.status, 'handled');
 });
 
