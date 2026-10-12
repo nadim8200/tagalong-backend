@@ -303,6 +303,16 @@ export function nearScore(said, onSheet) {
   const b = nameWords(onSheet);
   return nameWords(said).some((w) => w.length >= 5 && !GENERIC.has(w) && b.some((x) => sameWord(w, x))) ? s : 0;
 }
+// ARTIS Truck Builder's count for a customer on a trip (truckbuilder.js puts it on it._tb nightly) — the digital
+// original of the scanned trip sheet. Inline (not imported) so voice.js and truckbuilder.js don't import each other.
+function builderBoxes(it, customer, city) {
+  const tb = it && it._tb;
+  if (!tb || !tb.stops) return null;
+  const t = String(city || '').split(',')[0].toUpperCase().replace(/[^A-Z ]/g, '').trim();
+  const twn = (x) => String(x || '').toUpperCase().replace(/[^A-Z ]/g, '').trim();
+  const hits = tb.stops.filter((b) => Math.max(nameScore(customer, b.consignee), nameScore(b.consignee, customer)) >= 0.75 && (!t || !twn(b.city) || twn(b.city).startsWith(t) || t.startsWith(twn(b.city))));
+  return hits.length ? hits.reduce((n, b) => n + (Number(b.boxes) || 0), 0) : null;
+}
 // When TruckMate says a stop was delivered (its wall time at the stop). 00:00:0x is a date-only placeholder. Pure.
 export function deliveredWhen(raws) {
   const raw = (raws || []).filter(Boolean).map(String).sort().pop();
@@ -339,7 +349,7 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
       // this customer's TruckMate bills at the stop (several customers can share a town, e.g. Chelsea Market)
       const named = bills.filter((b) => { const n = (b.consignee && (b.consignee.name || b.consignee.clientName)) || b.billToName || ''; return nameScore(n, st.customer) >= 0.75 || nameScore(st.customer, n) >= 0.75; });
       const billBoxes = named.length ? named.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bills.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'trip sheet', _sheetBoxes: st.pieces != null ? Number(st.pieces) : null, _billBoxes: billBoxes });
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bills.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'trip sheet', _sheetBoxes: st.pieces != null ? Number(st.pieces) : null, _billBoxes: billBoxes, _tbBoxes: builderBoxes(it, st.customer, st.city) });
     }
     // TruckMate bills (no trip sheet, or names the sheet didn't have) — one line per customer and town, bills added up
     const groups = new Map();
@@ -360,7 +370,7 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
       const counted = bs.filter((b) => b.pieces != null);
       const pieces = counted.length ? counted.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
       const cubed = bs.filter((b) => b.cubes != null);
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: pieces != null ? `${pieces} boxes` : null, cubes: cubed.length ? Math.round(cubed.reduce((n, b) => n + Number(b.cubes || 0), 0) * 100) / 100 : null, appointment: null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bs.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate', _sheetBoxes: null, _billBoxes: pieces });
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: pieces != null ? `${pieces} boxes` : null, cubes: cubed.length ? Math.round(cubed.reduce((n, b) => n + Number(b.cubes || 0), 0) * 100) / 100 : null, appointment: null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bs.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate', _sheetBoxes: null, _billBoxes: pieces, _tbBoxes: null });
     }
   }
   // ARTIS: how many of THIS customer's boxes were scanned at our terminal for the load
@@ -370,21 +380,22 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
   const boxFor = (x) => {
     const it = items.find((i) => tripNo(i) === x.trip);
     const st = it && it._artis && (it._artis.stops || []).find((c) => nameScore(x.customer || '', c.consignee || '') >= 0.75 || nameScore(c.consignee || '', x.customer || '') >= 0.75);
-    if (!st && !x._billBoxes) return {};   // nothing better than the sheet's own words ("139 BOXES", "1 LOAD")
-    const total = Math.max(x._billBoxes || 0, (st && st.boxes) || 0) || x._sheetBoxes;
+    if (!st && !x._billBoxes && x._tbBoxes == null) return {};   // nothing better than the sheet's own words ("139 BOXES", "1 LOAD")
+    // ARTIS's Truck Builder (the digital trip sheet) first; else the bills, or ARTIS's EDI when it has more
+    const total = x._tbBoxes || Math.max(x._billBoxes || 0, (st && st.boxes) || 0) || x._sheetBoxes;
     if (!total) return {};
     const missing = Math.min((st && st.missing) || 0, total);
     const loaded = total - missing;
     const plural = (n) => `${n} box${n === 1 ? '' : 'es'}`;
     return { boxes: plural(loaded), boxes_loaded: `${plural(loaded)} loaded for them`,
       ...(staff ? {
-        ...(x._sheetBoxes != null && x._sheetBoxes !== total ? { boxes_on_trip_sheet: plural(x._sheetBoxes) } : {}),
+        ...(x._tbBoxes == null && x._sheetBoxes != null && x._sheetBoxes !== total ? { boxes_on_trip_sheet: plural(x._sheetBoxes) } : {}),
         ...(st ? { boxes_scanned_in_artis: `${st.scanned} of ${st.boxes}` } : {}),
         ...(missing > 0 ? { boxes_not_received: `${plural(missing)} not received from the shipper (ARTIS)` } : {}),
       } : {}) };
   };
-  return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 6).map(({ score, _sheetBoxes, _billBoxes, ...x }) => ({
-    ...x, ...boxFor({ ...x, _sheetBoxes, _billBoxes }),
+  return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 6).map(({ score, _sheetBoxes, _billBoxes, _tbBoxes, ...x }) => ({
+    ...x, ...boxFor({ ...x, _sheetBoxes, _billBoxes, _tbBoxes }),
     ...(!x.delivered && !x.truck_already_passed && !x.estimated_arrival ? { eta_note: 'No ETA available right now — do NOT estimate or guess a time. Say dispatch will call back with the ETA, and take a message.' } : {}),
     ...(etasByTrip[x.trip] && etasByTrip[x.trip].leavesAt && !x.delivered ? { truck_leaves_terminal_at: fmt(etasByTrip[x.trip].leavesAt) } : {}),
   }));

@@ -80,6 +80,9 @@ const LOOKBACK = 5;
 const dayBefore = (d, k) => ymd(new Date(Date.parse(`${d}T12:00:00Z`) - k * 86400000));
 const sameCo = (a, b) => { const x = normCo(a); const y = normCo(b); return !!(x && y && (x === y || x.startsWith(y) || y.startsWith(x))); };
 function sheetTotalFor(it, c) {
+  // ARTIS's Truck Builder (read nightly — truckbuilder.js) is the digital original of the trip sheet
+  const tb = it._tb && (it._tb.stops || []).filter((b) => (c.consigneeId && b.consigneeId && id5(b.consigneeId) === id5(c.consigneeId)) || sameCo(b.consignee, c.consignee));
+  if (tb && tb.length) return tb.reduce((n, b) => n + (Number(b.boxes) || 0), 0);
   const rows = ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && x.pieces != null && sameCo(x.customer, c.consignee));
   return rows.length ? rows.reduce((n, x) => n + (Number(x.pieces) || 0), 0) : null;
 }
