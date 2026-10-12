@@ -120,7 +120,7 @@ export function leftShortEmail(x) {
   };
 }
 
-export function initArtis(app, { requireAuth, requireAdmin = null, db = null, sendMail = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initArtis(app, { requireAuth, requireAdmin = null, db = null, sendMail = null, recipients = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const cache = new Map();   // "path?query" → { at, data }
   async function get(path, query = {}) {
     const cfg = artisConfig(env);
@@ -182,8 +182,8 @@ export function initArtis(app, { requireAuth, requireAdmin = null, db = null, se
     setTimeout(() => { refresh().catch(() => {}); }, 30000).unref?.();
     const tick = setInterval(() => { refresh().catch(() => {}); }, 10 * MIN); if (tick.unref) tick.unref();
   }
-  // a truck that left short → one email per trip (to ARTIS_LEFT_SHORT_TO — Nadim for the test)
-  const leftTo = () => String(env.ARTIS_LEFT_SHORT_TO || 'ntellez@floridabeauty.us').split(',').map((x) => x.trim()).filter(Boolean);
+  // a truck that left short → one email per trip (to the "Truck left with missing boxes" list — Employees → Alert emails)
+  const leftTo = async () => (recipients ? recipients('artis_left_short') : ['ntellez@floridabeauty.us']);
   async function notifyLeftShort(list) {
     if (!list.length || !db || !db.enabled || !sendMail) return 0;
     let fresh = [];
@@ -194,7 +194,9 @@ export function initArtis(app, { requireAuth, requireAdmin = null, db = null, se
       for (const [k, v] of Object.entries(a)) if (Date.parse(v.at) < now() - 14 * 86400000) delete a[k];
       return a;
     }, {});
-    for (const x of fresh) { try { await sendMail({ to: leftTo(), ...leftShortEmail(x) }); } catch (e) { console.warn('[artis] left-short email:', e.message); } } // eslint-disable-line no-await-in-loop
+    const to = fresh.length ? await leftTo() : [];
+    if (fresh.length && !to.length) { console.warn('[artis] left-short: nobody on the list (Employees → Alert emails)'); return 0; }
+    for (const x of fresh) { try { await sendMail({ to, ...leftShortEmail(x) }); } catch (e) { console.warn('[artis] left-short email:', e.message); } } // eslint-disable-line no-await-in-loop
     return fresh.length;
   }
   async function overlay(site, trips) {
@@ -214,7 +216,6 @@ export function initArtis(app, { requireAuth, requireAdmin = null, db = null, se
 }
 
 // ---- missing boxes on a load a customer asked about → the team gets an email (never the customer) ----
-export const MISSING_TEAM = ['Frank Ducassi', 'Sebastian Manotas', 'Ronen', 'Nadim'];
 // Pure: the email for a list of { trip, truck, shipDate, consignee, consigneeId, boxes, scanned, missing }.
 export function missingEmail(list, { caller = null } = {}) {
   const rows = list.map((m) => `<tr><td>${m.trip}</td><td>${m.truck || '—'}</td><td>${m.consignee}${m.consigneeId ? ` (${m.consigneeId})` : ''}</td><td>${m.scanned} of ${m.boxes}</td><td><b>${m.missing}</b></td><td>${m.shipDate}</td></tr>`).join('');

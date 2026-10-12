@@ -67,8 +67,8 @@ import { initRingCentral, setSmsGuard } from './ringcentral.js';
 import { initTruckMate } from './truckmate.js';
 import { initCarChat } from './carChat.js';
 import { initDbpo } from './dbpo.js';
-import { initArtis, initMissingBoxes, MISSING_TEAM } from './artis.js';
-import { findStaff } from './directory.js';
+import { initArtis, initMissingBoxes } from './artis.js';
+import { initAlertRecipients } from './alertrecipients.js';
 import { initRateCon } from './ratecon.js';
 import { sendMail, mailConfig, setMailGuard } from './mailer.js';
 import { initTraining } from './training.js';
@@ -793,17 +793,11 @@ const profiles = initProfiles(app, { clientList: () => clients.all(), requireAut
 let tempPhotos = null;    // reefer temp photos for trailers we can't read live (set below)
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
 let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers overlay)
-const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), env: process.env });
-// Missing boxes a customer asked about → email Frank Ducassi, Sebastian Manotas, Ronen and Nadim (Employees
-// emails; ARTIS_MISSING_TO in Render can replace the list, comma-separated addresses)
-const missingBoxes = initMissingBoxes({ db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: async () => {
-  if (process.env.ARTIS_MISSING_TO) return process.env.ARTIS_MISSING_TO.split(',').map((x) => x.trim()).filter(Boolean);
-  const people = ((await directory.load().catch(() => ({ people: [] }))).people) || [];
-  const found = MISSING_TEAM.map((n) => (findStaff(people, n, 1)[0] || {}).email || (n === 'Nadim' ? 'ntellez@floridabeauty.us' : null));
-  const miss = MISSING_TEAM.filter((n, i) => !found[i]);
-  if (miss.length) console.warn('[artis] missing boxes — no email on Employees for:', miss.join(', '));
-  return [...new Set(found.filter(Boolean).map((e) => String(e).toLowerCase()))];
-} });
+// who gets each alert email (Employees → Alert emails in the console)
+const alertRecipients = initAlertRecipients(app, { requireAuth: requireDispatch, requireAdmin, db, directory });
+const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: (k) => alertRecipients.resolve(k), env: process.env });
+// Missing boxes a customer asked about → email the "Customer asked about a load with missing boxes" list
+const missingBoxes = initMissingBoxes({ db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('artis_missing_call') });
 truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => artis.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
