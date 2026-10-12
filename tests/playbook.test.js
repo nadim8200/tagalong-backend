@@ -57,3 +57,12 @@ test('a training answer cut off mid-way still keeps every complete lesson', () =
   assert.equal(readLessonsJson('{"lessons": [{"do": "x"}], "questions": ["q"]}').questions[0], 'q');
   assert.deepEqual(readLessonsJson('nothing'), {});
 });
+
+test('every lesson reaches Jarvis: 20 SOP lessons + 10 new ones all fit, and the new ones come first', () => {
+  const sop = Array.from({ length: 20 }, (_, i) => ({ id: `sop${i + 1}`, category: 'rule', title: `SOP ${i + 1}`, do: 'x'.repeat(330), by: 'SOP Dispatch v1', source: 'SOP Dispatch v1', at: '2026-10-09T02:11:31Z' }));
+  const taught = Array.from({ length: 10 }, (_, i) => ({ id: `pb${i}`, category: 'rule', title: `New ${i}`, do: 'y'.repeat(250), by: 'Nadim Tellez', at: '2026-10-12T15:03:21Z' }));
+  const t = playbookText([...sop, ...taught]);
+  for (let i = 0; i < 10; i++) assert.ok(t.includes(`New ${i}`), `new lesson ${i} reaches the AI`);
+  for (let i = 1; i <= 20; i++) assert.ok(t.includes(`SOP ${i} —`), `SOP ${i} too`);
+  assert.ok(t.indexOf('New 0') < t.indexOf('SOP 1 —'), 'staff-taught lessons first');
+});

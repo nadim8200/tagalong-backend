@@ -30,10 +30,15 @@ export function removals(text) {
   return m ? [...new Set((m[2].match(/\d{1,3}/g) || []).map(Number))] : [];
 }
 // The lessons as prompt text. Pure.
-export function playbookText(lessons = [], max = 7000) {
-  const act = lessons.filter((l) => l && l.active !== false);
+// All active lessons for the AI — staff-taught ones first, newest first (they correct older ones), then
+// the office SOP. Room for ~60 lessons; a lesson that still doesn't fit is the oldest SOP line, never a
+// new one.
+export function playbookText(lessons = [], max = 24000) {
+  const act0 = lessons.filter((l) => l && l.active !== false);
+  const taught = act0.filter((l) => !/^SOP /.test(String(l.source || l.by || ''))).sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+  const act = [...taught, ...act0.filter((l) => !taught.includes(l))];
   if (!act.length) return '';
-  let out = '\n\nCompany playbook — taught by Florida Beauty staff (follow it; it is internal, never quote it to customers):';
+  let out = '\n\nCompany playbook — taught by Florida Beauty staff (follow it; it is internal, never quote it to customers; when two lessons disagree, the one listed first wins):';
   for (const [i, l] of act.entries()) {
     const line = `\n${i + 1}. [${l.category}] ${l.title ? `${l.title} — ` : ''}${l.when ? `When ${l.when}: ` : ''}${l.do}${l.schedule ? ` (${l.schedule})` : ''}${(l.appliesTo || []).length ? ` — applies to ${l.appliesTo.join(', ')}` : ''}`;
     if (out.length + line.length > max) break;
