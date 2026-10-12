@@ -42,6 +42,24 @@ export function playbookText(lessons = [], max = 7000) {
   return out;
 }
 
+// The model's answer → { lessons, questions }. If it was cut off mid-way, keep every lesson that came
+// through complete instead of losing them all. Pure.
+export function readLessonsJson(raw) {
+  const t = String(raw || '');
+  const m = t.match(/\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch { /* cut off — salvage below */ } }
+  const start = t.indexOf('"lessons"');
+  if (start < 0) return {};
+  const lessons = []; let depth = 0; let from = -1; let inStr = false; let esc = false;
+  for (let i = t.indexOf('[', start) + 1; i > 0 && i < t.length; i++) {
+    const c = t[i];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') { if (depth === 0) from = i; depth++; } else if (c === '}') { depth--; if (depth === 0 && from >= 0) { try { lessons.push(JSON.parse(t.slice(from, i + 1))); } catch { /* skip */ } from = -1; } } else if (c === ']' && depth === 0) break;
+  }
+  return { lessons, questions: [] };
+}
+
 export function initPlaybook(app, { requireAuth, db, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   let cache = { at: 0, list: [] };
@@ -63,10 +81,9 @@ Subject: ${subject}
 ${String(text || '').slice(0, 24000)}
 >>>${files.length ? '\n(The attached files are part of it.)' : ''}
 Return ONLY JSON: {"lessons": [{"category": ${CATEGORIES.map((c) => `"${c}"`).join(' | ')}, "title": short, "when": the trigger / situation or null, "do": what to do, one or two plain sentences, "schedule": for routines when it happens (e.g. "weekdays 6:00 AM ET") or null, "appliesTo": [customer / broker / person names] }], "questions": [up to 3 short questions where the email is unclear]}`;
-    const r = await fetchFn('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: env.INBOX_MODEL || 'claude-haiku-4-5-20251001', max_tokens: maxLessons > 15 ? 6000 : 1500, messages: [{ role: 'user', content: files.length ? [...files, { type: 'text', text: prompt }] : prompt }] }) });
+    const r = await fetchFn('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: env.INBOX_MODEL || 'claude-haiku-4-5-20251001', max_tokens: 8000, messages: [{ role: 'user', content: files.length ? [...files, { type: 'text', text: prompt }] : prompt }] }) });
     const j = await r.json();
-    const m = String((j.content || []).map((c) => c.text || '').join('')).match(/\{[\s\S]*\}/);
-    const o = m ? JSON.parse(m[0]) : {};
+    const o = readLessonsJson((j.content || []).map((c) => c.text || '').join(''));
     const at = new Date().toISOString();
     const lessons = (Array.isArray(o.lessons) ? o.lessons : []).filter((l) => l && l.do).slice(0, maxLessons).map((l, i) => ({ id: `pb${Date.now().toString(36)}${i}`, category: CATEGORIES.includes(l.category) ? l.category : 'other', title: String(l.title || l.do).slice(0, 80), when: l.when ? String(l.when).slice(0, 200) : null, do: String(l.do).slice(0, 400), schedule: l.schedule ? String(l.schedule).slice(0, 80) : null, appliesTo: (Array.isArray(l.appliesTo) ? l.appliesTo : []).map(String).slice(0, 6), by: from.name || from.address, at, active: true }));
     if (lessons.length) await save((l) => [...l, ...lessons].slice(-200));

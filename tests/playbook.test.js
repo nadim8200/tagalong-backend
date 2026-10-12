@@ -47,3 +47,13 @@ test('teach from a document: the office SOP is loaded once; a .pptx upload is re
   assert.equal(out.lessons[0].title, 'Max weight');
   assert.match(prompts.at(-1).messages[0].content, /Max weight 42,000/);
 });
+
+import { readLessonsJson } from '../playbook.js';
+
+test('a training answer cut off mid-way still keeps every complete lesson', () => {
+  const cut = '{"lessons": [{"category": "broker", "title": "One chain", "do": "Reply-all on the load chain."}, {"category": "broker", "title": "Temperature", "do": "Readings go to dispatch {not the broker}."}, {"category": "rout';
+  const o = readLessonsJson(cut);
+  assert.deepEqual(o.lessons.map((l) => l.title), ['One chain', 'Temperature']);
+  assert.equal(readLessonsJson('{"lessons": [{"do": "x"}], "questions": ["q"]}').questions[0], 'q');
+  assert.deepEqual(readLessonsJson('nothing'), {});
+});
