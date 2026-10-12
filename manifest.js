@@ -275,6 +275,17 @@ function subsetSum(items, target) {
 // Compare one trip sheet with what TruckMate sent for the same trip: stops on
 // paper but not in TruckMate (or the reverse), box-count differences per city,
 // and truck/trailer mismatches. "Added extra" shows up here.
+// Is `unit` the truck this sheet says the load transfers to (TRANSFER TRUCK box, or a handwritten
+// "transfer to 4504")? Pure.
+export function transferTo(sheet, unit) {
+  const u = String(unit || '').replace(/[^0-9A-Z]/gi, '').replace(/^0+/, '').toUpperCase();
+  if (!sheet || !u) return false;
+  const tt = String(sheet.transferTruck || '').replace(/[^0-9A-Z]/gi, '').replace(/^0+/, '').toUpperCase();
+  if (tt && tt === u) return true;
+  const text = [sheet.pickupPlan, sheet.notes, ...(sheet.unreadable || []), ...((sheet.stops || []).map((x) => x && x.notes))].filter(Boolean).join(' ');
+  return new RegExp(`transfer[^.\\n]{0,40}\\b0*${u}\\b`, 'i').test(text);
+}
+
 export function compareWithTruckMate(sheet, item) {
   const out = [];
   if (!item) return [{ kind: 'missing-trip', msg: `Trip ${sheet.tripNumber} is not on the TruckMate board.` }];
@@ -283,7 +294,9 @@ export function compareWithTruckMate(sheet, item) {
   // sheet shows the carrier's own truck / trailer — not a mismatch.
   const ocUnit = (v) => /^OC\s?-?\d*$/i.test(String(v || '').trim());
   const isOc = ocUnit(t.powerUnit) || ocUnit(t.trailer) || !!(sheet.outsideCarrier && sheet.outsideCarrier.isOutsideCarrier);
-  if (!isOc && sheet.truck && t.powerUnit && norm(sheet.truck) !== norm(t.powerUnit)) out.push({ kind: 'truck', msg: `Sheet says truck ${sheet.truck}, TruckMate has ${t.powerUnit}.` });
+  // the sheet's planned transfer (truck 734 leaves Miami, hands the trailer to truck 4504 on the road):
+  // TruckMate showing the transfer truck is not a mismatch
+  if (!isOc && sheet.truck && t.powerUnit && norm(sheet.truck) !== norm(t.powerUnit) && !transferTo(sheet, t.powerUnit)) out.push({ kind: 'truck', msg: `Sheet says truck ${sheet.truck}, TruckMate has ${t.powerUnit}.` });
   if (!isOc && sheet.trailer && t.trailer && norm(sheet.trailer) !== norm(t.trailer)) out.push({ kind: 'trailer', msg: `Sheet says trailer ${sheet.trailer}, TruckMate has ${t.trailer}.` });
   const pairs = pairStops(sheet.stops, item.freightBills);
   const tm = new Map();

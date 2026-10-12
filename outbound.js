@@ -10,6 +10,7 @@
 // Built from the board + Samsara GPS history. A draft is made every morning; a
 // dispatcher reviews it and clicks Send (or auto-send when turned on). It goes
 // out from the Jarvis mailbox once Outlook is connected.
+import { transferTo } from './manifest.js';
 import { sendMail, mailConfig } from './mailer.js';
 import { samsaraTokenFrom, getLiveIndex, vehicleForUnit, vehicleGpsHistory, driverHosLogs } from './samsara.js';
 import { haversineMi, MIAMI_YARDS, inFlorida } from './watchtower.js';
@@ -137,6 +138,23 @@ const cityState = (loc) => {
 };
 const titleCity = (x) => String(x || '').toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase()).replace(/\b(Ny|Nj|Fl|Ma|Ca|Nh|Ct|Ri|Nc|Sc|Ga|Il|Mi|Oh|Mn|Tn|Pa|Va|Md)\b/g, (s) => s.toUpperCase());
 
+// TruckMate's dispatch and departure for the night it was loaded: the first DISPATCHED and the first
+// DEPART SHIPPER from that day on (later re-dispatches at a transfer don't count). Pure.
+export function tmTimes(it, dateLoaded = null) {
+  const hist = ((it && it._times && it._times.statusHistory) || []).filter((h) => h && h.at).map((h) => ({ s: String(h.status || ''), ms: Date.parse(h.at) })).filter((h) => !Number.isNaN(h.ms)).sort((a, b) => a.ms - b.ms);
+  const from = dateLoaded ? Date.parse(`${dateLoaded}T00:00:00-05:00`) - 6 * 3600000 : -Infinity;
+  const disp = hist.find((h) => /^DISP/i.test(h.s) && h.ms >= from);
+  const dep = hist.find((h) => /^DEPSHIP/i.test(h.s) && h.ms >= from && (!disp || h.ms >= disp.ms - 5 * MIN));
+  return { dispatchedMs: disp ? disp.ms : null, departedMs: dep ? dep.ms : null };
+}
+
+// Which truck pulled out of the Miami yard: TruckMate's, unless the sheet planned a transfer to it
+// (734 leaves, 4504 takes over on the road) — then the sheet's own truck. Pure.
+export function yardTruck(it) {
+  const m = manifestOf(it) || {}; const pu = tripOf(it).powerUnit;
+  return m.truck && pu && String(m.truck) !== String(pu) && transferTo(m, pu) ? m.truck : (pu || m.truck || null);
+}
+
 // One report row. Pure.
 export function reportRow(it, track = null) {
   const t = tripOf(it); const m = manifestOf(it) || {};
@@ -147,17 +165,22 @@ export function reportRow(it, track = null) {
   const dest = last ? `${String(last.city || '').toUpperCase()} ${String(last.state || '').toUpperCase()}`.trim() : String(t.destZoneDesc || '').replace(/,\s*\d{5}.*$/, '').replace(',', '');
   const dispatchMs = parseSheetTime(m.dateLoaded, m.dispatchTime);
   const apptMs = m.pickupAt ? miamiMs(String(m.pickupAt).slice(0, 10), +String(m.pickupAt).slice(11, 13), +String(m.pickupAt).slice(14, 16)) : null;
-  const departedMs = track ? track.departedMs : null;
-  const slowMin = dispatchMs && departedMs ? Math.round((departedMs - dispatchMs) / MIN) : null;
+  // TruckMate's own times when the sheet / yard GPS don't have them (no dispatch time written; the truck
+  // hooked the trailer outside the yard, or the truck changed — sheet 734, TruckMate 4504)
+  const tm = tmTimes(it, m.dateLoaded);
+  const gpsDep = track ? track.departedMs : null;
+  const departedMs = gpsDep || tm.departedMs;
+  const dispatchAt = dispatchMs || tm.dispatchedMs;
+  const slowMin = dispatchAt && departedMs ? Math.round((departedMs - dispatchAt) / MIN) : null;
   return {
-    trip: tripNo(it), truck: String(m.truck || t.powerUnit || ''), trailer: String(m.trailer || t.trailer || ''),
+    trip: tripNo(it), truck: m.truck && t.powerUnit && String(m.truck) !== String(t.powerUnit) && transferTo(m, t.powerUnit) ? `${m.truck} → ${t.powerUnit}` : String(m.truck || t.powerUnit || ''), trailer: String(m.trailer || t.trailer || ''),
     drivers: drivers.length ? drivers.join(' ') : [live.driver1, live.driver2].filter(Boolean).join(' ').toUpperCase(),
     location: titleCity(cityState(live.location)) || '—', destination: dest || '—',
     puAppt: apptMs ? clock(apptMs) : '****',
-    dispatch: dispatchMs ? clock(dispatchMs) : (m.dispatchTime || '****'),
-    departure: departedMs ? clock(departedMs) : !track || !track.points ? 'NO GPS' : track.inYardNow ? 'IN YARD' : !track.seenInYard ? 'NOT SEEN IN YARD' : 'NO GPS',
+    dispatch: dispatchMs ? clock(dispatchMs) : tm.dispatchedMs ? `${clock(tm.dispatchedMs)} (TruckMate)` : (m.dispatchTime || '****'),
+    departure: gpsDep ? clock(gpsDep) : tm.departedMs && !(track && track.inYardNow) ? `${clock(tm.departedMs)} (TruckMate)` : !track || !track.points ? 'NO GPS' : track.inYardNow ? 'IN YARD' : !track.seenInYard ? 'NOT SEEN IN YARD' : 'NO GPS',
     slow: slowMin != null && slowMin > SLOW_MIN, slowMin,
-    notLeft: !!(track && !departedMs && track.inYardNow),
+    notLeft: !!(track && !gpsDep && track.inYardNow),
     stops: (track && track.stops) || [],
     leftFlorida: track && track.leftFloridaMs ? clock(track.leftFloridaMs) : null,
   };
@@ -208,7 +231,8 @@ export function initOutbound(app, { requireAuth, db, getBoard, env = process.env
     if (!token) return null;
     try {
       const idx = await getLiveIndex(token);
-      const veh = vehicleForUnit(idx, tripOf(it).powerUnit);
+      // the truck that left the yard: the sheet's truck when TruckMate already shows the transfer truck
+      const veh = vehicleForUnit(idx, yardTruck(it)) || vehicleForUnit(idx, tripOf(it).powerUnit);
       if (!veh || veh.id == null) return null;
       const pts = await vehicleGpsHistory(token, veh.id, new Date(startMs).toISOString(), new Date(now()).toISOString());
       const flStops = ((manifestOf(it) && manifestOf(it).stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && /^FL$/i.test(x.state || ''));

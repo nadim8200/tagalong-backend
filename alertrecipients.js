@@ -8,6 +8,7 @@ import { findStaff } from './directory.js';
 const KEY = 'taAlertRecipients';
 export const ALERTS = [
   { key: 'artis_left_short', label: 'Truck left with missing boxes', when: 'A truck departed with boxes for its customers not scanned in ARTIS (once per trip).', defaults: ['ntellez@floridabeauty.us'] },
+  { key: 'transfer', label: 'Truck transfer', when: 'A trip sheet plans a truck change (e.g. 734 → 4504): planned, every 2 h while apart (rolling or stopped, distance), when the trucks are together, and the driver\'s answer on whether the transfer is done.', defaults: ['ntellez@floridabeauty.us'] },
   { key: 'artis_missing_call', label: 'Customer asked about a load with missing boxes', when: 'A customer called about their delivery and ARTIS shows boxes not scanned for them (the customer is only told what is loaded).', defaults: ['Frank Ducassi', 'Sebastian Manotas', 'Ronen', 'Nadim'] },
 ];
 const isEmail = (x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(x || '').trim());

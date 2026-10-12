@@ -137,3 +137,35 @@ test('each unscheduled stop says what the drivers were doing: break, sleeper, on
   const solo = labelStops(stops.slice(0, 2), logs.filter((l) => l.driverId !== 'd2'));
   assert.deepEqual(solo.map((s) => s.duty), ['break', 'on duty']);
 });
+
+test('624773: no dispatch time on the sheet and the truck never seen in the yard → TruckMate dispatch / departure times', () => {
+  const it = {
+    trip: { tripNumber: '624773', status: 'DEPCONS', powerUnit: '4504', trailer: '7137', origZoneDesc: 'MIAMI TERMINAL' },
+    _manifest: { dateLoaded: '2026-10-11', truck: '734', trailer: '7137', dispatchTime: null, stops: [{ action: 'LOAD', customer: 'MIAMI TERMINAL', city: 'MIAMI', state: 'FL' }, { action: 'DELIVER', city: 'MEDFORD', state: 'MA' }] },
+    _times: { statusHistory: [{ status: 'LOADINGMAN', at: '2026-10-11T18:42:34Z' }, { status: 'DISP', at: '2026-10-11T21:10:33Z' }, { status: 'DEPSHIP', at: '2026-10-11T21:11:34Z' }, { status: 'DEPSHIP', at: '2026-10-12T06:48:39Z' }] },
+    _samsara: { location: 'I-75, Dooly County, GA' },
+  };
+  const r = reportRow(it, { departedMs: null, seenInYard: false, inYardNow: false, points: 40, stops: [] });
+  assert.equal(r.dispatch, `${clock(Date.parse('2026-10-11T21:10:33Z'))} (TruckMate)`);
+  assert.equal(r.departure, `${clock(Date.parse('2026-10-11T21:11:34Z'))} (TruckMate)`);
+  assert.equal(r.notLeft, false);
+  // GPS saw it leave the yard → the GPS time wins
+  const g = reportRow(it, { departedMs: Date.parse('2026-10-11T21:40:00Z'), seenInYard: true, inYardNow: false, points: 40, stops: [] });
+  assert.equal(g.departure, clock(Date.parse('2026-10-11T21:40:00Z')));
+});
+
+import { yardTruck } from '../outbound.js';
+import { compareWithTruckMate, transferTo } from '../manifest.js';
+
+test('planned transfer (sheet: truck 734 transfers to 4504): no false mismatch, the yard departure follows 734', () => {
+  const sheet = { tripNumber: '624773', truck: '734', transferTruck: '4504', trailer: '7137', stops: [] };
+  assert.equal(transferTo(sheet, '4504'), true);
+  assert.equal(transferTo({ truck: '734', pickupPlan: 'DRIVER WILL LEAVE AT 18:00 — TRANSFER TO TK 4504 IN JACKSONVILLE' }, '4504'), true);
+  assert.equal(transferTo({ truck: '734' }, '4504'), false);
+  const item = { trip: { tripNumber: '624773', powerUnit: '4504', trailer: '7137' }, freightBills: [] };
+  assert.ok(!compareWithTruckMate(sheet, item).some((d) => d.kind === 'truck'));
+  assert.ok(compareWithTruckMate({ ...sheet, transferTruck: null }, item).some((d) => d.kind === 'truck'), 'no transfer written → still flagged');
+  const it = { ...item, _manifest: { ...sheet, dateLoaded: '2026-10-11', stops: [{ action: 'LOAD', customer: 'MIAMI TERMINAL' }] } };
+  assert.equal(yardTruck(it), '734');
+  assert.equal(reportRow(it, null).truck, '734 → 4504');
+});

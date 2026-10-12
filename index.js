@@ -69,6 +69,7 @@ import { initCarChat } from './carChat.js';
 import { initDbpo } from './dbpo.js';
 import { initArtis, initMissingBoxes } from './artis.js';
 import { initAlertRecipients } from './alertrecipients.js';
+import { initTransferWatch } from './transferwatch.js';
 import { initRateCon } from './ratecon.js';
 import { sendMail, mailConfig, setMailGuard } from './mailer.js';
 import { initTraining } from './training.js';
@@ -827,7 +828,10 @@ jarvisChat = initJarvisChat(app, { artis, clients, planSheet, nextLoads, playboo
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });
-initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules, afterBoard: async (site, board, ctx) => { await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
+// planned truck transfers (sheet: 734 → 4504): follow both trucks, report, confirm with the drivers
+const transferWatch = initTransferWatch({ db, env: process.env, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('transfer'),
+  textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice });
+initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules, afterBoard: async (site, board, ctx) => { await transferWatch.process(site, board).catch((e) => console.warn('[transfer]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
