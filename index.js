@@ -73,6 +73,7 @@ import { initTransferWatch } from './transferwatch.js';
 import { initTruckBuilder } from './truckbuilder.js';
 import { initMissingCases } from './missingcase.js';
 import { initStopTasks } from './stoptasks.js';
+import { initMacroPoint } from './macropoint.js';
 import { initRateCon } from './ratecon.js';
 import { sendMail, mailConfig, setMailGuard } from './mailer.js';
 import { initTraining } from './training.js';
@@ -805,9 +806,11 @@ const alertRecipients = initAlertRecipients(app, { requireAuth: requireDispatch,
 const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: (k) => alertRecipients.resolve(k), env: process.env });
 // Missing boxes a customer asked about → email the "Customer asked about a load with missing boxes" list
 const truckBuilder = initTruckBuilder(app, { requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('tripsheet_check'), env: process.env });
+// MacroPoint (OC tracking the office already uses) → OC locations on our trips
+const macroPoint = initMacroPoint(app, { requireAdmin, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 missingCases = initMissingCases({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('missing_boxes_case'), getBoard: (site) => truckmate.buildBoard(site) });
 const missingBoxes = initMissingBoxes({ db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('artis_missing_call') });
-truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => truckBuilder.overlay(...a), (...a) => artis.overlay(...a), (...a) => stopTasks.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
+truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => truckBuilder.overlay(...a), (...a) => artis.overlay(...a), (...a) => stopTasks.overlay(...a), (...a) => macroPoint.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.

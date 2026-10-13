@@ -427,8 +427,9 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
   }));
 }
 
-// An outside-carrier load: an OC on the trip, an OC truck code ("OC978"), or no truck / trailer recorded. Pure.
-export const isOcLoad = (it) => !!(it && (it._oc || /^OC/i.test(String(tripOf(it).powerUnit || '').trim()) || (!String(tripOf(it).powerUnit || '').trim() && !String(tripOf(it).trailer || '').trim())));
+// An outside-carrier load with no tracking: an OC on the trip, an OC truck code ("OC978"), or no truck / trailer
+// recorded — unless MacroPoint has a fresh location for it (then it's tracked like our trucks). Pure.
+export const isOcLoad = (it) => !!(it && !(it._macropoint && it._macropoint.fresh) && (it._oc || /^OC/i.test(String(tripOf(it).powerUnit || '').trim()) || (!String(tripOf(it).powerUnit || '').trim() && !String(tripOf(it).trailer || '').trim())));
 // Trips among the stops with no truck, no trailer and no outside carrier marked, not delivered — usually an
 // outside carrier whose truck isn't recorded in TruckMate (no tracking). Pure.
 export function parkedTrips(items, stops) {
