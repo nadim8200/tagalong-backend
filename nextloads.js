@@ -107,7 +107,7 @@ export function nextTripTiming(nextItem, { eta = null, geo = () => null, now = D
   const stops = ((eta && eta.stops) || []).filter((x) => x.etaMs);
   if (!stops.length) { out.why = 'no live ETA for the current trip'; return out; }
   const last = stops[stops.length - 1];
-  out.emptyAtMs = last.etaMs; out.emptyAt = last.label || null;
+  out.emptyAtMs = last.etaMs; out.emptyAt = last.label || null; out.emptyMi = last.miles != null ? last.miles : null;
   const t = tripOf(nextItem);
   const pz = zip5(t.origZoneDesc);
   const drops = billsOf(nextItem).map((b) => ({ b, d: deadlineOf(b, now), zip: zip5(b.endZoneDescription) })).filter((x) => x.d).sort((a, b) => a.d.ms - b.d.ms);
@@ -232,7 +232,8 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
       n.forEach((x, i) => {
         const nx = trips.find((y) => tripNo(y) === x.trip); if (!nx) return;
         const tm = i === 0 ? x.timing || {} : {};
-        nx._queuedBehind = { trip: tripNo(it), truck: unitOf(it) || null, order: i + 1, emptyAt: tm.emptyAt || null, emptyAtMs: tm.emptyAtMs || null, pickupEtaMs: tm.pickupEtaMs || null, deliverEtaMs: tm.deliverEtaMs || null, state: tm.state || null };
+        nx._queuedBehind = { trip: tripNo(it), truck: unitOf(it) || null, order: i + 1, emptyAt: tm.emptyAt || null, emptyAtMs: tm.emptyAtMs || null, pickupEtaMs: tm.pickupEtaMs || null, deliverEtaMs: tm.deliverEtaMs || null, state: tm.state || null,
+          milesToPickup: tm.emptyMi != null && tm.deadheadMi != null ? Math.round(tm.emptyMi + tm.deadheadMi) : null };
       });
     }
     if (!enabled) return;
