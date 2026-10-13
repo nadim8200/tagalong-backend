@@ -192,6 +192,8 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   const useComms = (c) => { comms = c; };
   let photoHook = null;                                          // reefer temp photos (tempphotos.js)
   const usePhotos = (fn) => { photoHook = fn; };
+  let roadHook = null;                                           // breakdown photos (roadcall.js)
+  const useRoadPhotos = (fn) => { roadHook = fn; };
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const urlOf = (tok) => `${base}/t/${tok}`;
@@ -561,14 +563,15 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
       if (!isLive(status) && status !== 'completed') return res.status(410).json({ active: false, status });
       const b = req.body || {};
-      const kind = b.kind === 'bol' ? 'bol' : b.kind === 'temp' ? 'temp' : 'pod';
+      const kind = b.kind === 'bol' ? 'bol' : b.kind === 'temp' ? 'temp' : b.kind === 'breakdown' ? 'breakdown' : 'pod';
       const files = (Array.isArray(b.files) ? b.files : []).slice(0, 8);
       if (!files.length) return res.status(400).json({ error: 'Add at least one photo.' });
       const by = `${(link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'Driver'} (tracking link)`;
       const stored = await docs.storeDocs({ site: link.site, kind: 'driverdoc', trip: link.trip, files: files.map((f, i) => ({ ...f, filename: f.filename || `${kind.toUpperCase()}-${link.trip}-${i + 1}.jpg`, page: i + 1 })), by });
-      await docs.markDocs({ site: link.site, ids: stored.map((d) => d.id), docType: kind === 'bol' ? 'bill_of_lading' : kind === 'temp' ? 'reefer_temp' : 'proof_of_delivery' });
+      await docs.markDocs({ site: link.site, ids: stored.map((d) => d.id), docType: kind === 'bol' ? 'bill_of_lading' : kind === 'temp' ? 'reefer_temp' : kind === 'breakdown' ? 'breakdown_photo' : 'proof_of_delivery' });
+      if (kind === 'breakdown' && roadHook) Promise.resolve(roadHook(link.site, String(link.trip), { docIds: stored.map((d) => d.id), via: 'upload link', by })).catch(() => {});
       if (kind === 'temp' && photoHook) Promise.resolve(photoHook(link.site, String(link.trip), { docIds: stored.map((d) => d.id), via: 'upload link', by, forced: true })).catch(() => {});
-      if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: new Date().toISOString(), source: 'driver app', text: `Driver sent the ${kind === 'temp' ? 'reefer temp photo' : kind.toUpperCase()} (${stored.length} ${stored.length === 1 ? 'page' : 'pages'})`, by }]);
+      if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: new Date().toISOString(), source: 'driver app', text: `Driver sent the ${kind === 'temp' ? 'reefer temp photo' : kind === 'breakdown' ? 'breakdown photos' : kind.toUpperCase()} (${stored.length} ${stored.length === 1 ? 'page' : 'pages'})`, by }]);
       res.json({ ok: true, count: stored.length });
     } catch (e) { res.status(400).json({ error: e.message || 'Could not upload.' }); }
   });
@@ -682,5 +685,5 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   });
 
   console.log(`[driverlink] OC driver tracking links ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, routeFor, ensureDocsLink, messageDriver, useComms, usePhotos };
+  return { overlay, routeFor, ensureDocsLink, messageDriver, useComms, usePhotos, useRoadPhotos };
 }

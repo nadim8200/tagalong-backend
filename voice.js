@@ -92,6 +92,7 @@ How to help:
 - Only state facts lookup_load returns. For a customer or broker that is: where the truck is now, and THEIR delivery — ETA, boxes, cubes, appointment, delivered or not. Never mention any other stop, customer or city on the route (before or after theirs), and don't say you are leaving anything out; if they ask about the route, say the truck is on its way to them and give their ETA. Only the driver hears the full list of stops. Say times the way the tool gives them — ETAs and appointments are already in the delivery's LOCAL time, so always say the time zone with them (e.g. "1:00 AM Pacific time"); never convert them to Miami / Eastern time. Whenever you give a customer or broker an ETA, finish with this once, in their language: "${ETA_DISCLAIMER}" Read truck, trailer, trip and bill numbers one digit at a time, exactly as the tool spaces them (truck 2 0 2 6 = "two zero two six", never "two thousand twenty-six"); in Spanish or Hebrew, say each digit in that language. Never guess a location or a time.
 - Drivers can tell you a stop is delivered (confirm_delivered) or report a problem — breakdown, delay, accident, reefer issue (report_problem). Repeat back the key details before saving.
 - Anything you can't answer, anything about rates, payments, detention, lumper, claims, appointments changes, or bank details: take a message with take_message (name, callback number, what they need) and say a dispatcher will call back. Never agree to change rates, payments, appointments or bank details.
+- A DRIVER with a breakdown, flat tire or needing a tow: first make sure they're safe (hazards on, in a safe spot). Then use road_call_details and gather, one question at a time: what happened; for a tire — which tire (steer, drive or trailer; left or right; inside or outside) and the size off the sidewall (if they can't read it, ask them to text a photo of the sidewall); where they are (highway, mile marker, direction); loaded or empty. Read back what you have. Say dispatch is arranging the road service and will text the ETA. Never promise a time.
 - If the caller asks for a person, is upset, or reports an accident or an emergency, transfer them to dispatch with transfer_to_dispatch (after report_problem for accidents). For a life-threatening emergency tell them to hang up and call 911.
 
 Brokers: a broker calling with their load number, rate confirmation number or company name gets their whole load — status, where the truck is, pickup, and the ETA to each of their deliveries. Pass their load number as broker_load_number, or their company as customer_name.
@@ -161,6 +162,16 @@ function tools(base, transferNumber) {
       details: { type: 'string', description: 'What happened, in English' },
       location: { type: 'string', description: 'Where the truck is (city, highway, mile marker)' },
     }, ['problem_type', 'details']),
+    fn('road_call_details', 'The DRIVER has a breakdown / flat tire / needs a tow: record what the road service needs. Call it as you learn each detail (it can be called several times).', {
+      trip_number: { type: 'string' },
+      problem: { type: 'string', enum: ['tire', 'mechanical', 'tow'] },
+      details: { type: 'string', description: 'What happened / what the driver sees or hears, in English' },
+      tire_position: { type: 'string', description: 'Which tire, in the driver\'s words: steer / drive / trailer, left / right, inside / outside, front / rear axle' },
+      tire_size: { type: 'string', description: 'Tire size if the driver reads it off the sidewall, e.g. 295/75R22.5 or 11R22.5' },
+      location: { type: 'string', description: 'Highway, mile marker, direction, exit or landmark' },
+      safe: { type: 'boolean', description: 'true if the truck is in a safe spot (shoulder, truck stop, rest area)' },
+      loaded: { type: 'boolean', description: 'true if the trailer is loaded' },
+    }, ['problem']),
     { type: 'end_call', name: 'end_call', description: 'End the call when the caller is finished.' },
   ];
   if (transferNumber) {
@@ -622,7 +633,7 @@ export function brokerView(item, eta) {
   };
 }
 
-export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCases = null, artis = null, clients = null, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCases = null, roadCalls = null, artis = null, clients = null, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taRetellCfg';
@@ -911,6 +922,23 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
     } catch (e) { res.json({ saved: false, say: 'Could not save — take a message.' }); }
   });
 
+  // a driver's breakdown → the road call (Michelin ONCall when its API is set up)
+  app.post('/retell/fn/road_call_details', verified, async (req, res) => {
+    try {
+      const a = argsOf(req); const call = callOf(req);
+      const hit = findLoad(await items(), { trip: a.trip_number || callTrip.get(call.call_id), phone: callerPhone(call) });
+      const trip = hit ? tripNo(hit.item) : (a.trip_number ? String(a.trip_number).replace(/\D/g, '') : null);
+      if (!roadCalls) return res.json({ saved: false, say: 'Save it with report_problem and tell the driver dispatch is alerted.' });
+      const { tirePosition, tireSize } = await import('./roadcall.js');
+      const tire = {};
+      if (a.tire_size && tireSize(a.tire_size)) tire.size = tireSize(a.tire_size);
+      if (a.tire_position) tire.position = tirePosition(a.tire_position) || { label: String(a.tire_position).slice(0, 60) };
+      const rc = await roadCalls.open({ trip, source: 'call', by: 'Jarvis call', type: a.problem || null, details: a.details || null, tire: Object.keys(tire).length ? tire : null, location: a.location ? { text: String(a.location).slice(0, 200) } : null, safe: typeof a.safe === 'boolean' ? a.safe : null, loaded: typeof a.loaded === 'boolean' ? a.loaded : null, driver: { phone: callerPhone(call) || null } });
+      if (!rc) return res.json({ saved: false, say: 'Could not save — transfer to dispatch.' });
+      res.json({ saved: true, road_call: rc.id, still_needed: rc.missing, say: rc.missing.length ? `Ask, one at a time: ${rc.missing.join('; ')}. If they can't read the tire size, ask them to text a photo of the sidewall.` : 'You have everything. Tell the driver dispatch is arranging the road service now and will text the ETA. Ask them to stay safe with hazards on.' });
+    } catch (e) { res.json({ saved: false, say: 'Could not save — transfer to dispatch.' }); }
+  });
+
   app.post('/retell/fn/report_problem', verified, async (req, res) => {
     try {
       const a = argsOf(req); const call = callOf(req);
@@ -923,6 +951,11 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
       if (trip && carriers && carriers.addCheckins) await carriers.addCheckins(site, trip, [{ at, source: 'Jarvis call', from: hit.role === 'driver' ? 'driver' : (callerPhone(call) || 'caller'), text, issue: true }]);
       // a problem on the road: dispatch hears it now (breakdown / accident → urgent group too)
       if (help && help.raise) help.raise({ source: 'call', ref: `${call.call_id || at}:problem:${a.problem_type}`, role: hit && hit.role === 'driver' ? 'driver' : 'unknown', from: { phone: callerPhone(call) }, trip, need: text, urgent: ['breakdown', 'accident', 'reefer'].includes(a.problem_type) }).catch(() => {});
+      if (a.problem_type === 'breakdown' && roadCalls && hit && hit.role === 'driver') {
+        const { roadCallType } = await import('./roadcall.js');
+        const rc = await roadCalls.open({ trip, source: 'call', by: 'Jarvis call', type: roadCallType(a.details) || 'mechanical', details: a.details, location: a.location ? { text: String(a.location).slice(0, 200) } : null, driver: { phone: callerPhone(call) || null } }).catch(() => null);
+        if (rc) return res.json({ saved: true, trip, road_call: rc.id, still_needed: rc.missing, say: `Dispatch is alerted. Now gather the road-service details with road_call_details: ${rc.missing.join('; ') || 'nothing more needed'}.` });
+      }
       res.json({ saved: true, trip, say: a.problem_type === 'breakdown' || a.problem_type === 'accident' ? 'Tell the driver dispatch is alerted now; offer to transfer them to a dispatcher.' : 'Tell the caller dispatch has the update.' });
     } catch (e) { res.json({ saved: false, say: 'Could not save — transfer to dispatch.' }); }
   });
@@ -1145,6 +1178,7 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
     'confirm-stop': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to confirm whether {{next_stop}} was delivered. If yes, save it with confirm_delivered (ask boxes and any shortage or damage) and remind them to upload the signed POD/BOL.',
     'temp-photo': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) for the {{check}} reefer temperature check — we cannot read this trailer\'s temperature remotely. Ask them to read the reefer display (box / return-air temperature and the set point), repeat the numbers back, and ask them to send a photo of the display to dispatch through the TagAlong link or by text as soon as they safely can.',
     'pickup-check': 'This is an outgoing check call to the driver of trip {{trip}} ({{driver_name}}) about the pickup at {{pickup}} planned for {{pickup_time}}. Ask whether they are already rolling / on the way, where they are, and their ETA to the pickup. If they will be late, ask why and the new time, and save it with report_problem (problem_type delay). Keep it short — they may be driving.',
+    'roadcall-check': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}). Dispatch is checking on them — the truck may be broken down. First ask if they are OK and safe. If they are broken down, use road_call_details and gather: what happened (tire or mechanical); for a tire, which tire (steer, drive or trailer; left or right; inside or outside) and the size off the sidewall; where they are (highway, mile marker, direction); loaded or empty. Ask them to send photos of the problem from the link Jarvis texted. Read back what you have and say dispatch is arranging road service. If they are not broken down, thank them and note what they said with road_call_details details.',
     'stop-instruction': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) about a change for {{customer}}: {{instruction}} The place is {{place}} ({{boxes}}). Tell them the change clearly, ask them to repeat it back, and ask them to say OK that they got it. Answer in their language (English or Spanish).',
     'stop-verify': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to confirm a stop: did they deliver {{boxes}} for {{customer}} at {{place}} ({{instruction}})? Ask yes or no; if no, ask what happened. Repeat their answer back briefly.',
     'transfer-check': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) about the planned trailer transfer: trailer {{trailer}} moves from truck {{from_truck}} to truck {{to_truck}}. Ask whether the transfer is done — is the trailer hooked to truck {{to_truck}} and rolling? If not, ask what is holding it up and when it will be done. Repeat their answer back briefly.',

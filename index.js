@@ -74,6 +74,7 @@ import { initTruckBuilder } from './truckbuilder.js';
 import { initMissingCases } from './missingcase.js';
 import { initStopTasks } from './stoptasks.js';
 import { initMacroPoint } from './macropoint.js';
+import { initRoadCalls } from './roadcall.js';
 import { initRateCon } from './ratecon.js';
 import { sendMail, mailConfig, setMailGuard } from './mailer.js';
 import { initTraining } from './training.js';
@@ -759,7 +760,8 @@ const staffAsk = async ({ phone, text }) => {
   return r && r.answer ? r.answer : null;
 };
 let missingCases = null;   // set below, once the alert lists exist
-const comms = initComms(app, { staffAsk: (...a) => staffAsk(...a), missingCases: { fromText: (...a) => (missingCases ? missingCases.fromText(...a) : null) }, help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+let roadCalls = null;      // set below too
+const comms = initComms(app, { staffAsk: (...a) => staffAsk(...a), missingCases: { fromText: (...a) => (missingCases ? missingCases.fromText(...a) : null) }, roadCalls: { fromDriverText: (...a) => (roadCalls ? roadCalls.fromDriverText(...a) : null) }, help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
 helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, pushRules, directory, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) },
@@ -784,7 +786,7 @@ const nextLoads = initNextLoads({ db, env: process.env });
 const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), nextLoads, env: process.env });
 // stop instructions from staff email chains (e.g. deliver to Biloxi instead of Pensacola): driver has it, GPS + driver confirm, reply on the chain
 const stopTasks = initStopTasks({ db, env: process.env, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice: { placeCall: (...a) => voice.placeCall(...a), callsFor: (...a) => voice.callsFor(...a) }, replyInThread: (...a) => inbox.replyInThread(...a) });
-const inbox = initInbox(app, { stopTasks, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
+const inbox = initInbox(app, { stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
@@ -806,6 +808,11 @@ const alertRecipients = initAlertRecipients(app, { requireAuth: requireDispatch,
 const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: (k) => alertRecipients.resolve(k), env: process.env });
 // Missing boxes a customer asked about → email the "Customer asked about a load with missing boxes" list
 const truckBuilder = initTruckBuilder(app, { requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('tripsheet_check'), env: process.env });
+// road calls (breakdowns / tires) → Michelin ONCall when its API is set up; else the packet for 1-800-TIRE911
+roadCalls = initRoadCalls(app, { requireAuth: requireDispatch, db, docs, help,
+  textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by),
+  callDriver: (trip, rc) => voice.placeCall(String(trip), { purpose: 'roadcall-check', by: `Jarvis (road call ${rc.id})` }),
+  photoLink: (site, trip, by) => driverLinks.ensureDocsLink(site, trip, by), sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('road_call'), getBoard: (site) => truckmate.buildBoard(site), env: process.env });
 // MacroPoint (OC tracking the office already uses) → OC locations on our trips
 const macroPoint = initMacroPoint(app, { requireAdmin, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 missingCases = initMissingCases({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('missing_boxes_case'), getBoard: (site) => truckmate.buildBoard(site) });
@@ -821,14 +828,15 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 // Watchtower — checks every active trip each minute (reefer, late risk, HOS,
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
-const voice = initVoice(app, { artis, missingBoxes, missingCases, clients, training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const voice = initVoice(app, { artis, missingBoxes, missingCases, roadCalls, clients, training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, db, replyInThread: (...a) => inbox.replyInThread(...a), ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // paperwork after delivery: POD / BOL from the driver → broker + Billing; Billing's document requests
 const paperwork = initPaperwork(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), groupEmail: (n) => directory.groupEmail(n), replyWithDocs: (id, o) => inbox.replyWithDocs(id, o), env: process.env });
 // reefer temp photos (8 AM / 3 PM / 9:30 PM, hourly reminders) + an email to dispatch on every driver contact
 tempPhotos = initTempPhotos(app, { team: () => alertRecipients.resolve('reefer_temp'), groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, ringcentral: rc, voice, comms, isInternal, env: process.env });
-driverLinks.usePhotos((site, trip, info) => tempPhotos.received(site, trip, info));
+driverLinks.usePhotos((site, trip, info) => { if (roadCalls) roadCalls.photos(site, trip, info).catch(() => {}); return tempPhotos.received(site, trip, info); });
+driverLinks.useRoadPhotos((site, trip, info) => (roadCalls ? roadCalls.photos(site, trip, info) : null));
 const outreach = initOutreach({ groupEmail: (n) => directory.groupEmail(n), db, getBoard: (site) => truckmate.buildBoard(site), isInternal, env: process.env });
 comms.useOutreach((ev) => outreach.notify(ev));
 voice.useOutreach((ev) => outreach.notify(ev));
