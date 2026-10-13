@@ -204,3 +204,16 @@ test('a flagged split whose other part is on another night or hub is found; a no
   assert.deepEqual(t624743.stops[0].splitWith.map((x) => x.trip), ['624800']);
   assert.equal(splitNote(t624743.stops[0]), 'Split between trailers: 52 boxes on this truck; 140 boxes on trip 624800 (truck 2219, 10/10).');
 });
+
+// backfill 10/13: Pyramid (624720) 4 pallets, Foodland (624762) 4 pallets — the sheet prints "4 PLTS"
+test('a pallet-only stop compares pallets, not "0 boxes"', () => {
+  const truck = { trip: '624720', truck: '2606', trailer: '7288', stops: [{ order: 1, consigneeId: '03017', consignee: 'PYRAMID FLOWERS, INC.-OXNARD', city: 'OXNARD', boxes: 0, pallets: 4, cubes: 400 }], boxes: 0, cubes: 400 };
+  const sh = (n) => ({ stops: [{ action: 'DELIVER', customer: 'PYRAMID FLOWERS, INC.-OXNARD', city: 'OXNARD', pieces: n }] });
+  assert.equal(compareSheet(sh(4), truck).ok, true);
+  const off = compareSheet(sh(5), truck);
+  assert.deepEqual(off.boxDiffs, [{ customer: 'PYRAMID FLOWERS, INC.-OXNARD', city: 'OXNARD', sheet: 5, builder: 4, unit: 'pallets' }]);
+  assert.match(checkEmail(HUBS[0], '2026-10-09', [{ ...truck, check: off }]).html, /read <b>5<\/b> pallets — ARTIS has <b>4<\/b>/);
+  const m = mergeStops(sh(4), truck);
+  assert.equal(m.stops[1].piecesText, '4 PALLETS'); assert.equal(m.stops[1].pieces, 4); assert.equal(m.stops[1].sheetPieces, undefined);
+  assert.equal(builderBoxesFor({ _tb: truck }, 'PYRAMID FLOWERS, INC.-OXNARD', 'OXNARD'), null);
+});

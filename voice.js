@@ -311,7 +311,8 @@ function builderBoxes(it, customer, city) {
   const t = String(city || '').split(',')[0].toUpperCase().replace(/[^A-Z ]/g, '').trim();
   const twn = (x) => String(x || '').toUpperCase().replace(/[^A-Z ]/g, '').trim();
   const hits = tb.stops.filter((b) => Math.max(nameScore(customer, b.consignee), nameScore(b.consignee, customer)) >= 0.75 && (!t || !twn(b.city) || twn(b.city).startsWith(t) || t.startsWith(twn(b.city))));
-  return hits.length ? hits.reduce((n, b) => n + (Number(b.boxes) || 0), 0) : null;
+  const n = hits.reduce((m, b) => m + (Number(b.boxes) || 0), 0);
+  return hits.length && n ? n : null;   // a pallet-only stop has no box count — keep the sheet's words ("4 PLTS")
 }
 // When TruckMate says a stop was delivered (its wall time at the stop). 00:00:0x is a date-only placeholder. Pure.
 export function deliveredWhen(raws) {

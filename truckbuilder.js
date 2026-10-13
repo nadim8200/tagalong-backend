@@ -127,9 +127,11 @@ export function compareSheet(sheet, truck) {
   for (const c of cands) { if (doneSheet.has(c.i) || used.has(c.j)) continue; doneSheet.add(c.i); used.add(c.j); pairs.push(c); }
   sheetStops.forEach((s, i) => { if (!doneSheet.has(i)) onlyOnSheet.push({ customer: s.customer, city: s.city, boxes: s.pieces != null ? Number(s.pieces) : null }); });
   const onlyInBuilder = truck.stops.filter((_, j) => !used.has(j)).map((b) => ({ customer: b.consignee, city: b.city, boxes: b.boxes }));
+  // a pallet-only stop: ARTIS has 0 boxes + N pallets, the sheet prints "N PLTS" — compare pallets
+  const count = (b) => (!b.boxes && b.pallets ? { n: b.pallets, unit: 'pallets' } : { n: b.boxes, unit: 'boxes' });
   const boxDiffs = pairs.map(({ i, j }) => ({ s: sheetStops[i], b: truck.stops[j] }))
-    .filter(({ s, b }) => s.pieces != null && Number(s.pieces) !== b.boxes)
-    .map(({ s, b }) => ({ customer: b.consignee, city: b.city, sheet: Number(s.pieces), builder: b.boxes }));
+    .filter(({ s, b }) => s.pieces != null && Number(s.pieces) !== count(b).n)
+    .map(({ s, b }) => ({ customer: b.consignee, city: b.city, sheet: Number(s.pieces), builder: count(b).n, unit: count(b).unit }));
   const unclear = (sheet && sheet.unreadable) || [];
   const same = (a, b) => !a || !b || up(a).replace(/^0+/, '') === up(b).replace(/^0+/, '');
   const truckDiff = same(sheet && sheet.truck, truck.truck) ? null : { sheet: sheet.truck, builder: truck.truck };
@@ -144,7 +146,8 @@ export function builderBoxesFor(it, customer, city = null) {
   if (!tb || !tb.stops) return null;
   const t = town(String(city || '').split(',')[0]);
   const hits = tb.stops.filter((b) => fit(customer, b.consignee) >= 0.75 && (!t || !town(b.city) || town(b.city).startsWith(t) || t.startsWith(town(b.city))));
-  return hits.length ? hits.reduce((n, b) => n + b.boxes, 0) : null;
+  const n = hits.reduce((m, b) => m + b.boxes, 0);
+  return hits.length && n ? n : null;   // a pallet-only stop has no box count
 }
 
 // The nightly email: every truck checked, what differed. Pure.
@@ -155,7 +158,7 @@ export function checkEmail(hub, date, rows) {
   const md = date.slice(5).replace('-', '/');
   const block = (r) => {
     const c = r.check; const li = [];
-    for (const d of c.boxDiffs) li.push(`<li><b>${esc(d.customer)}</b> (${esc(d.city)}): trip sheet read <b>${d.sheet}</b> boxes — ARTIS has <b>${d.builder}</b></li>`);
+    for (const d of c.boxDiffs) li.push(`<li><b>${esc(d.customer)}</b> (${esc(d.city)}): trip sheet read <b>${d.sheet}</b> ${d.unit || 'boxes'} — ARTIS has <b>${d.builder}</b></li>`);
     for (const d of c.onlyInBuilder) li.push(`<li><b>${esc(d.customer)}</b> (${esc(d.city)}, ${d.boxes} boxes) is on the truck in ARTIS but was not read on the trip sheet</li>`);
     for (const d of c.onlyOnSheet) li.push(`<li><b>${esc(d.customer)}</b> (${esc(d.city)}) was read on the trip sheet but is not on this truck in ARTIS</li>`);
     if (c.trailerDiff) li.push(`<li>Trailer: trip sheet ${esc(c.trailerDiff.sheet)} — ARTIS ${esc(c.trailerDiff.builder)}</li>`);
@@ -225,9 +228,9 @@ export function mergeStops(sheet, truck, item = null) {
     const seq = n + 1 - (b.order || j + 1);                 // delivery order
     return { ...(sh || { action: 'DELIVER', key: `artis.${b.consigneeId || j}` }), action: 'DELIVER', stopNumber: seq + 1,
       customer: b.consignee, sheetCustomer: sh ? sh.customer : undefined, consigneeId: b.consigneeId, city: b.city, state: b.state || (sh && sh.state) || null,
-      pieces: b.boxes, piecesText: `${b.boxes} BOXES${b.pallets ? ` + ${b.pallets} PALLET${b.pallets === 1 ? '' : 'S'}` : ''}`, cubes: b.cubes, ...(b.pallets ? { pallets: b.pallets } : {}),
+      pieces: !b.boxes && b.pallets ? b.pallets : b.boxes, piecesText: [b.boxes || !b.pallets ? `${b.boxes} BOXES` : null, b.pallets ? `${b.pallets} PALLET${b.pallets === 1 ? '' : 'S'}` : null].filter(Boolean).join(' + '), cubes: b.cubes, ...(b.pallets ? { pallets: b.pallets } : {}),
       ...(b.split ? { split: true, splitWith: b.splitWith || [], splitNote: splitNote(b) } : {}),
-      ...(sh && sh.pieces != null && Number(sh.pieces) !== b.boxes ? { sheetPieces: Number(sh.pieces) } : {}), from: sh ? 'ARTIS + trip sheet' : 'ARTIS' };
+      ...(sh && sh.pieces != null && Number(sh.pieces) !== (!b.boxes && b.pallets ? b.pallets : b.boxes) ? { sheetPieces: Number(sh.pieces) } : {}), from: sh ? 'ARTIS + trip sheet' : 'ARTIS' };
   });
   const extra = sheetStops.filter((s) => !pairedSheet.has(s)).map((s) => ({ ...s, notInArtis: true, from: 'trip sheet only' }));
   const load = ((sheet && sheet.stops) || []).find((x) => /LOAD/i.test(x.action || '')) || { action: 'LOAD', customer: `${String(truck.hub || '').toUpperCase()} TERMINAL`, stopNumber: 1, key: 'artis.load' };
@@ -333,7 +336,7 @@ export function initTruckBuilder(app, { requireAdmin, db, sendMail = null, recip
   }
 
   // once (after this is first deployed): the trips already on the road — the last 4 nights, both hubs, one sign-in
-  const BACKFILL = 'v1';
+  const BACKFILL = 'v2';   // v2: re-read after the pallet-only fix
   async function backfill({ force = false } = {}) {
     if (!enabled()) return null;
     const st = await load();
