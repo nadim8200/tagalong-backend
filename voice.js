@@ -415,6 +415,17 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
   }));
 }
 
+// Trips among the stops with no truck, no trailer and no outside carrier, not delivered — parked in TruckMate,
+// not on the road. Pure.
+export function parkedTrips(items, stops) {
+  return [...new Set((stops || []).map((x) => x.trip))].filter((n) => {
+    const it = (items || []).find((i) => tripNo(i) === n);
+    if (!it) return false;
+    const t = tripOf(it);
+    const mine = stops.filter((x) => x.trip === n);
+    return !String(t.powerUnit || '').trim() && !String(t.trailer || '').trim() && !it._oc && !mine.some((x) => x.delivered);
+  });
+}
 // The asked-about customers' ARTIS boxes still missing on their loads (for the team — never the caller). Pure.
 export function missingFor(items, stops) {
   const out = [];
@@ -761,12 +772,17 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
         }
         if (said && !staffPhone) await remember(callerPhone(call), stops[0].customer);
         if (!staffPhone && missingBoxes) missingBoxes(missingFor(all, stops), { caller: callerPhone(call), callId: call.call_id || null }).catch(() => {});
-        const trips = [...new Set(stops.map((x) => x.trip))];
+        // a TruckMate trip with no truck, no trailer and no outside carrier (e.g. a 1-box bill parked on a trip by the
+        // office — 624811 / 624662 for Native Lombard) is not a load on the road: customers never hear it; staff get
+        // it as one line after the real loads
+        const parked = new Set(parkedTrips(all, stops));
+        const trips = [...new Set(stops.map((x) => x.trip))].filter((n) => !parked.has(n) || stops.every((x) => parked.has(x.trip)));
         const full = trips.map((n) => customerView(all.find((it) => tripNo(it) === n), etas[n], stops.filter((x) => x.trip === n)));
         const loads = staffPhone ? full : full.map(customerLean);
+        const parkedNote = trips.every((n) => !parked.has(n)) && parked.size ? [...parked].map((n) => { const bx = stops.filter((x) => x.trip === n).map((x) => x.boxes).filter(Boolean).join(', '); return `${n}${bx ? ` (${bx})` : ''}`; }) : [];
         if (staffPhone) {
           const heard = stops.every((x) => nameScore(name, x.customer) < 0.75 && nameScore(name, `${x.customer} ${x.city || ''}`) < 0.75);
-          return reply({ found: true, matched_by: heard ? 'closest name on the board' : 'customer name', caller_is: STAFF_IS, loads, say: `${heard ? `Closest match to "${name}": say the business name you found (e.g. "I have ${spokenName(stops[0].customer)}") and give its ETA — if it's not the one, they'll tell you. ` : ''}${STAFF_RULE}` });
+          return reply({ found: true, matched_by: heard ? 'closest name on the board' : 'customer name', caller_is: STAFF_IS, loads, ...(parkedNote.length ? { not_on_a_truck: parkedNote } : {}), say: `${heard ? `Closest match to "${name}": say the business name you found (e.g. "I have ${spokenName(stops[0].customer)}") and give its ETA — if it's not the one, they'll tell you. ` : ''}${STAFF_RULE}${parkedNote.length ? ` After the loads, add ONE short line: "There ${parkedNote.length === 1 ? 'is also 1 TruckMate trip' : `are also ${parkedNote.length} TruckMate trips`} with no truck assigned — ${parkedNote.join('; ')} — check with dispatch." Do not count those as loads.` : ''}` });
         }
         return reply({ found: true, matched_by: known && !said ? 'caller phone (called before as this business)' : 'customer name', speaking_with: biz, ...(known && !said ? { confirm: `Confirm first: "Is this ${biz}?"` } : {}), loads, say: `${trips.length > 1 ? 'They have deliveries on more than one truck — ask which city or trailer number before giving an ETA. ' : ''}${CUSTOMER_RULE}` });
       }

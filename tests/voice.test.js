@@ -706,3 +706,12 @@ test('customers hear location, truck, trailer, trip, total boxes and ETA — del
   assert.deepEqual(done, { trip: '624773', deliveries: [{ customer: 'SPRINGFIELD FLORIST', city: 'SPRINGFIELD, MA', delivered: true, say_exactly: DELIVERED_SAY }] });
   assert.equal(DELIVERED_SAY, 'Your shipment has been delivered.');
 });
+
+// Native Lombard (Oct 13): Jarvis said "five loads" — 624811 and 624662 are 1-box bills on trips with no truck / trailer
+test('trips with no truck, no trailer and no outside carrier are not loads on the road', async () => {
+  const { parkedTrips, customerStops } = await import('../voice.js');
+  const mk = (trip, unit, trailer, extra = {}) => ({ trip: { tripNumber: trip, powerUnit: unit, trailer, status: 'LOADEDTOGO' }, freightBills: [{ billToName: 'NATIVE CHICAGO - LOMBARD', endZoneDescription: 'LOMBARD, IL, 60148', pieces: 1 }], ...extra });
+  const items = [mk('624901', '2620', '7327'), mk('624815', '', '', { _oc: { truck: 'OC978' } }), mk('624811', '', ''), mk('624662', '', '')];
+  const stops = customerStops(items, 'Native Lombard', {}, { staff: true });
+  assert.deepEqual(parkedTrips(items, stops).sort(), ['624662', '624811']);
+});

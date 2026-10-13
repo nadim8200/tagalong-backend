@@ -129,3 +129,16 @@ test('TruckMate next trip: 35°F vs 36°F is not a temperature change', () => {
   const nx = { trip: { tripNumber: '2', status: 'ASSGN', powerUnit: '9' }, freightBills: [{ temperature: 35 }] };
   assert.equal(tmNextTrips([cur, nx]).get('1')[0].tempChange, null);
 });
+
+// truck 2620 / trailer 7327: on 624901 (Miami → Lombard); TruckMate already has 624968 (Glendale Heights → Miami) assigned
+test('a next load assigned to a truck still on a run waits behind it (shown inside the current trip, clock from the drop)', async () => {
+  const { initNextLoads } = await import('../nextloads.js');
+  const cur = { trip: { tripNumber: '624901', powerUnit: '2620', status: 'DEPSHIP', origZoneDesc: 'MIAMI TERMINAL', destZoneDesc: 'LOMBARD, IL, 60148' }, freightBills: [] };
+  const nxt = { trip: { tripNumber: '624968', powerUnit: '2620', status: 'ASSGN', origZoneDesc: 'GLENDALE HEIGHTS, IL, 60139', destZoneDesc: 'MIAMI, FL, 33167' }, freightBills: [], _times: { createdAt: '2026-10-13T17:59:00Z' } };
+  const nl = initNextLoads({ get() {}, post() {}, put() {} }, { requireAuth: () => {}, db: { enabled: false }, env: { NODE_ENV: 'test' } });
+  const trips = [cur, nxt];
+  await nl.overlay('florida-beauty', trips);
+  assert.equal(cur._tmNext[0].trip, '624968');
+  assert.equal(nxt._queuedBehind.trip, '624901'); assert.equal(nxt._queuedBehind.truck, '2620'); assert.equal(nxt._queuedBehind.order, 1);
+  assert.equal(cur._queuedBehind, undefined);
+});

@@ -129,3 +129,17 @@ test('a stop with no ZIP ("DEVENS, MA") still gets a map point by city + state (
   const e = boardEtas({ trips: [it] }, { now: Date.parse('2026-10-11T22:03:00Z'), geo: (z) => G[z] || null, unitState: () => ({}) })['624338'];
   assert.ok(e, 'ETA computed for the city-only stop'); assert.ok(e.stops[0].miles < 3);
 });
+
+// 624889 (Oct 13): truck 2220 in McMinn County, TN on I-75 north — past BOTH south-Georgia stops (Dixie, Thomasville)
+// on the way to Michigan; it was routed back to Georgia first (Ferndale ETA 7:23 PM next day instead of ~3–4 AM)
+test('a truck past several stops in a row (between none of them) has passed them all', async () => {
+  const { passedCount } = await import('../watchtower.js');
+  const P = { DIXIE: [30.79, -83.67], THOMASVILLE: [30.84, -83.98], TAYLOR: [42.24, -83.27], FERNDALE: [42.46, -83.13], MADISON: [42.49, -83.10], SOUTHFIELD: [42.47, -83.22] };
+  const ordered = Object.keys(P).map((k, i) => ({ key: k, seq: i + 2 }));
+  const pts = new Map(Object.entries(P).map(([k, [lat, lng]]) => [k, { lat, lng }]));
+  assert.equal(passedCount(ordered, pts, { lat: 35.42, lng: -84.60 }), 2);        // Tennessee → Dixie + Thomasville behind
+  assert.equal(passedCount(ordered, pts, { lat: 30.19, lng: -82.64 }), 0);        // still in Florida, heading to Dixie
+  assert.equal(passedCount(ordered, pts, { lat: 30.80, lng: -83.70 }), 0);        // at Dixie
+  assert.equal(passedCount(ordered, pts, { lat: 30.84, lng: -83.94 }), 1);        // left Dixie, almost at Thomasville
+  assert.equal(passedCount(ordered, pts, { lat: 42.25, lng: -83.26 }), 2);        // at Taylor — Taylor not passed yet
+});

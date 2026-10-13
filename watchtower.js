@@ -306,13 +306,20 @@ export function passedCount(ordered, pts, at, { awayMi = 15, marginMi = 10 } = {
     const g = pts.get(st.key); const last = groups[groups.length - 1];
     if (last && haversineMi(last.g.lat, last.g.lng, g.lat, g.lng) < marginMi) last.n += 1; else groups.push({ g, n: 1 });
   }
+  // a stop is behind the truck when the truck is well away from it and clearly closer to a LATER stop than
+  // that stop is — the next one, or any one after (624889: past both south-Georgia stops, now in Tennessee
+  // headed to Michigan — between neither pair, but far past both)
   let k = 0;
   for (let i = 0; i < groups.length - 1; i++) {
-    const A = groups[i].g; const B = groups[i + 1].g;
-    const leg = haversineMi(A.lat, A.lng, B.lat, B.lng);
+    const A = groups[i].g;
     const fromA = haversineMi(at.lat, at.lng, A.lat, A.lng);
-    const toB = haversineMi(at.lat, at.lng, B.lat, B.lng);
-    if (fromA > awayMi && toB < leg - marginMi) k += groups[i].n; else break;
+    if (fromA <= awayMi) break;
+    const past = groups.slice(i + 1).some(({ g: B }, j) => {
+      const leg = haversineMi(A.lat, A.lng, B.lat, B.lng);
+      if (j > 0 && leg < 2 * awayMi) return false;           // a farther stop only counts when it's a real leg away
+      return haversineMi(at.lat, at.lng, B.lat, B.lng) < leg - marginMi;
+    });
+    if (past) k += groups[i].n; else break;
   }
   return k;
 }

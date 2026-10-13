@@ -227,6 +227,13 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
         if (nx) n[0].timing = nextTripTiming(nx, { eta: etas[tripNo(it)] || null, geo: (z) => geoZip[z] || null, now: now() });
       }
       it._tmNext = n;
+      // the next loads wait behind this run: the board shows them inside this trip, and their clock starts
+      // when this trip is done (not from where the truck is now)
+      n.forEach((x, i) => {
+        const nx = trips.find((y) => tripNo(y) === x.trip); if (!nx) return;
+        const tm = i === 0 ? x.timing || {} : {};
+        nx._queuedBehind = { trip: tripNo(it), truck: unitOf(it) || null, order: i + 1, emptyAt: tm.emptyAt || null, emptyAtMs: tm.emptyAtMs || null, pickupEtaMs: tm.pickupEtaMs || null, deliverEtaMs: tm.deliverEtaMs || null, state: tm.state || null };
+      });
     }
     if (!enabled) return;
     const list = (((await db.get(key, { list: [] })) || {}).list || []).filter((x) => x.truck && !x.doneAt);
