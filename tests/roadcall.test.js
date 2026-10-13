@@ -90,3 +90,23 @@ test('dispatch asks Jarvis to check on a driver → text with the questions + a 
   const rc2 = await rcs.checkDriver('624889', 'Rosa');
   assert.equal(rc2.id, rc.id);
 });
+
+test('the Michelin packet carries lat / long, the GPS time and a map link — refreshed when dispatch approves', async () => {
+  const rc = { id: 'RC-1', type: 'mechanical', truck: '2220', details: 'won\'t start', safe: true, location: { lat: 35.423456, lng: -84.601234, gpsAt: '2026-10-13T20:05:00Z', source: 'truck ELD', address: 'I 75, McMinn County, TN', text: 'northbound mile marker 49' } };
+  const p = packet(rc);
+  assert.equal(p.location.latitude, 35.423456); assert.equal(p.location.longitude, -84.601234);
+  assert.equal(p.location.mapUrl, 'https://maps.google.com/?q=35.423456,-84.601234');
+  const txt = packetText(rc);
+  assert.match(txt, /GPS: 35\.423456, -84\.601234 \(as of Oct 13, 4:05 PM ET, truck ELD\) · Map: https:\/\/maps\.google\.com\/\?q=35\.423456,-84\.601234/);
+  assert.match(txt, /driver says: northbound mile marker 49/);
+  assert.match(packetText({ ...rc, location: { text: 'TA Knoxville' } }), /GPS: not available — use the location the driver gave/);
+  // approve → the truck's newest GPS goes out, not the one from when the call opened
+  const store = {}; const db = { enabled: true, get: async (k, d) => store[k] ?? d, update: async (k, fn, d) => { store[k] = fn(store[k] ?? d); return store[k]; } };
+  const board = { trips: [{ trip: { tripNumber: '624889', powerUnit: '2220' }, _samsara: { lat: 35.4, lng: -84.6, gpsAt: '2026-10-13T20:00:00Z' } }] };
+  const sent = [];
+  const rcs = initRoadCalls(null, { db, getBoard: async () => board, env: {}, provider: { name: 'Michelin ONCall', phone: 'x', ready: true, create: async (pk) => { sent.push(pk); return { ref: 'ONC-1' }; } } });
+  const opened = await rcs.open({ trip: '624889', type: 'mechanical', details: 'no start', safe: true });
+  board.trips[0]._samsara = { lat: 35.55, lng: -84.45, gpsAt: '2026-10-13T20:40:00Z' };
+  await rcs.approve(opened.id, 'Rosa');
+  assert.equal(sent[0].location.latitude, 35.55); assert.equal(sent[0].location.gpsAt, '2026-10-13T20:40:00Z');
+});

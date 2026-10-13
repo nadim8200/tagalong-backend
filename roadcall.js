@@ -65,7 +65,7 @@ export function packet(rc) {
     reference: rc.id, poNumber: rc.id, trip: rc.trip,
     serviceType: rc.type === 'tire' ? 'TIRE' : rc.type === 'tow' ? 'TOW' : 'MECHANICAL',
     unit: { type: rc.unit || (rc.tire && rc.tire.position && rc.tire.position.axle === 'trailer' ? 'trailer' : 'tractor'), tractor: rc.truck || null, trailer: rc.trailer || null, vin: rc.vin || null, reefer: !!rc.reefer },
-    location: { latitude: rc.location ? rc.location.lat ?? null : null, longitude: rc.location ? rc.location.lng ?? null : null, address: rc.location ? rc.location.address || null : null, highway: rc.location ? rc.location.highway || null : null, mileMarker: rc.location ? rc.location.mileMarker || null : null, direction: rc.location ? rc.location.direction || null : null, notes: rc.location ? rc.location.text || null : null },
+    location: { latitude: rc.location ? rc.location.lat ?? null : null, longitude: rc.location ? rc.location.lng ?? null : null, gpsAt: rc.location ? rc.location.gpsAt || null : null, source: rc.location ? rc.location.source || null : null, mapUrl: rc.location && rc.location.lat != null ? `https://maps.google.com/?q=${rc.location.lat},${rc.location.lng}` : null, address: rc.location ? rc.location.address || null : null, highway: rc.location ? rc.location.highway || null : null, mileMarker: rc.location ? rc.location.mileMarker || null : null, direction: rc.location ? rc.location.direction || null : null, notes: rc.location ? rc.location.text || null : null },
     driver: { name: rc.driver ? rc.driver.name || null : null, phone: rc.driver ? rc.driver.phone || null : null, language: rc.driver ? rc.driver.language || null : null },
     tire: rc.type === 'tire' ? { position: rc.tire && rc.tire.position ? rc.tire.position.label : null, axle: rc.tire && rc.tire.position ? rc.tire.position.axle : null, side: rc.tire && rc.tire.position ? rc.tire.position.side : null, dual: rc.tire && rc.tire.position ? rc.tire.position.pos : null, size: rc.tire ? rc.tire.size || null : null, brand: rc.tire ? rc.tire.brand || null : null, condition: rc.tire ? rc.tire.condition || null : null, quantity: (rc.tire && rc.tire.qty) || 1 } : null,
     faultCodes: (rc.faults || []).map((f) => ({ code: f.code, description: f.description || null })),
@@ -80,7 +80,8 @@ export function packetText(rc) {
   return [
     `Road call ${rc.id} — ${p.serviceType}${rc.trip ? ` · trip ${rc.trip}` : ''}`,
     `Unit: tractor ${p.unit.tractor || '—'}${p.unit.trailer ? ` · trailer ${p.unit.trailer}` : ''}${p.unit.reefer ? ' (reefer)' : ''}${p.unit.vin ? ` · VIN ${p.unit.vin}` : ''}`,
-    `Location: ${[L.address, L.highway, L.mileMarker ? `mile marker ${L.mileMarker}` : null, L.direction].filter(Boolean).join(' · ') || L.notes || '—'}${L.latitude != null ? ` (GPS ${L.latitude.toFixed(5)}, ${L.longitude.toFixed(5)})` : ''}`,
+    `Location: ${[L.address, L.highway, L.mileMarker ? `mile marker ${L.mileMarker}` : null, L.direction].filter(Boolean).join(' · ') || L.notes || '—'}${L.notes && L.address ? ` · driver says: ${L.notes}` : ''}`,
+    L.latitude != null ? `GPS: ${L.latitude.toFixed(6)}, ${L.longitude.toFixed(6)}${L.gpsAt ? ` (as of ${new Date(L.gpsAt).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} ET${L.source ? `, ${L.source}` : ''})` : ''} · Map: https://maps.google.com/?q=${L.latitude.toFixed(6)},${L.longitude.toFixed(6)}` : 'GPS: not available — use the location the driver gave',
     `Driver: ${p.driver.name || '—'}${p.driver.phone ? ` · ${p.driver.phone}` : ''}`,
     p.tire ? `Tire: ${p.tire.position || 'position not given'} · size ${p.tire.size || 'not given'}${p.tire.condition ? ` · ${p.tire.condition}` : ''}` : null,
     p.faultCodes.length ? `Fault codes: ${p.faultCodes.map((f) => `${f.code}${f.description ? ` (${f.description})` : ''}`).join('; ')}` : null,
@@ -126,7 +127,7 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
     const t = tripOf(item); const s = item._samsara || {};
     return { ...rc, truck: rc.truck || t.powerUnit || null, trailer: rc.trailer || t.trailer || null,
       driver: { name: (s.driver1Info && s.driver1Info.name) || s.driver1 || (item._oc && item._oc.driverName) || null, phone: (s.driver1Info && s.driver1Info.phone) || null, ...(rc.driver || {}) },
-      location: { ...(s.lat != null ? { lat: s.lat, lng: s.lng, address: s.location || null, gpsAt: s.gpsAt || null } : {}), ...(rc.location || {}) },
+      location: { ...(rc.location || {}), ...(s.lat != null ? { lat: s.lat, lng: s.lng, address: s.location || null, gpsAt: s.gpsAt || null, source: s.source === 'driver app' ? "driver's phone" : s.source === 'MacroPoint' ? 'MacroPoint' : 'truck ELD' } : {}) },
       faults: rc.faults && rc.faults.length ? rc.faults : (s.dtcCodes || []).slice(0, 10).map((c) => ({ code: c.code, description: c.description || c.text || null })),
       reefer: rc.reefer ?? !!(item._reefer || (item._samsara && item._samsara.reefer)) };
   }
@@ -175,7 +176,9 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
     const all = await list();
     const old = all.find((x) => x.id === id);
     if (!old) return null;
-    let rc = { ...old, approved: { by, at: new Date(now()).toISOString() }, status: 'approved', log: [...(old.log || []), { at: new Date(now()).toISOString(), by, text: 'Approved' }] };
+    // the truck's latest GPS right before it goes out (triage can take a while)
+    const fresh = fromBoard({ ...old, location: { ...(old.location || {}) } }, await boardItem(old.trip));
+    let rc = { ...old, location: fresh.location, approved: { by, at: new Date(now()).toISOString() }, status: 'approved', log: [...(old.log || []), { at: new Date(now()).toISOString(), by, text: 'Approved' }] };
     if (prov.ready) {
       try { const r = await prov.create(packet(rc)); rc = { ...rc, status: 'sent', provider: { name: prov.name, ref: r.ref, status: r.status, eta: r.eta, sentAt: new Date(now()).toISOString() } }; } catch (e) { rc = { ...rc, provider: { name: prov.name, error: e.message } }; }
     }
