@@ -64,7 +64,7 @@ export function recipientFor(item, which = 1, phoneConsent = {}) {
   return { phone: info.phone, name: info.name, consent: phoneConsent[last10(info.phone)] || null, kind: 'company' };
 }
 
-export function initComms(app, { requireAuth, db, staffAsk = null, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, help = null, activity = null, env = process.env }) {
+export function initComms(app, { requireAuth, db, staffAsk = null, missingCases = null, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, help = null, activity = null, env = process.env }) {
   const enabled = !!(db && db.enabled);
   const logKey = (site) => `taTripComms:${site}`;
   const askKey = (site) => `taCommsAsks:${site}`;
@@ -259,6 +259,17 @@ export function initComms(app, { requireAuth, db, staffAsk = null, ringcentral =
             continue;
           }
         } catch (e) { console.warn('[comms] staff question:', e.message); }
+      }
+      // a customer texting about missing boxes → a case for the office; the reply only says a case is open
+      if (!kw && missingCases && !driverPhones.has(last10(r.from))) {
+        try {
+          const mc = await missingCases.fromText({ from: r.from, text: r.text }); // eslint-disable-line no-await-in-loop
+          if (mc) {
+            await ringcentral.sendSms('__shared', { to: r.from, text: mc.reply }); // eslint-disable-line no-await-in-loop
+            await thread(site, r.from, { type: 'text', kind: 'missing-boxes-case', to: r.from, text: mc.reply, by: 'AI Dispatcher (Jarvis)' }); // eslint-disable-line no-await-in-loop
+            continue;
+          }
+        } catch (e) { console.warn('[comms] missing boxes:', e.message); }
       }
       // a text asking for a call back / help → email / text the right people now
       if (!kw && help && help.raise && wantsContact(r.text)) {

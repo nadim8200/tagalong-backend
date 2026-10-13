@@ -114,7 +114,7 @@ test('a truck that LEFT with boxes not scanned (10 expected, 9 scanned) → one 
   const sent = []; const store = new Map();
   const db = { enabled: true, get: async (k, fb) => (store.has(k) ? store.get(k) : fb), set: async (k, v) => store.set(k, v), update: async (k, fn, fb) => { const v = fn(store.has(k) ? store.get(k) : fb); store.set(k, v); return v; } };
   const app = { get: () => {}, post: () => {} };
-  const a = initArtis(app, { requireAuth: () => {}, db, sendMail: async (m) => sent.push(m), env: { NODE_ENV: 'test', ARTIS_API_USER: 'u', ARTIS_API_PASSWORD: 'p' }, now: () => now });
+  const a = initArtis(app, { requireAuth: () => {}, db, sendMail: async (m) => sent.push(m), env: { NODE_ENV: 'test', ARTIS_API_USER: 'u', ARTIS_API_PASSWORD: 'p', ARTIS_LEFT_SHORT_EMAILS: 'on' }, now: () => now });
   a._byDate.set('2026-10-11', one);
   await a.overlay('fb', [{ ...left }]); await new Promise((r) => setTimeout(r, 10));
   await a.overlay('fb', [{ ...left }]); await new Promise((r) => setTimeout(r, 10));
@@ -184,4 +184,12 @@ test('earlier ship dates count only when they make the total EXACTLY the trip sh
   assert.equal(loadBoxes(load(null, bills), (d) => days[d] || null, at).boxes, 256);
   // nothing to match against → only the load's own ship date
   assert.equal(loadBoxes(load(null), (d) => days[d] || null, at).boxes, 240);
+});
+
+test('"truck left — boxes not received" emails are off unless ARTIS_LEFT_SHORT_EMAILS=on', async () => {
+  const { initArtis } = await import('../artis.js');
+  const sent = []; const db = { enabled: true, get: async (k, d) => d, set: async () => {}, update: async (k, fn, d) => fn(d) };
+  const a = initArtis({ get() {}, post() {} }, { requireAuth: () => {}, db, sendMail: async (m) => sent.push(m), env: { NODE_ENV: 'test', ARTIS_API_USER: 'u', ARTIS_API_PASSWORD: 'p' } });
+  assert.equal(await a.notifyLeftShort([{ trip: '624928', truck: '725', departedAt: new Date().toISOString(), missing: 20, boxes: 117, scanned: 97, stops: [] }]), 0);
+  assert.equal(sent.length, 0);
 });

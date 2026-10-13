@@ -266,7 +266,11 @@ export function initArtis(app, { requireAuth, requireAdmin = null, db = null, se
   }
   // a truck that left short → one email per trip (to the "Truck left with missing boxes" list — Employees → Alert emails)
   const leftTo = async () => (recipients ? recipients('artis_left_short') : ['ntellez@floridabeauty.us']);
+  // turned off 2026-10-13 (owner's call) — set ARTIS_LEFT_SHORT_EMAILS=on in Render to send them again.
+  // The trip card chip and Jarvis's answers about boxes not received stay on.
+  const leftShortOn = () => /^(1|on|true|yes)$/i.test(String(env.ARTIS_LEFT_SHORT_EMAILS || ''));
   async function notifyLeftShort(list) {
+    if (!leftShortOn()) return 0;
     if (!list.length || !db || !db.enabled || !sendMail) return 0;
     let fresh = [];
     await db.update('taArtisLeftShort', (cur) => {
