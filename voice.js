@@ -336,6 +336,16 @@ export function deliveredWhen(raws) {
   if (!m[4] || (m[4] === '00' && m[5] === '00')) return `${day} (time not recorded)`;
   return `${day}, ${d.toLocaleString('en-US', { timeZone: 'UTC', hour: 'numeric', minute: '2-digit' })} (local time)`;
 }
+// TruckMate: the truck ARRIVED at the consignee and the load has only that one receiver town → when. Pure.
+export function arrivedOnly(it) {
+  const t = tripOf(it);
+  if (!/^ARRCONS/i.test(String(t.status || ''))) return null;
+  const towns = new Set(billsOf(it).map((b) => cityOf(b.endZoneDescription).toUpperCase()).filter(Boolean));
+  if (towns.size !== 1) return null;
+  const h = ((it._times && it._times.statusHistory) || []).filter((x) => /^ARRCONS/i.test(String(x.status || '')) && x.at).pop();
+  return h ? Date.parse(h.at) : null;
+}
+const arrivedSaid = (ms, label) => ({ arrived_at_receiver: fmtLocal(ms, label), note: 'TruckMate shows the truck arrived at the receiver — most likely delivered; the delivery is not confirmed in the system yet. Offer to have dispatch confirm.' });
 // Every stop on the board whose customer matches the name — with boxes, cubes and ETA for that stop only.
 // near: also half-heard names (nearScore) — for staff, or to ask a customer "Is that …?". Pure.
 export function customerStops(items, name, etasByTrip = {}, { near = false, staff = false } = {}) {
@@ -362,7 +372,8 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
       // this customer's TruckMate bills at the stop (several customers can share a town, e.g. Chelsea Market)
       const named = bills.filter((b) => { const n = (b.consignee && (b.consignee.name || b.consignee.clientName)) || b.billToName || ''; return nameScore(n, st.customer) >= 0.75 || nameScore(st.customer, n) >= 0.75; });
       const billBoxes = named.length ? named.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bills.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'trip sheet', _sheetBoxes: st.pieces != null ? Number(st.pieces) : null, _billBoxes: billBoxes, _tbBoxes: builderBoxes(it, st.customer, st.city), _split: st.splitNote || null });
+      const arr = !delivered && !passed ? arrivedOnly(it) : null;
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, ...(arr ? arrivedSaid(arr, city) : {}), boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bills.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && !arr && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'trip sheet', _sheetBoxes: st.pieces != null ? Number(st.pieces) : null, _billBoxes: billBoxes, _tbBoxes: builderBoxes(it, st.customer, st.city), _split: st.splitNote || null });
     }
     // TruckMate bills (no trip sheet, or names the sheet didn't have) — one line per customer and town, bills added up
     const groups = new Map();
@@ -383,7 +394,8 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
       const counted = bs.filter((b) => b.pieces != null);
       const pieces = counted.length ? counted.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
       const cubed = bs.filter((b) => b.cubes != null);
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: pieces != null ? `${pieces} boxes` : null, cubes: cubed.length ? Math.round(cubed.reduce((n, b) => n + Number(b.cubes || 0), 0) * 100) / 100 : null, appointment: null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bs.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate', _sheetBoxes: null, _billBoxes: pieces, _tbBoxes: null, _split: null });
+      const arr = !delivered && !passed ? arrivedOnly(it) : null;
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, ...(arr ? arrivedSaid(arr, city) : {}), boxes: pieces != null ? `${pieces} boxes` : null, cubes: cubed.length ? Math.round(cubed.reduce((n, b) => n + Number(b.cubes || 0), 0) * 100) / 100 : null, appointment: null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bs.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && !arr && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate', _sheetBoxes: null, _billBoxes: pieces, _tbBoxes: null, _split: null });
     }
   }
   // ARTIS: how many of THIS customer's boxes were scanned at our terminal for the load
@@ -410,13 +422,15 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
   };
   return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 6).map(({ score, _sheetBoxes, _billBoxes, _tbBoxes, _split, ...x }) => ({
     ...x, ...boxFor({ ...x, _sheetBoxes, _billBoxes, _tbBoxes, _split }),
-    ...(!x.delivered && !x.truck_already_passed && !x.estimated_arrival ? { eta_note: 'No ETA available right now — do NOT estimate or guess a time. Say dispatch will call back with the ETA, and take a message.' } : {}),
+    ...(!x.delivered && !x.truck_already_passed && !x.arrived_at_receiver && !x.estimated_arrival ? { eta_note: 'No ETA available right now — do NOT estimate or guess a time. Say dispatch will call back with the ETA, and take a message.' } : {}),
     ...(etasByTrip[x.trip] && etasByTrip[x.trip].leavesAt && !x.delivered ? { truck_leaves_terminal_at: fmt(etasByTrip[x.trip].leavesAt) } : {}),
   }));
 }
 
-// Trips among the stops with no truck, no trailer and no outside carrier, not delivered — parked in TruckMate,
-// not on the road. Pure.
+// An outside-carrier load: an OC on the trip, an OC truck code ("OC978"), or no truck / trailer recorded. Pure.
+export const isOcLoad = (it) => !!(it && (it._oc || /^OC/i.test(String(tripOf(it).powerUnit || '').trim()) || (!String(tripOf(it).powerUnit || '').trim() && !String(tripOf(it).trailer || '').trim())));
+// Trips among the stops with no truck, no trailer and no outside carrier marked, not delivered — usually an
+// outside carrier whose truck isn't recorded in TruckMate (no tracking). Pure.
 export function parkedTrips(items, stops) {
   return [...new Set((stops || []).map((x) => x.trip))].filter((n) => {
     const it = (items || []).find((i) => tripNo(i) === n);
@@ -532,7 +546,7 @@ export function customerLean(v) {
   const one = (d) => (d.delivered
     ? { customer: d.customer, city: d.city, delivered: true, say_exactly: DELIVERED_SAY }
     : { customer: d.customer, city: d.city, delivered: false, boxes: d.boxes_loaded ? String(d.boxes_loaded).replace(/ loaded for them$/, '') : d.boxes,
-      estimated_arrival: d.estimated_arrival, eta_note: d.eta_note, truck_already_passed: d.truck_already_passed, note: d.note, truck_leaves_terminal_at: d.truck_leaves_terminal_at });
+      estimated_arrival: d.estimated_arrival, eta_note: d.eta_note, truck_already_passed: d.truck_already_passed, arrived_at_receiver: d.arrived_at_receiver, note: d.note, truck_leaves_terminal_at: d.truck_leaves_terminal_at });
   const ds = v.deliveries ? v.deliveries.map(one) : v.your_delivery ? [one(v.your_delivery)] : null;
   if (ds && ds.every((d) => d.delivered)) return { trip: v.trip, deliveries: ds };
   return { trip: v.trip, truck: v.truck, trailer: v.trailer, status: v.status, truck_now: v.truck_now, coming_from: v.coming_from, breakdown: v.breakdown,
@@ -775,16 +789,26 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
         // a TruckMate trip with no truck, no trailer and no outside carrier (e.g. a 1-box bill parked on a trip by the
         // office — 624811 / 624662 for Native Lombard) is not a load on the road: customers never hear it; staff get
         // it as one line after the real loads
-        const parked = new Set(parkedTrips(all, stops));
-        const trips = [...new Set(stops.map((x) => x.trip))].filter((n) => !parked.has(n) || stops.every((x) => parked.has(x.trip)));
+        // outside-carrier loads (an OC truck, or no truck recorded in TruckMate — 624811 / 624662 for Native Lombard)
+        // aren't reported until texting is live and OCs get the tracking link: customers hear only the loads we
+        // track; Frank Ducassi follows up on the OC ones (he gets the message); staff hear them as one line
+        const oc = new Set(stops.map((x) => x.trip).filter((n) => isOcLoad(all.find((i) => tripNo(i) === n))));
+        const allTrips = [...new Set(stops.map((x) => x.trip))];
+        const trips = allTrips.filter((n) => !oc.has(n));
+        const ocTrips = allTrips.filter((n) => oc.has(n));
         const full = trips.map((n) => customerView(all.find((it) => tripNo(it) === n), etas[n], stops.filter((x) => x.trip === n)));
         const loads = staffPhone ? full : full.map(customerLean);
-        const parkedNote = trips.every((n) => !parked.has(n)) && parked.size ? [...parked].map((n) => { const bx = stops.filter((x) => x.trip === n).map((x) => x.boxes).filter(Boolean).join(', '); return `${n}${bx ? ` (${bx})` : ''}`; }) : [];
+        if (ocTrips.length && !staffPhone && help && help.raise) {
+          help.raise({ source: 'call', ref: `${call.call_id || Date.now()}:oc-update`, role: 'customer', from: { name: biz, phone: callerPhone(call) || null }, trip: ocTrips[0],
+            need: `${biz} asked for an update on their load${ocTrips.length > 1 ? 's' : ''} with an outside carrier (trip ${ocTrips.join(', ')}). No tracking on OC loads yet — please follow up with them.`, forPerson: 'Frank Ducassi' }).catch(() => {});
+        }
+        const OC_CUSTOMER = `Also say: "For your shipment${ocTrips.length > 1 ? 's' : ''} with our partner carrier, I'll have Frank Ducassi follow up with you." (The message is already sent to Frank.) Never give any detail, truck or ETA for those.`;
+        if (!staffPhone && !trips.length && ocTrips.length) return reply({ found: true, matched_by: 'customer name', speaking_with: biz, partner_carrier_only: true, say: `Their shipment${ocTrips.length > 1 ? 's are' : ' is'} with our partner carrier — no live tracking on those yet. Say: "Your shipment is with our partner carrier. I'll have Frank Ducassi follow up with you." (The message is already sent to Frank.) Do not give any ETA, truck or location. ${CLOSING_RULE}` });
         if (staffPhone) {
           const heard = stops.every((x) => nameScore(name, x.customer) < 0.75 && nameScore(name, `${x.customer} ${x.city || ''}`) < 0.75);
-          return reply({ found: true, matched_by: heard ? 'closest name on the board' : 'customer name', caller_is: STAFF_IS, loads, ...(parkedNote.length ? { not_on_a_truck: parkedNote } : {}), say: `${heard ? `Closest match to "${name}": say the business name you found (e.g. "I have ${spokenName(stops[0].customer)}") and give its ETA — if it's not the one, they'll tell you. ` : ''}${STAFF_RULE}${parkedNote.length ? ` After the loads, add ONE short line: "There ${parkedNote.length === 1 ? 'is also 1 TruckMate trip' : `are also ${parkedNote.length} TruckMate trips`} with no truck assigned — ${parkedNote.join('; ')} — check with dispatch." Do not count those as loads.` : ''}` });
+          return reply({ found: true, matched_by: heard ? 'closest name on the board' : 'customer name', caller_is: STAFF_IS, loads, say: `${heard ? `Closest match to "${name}": say the business name you found (e.g. "I have ${spokenName(stops[0].customer)}") and give its ETA — if it's not the one, they'll tell you. ` : ''}${STAFF_RULE}${ocTrips.length ? ` After the loads, add ONE short line: "Plus ${ocTrips.length} outside-carrier load${ocTrips.length > 1 ? 's' : ''} (trip ${ocTrips.join(', ')}) — no tracking yet; Frank Ducassi has ${ocTrips.length > 1 ? 'those' : 'that one'}." Don't count them as loads above.` : ''}` });
         }
-        return reply({ found: true, matched_by: known && !said ? 'caller phone (called before as this business)' : 'customer name', speaking_with: biz, ...(known && !said ? { confirm: `Confirm first: "Is this ${biz}?"` } : {}), loads, say: `${trips.length > 1 ? 'They have deliveries on more than one truck — ask which city or trailer number before giving an ETA. ' : ''}${CUSTOMER_RULE}` });
+        return reply({ found: true, matched_by: known && !said ? 'caller phone (called before as this business)' : 'customer name', speaking_with: biz, ...(known && !said ? { confirm: `Confirm first: "Is this ${biz}?"` } : {}), loads, say: `${trips.length > 1 ? 'They have deliveries on more than one truck — ask which city or trailer number before giving an ETA. ' : ''}${CUSTOMER_RULE}${ocTrips.length ? ` ${OC_CUSTOMER}` : ''}` });
       }
       const hit = findLoad(await items(), { trip: a.trip_number || meta.trip, bill: a.bill_number || a.broker_load_number, loadNumber: a.broker_load_number, truck: a.truck_number, trailer: a.trailer_number, phone: callerPhone(call) });
       if (!hit) return reply({ found: false, say: 'No active load matched. Ask the caller for the trailer, trip or bill number, or take a message.' });
@@ -810,6 +834,12 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
         if (!ok.ok) return reply({ found: false, private: true, say: `For privacy, updates on ${spokenName(mine[0].customer)} deliveries only go to the phone numbers they authorized. Do not share any details of the load. Offer to take a message so customer service calls them back on an authorized number.` });
       }
       if (mine.length && said) await remember(callerPhone(call), mine[0].customer);
+      // an outside-carrier load: no tracking yet → Frank Ducassi follows up (he gets the message)
+      if (isOcLoad(hit.item)) {
+        const who = mine.length ? spokenName(mine[0].customer) : (name || 'A customer');
+        if (help && help.raise) help.raise({ source: 'call', ref: `${call.call_id || Date.now()}:oc-update`, role: 'customer', from: { name: who, phone: callerPhone(call) || null }, trip, need: `${who} asked for an update on trip ${trip} (outside carrier). No tracking on OC loads yet — please follow up with them.`, forPerson: 'Frank Ducassi' }).catch(() => {});
+        return reply({ found: true, matched_by: hit.by, partner_carrier_only: true, say: `This load is with our partner carrier — no live tracking on it yet. Say: "That shipment is with our partner carrier. I'll have Frank Ducassi follow up with you." (The message is already sent to Frank.) Do not give any ETA, truck or location. ${CLOSING_RULE}` });
+      }
       return reply({ found: true, matched_by: mine.length ? `${hit.by} + customer name` : hit.by, ...(mine.length ? { speaking_with: spokenName(mine[0].customer) } : {}), ...customerLean(customerView(hit.item, eta, mine)), say: CUSTOMER_RULE });
     } catch (e) { reply({ found: false, say: `Lookup failed (${e.message}). Take a message instead.` }); }
   });

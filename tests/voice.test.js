@@ -30,7 +30,7 @@ function setup(extraEnv = {}, opts = {}) {
       : url.includes('create-phone-call') ? { call_id: 'call_9', call_status: 'registered' } : {};
     return { ok: true, status: 201, json: async () => body };
   };
-  initVoice(app, { ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: board }), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
+  initVoice(app, { ...(opts.help ? { help: opts.help } : {}), ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: board }), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
   const hit = async (route, body, { sign = true, user = { name: 'Ana' } } = {}) => {
     const raw = JSON.stringify(body);
     const sig = sign ? await Retell.sign(raw, KEY) : 'v=1,d=bad';
@@ -267,7 +267,7 @@ test('customer names the way people say them, fed to the transcriber', () => {
 });
 
 test('a caller who found their stop before is recognized by phone next time', async () => {
-  const items = [{ trip: { tripNumber: '624481', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }], _manifest: { stops: [{ stopNumber: 9, action: 'DELIVER', customer: 'BOKHARY FARMS LLC *', city: 'WALTHAM', state: 'MA' }] } }];
+  const items = [{ trip: { tripNumber: '624481', status: 'DEPSHIP', powerUnit: '2618', trailer: '2029' }, freightBills: [{ billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }], _manifest: { stops: [{ stopNumber: 9, action: 'DELIVER', customer: 'BOKHARY FARMS LLC *', city: 'WALTHAM', state: 'MA' }] } }];
   const routes = {}; const m = new Map();
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
@@ -373,7 +373,7 @@ test('a caller leaves a message with Jarvis → a callback request goes to the r
 });
 
 test('authorized numbers only: an unknown phone asking about a customer gets no details — offered a callback', async () => {
-  const items = [{ trip: { tripNumber: '624481', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }], _manifest: { stops: [{ stopNumber: 9, action: 'DELIVER', customer: 'BOKHARY FARMS LLC *', city: 'WALTHAM', state: 'MA' }] } }];
+  const items = [{ trip: { tripNumber: '624481', status: 'DEPSHIP', powerUnit: '2618', trailer: '2029' }, freightBills: [{ billNumber: 'M2', billToName: 'BOKHARY FARMS LLC *', endZoneDescription: 'WALTHAM, MA, 02453' }], _manifest: { stops: [{ stopNumber: 9, action: 'DELIVER', customer: 'BOKHARY FARMS LLC *', city: 'WALTHAM', state: 'MA' }] } }];
   const routes = {};
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: () => {} };
   const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
@@ -707,11 +707,45 @@ test('customers hear location, truck, trailer, trip, total boxes and ETA — del
   assert.equal(DELIVERED_SAY, 'Your shipment has been delivered.');
 });
 
-// Native Lombard (Oct 13): Jarvis said "five loads" — 624811 and 624662 are 1-box bills on trips with no truck / trailer
-test('trips with no truck, no trailer and no outside carrier are not loads on the road', async () => {
-  const { parkedTrips, customerStops } = await import('../voice.js');
+// Native Lombard (Oct 13): 624811 and 624662 have no truck in TruckMate — they're outside carriers (not recorded);
+// 624662 "arrived consignee" Monday and was delivered, but never marked delivered
+test('no truck in TruckMate = likely an outside carrier (still a load); arrived at the only receiver = most likely delivered', async () => {
+  const { parkedTrips, customerStops, arrivedOnly, customerLean } = await import('../voice.js');
   const mk = (trip, unit, trailer, extra = {}) => ({ trip: { tripNumber: trip, powerUnit: unit, trailer, status: 'LOADEDTOGO' }, freightBills: [{ billToName: 'NATIVE CHICAGO - LOMBARD', endZoneDescription: 'LOMBARD, IL, 60148', pieces: 1 }], ...extra });
-  const items = [mk('624901', '2620', '7327'), mk('624815', '', '', { _oc: { truck: 'OC978' } }), mk('624811', '', ''), mk('624662', '', '')];
+  const arrived = mk('624662', '', '', { trip: { tripNumber: '624662', powerUnit: '', trailer: '', status: 'ARRCONS' }, _times: { statusHistory: [{ status: 'ARRCONS', at: '2026-10-12T12:10:40Z' }] } });
+  const items = [mk('624901', '2620', '7327'), mk('624815', '', '', { _oc: { truck: 'OC978' } }), mk('624811', '', ''), arrived];
   const stops = customerStops(items, 'Native Lombard', {}, { staff: true });
-  assert.deepEqual(parkedTrips(items, stops).sort(), ['624662', '624811']);
+  assert.equal(new Set(stops.map((x) => x.trip)).size, 4);                       // all real loads
+  assert.deepEqual(parkedTrips(items, stops).sort(), ['624662', '624811']);       // no truck recorded → said to staff
+  assert.equal(arrivedOnly(arrived), Date.parse('2026-10-12T12:10:40Z'));
+  const s662 = stops.find((x) => x.trip === '624662');
+  assert.match(s662.arrived_at_receiver, /Mon, Oct 12/); assert.match(s662.note, /most likely delivered/);
+  assert.equal(s662.eta_note, undefined); assert.equal(s662.estimated_arrival, null);
+  const lean = customerLean({ trip: '624662', deliveries: [s662] });
+  assert.match(lean.deliveries[0].arrived_at_receiver, /Mon, Oct 12/);
+  assert.equal(arrivedOnly(mk('1', '', '', { trip: { tripNumber: '1', status: 'ARRCONS' }, freightBills: [{ endZoneDescription: 'A, IL' }, { endZoneDescription: 'B, IL' }] })), null);   // several towns: not this rule
+});
+
+// Oct 13: until texting is live (OC tracking link), customers hear only loads we track; Frank Ducassi follows up on OC loads
+test('outside-carrier loads: customers hear only tracked loads and Frank gets the message; staff hear them as one line', async () => {
+  const native = (trip, unit, extra = {}) => ({ trip: { tripNumber: trip, status: 'DEPSHIP', powerUnit: unit, trailer: unit ? '7327' : '' }, freightBills: [{ billNumber: `B${trip}`, billToName: 'NATIVE CHICAGO - LOMBARD', endZoneDescription: 'LOMBARD, IL, 60148', pieces: 10 }], ...extra });
+  const loads = [native('624901', '2620'), native('624815', 'OC978'), native('624811', '')];
+  board.push(...loads);
+  try {
+    const raised = [];
+    const help = { raise: async (r) => { raised.push(r); return r; } };
+    const directory = { load: async () => ({ people: [{ name: 'Ronen Koubi', phone: '305-555-0103' }] }) };
+    const v = setup({}, { help, directory });
+    const cust = await v.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Native Lombard' }, call: { call_id: 'n1', direction: 'inbound', from_number: '+16305550188' } });
+    assert.deepEqual(cust.out.loads.map((l) => l.trip), ['6 2 4 9 0 1']);
+    assert.match(cust.out.say, /I'll have Frank Ducassi follow up with you/);
+    assert.equal(raised.length, 1); assert.equal(raised[0].forPerson, 'Frank Ducassi'); assert.match(raised[0].need, /trip 624815, 624811/);
+    // by the OC trip's number → nothing about it, Frank follows up
+    const byNo = await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '624815' }, call: { call_id: 'n2', direction: 'inbound', from_number: '+16305550188' } });
+    assert.equal(byNo.out.partner_carrier_only, true); assert.equal(byNo.out.truck, undefined);
+    // staff: the tracked load, then one line for the OC ones
+    const staff = await v.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Native Lombard' }, call: { call_id: 'n3', direction: 'inbound', from_number: '+13055550103' } });
+    assert.deepEqual(staff.out.loads.map((l) => l.trip), ['6 2 4 9 0 1']);
+    assert.match(staff.out.say, /Plus 2 outside-carrier loads \(trip 624815, 624811\) — no tracking yet; Frank Ducassi has those/);
+  } finally { board.splice(board.length - 3, 3); }
 });
