@@ -131,6 +131,19 @@ export function loadBoxes(it, summaryFor, now = Date.now()) {
     for (const { d, c } of pick) acc = acc ? addDay(acc, c, d) : { ...c, shipDates: [d] };
     byKey.set(key, acc);
   }
+  // a customer split between trailers (ARTIS Truck Builder, truckbuilder.js): the EDI count covers ALL their
+  // trailers — this trip gets this truck's share; boxes never received are the customer's, on either trailer
+  const tbStops = (it._tb && it._tb.stops) || [];
+  for (const [k, c] of byKey) {
+    // this customer's stops on this truck (one per city); split ones only
+    const mineTb = tbStops.filter((x) => (x.consigneeId && c.consigneeId && id5(x.consigneeId) === id5(c.consigneeId)) || sameCo(x.consignee, c.consignee));
+    const b = mineTb.length === 1 ? mineTb[0] : null;   // several cities under one customer → EDI can't be told apart
+    if (!b || !b.split) continue;
+    const short = Math.max(0, c.boxes - c.scanned);
+    const others = (b.splitWith || []).map((x) => `${x.boxes} on ${x.trip ? `trip ${x.trip}` : 'a truck not assigned yet'}`).join(', ');
+    byKey.set(k, { ...c, ediBoxes: c.boxes, ediScanned: c.scanned, boxes: b.boxes, scanned: Math.max(0, b.boxes - short), missing: Math.min(short, b.boxes),
+      split: `split between trailers: ${b.boxes} on this truck${others ? `, ${others}` : ''}${short ? ` — ${short} not received for this customer could be on either trailer` : ''}` });
+  }
   const stops = [...byKey.values()].sort((a, b) => b.missing - a.missing || String(a.consignee).localeCompare(String(b.consignee)));
   if (!stops.length) return null;
   const tot = stops.reduce((a, c) => ({ boxes: a.boxes + c.boxes, scanned: a.scanned + c.scanned }), { boxes: 0, scanned: 0 });
@@ -142,6 +155,7 @@ export function loadBoxes(it, summaryFor, now = Date.now()) {
   const same = sameCo;
   const sheet = ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && x.pieces != null);
   const sheetDiffs = stops.map((c) => {
+    if (c.split) return null;   // split: the Truck Builder check compares each truck's share
     const rows = sheet.filter((x) => same(x.customer, c.consignee));
     if (!rows.length) return null;
     const n = rows.reduce((a, x) => a + (Number(x.pieces) || 0), 0);
@@ -150,10 +164,10 @@ export function loadBoxes(it, summaryFor, now = Date.now()) {
   return {
     sheetDiffs,
     shipDate: date, boxes: tot.boxes, scanned: tot.scanned, missing,
-    stops: stops.map((c) => ({ consigneeId: c.consigneeId, consignee: c.consignee, boxes: c.boxes, scanned: c.scanned, missing: c.missing, cubes: c.cubes, ...(c.shipDates && c.shipDates.length > 1 ? { shipDates: c.shipDates } : {}), shippers: (c.shippers || []).filter((x) => x.missing > 0) })),
+    stops: stops.map((c) => ({ consigneeId: c.consigneeId, consignee: c.consignee, boxes: c.boxes, scanned: c.scanned, missing: c.missing, cubes: c.cubes, ...(c.shipDates && c.shipDates.length > 1 ? { shipDates: c.shipDates } : {}), ...(c.split ? { split: c.split } : {}), shippers: (c.shippers || []).filter((x) => x.missing > 0) })),
     // before the truck leaves: boxes for a customer on it still not scanned
     // "not scanned" in ARTIS = never received at our terminal from the shipper (not left behind)
-    alert: notLeft && missing > 0 ? `${missing} box${missing === 1 ? '' : 'es'} not received from the shipper yet — ${short.map((c) => `${c.consignee} ${c.scanned}/${c.boxes}${(c.shippers || []).filter((x) => x.missing > 0).length ? ` (${c.shippers.filter((x) => x.missing > 0).map((x) => `${x.shipper} ${x.missing}`).join(', ')})` : ''}`).join(', ')}` : null,
+    alert: notLeft && missing > 0 ? `${missing} box${missing === 1 ? '' : 'es'} not received from the shipper yet — ${short.map((c) => `${c.consignee} ${c.scanned}/${c.boxes}${c.split ? ' (split — could be on the other trailer)' : ''}${(c.shippers || []).filter((x) => x.missing > 0).length ? ` (${c.shippers.filter((x) => x.missing > 0).map((x) => `${x.shipper} ${x.missing}`).join(', ')})` : ''}`).join(', ')}` : null,
   };
 }
 

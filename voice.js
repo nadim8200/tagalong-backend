@@ -349,7 +349,7 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
       // this customer's TruckMate bills at the stop (several customers can share a town, e.g. Chelsea Market)
       const named = bills.filter((b) => { const n = (b.consignee && (b.consignee.name || b.consignee.clientName)) || b.billToName || ''; return nameScore(n, st.customer) >= 0.75 || nameScore(st.customer, n) >= 0.75; });
       const billBoxes = named.length ? named.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bills.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'trip sheet', _sheetBoxes: st.pieces != null ? Number(st.pieces) : null, _billBoxes: billBoxes, _tbBoxes: builderBoxes(it, st.customer, st.city) });
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bills.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'trip sheet', _sheetBoxes: st.pieces != null ? Number(st.pieces) : null, _billBoxes: billBoxes, _tbBoxes: builderBoxes(it, st.customer, st.city), _split: st.splitNote || null });
     }
     // TruckMate bills (no trip sheet, or names the sheet didn't have) — one line per customer and town, bills added up
     const groups = new Map();
@@ -370,7 +370,7 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
       const counted = bs.filter((b) => b.pieces != null);
       const pieces = counted.length ? counted.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
       const cubed = bs.filter((b) => b.cubes != null);
-      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: pieces != null ? `${pieces} boxes` : null, cubes: cubed.length ? Math.round(cubed.reduce((n, b) => n + Number(b.cubes || 0), 0) * 100) / 100 : null, appointment: null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bs.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate', _sheetBoxes: null, _billBoxes: pieces, _tbBoxes: null });
+      out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, boxes: pieces != null ? `${pieces} boxes` : null, cubes: cubed.length ? Math.round(cubed.reduce((n, b) => n + Number(b.cubes || 0), 0) * 100) / 100 : null, appointment: null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bs.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate', _sheetBoxes: null, _billBoxes: pieces, _tbBoxes: null, _split: null });
     }
   }
   // ARTIS: how many of THIS customer's boxes were scanned at our terminal for the load
@@ -380,7 +380,7 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
   const boxFor = (x) => {
     const it = items.find((i) => tripNo(i) === x.trip);
     const st = it && it._artis && (it._artis.stops || []).find((c) => nameScore(x.customer || '', c.consignee || '') >= 0.75 || nameScore(c.consignee || '', x.customer || '') >= 0.75);
-    if (!st && !x._billBoxes && x._tbBoxes == null) return {};   // nothing better than the sheet's own words ("139 BOXES", "1 LOAD")
+    if (!st && !x._billBoxes && x._tbBoxes == null) return staff && x._split ? { split_between_trailers: x._split } : {};   // nothing better than the sheet's own words ("139 BOXES", "1 LOAD")
     // ARTIS's Truck Builder (the digital trip sheet) first; else the bills, or ARTIS's EDI when it has more
     const total = x._tbBoxes || Math.max(x._billBoxes || 0, (st && st.boxes) || 0) || x._sheetBoxes;
     if (!total) return {};
@@ -391,11 +391,12 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
       ...(staff ? {
         ...(x._tbBoxes == null && x._sheetBoxes != null && x._sheetBoxes !== total ? { boxes_on_trip_sheet: plural(x._sheetBoxes) } : {}),
         ...(st ? { boxes_scanned_in_artis: `${st.scanned} of ${st.boxes}` } : {}),
-        ...(missing > 0 ? { boxes_not_received: `${plural(missing)} not received from the shipper (ARTIS)` } : {}),
+        ...(missing > 0 ? { boxes_not_received: `${plural(missing)} not received from the shipper (ARTIS)${st && st.split ? ' — split order, could be on the other trailer' : ''}` } : {}),
+        ...(x._split ? { split_between_trailers: x._split } : {}),
       } : {}) };
   };
-  return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 6).map(({ score, _sheetBoxes, _billBoxes, _tbBoxes, ...x }) => ({
-    ...x, ...boxFor({ ...x, _sheetBoxes, _billBoxes, _tbBoxes }),
+  return out.sort((a, b) => (b.score - a.score) || (a.delivered - b.delivered)).slice(0, 6).map(({ score, _sheetBoxes, _billBoxes, _tbBoxes, _split, ...x }) => ({
+    ...x, ...boxFor({ ...x, _sheetBoxes, _billBoxes, _tbBoxes, _split }),
     ...(!x.delivered && !x.truck_already_passed && !x.estimated_arrival ? { eta_note: 'No ETA available right now — do NOT estimate or guess a time. Say dispatch will call back with the ETA, and take a message.' } : {}),
     ...(etasByTrip[x.trip] && etasByTrip[x.trip].leavesAt && !x.delivered ? { truck_leaves_terminal_at: fmt(etasByTrip[x.trip].leavesAt) } : {}),
   }));
@@ -429,7 +430,7 @@ export function spokenName(raw) {
 // words every call uses — so speech-to-text hears "load", not "loan"
 // Florida Beauty's own staff (a phone saved on an employee in Employees) can get any load's ETA.
 const STAFF_IS = 'Florida Beauty staff (phone on the Employees list)';
-const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — the complete count from the TruckMate bills), and only if present: the different trip sheet count (boxes_on_trip_sheet) and boxes not received (boxes_not_received).';
+const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — the complete count from the TruckMate bills), and only if present: the different trip sheet count (boxes_on_trip_sheet) and boxes not received (boxes_not_received). If split_between_trailers is there, say the order is split and how many boxes are on each truck.';
 export const BASE_WORDS = ['Florida Beauty Flora', 'Jarvis', 'ETA', 'load', 'trip number', 'bill number', 'trailer', 'POD', 'BOL', 'rate confirmation'];
 export function customerKeywords(items, max = 100) {
   const n = new Map();

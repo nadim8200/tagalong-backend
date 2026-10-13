@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeTrucks, compareSheet, checkEmail, dueNow, hubOfSheet, hubClock, builderBoxesFor, HUBS, initTruckBuilder } from '../truckbuilder.js';
+import { normalizeTrucks, compareSheet, checkEmail, dueNow, hubOfSheet, hubClock, builderBoxesFor, mergeStops, nightOf, combineStops, markSplits, splitNote, resolveFlaggedSplits, HUBS, initTruckBuilder } from '../truckbuilder.js';
 
 // ARTIS Truck Builder, Miami 10/11/2026, trip 624773 (as read live — names / counts only)
 const B = [[1, '03373', "CAGGIANO'S MEDFORD  *", 'MEDFORD', 288], [2, '06000', 'KELLEY WHOLESALE FLORIST', 'CHELSEA', 18], [3, '01732', 'RICCARDI WHOLESALE', 'CHELSEA', 38],
@@ -68,7 +68,14 @@ test('when to read a hub: after that night\'s trip sheets go quiet for 20 min, e
   assert.equal(due.night, '2026-10-11'); assert.deepEqual(due.dates, ['2026-10-11']);
   assert.equal(dueNow(miami, { state: { hubs: { 3: { night: '2026-10-11' } } }, sheets: [s], now: at('2026-10-12T01:00:00Z') }), null);   // done tonight
   assert.equal(dueNow(miami, { sheets: [], now: at('2026-10-11T20:00:00Z') }), null);             // 4 PM, nothing yet
-  assert.equal(dueNow(miami, { sheets: [], now: at('2026-10-12T03:35:00Z') }).reason, 'end of the night');   // 11:35 PM
+  assert.equal(dueNow(miami, { sheets: [], now: at('2026-10-12T03:35:00Z') }), null);             // 11:35 PM — still waiting for sheets
+  assert.equal(dueNow(miami, { sheets: [], now: at('2026-10-12T09:55:00Z') }), null);             // 5:55 AM
+  const sixAm = dueNow(miami, { sheets: [], now: at('2026-10-12T10:00:00Z') });                   // 6 AM Miami, no sheets seen
+  assert.equal(sixAm.reason, '6 AM — no trip sheets seen'); assert.equal(sixAm.night, '2026-10-11');
+  // California: 6 AM Pacific (9 AM Miami), not 6 AM Miami
+  assert.equal(dueNow(HUBS[1], { sheets: [], now: at('2026-10-12T10:00:00Z') }), null);
+  assert.equal(dueNow(HUBS[1], { sheets: [], now: at('2026-10-12T13:00:00Z') }).night, '2026-10-11');
+  assert.equal(nightOf('America/New_York', at('2026-10-12T04:30:00Z')), '2026-10-11');             // 12:30 AM is still that night
   assert.equal(dueNow(HUBS[1], { sheets: [s], now: at('2026-10-12T00:31:00Z') }), null);         // a Miami sheet doesn't start Ventura
   assert.equal(hubClock('America/Los_Angeles', at('2026-10-12T06:00:00Z')).date, '2026-10-11');
 });
@@ -104,4 +111,96 @@ test('reads ARTIS read-only with one sign-in; a bad login is tried once a night 
   assert.equal(calls.filter((c) => c[0] === 'POST').length, 1);
   assert.equal(mails.length, 1); assert.match(mails[0].subject, /couldn't read ARTIS Truck Builder \(Miami\)/);
   assert.match(mails[0].html, /ARTIS_WEB_PASSWORD/);
+});
+
+test('624773 stops from ARTIS (order, boxes, cubes, totals) with the trip sheet\'s instructions kept', () => {
+  const [truck] = normalizeTrucks(routes, { hub: 'Miami', date: '2026-10-11' });
+  const withNotes = { ...sheet, pickupPlan: 'DRIVER WILL LEAVE AT 18:00', handwrittenNotes: ['TRANSFER PILOT FORT PIERCE'],
+    stops: sheet.stops.map((x) => (x.customer === 'SPRINGFIELD FLORIST' ? { ...x, callAhead: [{ contact: 'ISRAEL', phone: '4138837695' }], instructions: ['DONT WAIT, OFFLOAD IN THE COOLER'], apptDate: '2026-10-13', apptTime: '08:00' } : x)) };
+  const m = mergeStops(withNotes, truck);
+  const del = m.stops.filter((x) => x.action === 'DELIVER');
+  // delivery order = ARTIS loading order reversed: Lyons first … Medford last
+  assert.equal(del[0].customer, "JOHNSON'S WHOLESALE FLORIST LLC"); assert.equal(del[0].stopNumber, 2);
+  assert.equal(del.find((x) => x.customer === "CAGGIANO'S MEDFORD  *").stopNumber, 17);
+  // ARTIS counts; the scan's misread kept for reference
+  const midga = del.find((x) => /MID-GA/.test(x.customer));
+  assert.equal(midga.pieces, 97); assert.equal(midga.sheetPieces, 98); assert.equal(midga.from, 'ARTIS + trip sheet');
+  // the sheet's instructions stay on the stop
+  const spf = del.find((x) => x.customer === 'SPRINGFIELD FLORIST');
+  assert.deepEqual(spf.callAhead, [{ contact: 'ISRAEL', phone: '4138837695' }]); assert.equal(spf.apptTime, '08:00'); assert.equal(spf.pieces, 80);
+  // the stop ARTIS no longer has stays, marked
+  assert.equal(del.find((x) => /BLOSSOMS/.test(x.customer)).notInArtis, true);
+  // truck totals from ARTIS; trip-wide notes from the sheet
+  assert.equal(m.stops[0].action, 'LOAD'); assert.equal(m.stops[0].pieces, 1778); assert.equal(m.stops[0].sheetPieces, 1863);
+  assert.equal(m.artis.boxes, 1778); assert.equal(m.pickupPlan, 'DRIVER WILL LEAVE AT 18:00'); assert.deepEqual(m.handwrittenNotes, ['TRANSFER PILOT FORT PIERCE']);
+  // no trip sheet yet → ARTIS alone gives the trip its stops
+  const only = mergeStops(null, truck);
+  assert.equal(only.artisOnly, true); assert.equal(only.stops.length, 17); assert.equal(only.stops[1].customer, "JOHNSON'S WHOLESALE FLORIST LLC");
+});
+
+// real 10/09–10/10 examples: Produce Junction 811 boxes + 2 pallets on one truck; Pyramid split 486 boxes / 4 pallets
+// between trips 624715 and 624720 ("PYRAMID - SPLIT"); Ventura Bay State 52 on 624743 + 140 on a truck not assigned yet
+test('one stop per customer per truck (box + pallet lines); split customers carry the other trailers\' share; comments kept', () => {
+  const pj = combineStops([{ stopOrder: 2, consigneeId: '00084', consigneeName: 'PRODUCE JUNCTION >>>>', consigneeCity: 'SWEDESBORO', boxes: 2, cubes: 200, packType: 'PALLET' },
+    { stopOrder: 3, consigneeId: '00084', consigneeName: 'PRODUCE JUNCTION >>>>', consigneeCity: 'SWEDESBORO', boxes: 811, cubes: 1197.44, packType: 'BOX' },
+    { stopOrder: 1, consigneeId: '50381', consigneeName: 'THE FLOWER BUCKET', consigneeCity: 'FAYETTEVILLE', boxes: 26, cubes: 38.94, packType: 'BOX' }]);
+  assert.equal(pj.length, 2);
+  assert.deepEqual([pj[1].consignee, pj[1].boxes, pj[1].pallets, pj[1].cubes, pj[1].order], ['PRODUCE JUNCTION >>>>', 811, 2, 1397.44, 2]);
+  const truck = (trip, no, stops, comments = '') => ({ routeTrucks: [{ truckId: no, trailerId: 'T' + no, truckInfo: trip ? { tripNumber: trip, comments } : { comments }, truckRouteStops: stops }] });
+  const routes = [truck(624715, '725', [{ stopOrder: 1, consigneeId: '03017', consigneeName: 'PYRAMID', consigneeCity: 'X', boxes: 486, packType: 'BOX' }], 'PYRAMID - SPLIT'),
+    truck(624720, '2606', [{ stopOrder: 1, consigneeId: '03017', consigneeName: 'PYRAMID', consigneeCity: 'X', boxes: 4, packType: 'PALLET' }], 'PYRAMID - SPLIT'),
+    truck(624743, '736', [{ stopOrder: 1, consigneeId: '02273', consigneeName: 'BAY STATE FLORAL- WILMINGTON', consigneeCity: 'WILMINGTON', boxes: 52, packType: 'BOX', splitStop: true }]),
+    truck(null, '', [{ stopOrder: 1, consigneeId: '02273', consigneeName: 'BAY STATE FLORAL- WILMINGTON', consigneeCity: 'WILMINGTON', boxes: 140, packType: 'BOX', splitStop: true }])];
+  const withTrip = normalizeTrucks(routes, { hub: 'Miami', date: '2026-10-09' });
+  assert.equal(withTrip.length, 3);
+  markSplits(withTrip, [...withTrip, ...normalizeTrucks(routes, { all: true }).filter((t) => !t.trip)]);
+  const [p715, p720, bay] = withTrip;
+  assert.equal(p715.comments, 'PYRAMID - SPLIT');
+  assert.equal(splitNote(p715.stops[0]), 'Split between trailers: 486 boxes on this truck; 4 pallets on trip 624720 (truck 2606, trailer T2606).');
+  assert.equal(splitNote(p720.stops[0]), 'Split between trailers: 4 pallets on this truck; 486 boxes on trip 624715 (truck 725, trailer T725).');
+  assert.equal(splitNote(bay.stops[0]), 'Split between trailers: 52 boxes on this truck; 140 boxes on a truck not assigned yet.');
+  // the trip carries the split and the comment; the nightly email shows both
+  const m = mergeStops(null, p715);
+  assert.equal(m.stops[1].split, true); assert.equal(m.artis.comments, 'PYRAMID - SPLIT');
+  const mail = checkEmail(HUBS[0], '2026-10-09', withTrip.map((t) => ({ ...t, check: null })));
+  assert.match(mail.html, /ARTIS comment: <i>PYRAMID - SPLIT<\/i>/);
+  assert.match(mail.html, /BAY STATE FLORAL- WILMINGTON<\/b> \(WILMINGTON\): Split between trailers: 52 boxes on this truck; 140 boxes on a truck not assigned yet/);
+});
+
+test('ARTIS boxes for a split customer: this truck\'s share, missing flagged as either trailer', async () => {
+  const { loadBoxes } = await import('../artis.js');
+  const it = { trip: { tripNumber: '624743', status: 'LOADEDTOGO' }, _times: { statusHistory: [{ status: 'LOADINGMAN', at: '2026-10-09T18:00:00Z' }] },
+    freightBills: [{ billToName: 'BAY STATE FLORAL- WILMINGTON', consignee: { clientId: '02273' } }],
+    _tb: { stops: [{ consigneeId: '02273', consignee: 'BAY STATE FLORAL- WILMINGTON', boxes: 52, split: true, splitWith: [{ trip: null, boxes: 140 }] }] } };
+  // ARTIS received 186 of the customer's 192 (both trailers) → this truck: 52 boxes, 6 not received on either trailer
+  const b = loadBoxes(it, (d) => (d === '2026-10-09' ? [{ consigneeId: '02273', consignee: 'BAY STATE FLORAL- WILMINGTON', boxes: 192, scanned: 186, missing: 6, shippers: [] }] : null), Date.parse('2026-10-09T22:00:00Z'));
+  assert.equal(b.stops[0].boxes, 52); assert.equal(b.stops[0].missing, 6);
+  assert.match(b.stops[0].split, /52 on this truck, 140 on a truck not assigned yet — 6 not received for this customer could be on either trailer/);
+  assert.match(b.alert, /\(split — could be on the other trailer\)/);
+  assert.deepEqual(b.sheetDiffs, []);
+});
+
+test('same customer, different city = a different stop (not combined, not a split); same city on another truck = split', () => {
+  const st = combineStops([{ stopOrder: 1, consigneeId: '01821', consigneeName: 'CARBONE R.J CO.', consigneeCity: 'CHELSEA', boxes: 190, packType: 'BOX' },
+    { stopOrder: 2, consigneeId: '01821', consigneeName: 'CARBONE R.J CO.', consigneeCity: 'DERRY', boxes: 132, packType: 'BOX' },
+    { stopOrder: 3, consigneeId: '01821', consigneeName: 'CARBONE R.J CO.', consigneeCity: 'CHELSEA', boxes: 1, packType: 'PALLET' }]);
+  assert.deepEqual(st.map((x) => [x.city, x.boxes, x.pallets]), [['CHELSEA', 190, 1], ['DERRY', 132, 0]]);
+  const t = (trip, city, boxes) => ({ trip, truck: trip, stops: [{ consigneeId: '01821', consignee: 'CARBONE R.J CO.', city, boxes, pallets: 0 }] });
+  const a = t('1', 'CHELSEA', 190); const b = t('2', 'DERRY', 132); const c = t('3', 'CHELSEA', 40);
+  markSplits([a, b, c]);
+  assert.equal(b.stops[0].split, undefined);                         // Derry is another location
+  assert.equal(a.stops[0].split, true); assert.deepEqual(a.stops[0].splitWith.map((x) => x.trip), ['3']);   // Chelsea on two trucks
+});
+
+// Bay State Wilmington: ARTIS flags split on Ventura 10/08 (150, no truck yet) and on 10/09 (52 on 624743 + 140)
+test('a flagged split whose other part is on another night or hub is found; a normal daily delivery is not a split', () => {
+  const stop = (o) => ({ consigneeId: '02273', consignee: 'BAY STATE FLORAL- WILMINGTON', city: 'WILMINGTON', boxes: 0, pallets: 0, ...o });
+  const t624743 = { trip: '624743', truck: '736', hub: 'Ventura', date: '2026-10-09', stops: [stop({ boxes: 52, split: true, splitWith: [], hub: 'Ventura', date: '2026-10-09' })] };
+  const other = [
+    { trip: '624800', truck: '2219', hub: 'Ventura', date: '2026-10-10', stops: [stop({ boxes: 140, split: true })] },
+    { trip: '624801', truck: '2220', hub: 'Miami', date: '2026-10-10', stops: [stop({ boxes: 300 })] },   // a normal delivery, not flagged
+  ];
+  resolveFlaggedSplits([t624743], other);
+  assert.deepEqual(t624743.stops[0].splitWith.map((x) => x.trip), ['624800']);
+  assert.equal(splitNote(t624743.stops[0]), 'Split between trailers: 52 boxes on this truck; 140 boxes on trip 624800 (truck 2219, 10/10).');
 });
