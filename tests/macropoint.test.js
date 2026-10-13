@@ -64,3 +64,29 @@ test('a ping lands on the OC trip: position for the ETA / map / Jarvis; unknown 
   const st = res(); await routes['GET /truckmate/macropoint/status']({}, st);
   assert.deepEqual(st.body.unmatched.map((x) => x.orderId), ['ZZ-1']);
 });
+
+// the four callbacks exactly as docs.macropoint.com lists them (GET, values in the URL)
+test('MacroPoint callbacks as documented: location, trip event, order status, schedule alert', async () => {
+  const q = (s) => Object.fromEntries(new URLSearchParams(s));
+  const loc = readPing(flatten('', q('MPOrderID=FB93D3FE&ID=624741+NATIVE+LOMBARD&Latitude=41.1505&Longitude=-104.8202&Uncertainty=0.2&Street1=&City=Cheyenne&State=WY&Postal=82001&Country=US&LocationDateTimeUTC=2026-10-13T21:05:00Z&DataSource=Ping&Locator=3055550101')));
+  assert.equal(loc.kind, 'location'); assert.equal(loc.orderId, '624741 NATIVE LOMBARD'); assert.equal(loc.mpOrderId, 'FB93D3FE');
+  assert.equal(loc.city, 'Cheyenne'); assert.equal(loc.source, 'Ping'); assert.equal(loc.at, Date.parse('2026-10-13T21:05:00Z'));
+  const ev = readPing(flatten('', q('MPOrderID=FB93D3FE&ID=624741+NATIVE&Stop=Stop+2&Event=X1&EventDateTime=2026-10-14T17:40:00&StopID=03516&Latitude=41.88&Longitude=-88.01&City=Lombard&State=IL')));
+  assert.equal(ev.kind, 'event'); assert.equal(ev.event, 'Arrived at delivery'); assert.equal(ev.at, Date.parse('2026-10-14T17:40:00Z'));
+  const st = readPing(flatten('', q('MPOrderID=FB93D3FE&MPTrackingRequestID=A04E&ID=624741+NATIVE&Code=1068&Message=Driver+Phone+Unresponsive')));
+  assert.equal(st.kind, 'status'); assert.deepEqual(st.status, { code: '1068', message: 'Driver Phone Unresponsive' });
+  const sa = readPing(flatten('', q('MPOrderID=FB93D3FE&ID=624741+NATIVE&StopType=DropOff&StopName=Native+Lombard&City=Lombard&State=IL&ScheduleAlertCode=3&ScheduleAlertText=Behind+Schedule&DistanceToStopInMiles=912&EtaToStop=2026-10-14T19:30:00&ETALocalTimeZoneOffset=-5')));
+  assert.equal(sa.kind, 'schedule'); assert.equal(sa.schedule.alert, 'Behind Schedule'); assert.equal(sa.schedule.distanceMi, 912);
+
+  // all of them land on trip 624741; a later message with only MacroPoint's MPOrderID still finds it
+  const store = {}; const db = { enabled: true, get: async (k, d) => store[k] ?? d, set: async (k, v) => { store[k] = JSON.parse(JSON.stringify(v)); } };
+  const routes = {}; const app = { post: (p, h) => { routes[`POST ${p}`] = h; }, get: (p, ...h) => { routes[`GET ${p}`] = h[h.length - 1]; } };
+  const mp = initMacroPoint(app, { requireAdmin: () => {}, db, getBoard: async () => ({ trips: board }), env: { MACROPOINT_CALLBACK_KEY: 'k' }, now: () => Date.parse('2026-10-13T21:10:00Z') });
+  const hit = async (s) => { const r = { code: 200, status(c) { r.code = c; return r; }, json(b) { r.body = b; return r; } }; await routes['GET /macropoint/callback']({ query: { key: 'k', ...q(s) }, get: () => undefined }, r); return r.body; };
+  assert.equal((await hit('MPOrderID=FB93D3FE&ID=624741+NATIVE+LOMBARD&Latitude=41.15&Longitude=-104.82&City=Cheyenne&State=WY&LocationDateTimeUTC=2026-10-13T21:05:00Z&DataSource=Ping')).trip, '624741');
+  assert.equal((await hit('MPOrderID=FB93D3FE&Code=1021&Message=Tracking+Now')).trip, '624741');
+  await hit('MPOrderID=FB93D3FE&ID=624741+NATIVE&ScheduleAlertText=On+Time&DistanceToStopInMiles=912&EtaToStop=2026-10-14T19:30:00');
+  const trips = JSON.parse(JSON.stringify(board)); await mp.overlay('florida-beauty', trips);
+  const t = trips.find((x) => x.trip.tripNumber === '624741');
+  assert.equal(t._samsara.location, 'Cheyenne, WY'); assert.equal(t._macropoint.status.message, 'Tracking Now'); assert.equal(t._macropoint.schedule.alert, 'On Time');
+});

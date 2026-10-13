@@ -40,23 +40,36 @@ export function flatten(body, query = {}) {
 }
 
 const pick = (f, names) => { for (const n of names) if (f[n] != null && f[n] !== '') return f[n]; return null; };
-// The ping / event in it. Pure. → { orderId, lat, lng, at, city, state, zip, street, source, event, stop } | null
+// MacroPoint times are UTC (ISO 8601); a value with no zone is read as UTC. Pure.
+const utc = (v) => { if (!v) return null; if (/^\d{10,13}$/.test(v)) return Number(v) * (v.length === 10 ? 1000 : 1); const t = Date.parse(/z$|[+-]\d\d:?\d\d$/i.test(v) ? v : `${String(v).replace(' ', 'T')}Z`); return Number.isNaN(t) ? null : t; };
+export const EVENTS = { X3: 'Arrived at pickup', AF: 'Departed pickup', X1: 'Arrived at delivery', D1: 'Departed delivery' };
+// One MacroPoint callback (docs.macropoint.com — all GET with the values in the URL):
+//  Location Updates  ?MPOrderID&ID&Latitude&Longitude&…&City&State&Postal&LocationDateTimeUTC&DataSource&Locator
+//  Trip Events       ?MPOrderID&ID&Stop&Event(X3/AF/X1/D1)&EventDateTime&StopID&Latitude&Longitude&City&State…
+//  Order Status      ?MPOrderID&ID&Code&Message
+//  Schedule Alerts   ?MPOrderID&ID&StopName&City&State&ScheduleAlertCode&ScheduleAlertText&DistanceToStopInMiles&EtaToStop…
+// ID is the office's Load ID ("624741 NATIVE…"); MPOrderID is MacroPoint's own. Pure. → ping | null
 export function readPing(f) {
-  const orderId = pick(f, ['mporderid', 'orderid', 'loadid', 'loadnumber', 'shipmentid', 'trackingrequestid', 'referencenumber', 'ordernumber', 'id']);
+  const orderId = pick(f, ['id', 'loadid', 'loadnumber', 'orderid', 'shipmentid', 'referencenumber', 'ordernumber']);
+  const mpOrderId = pick(f, ['mporderid', 'mptrackingrequestid']);
   const lat = Number(pick(f, ['latitude', 'lat']));
   const lng = Number(pick(f, ['longitude', 'lon', 'lng', 'long']));
-  // the time: a UTC field without a zone gets "Z"; anything with a zone is read as written
-  const tKey = ['locationdatetimeutc', 'datetimeutc', 'eventdatetimeutc', 'createddatetimeutc', 'locationdatetime', 'eventdatetime', 'datetime', 'timestamp', 'time'].find((k) => f[k]);
-  const at0 = tKey ? f[tKey] : null;
-  let at = at0 ? (/^\d{10,13}$/.test(at0) ? Number(at0) * (at0.length === 10 ? 1000 : 1) : Date.parse(/utc/.test(tKey) && !/z$|[+-]\d\d:?\d\d$/i.test(at0) ? `${at0.replace(' ', 'T')}Z` : at0)) : NaN;
-  if (Number.isNaN(at)) at = null;
   const ok = Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0);
-  const event = pick(f, ['tripevent', 'eventtype', 'event', 'eventcode', 'status', 'statuscode']);
-  if (!orderId || (!ok && !event)) return null;
+  const code = pick(f, ['event', 'tripevent', 'eventtype', 'eventcode']);
+  const statusMsg = pick(f, ['message', 'statusmessagedetail']);
+  const alertText = pick(f, ['schedulealerttext']);
+  const kind = alertText || pick(f, ['schedulealertcode']) ? 'schedule' : code ? 'event' : statusMsg && pick(f, ['code']) ? 'status' : ok ? 'location' : null;
+  if ((!orderId && !mpOrderId) || !kind) return null;
+  const at = utc(pick(f, ['locationdatetimeutc', 'eventdatetime', 'createddatetime', 'datetimeutc', 'datetime', 'timestamp']));
+  const clean = (v) => (v == null ? null : String(v).replace(/\+/g, ' ').trim() || null);
   return {
-    orderId: String(orderId).trim(), lat: ok ? lat : null, lng: ok ? lng : null, at,
-    city: pick(f, ['city']), state: pick(f, ['state', 'stateprovince', 'province']), zip: pick(f, ['postal', 'postalcode', 'zip', 'zipcode']), street: pick(f, ['street1', 'street', 'address1', 'address']),
-    source: pick(f, ['datasource', 'source', 'locationsource']), event: event || null, stop: pick(f, ['stopname', 'stopid', 'stop', 'stopnumber']),
+    kind, orderId: orderId ? String(orderId).trim() : null, mpOrderId: mpOrderId || null,
+    lat: ok ? lat : null, lng: ok ? lng : null, at,
+    city: pick(f, ['city']), state: pick(f, ['state', 'stateorprovince', 'province']), zip: pick(f, ['postal', 'postalcode', 'zip']), street: pick(f, ['street1', 'addressline1', 'street', 'address1']),
+    source: pick(f, ['datasource', 'source']), locator: pick(f, ['locator']),
+    event: kind === 'event' ? (EVENTS[String(code).toUpperCase()] || clean(code)) : null, eventCode: kind === 'event' ? String(code).toUpperCase() : null, stop: pick(f, ['stop', 'stopname', 'stopid']),
+    status: kind === 'status' ? { code: pick(f, ['code']), message: clean(statusMsg) } : null,
+    schedule: kind === 'schedule' ? { alert: clean(alertText), code: pick(f, ['schedulealertcode']), stop: pick(f, ['stopname', 'stopid']), city: pick(f, ['city']), state: pick(f, ['state']), distanceMi: Number(pick(f, ['distancetostopinmiles'])) || null, etaToStop: pick(f, ['etatostop']), etaOffset: pick(f, ['etalocaltimezoneoffset']) } : null,
   };
 }
 
@@ -110,13 +123,18 @@ export function initMacroPoint(app, { requireAdmin, db, getBoard = null, env = p
     st.raw = [{ at: new Date(now()).toISOString(), fields: Object.fromEntries(Object.entries(f).slice(0, 40)) }, ...(st.raw || [])].slice(0, 30);
     const p = readPing(f);
     if (!p) { await save(); return { ok: true, used: false, why: 'no order id / location in the message' }; }
-    let trip = st.orderMap[norm(p.orderId)] || null;
-    if (!trip && getBoard) { const b = await getBoard(SITE).catch(() => null); trip = tripFor(p.orderId, (b && b.trips) || []); if (trip) st.orderMap[norm(p.orderId)] = trip; }
-    if (!trip) { st.unmatched = [{ at: new Date(now()).toISOString(), orderId: p.orderId, city: p.city, state: p.state }, ...(st.unmatched || []).filter((x) => x.orderId !== p.orderId)].slice(0, 30); await save(); return { ok: true, used: false, why: `no trip for MacroPoint load ${p.orderId}` }; }
+    let trip = (p.orderId && st.orderMap[norm(p.orderId)]) || (p.mpOrderId && st.orderMap[`MP:${p.mpOrderId}`]) || null;
+    if (!trip && getBoard && p.orderId) { const b = await getBoard(SITE).catch(() => null); trip = tripFor(p.orderId, (b && b.trips) || []); }
+    if (trip) { if (p.orderId) st.orderMap[norm(p.orderId)] = trip; if (p.mpOrderId) st.orderMap[`MP:${p.mpOrderId}`] = trip; }
+    if (!trip) { const id = p.orderId || p.mpOrderId; st.unmatched = [{ at: new Date(now()).toISOString(), orderId: id, kind: p.kind, city: p.city, state: p.state }, ...(st.unmatched || []).filter((x) => x.orderId !== id)].slice(0, 30); await save(); return { ok: true, used: false, why: `no trip for MacroPoint load ${id}` }; }
     const cur = st.byTrip[trip] || { trip, orderId: p.orderId, events: [] };
+    if (p.orderId) cur.orderId = p.orderId;
+    if (p.mpOrderId) cur.mpOrderId = p.mpOrderId;
     const at = p.at || now();
-    if (p.lat != null && (!cur.at || at >= Date.parse(cur.at))) Object.assign(cur, { lat: p.lat, lng: p.lng, at: new Date(at).toISOString(), city: p.city || null, state: p.state || null, zip: p.zip || null, street: p.street || null, source: p.source || null });
-    if (p.event) cur.events = [{ at: new Date(at).toISOString(), event: p.event, stop: p.stop || null, city: p.city || null, state: p.state || null }, ...(cur.events || [])].slice(0, 20);
+    if (p.lat != null && (p.kind === 'location' || p.kind === 'event') && (!cur.at || at >= Date.parse(cur.at))) Object.assign(cur, { lat: p.lat, lng: p.lng, at: new Date(at).toISOString(), city: p.city || null, state: p.state || null, zip: p.zip || null, street: p.street || null, source: p.source || null, locator: p.locator || cur.locator || null });
+    if (p.kind === 'event') cur.events = [{ at: new Date(at).toISOString(), event: p.event, code: p.eventCode, stop: p.stop || null, city: p.city || null, state: p.state || null }, ...(cur.events || [])].slice(0, 20);
+    if (p.kind === 'status') cur.status = { ...p.status, at: new Date(now()).toISOString() };
+    if (p.kind === 'schedule') cur.schedule = { ...p.schedule, at: new Date(now()).toISOString() };
     cur.receivedAt = new Date(now()).toISOString();
     st.byTrip[trip] = cur;
     for (const [k, v] of Object.entries(st.byTrip)) if (Date.parse(v.receivedAt) < now() - 10 * 24 * 60 * MIN) delete st.byTrip[k];
@@ -141,7 +159,7 @@ export function initMacroPoint(app, { requireAdmin, db, getBoard = null, env = p
     for (const it of trips) {
       const r = st.byTrip[tripNo(it)];
       if (!r) continue;
-      it._macropoint = { at: r.at || null, city: r.city, state: r.state, source: r.source, orderId: r.orderId, events: (r.events || []).slice(0, 5), fresh: !!(r.at && now() - Date.parse(r.at) < FRESH_MIN * MIN) };
+      it._macropoint = { at: r.at || null, city: r.city, state: r.state, source: r.source, orderId: r.orderId, events: (r.events || []).slice(0, 5), status: r.status || null, schedule: r.schedule || null, fresh: !!(r.at && now() - Date.parse(r.at) < FRESH_MIN * MIN) };
       const s = it._samsara || null;
       const ownNewer = s && s.lat != null && s.gpsAt && r.at && Date.parse(s.gpsAt) > Date.parse(r.at);
       if (r.lat != null && !ownNewer) it._samsara = { ...(s || {}), source: 'MacroPoint', lat: r.lat, lng: r.lng, gpsAt: r.at, speedMph: s && s.source !== 'MacroPoint' ? s.speedMph : null, location: [r.street, r.city, r.state].filter(Boolean).join(', ') || null };
@@ -150,7 +168,7 @@ export function initMacroPoint(app, { requireAdmin, db, getBoard = null, env = p
 
   app.get('/truckmate/macropoint/status', requireAdmin, async (req, res) => {
     const st = enabled ? await load() : { byTrip: {}, raw: [], unmatched: [] };
-    res.json({ configured: !!((env.MACROPOINT_CALLBACK_USER && env.MACROPOINT_CALLBACK_PASSWORD) || env.MACROPOINT_CALLBACK_KEY), tracked: Object.values(st.byTrip).map((r) => ({ trip: r.trip, orderId: r.orderId, at: r.at, city: r.city, state: r.state, events: (r.events || []).length })), unmatched: st.unmatched || [], lastMessages: (st.raw || []).slice(0, 5) });
+    res.json({ configured: !!((env.MACROPOINT_CALLBACK_USER && env.MACROPOINT_CALLBACK_PASSWORD) || env.MACROPOINT_CALLBACK_KEY), tracked: Object.values(st.byTrip).map((r) => ({ trip: r.trip, orderId: r.orderId, at: r.at, city: r.city, state: r.state, status: r.status ? r.status.message : null, schedule: r.schedule ? r.schedule.alert : null, lastEvent: (r.events || [])[0] || null })), unmatched: st.unmatched || [], lastMessages: (st.raw || []).slice(0, 5) });
   });
 
   return { overlay, receive };
