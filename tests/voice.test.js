@@ -697,7 +697,7 @@ test('customers hear location, truck, trailer, trip, total boxes and ETA — del
   const view = { trip: '624773', truck: '4504', trailer: '7137', status: 'on the way', truck_now: 'Greenville, SC', as_of: 'x', moving: true, coming_from: 'Miami, Florida',
     deliveries: [{ customer: 'SPRINGFIELD FLORIST', city: 'SPRINGFIELD, MA', boxes: '81 boxes', boxes_loaded: '81 boxes loaded for them', cubes: 113.23, appointment: '2026-10-13 08:00', delivered: false, estimated_arrival: 'Tue, Oct 13, 8:39 PM Eastern' }] };
   const lean = customerLean(view);
-  assert.deepEqual(Object.keys(lean).filter((k) => lean[k] !== undefined).sort(), ['coming_from', 'deliveries', 'status', 'trailer', 'trip', 'truck', 'truck_now']);
+  assert.deepEqual(Object.keys(lean).filter((k) => lean[k] !== undefined).sort(), ['as_of', 'coming_from', 'deliveries', 'status', 'trailer', 'trip', 'truck', 'truck_now']);
   const d = lean.deliveries[0];
   assert.equal(d.boxes, '81 boxes');
   assert.equal(d.estimated_arrival, 'Tue, Oct 13, 8:39 PM Eastern');
@@ -748,4 +748,14 @@ test('outside-carrier loads: customers hear only tracked loads and Frank gets th
     assert.deepEqual(staff.out.loads.map((l) => l.trip), ['6 2 4 9 0 1']);
     assert.match(staff.out.say, /Plus 2 outside-carrier loads \(trip 624815, 624811\) — no tracking yet; Frank Ducassi has those/);
   } finally { board.splice(board.length - 3, 3); }
+});
+
+// call Oct 13 (Stemline): Jarvis gave the ETA but not where the truck is until asked
+test('every ETA answer starts with where the truck is now — staff and customers', async () => {
+  const { CUSTOMER_RULE, customerLean } = await import('../voice.js');
+  assert.match(CUSTOMER_RULE, /ALWAYS start with where the truck is right now \(truck_now, "as of" as_of\) — before the ETA, without being asked/);
+  const lean = customerLean({ trip: '624889', truck: '2220', trailer: '7235', status: 'on the way', truck_now: 'Farragut, TN', as_of: 'Tue, Oct 13, 4:40 PM Eastern', deliveries: [{ customer: 'STEMLINE', city: 'FERNDALE, MI', delivered: false, boxes: '270 boxes', estimated_arrival: 'Wed, Oct 14, 3:43 AM Eastern' }] });
+  assert.equal(lean.truck_now, 'Farragut, TN'); assert.equal(lean.as_of, 'Tue, Oct 13, 4:40 PM Eastern');
+  const src = (await import('fs')).readFileSync(new URL('../voice.js', import.meta.url), 'utf8');
+  assert.match(src, /STAFF_RULE = .*ALWAYS start each load with where the truck is right now/);
 });
