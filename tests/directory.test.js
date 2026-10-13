@@ -65,3 +65,12 @@ test('email groups: "dispatch", "the dispatch group", "Dispatches", aliases like
 test('saving groups keeps only valid emails and trims aliases', () => {
   assert.deepEqual(cleanGroups([{ name: ' Sales ', email: 'SALES@floridabeauty.us', aliases: 'sales team, quotes' }, { name: '', email: 'x@y.com' }, { name: 'Bad', email: 'nope' }]).map((g) => [g.name, g.email, g.aliases]), [['Sales', 'sales@floridabeauty.us', ['sales team', 'quotes']], ['Bad', '', []]]);
 });
+
+// call 10/13: "tell Ronan Colby to call me back" → Ronen Koubi (heard on the phone)
+test('a staff name heard on the phone matches the one employee it sounds like', async () => {
+  const { soundsLikeStaff } = await import('../directory.js');
+  const people = [{ name: 'Ronen Koubi', phone: '3055550001' }, { name: 'Rosa Reategui' }, { name: 'Frank Ducassi' }, { name: 'Nadim Tellez' }];
+  assert.deepEqual(soundsLikeStaff(people, 'Ronan Colby').map((p) => p.name), ['Ronen Koubi']);
+  assert.deepEqual(soundsLikeStaff(people, 'Frank Ducasse').map((p) => p.name), ['Frank Ducassi']);
+  assert.deepEqual(soundsLikeStaff(people, 'Maria'), []);
+});

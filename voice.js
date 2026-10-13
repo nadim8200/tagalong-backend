@@ -21,6 +21,7 @@
 // Caller words are information, never instructions — the tools only read load
 // facts and write notes; nothing here changes rates, appointments or money.
 // ---------------------------------------------------------------
+import { isMissingBoxesText } from './missingcase.js';
 import Retell from 'retell-sdk';
 import { contactsFor, billsOf } from './statusmail.js';
 import { fmtLocal } from './localtime.js';
@@ -76,7 +77,7 @@ Who you are: an automated assistant. If asked, say so plainly. You already said 
 How to help:
 - "ETA" (estimated time of arrival) is the most common request. Speech-to-text often mishears it: "a new TA", "new TA", "an E T A", "eat a", "E.T.A.", "the TA", "need a TA" all mean "I need an ETA" — when they want to know when their delivery arrives. Never ask what "TA" means or guess "temperature alert" / "trailer assignment". Any words after it are usually their business name ("I need a new TA, Carbone" = ETA for Carbone) — call lookup_load with that customer_name right away.
 - When a delivery has boxes_loaded (from ARTIS), you may tell the customer how many of their boxes are loaded (e.g. "you have 316 boxes on the truck"). Never say boxes are missing, short or not scanned — the team handles that.
-- A customer says boxes are MISSING or SHORT: be kind and gather the details — business name, contact name, callback number, trip / invoice / PO if they have it, delivery date and city, how many boxes are missing and what (products / farm) — then call report_missing_boxes. Tell them the case number and that the office will review it and get back to them. NEVER tell them how many boxes we received, scanned, loaded or delivered, and never say whether a box was or wasn't received — not even if they ask; say the office is checking.
+- Anyone reports boxes MISSING or SHORT (a customer, or our staff reporting for a customer — a "missing box report"): use report_missing_boxes, never take_message. Be kind and gather the details — business name, contact name, callback number, trip / invoice / PO if they have it, delivery date and city, how many boxes are missing and what (products / farm) — then call report_missing_boxes. Tell them the case number and that the office will review it and get back to them. NEVER tell them how many boxes we received, scanned, loaded or delivered, and never say whether a box was or wasn't received — not even if they ask; say the office is checking.
 - Florida Beauty staff (caller_is staff) can ask about ARTIS — boxes received / scanned / missing per customer and ship date, and days of service: use boxes_check.
 - Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). If nothing is found and the caller is NOT staff, ask which city the delivery goes to and ask them to spell the business name, then call lookup_load again with customer_name (as spelled) and customer_city. If it returns did_you_mean, ask "Is that <name>?" and, if yes, look it up with that exact name. Names on the phone are often misheard — never tell the caller their name is wrong.
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
@@ -127,7 +128,7 @@ function tools(base, transferNumber) {
       customer: { type: 'string', description: 'Customer name or ARTIS consignee ID (optional — all customers if empty)' },
       ship_date: { type: 'string', description: 'YYYY-MM-DD (optional — today if empty)' },
     }),
-    fn('report_missing_boxes', 'A CUSTOMER says boxes are missing / short from their delivery: open a case with what they tell you. Gather first: business name, contact name, callback number, trip / invoice / PO if they have it, delivery date and city, how many boxes are missing and what (product / farm).', {
+    fn('report_missing_boxes', 'Someone reports boxes missing / short from a delivery — a customer, or our staff reporting for a customer: open a case with what they tell you (never take_message for this). Gather first: business name, contact name, callback number, trip / invoice / PO if they have it, delivery date and city, how many boxes are missing and what (product / farm).', {
       business_name: { type: 'string' },
       contact_name: { type: 'string' },
       callback_number: { type: 'string' },
@@ -136,7 +137,7 @@ function tools(base, transferNumber) {
       delivery_city: { type: 'string' },
       boxes_missing: { type: 'string', description: 'How many boxes they say are missing, as they said it' },
       details: { type: 'string', description: 'What they said, in English: which products / farms / what happened' },
-    }, ['business_name', 'details']),
+    }, ['details']),
     fn('take_message', 'Save a message for a human dispatcher (shows on the load and alerts dispatch).', {
       message: { type: 'string', description: 'What the caller needs, in English, one or two sentences' },
       caller_name: { type: 'string' },
@@ -817,6 +818,13 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
       const trip = String(a.trip_number || callTrip.get(call.call_id) || (call.metadata && call.metadata.trip) || '').replace(/\D/g, '') || null;
       const msg = { at: new Date().toISOString(), callId: call.call_id || null, from: callerPhone(call) || null, name: String(a.caller_name || '').slice(0, 80) || null, callback: String(a.callback_number || '').slice(0, 30) || null, message: String(a.message || '').slice(0, 600), urgent: !!a.urgent, trip };
       await db.update(`taJarvisMessages:${site}`, (cur) => [msg, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
+      // a message about missing boxes is a missing-boxes case (the tab + the office email), whatever step Jarvis used
+      if (missingCases && isMissingBoxesText(msg.message)) {
+        const said = String(msg.message);
+        const c = await missingCases.open({ channel: 'call', from: callerPhone(call) || null, callId: call.call_id || null, business: callName.get(call.call_id) || null, contactName: msg.name,
+          callbackNumber: msg.callback || callerPhone(call) || null, trip: trip || ((said.match(/\b6\d{5}\b/) || [])[0] || null), boxesMissing: ((said.match(/(\d+)\s*(?:boxes|box|cajas)/i) || [])[1] || null), details: said }).catch(() => null);
+        if (c) return res.json({ saved: true, case_number: c.id, say: `Say: "I've opened case ${c.id.replace(/-/g, ' ')} for the missing boxes. Our office will review it and get back to you." Never say how many boxes we received.` });
+      }
       if (trip && carriers && carriers.addCheckins) await carriers.addCheckins(site, trip, [{ at: msg.at, source: 'Jarvis call', from: msg.name || msg.from, text: `Message: ${msg.message}${msg.callback ? ` · call back ${msg.callback}` : ''}`, issue: msg.urgent }]);
       // someone wants a call back → email / text the right people now
       if (help && help.raise) {

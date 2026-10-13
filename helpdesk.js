@@ -187,6 +187,8 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
     // a message for a named staff member ("have Frank call me") → that person gets it directly
     if (directory) {
       try { req.forStaff = (await directory.mentioned(`${req.forPerson || ''} ${req.need} ${req.said || ''}`)).map((p) => ({ name: p.name, department: p.department, ext: p.ext || null })); } catch { req.forStaff = []; }
+      // misheard on the phone ("Ronan Colby") → the employee whose name sounds like it
+      if (!req.forStaff.length && req.forPerson && directory.soundsLike) { try { req.forStaff = (await directory.soundsLike(req.forPerson)).map((p) => ({ name: p.name, department: p.department, ext: p.ext || null })); } catch { /* none */ } }
     }
     let dup = false;
     await db.update(key, (cur) => {
@@ -220,6 +222,9 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
         if (plan.call && !to.calls.some((c) => c.phone === p.phone)) to.calls.push({ phone: p.phone, name: p.name });
       }
     }
+    // never send the request back to the person who asked for it (a staff member calling for someone else)
+    const self = String((req.from && req.from.phone) || '').replace(/\D+/g, '').slice(-10);
+    if (self.length === 10) { to.phones = to.phones.filter((p) => String(p).replace(/\D+/g, '').slice(-10) !== self); to.calls = to.calls.filter((c) => String(c.phone).replace(/\D+/g, '').slice(-10) !== self); }
     const msg = helpEmail(req, await loadView(req.trip));
     const sent = { teams: to.groups, email: null, text: null, push: null, call: null };
     if (to.emails.length) {

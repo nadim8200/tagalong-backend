@@ -50,6 +50,21 @@ export function mentionedStaff(people, text) {
   return out.slice(0, 3);
 }
 
+// A name heard on the phone ("Ronan Colby" → Ronen Koubi): the first or last name SOUNDS like exactly one
+// employee's (same first letter, same consonants once C=K, Y=I). Only for a person they named. Pure.
+const sound = (w) => { const x = String(w || '').toUpperCase().replace(/[^A-Z]/g, '').replace(/PH/g, 'F').replace(/C(?=[EIY])/g, 'S').replace(/C|Q/g, 'K').replace(/Y/g, 'I'); return x ? (x[0] + x.slice(1).replace(/[AEIOUHW]/g, '')).replace(/(.)\1+/g, '$1') : ''; };
+export function soundsLikeStaff(people, said) {
+  const words = fold(said).split(' ').filter((w) => w.length >= 3);
+  if (!words.length) return [];
+  const act = people.filter((p) => p.active !== false);
+  const hit = (i) => act.filter((p) => { const parts = fold(p.name).split(' '); const part = i === 0 ? parts[0] : parts[parts.length - 1]; return part && part.length >= 3 && words.some((w) => w[0] === part[0] && sound(w).length >= 2 && sound(w) === sound(part)); });
+  const firsts = hit(0); const lasts = hit(1);
+  const both = firsts.filter((p) => lasts.includes(p));
+  if (both.length === 1) return both;
+  if (firsts.length === 1) return firsts;
+  if (lasts.length === 1) return lasts;
+  return [];
+}
 // How Jarvis reaches a staff member: their chosen channels, falling back to a call
 // while company texting isn't live. Pure.
 export function reachPlan(p, { textingLive = false } = {}) {
@@ -151,6 +166,7 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
     load,
     find: async (q) => { const d = await load(); return findStaff(d.people, q).map((p) => publicView(p, d.main)); },
     mentioned: async (text) => mentionedStaff((await load()).people, text),   // internal: includes phone / email
+    soundsLike: async (said) => soundsLikeStaff((await load()).people, said),   // internal: a name heard on the phone
     main: async () => (await load()).main,
     groups: async () => ((await load()).groups || []).filter((g) => g.active !== false),
     // the one address for a group by name ("dispatch", "customer service", "billing"…) or null

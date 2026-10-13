@@ -48,7 +48,7 @@ test('a customer text opens a case, a follow-up text from the same phone is adde
 
 test('Jarvis on the phone: gathers the details, gives the case number, never counts', async () => {
   const { PROMPT } = await import('../voice.js');
-  assert.match(PROMPT, /boxes are MISSING or SHORT[\s\S]*report_missing_boxes[\s\S]*NEVER tell them how many boxes we received/);
+  assert.match(PROMPT, /reports boxes MISSING or SHORT[\s\S]*report_missing_boxes, never take_message[\s\S]*NEVER tell them how many boxes we received/);
 });
 
 test('grouped by customer: how many times each one filed, open cases, boxes reported', () => {
@@ -73,4 +73,11 @@ test('the console lists cases and the office sets status / notes (who and when)'
   assert.equal(r2.body.status, 'resolved'); assert.deepEqual(r2.body.notes[0], { at: '2026-10-14T12:00:00.000Z', by: 'Sara Trujillo', note: 'Found at the farm, credit issued', status: 'resolved' });
   const r3 = res(); await routes['POST /truckmate/missing-cases/:id']({ params: { id: 'nope' }, body: { status: 'open' } }, r3);
   assert.equal(r3.code, 404);
+});
+
+// call 10/13 (Nadim, staff phone): "missing box report — trip 624520, 10/09 Lombard IL, 45 boxes of roses" went to take_message
+test('a "take a message" about missing boxes still opens a case', async () => {
+  const { isMissingBoxesText } = await import('../missingcase.js');
+  assert.ok(isMissingBoxesText('Missing box report: trip 624520, delivered 10/09 in Lombard, IL — 45 boxes of roses missing'));
+  assert.ok(isMissingBoxesText('Customer reports 45 boxes missing on trip 624520'));
 });
