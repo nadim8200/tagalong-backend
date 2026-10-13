@@ -186,11 +186,16 @@ export function nightOf(tz, ms) { const c = hubClock(tz, ms); return c.hour >= 1
 export function dueNow(hub, { state = {}, sheets = [], now = Date.now() } = {}) {
   const c = hubClock(hub.tz, now);
   const night = nightOf(hub.tz, now);
-  if (state.hubs && state.hubs[hub.id] && state.hubs[hub.id].night === night) return null;
-  if (c.hour >= 12 && c.hour < 17) return null;                       // daytime: nothing to check yet
   const mine = sheets.filter((s) => s && s.uploadedAt && hubOfSheet(s) === hub.id && nightOf(hub.tz, Date.parse(s.uploadedAt)) === night);
   const last = mine.reduce((m, s) => Math.max(m, Date.parse(s.uploadedAt) || 0), 0);
   const dates = [...new Set([night, ...mine.map((s) => s.dateLoaded).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')))])].slice(0, 3);
+  const ran = state.hubs && state.hubs[hub.id] && state.hubs[hub.id].night === night ? state.hubs[hub.id] : null;
+  if (ran) {
+    // read at 6 AM with no sheets, and the sheets came in later (e.g. California's at 7:35 AM) → once more
+    if (/^6 AM/.test(String(ran.reason || '')) && !ran.lateSheets && mine.length && last > Date.parse(ran.at || 0) && now - last >= 20 * MIN) return { night, reason: `${mine.length} trip sheet${mine.length === 1 ? '' : 's'} came in after 6 AM`, dates, late: true };
+    return null;
+  }
+  if (c.hour >= 12 && c.hour < 17) return null;                       // daytime: nothing to check yet
   if (mine.length && now - last >= 20 * MIN) return { night, reason: `${mine.length} trip sheet${mine.length === 1 ? '' : 's'} read`, dates };
   if (c.hour >= 6 && c.hour < 12) return { night, reason: '6 AM — no trip sheets seen', dates };
   return null;
@@ -310,9 +315,9 @@ export function initTruckBuilder(app, { requireAdmin, db, sendMail = null, recip
   }
 
   // read one hub for the given dates, compare with the trip sheets, keep it, email the result
-  async function run(hub, { dates, night = hubClock(hub.tz, now()).date, reason = 'manual', email = true } = {}) {
+  async function run(hub, { dates, night = hubClock(hub.tz, now()).date, reason = 'manual', email = true, late = false } = {}) {
     const st = await load();
-    st.hubs[hub.id] = { ...(st.hubs[hub.id] || {}), night, at: new Date(now()).toISOString(), reason, ok: false, error: null };
+    st.hubs[hub.id] = { ...(st.hubs[hub.id] || {}), night, at: new Date(now()).toISOString(), reason, ok: false, error: null, ...(late ? { lateSheets: true } : {}) };
     await db.set(KEY, st);   // marked first: one attempt per night even if it fails
     try {
       const cookie = await signIn();
@@ -368,7 +373,7 @@ export function initTruckBuilder(app, { requireAdmin, db, sendMail = null, recip
     const sheets = Object.values((await db.get(`taTruckMateManifest:${SITE}`, {})) || {});
     for (const hub of HUBS) {
       const due = dueNow(hub, { state: st, sheets, now: now() });   // after the night's trip sheets, or 6 AM hub time
-      if (due) await run(hub, { dates: due.dates, night: due.night, reason: due.reason }).catch((e) => console.warn(`[truckbuilder] ${hub.name}:`, e.message)); // eslint-disable-line no-await-in-loop
+      if (due) await run(hub, { dates: due.dates, night: due.night, reason: due.reason, late: !!due.late }).catch((e) => console.warn(`[truckbuilder] ${hub.name}:`, e.message)); // eslint-disable-line no-await-in-loop
     }
   }
   if (env.NODE_ENV !== 'test') {

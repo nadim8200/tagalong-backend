@@ -217,3 +217,15 @@ test('a pallet-only stop compares pallets, not "0 boxes"', () => {
   assert.equal(m.stops[1].piecesText, '4 PALLETS'); assert.equal(m.stops[1].pieces, 4); assert.equal(m.stops[1].sheetPieces, undefined);
   assert.equal(builderBoxesFor({ _tb: truck }, 'PYRAMID FLOWERS, INC.-OXNARD', 'OXNARD'), null);
 });
+
+// California's trip sheets came at 7:35 AM PT (forwarded 9:01 AM ET), after the 6 AM read with no sheets
+test('sheets that come after the 6 AM read → read ARTIS once more for that night', () => {
+  const ventura = HUBS[1];
+  const sixAmRun = { hubs: { 5: { night: '2026-10-12', at: '2026-10-13T13:01:56Z', reason: '6 AM — no trip sheets seen' } } };
+  const sheet = { uploadedAt: '2026-10-13T14:40:00Z', dateLoaded: '2026-10-12', stops: [{ action: 'LOAD', customer: 'VENTURA TERMINAL', city: 'VENTURA', state: 'CA' }] };
+  assert.equal(dueNow(ventura, { state: sixAmRun, sheets: [sheet], now: Date.parse('2026-10-13T14:50:00Z') }), null);      // still coming in
+  const due = dueNow(ventura, { state: sixAmRun, sheets: [sheet], now: Date.parse('2026-10-13T15:01:00Z') });
+  assert.equal(due.late, true); assert.equal(due.night, '2026-10-12'); assert.match(due.reason, /came in after 6 AM/);
+  assert.equal(dueNow(ventura, { state: { hubs: { 5: { ...sixAmRun.hubs[5], lateSheets: true } } }, sheets: [sheet], now: Date.parse('2026-10-13T16:00:00Z') }), null);   // only once
+  assert.equal(dueNow(ventura, { state: { hubs: { 5: { night: '2026-10-12', at: '2026-10-13T05:00:00Z', reason: '3 trip sheets read' } } }, sheets: [sheet], now: Date.parse('2026-10-13T16:00:00Z') }), null);   // normal night: done
+});
