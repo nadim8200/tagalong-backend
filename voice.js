@@ -672,6 +672,9 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
   const argsOf = (req) => ((req.body && req.body.args) || req.body || {});
   const callOf = (req) => (req.body && req.body.call) || {};
   const callerPhone = (call) => (call.direction === 'outbound' ? call.to_number : call.from_number);
+  // a live voice chat from the console: only our server creates these (for a signed-in dispatcher), and
+  // Retell signs every tool request — so the metadata can be trusted as staff.
+  const consoleCall = (call) => !!(call && call.call_type === 'web_call' && call.metadata && call.metadata.purpose === 'console' && call.metadata.staff === true);
 
   const callName = new Map();    // call_id → the business name the caller gave
   const callGuess = new Map();   // call_id → names Jarvis suggested (did_you_mean) — need the caller's yes
@@ -720,7 +723,7 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
     const a = argsOf(req); const call = callOf(req);
     try {
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
-      const staff = people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const staff = consoleCall(call) || people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
       if (!staff) return res.json({ ok: false, say: 'That information is for Florida Beauty staff only. Offer to take a message.' });
       if (!artis || !artis.ready()) return res.json({ ok: false, say: 'ARTIS is not connected right now. Offer to have dispatch check.' });
       const r = await artis.cargo({ date: a.ship_date || undefined, customer: a.customer || '' });
@@ -740,7 +743,7 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
       const said = a.customer_name || [a.bill_number, a.broker_load_number, a.trip_number, a.truck_number, a.trailer_number].find(isName) || null;
       if (said && call.call_id) callName.set(call.call_id, said);
       // our own staff call about many customers — their numbers are never tied to one business
-      const staffPhone = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []).some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call))) : false;
+      const staffPhone = consoleCall(call) || (directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []).some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call))) : false);
       const memory = staffPhone ? null : ((await db.get(bookKey, {}))[last10(callerPhone(call))] || null);
       let known = said ? null : memory;   // called before from this phone
       // a number on the client list → that business (confirmed with the caller before anything is shared)
@@ -982,7 +985,7 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
       };
       await db.update(callsKey, (cur) => [rec, ...(Array.isArray(cur) ? cur : []).filter((c) => c.callId !== rec.callId)].slice(0, 300), []);
       if (event === 'call_analyzed' || !done.some((c) => c.callId === rec.callId)) {
-        const entry = { type: 'call', ai: true, at: rec.at, label: `Jarvis (AI) ${rec.direction === 'outbound' ? 'called' : 'answered'} ${phone || 'caller'}`, to: rec.direction === 'outbound' ? phone : undefined, from: rec.direction === 'outbound' ? undefined : phone, text: rec.summary || rec.transcript.slice(0, 400), by: rec.by || 'Jarvis (AI)' };
+        const entry = { type: 'call', ai: true, at: rec.at, label: consoleCall(call) ? `Jarvis (AI) voice chat with ${rec.by || 'a dispatcher'} (console)` : `Jarvis (AI) ${rec.direction === 'outbound' ? 'called' : 'answered'} ${phone || 'caller'}`, to: rec.direction === 'outbound' ? phone : undefined, from: rec.direction === 'outbound' ? undefined : phone, text: rec.summary || rec.transcript.slice(0, 400), by: rec.by || 'Jarvis (AI)' };
         if (trip && comms && comms.log) await comms.log(site, trip, entry);
         else if (comms && comms.log && phone) await comms.log(site, null, entry);
       }
@@ -995,7 +998,7 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
           from: call.from_number || null, to: call.to_number || null, ourLine: call.direction === 'outbound' ? call.from_number : call.to_number,
           minutes: rec.minutes, trip, summary: rec.summary, transcript: String(call.transcript || '').slice(0, 60000), recording: call.recording_url || null,
           ended: call.disconnection_reason || null, by: rec.by, purpose: purpose || null,
-          ...(purpose === 'staff-alert' ? { role: 'team' } : purpose && call.direction === 'outbound' ? { role: 'driver' } : said ? { role: 'customer', name: spokenName(said) } : {}),
+          ...(consoleCall(call) ? { role: 'team', name: rec.by || null } : purpose === 'staff-alert' ? { role: 'team' } : purpose && call.direction === 'outbound' ? { role: 'driver' } : said ? { role: 'customer', name: spokenName(said) } : {}),
         }).catch(() => {});
       }
       // the whole conversation by email (Calls, texts & email → Jarvis call transcripts)
@@ -1271,6 +1274,27 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
       number,
     };
   }
+  // 📞 Call Jarvis from the console: a live, interruptible voice chat in the browser with the same Jarvis
+  // agent as the phone line. The signed-in dispatcher is staff (any load, any ETA). The browser gets a
+  // one-time access token (must start within 30 s); no Retell key ever leaves the server.
+  const webCallAt = new Map();   // dispatcher → last start (one every 10 s)
+  app.post('/voice/web-call', requireAuth, async (req, res) => {
+    try {
+      if (!key()) return res.status(503).json({ error: 'Jarvis voice is not set up (Retell key missing).' });
+      const cfg = await db.get(cfgKey, {});
+      if (!cfg.agentId) return res.status(503).json({ error: 'Jarvis agent is not set up — press "Update Jarvis in Retell" first.' });
+      const by = who(req);
+      if (Date.now() - (webCallAt.get(by) || 0) < 10000) return res.status(429).json({ error: 'One moment — a call is already starting.' });
+      webCallAt.set(by, Date.now());
+      const call = await retell('/v2/create-web-call', { body: {
+        agent_id: cfg.agentId,
+        metadata: { purpose: 'console', staff: true, by },
+        retell_llm_dynamic_variables: { greeting: staffGreeting(by.includes('@') ? '' : by), call_context: `This is a live voice chat from the dispatch console with ${by}, Florida Beauty staff (signed in to the console). Treat them exactly like staff calling from an Employees-list phone: help with any load — they may get any ETA and any detail. Keep answers short and conversational; they can interrupt you.` },
+      } });
+      await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'web', phone: null, trip: null, purpose: 'console', by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
+      return res.json({ ok: true, callId: call.call_id, accessToken: call.access_token });
+    } catch (e) { return res.status(502).json({ error: e.message }); }
+  });
   app.get('/voice/live', requireAuth, async (req, res) => { try { res.json(await live()); } catch (e) { res.status(502).json({ error: e.message }); } });
 
   app.get('/voice/calls', requireAuth, async (req, res) => {

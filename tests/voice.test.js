@@ -27,7 +27,8 @@ function setup(extraEnv = {}, opts = {}) {
       : url.includes('/create-agent-version/') ? { agent_id: 'agent_1', version: 5, is_published: false, response_engine: { type: 'retell-llm', llm_id: 'llm_1', version: 5 } }
       : /\/update-agent\//.test(url) ? { agent_id: 'agent_1', version: drafted ? 5 : 4 }
       : url.includes('/create-agent') ? { agent_id: 'agent_1', version: 0 }
-      : url.includes('create-phone-call') ? { call_id: 'call_9', call_status: 'registered' } : {};
+      : url.includes('create-phone-call') ? { call_id: 'call_9', call_status: 'registered' }
+      : url.includes('create-web-call') ? { call_id: 'web_1', call_status: 'registered', access_token: 'tok_1' } : {};
     return { ok: true, status: 201, json: async () => body };
   };
   initVoice(app, { ...(opts.help ? { help: opts.help } : {}), ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: board }), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
@@ -758,4 +759,34 @@ test('every ETA answer starts with where the truck is now — staff and customer
   assert.equal(lean.truck_now, 'Farragut, TN'); assert.equal(lean.as_of, 'Tue, Oct 13, 4:40 PM Eastern');
   const src = (await import('fs')).readFileSync(new URL('../voice.js', import.meta.url), 'utf8');
   assert.match(src, /STAFF_RULE = .*ALWAYS start each load with where the truck is right now/);
+});
+
+test('📞 Call Jarvis from the console: a live web call as staff; only our server can mark a call staff', async () => {
+  const clients = initClients({ score: nameScore });
+  const profiles = { allowed: async () => ({ ok: false }), anyLoad: async () => false };
+  const ash = { trip: { tripNumber: '624803', status: 'DEPSHIP', powerUnit: '2703' }, freightBills: [{ billNumber: 'B0200004', billToName: 'ASHLAND ADDISON', endZoneDescription: 'CHICAGO, IL, 60612', pieces: 12 }] };
+  board.push(ash);
+  try {
+    const v = setup({}, { clients, profiles });
+    // not set up yet → a clear message
+    assert.equal((await v.hit('POST /voice/web-call', {}, { user: { name: 'Rosa Diaz' } })).code, 503);
+    await v.db.set('taRetellCfg', { agentId: 'agent_1' });
+    const r = await v.hit('POST /voice/web-call', {}, { user: { name: 'Rosa Diaz' } });
+    assert.deepEqual(r.out, { ok: true, callId: 'web_1', accessToken: 'tok_1' });
+    const sent = v.retellCalls.find((c) => c.url.endsWith('/v2/create-web-call'));
+    assert.equal(sent.body.agent_id, 'agent_1');
+    assert.deepEqual(sent.body.metadata, { purpose: 'console', staff: true, by: 'Rosa Diaz' });
+    assert.match(sent.body.retell_llm_dynamic_variables.greeting, /, Rosa! This is Jarvis/);
+    assert.equal(JSON.stringify(sent.body).includes(KEY), false, 'the key never goes in the request body');
+    assert.equal((await v.hit('POST /voice/web-call', {}, { user: { name: 'Rosa Diaz' } })).code, 429, 'no double start');
+    // in the call: any customer's ETA, like an Employees-list phone
+    const web = { call_id: 'web_1', call_type: 'web_call', metadata: { purpose: 'console', staff: true, by: 'Rosa Diaz' } };
+    const r1 = await v.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: web });
+    assert.equal(r1.out.found, true);
+    assert.match(r1.out.caller_is, /Florida Beauty staff/);
+    // a phone call claiming the same metadata is NOT staff
+    const fake = { call_id: 'p1', call_type: 'phone_call', direction: 'inbound', from_number: '+13125550177', metadata: { purpose: 'console', staff: true } };
+    const r2 = await v.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Ashland Addison' }, call: fake });
+    assert.equal(r2.out.found, false);
+  } finally { board.pop(); }
 });
