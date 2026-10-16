@@ -194,14 +194,24 @@ export function buildReport(rows, date, { note = '' } = {}) {
   const left = notLeft.length ? `All loads left the yard except truck${notLeft.length > 1 ? 's' : ''} ${notLeft.join(' and ')}.` : 'All loads left the yard.';
   const withStops = rows.filter((r) => r.stops.length);
   const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  const th = (x) => `<th style="padding:4px 8px;border-bottom:1px solid #999;font-size:11px;text-align:left">${x}</th>`;
-  const td = (x) => `<td style="padding:3px 8px;font-size:11px;white-space:nowrap">${esc(x)}</td>`;
-  const table = `<table cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif">
-<tr><td colspan="10" style="text-align:center;font-size:11px;padding:4px">OUTBOUND ${n} TRIP SHEETS ${date.slice(5, 7)}/${date.slice(8, 10)}/${date.slice(0, 4)}</td></tr>
-<tr>${['TRIP', 'TRUCKS', 'TRAILERS', 'DRIVERS', 'LOCATION', 'DESTINATION', 'PU APPT', 'TIME OF DISPATCH', 'TIME OF DEPARTURE', 'UNSCHEDULED STOPS'].map(th).join('')}</tr>
-<tr><td colspan="10" style="text-align:center;font-size:11px;background:#ddd;padding:2px">FLOWERS (FLORIDA)</td></tr>
-${rows.map((r) => { const brk = r.stops.filter((s) => s.duty === 'break' || s.duty === 'sleeper').length; return `<tr style="${r.slow ? 'background:#ffff66' : ''}">${[r.trip, r.truck, r.trailer, r.drivers, r.location, r.destination, r.puAppt, r.dispatch, r.departure, r.stops.length ? `${r.stops.length} (${r.stops.reduce((a, s) => a + s.minutes, 0)} min${brk ? `, ${brk} break${brk === 1 ? '' : 's'}` : ''})` : ''].map(td).join('')}</tr>`; }).join('\n')}
-</table>`;
+  const th = (x) => `<th style="padding:4px 5px;border-bottom:1px solid #999;font-size:10px;text-align:left;vertical-align:bottom;color:#000">${x}</th>`;
+  // Five stacked columns so the table fits a phone: a wider table gets shrunk by Outlook on iPhone and
+  // the text after it slides up over it. Every field of the old ten columns is still there.
+  const td = (parts) => `<td style="padding:4px 5px;font-size:11px;line-height:1.35;vertical-align:top;color:#000;border-bottom:1px solid #ddd">${parts.filter((x) => x != null && x !== '').join('<br>')}</td>`;
+  const lbl = (k, v) => `<span style="color:#555">${k}</span> ${esc(v)}`;
+  const table = `<table role="presentation" width="100%" cellspacing="0" style="width:100%;max-width:640px;border-collapse:collapse;font-family:Arial,sans-serif;background:#fff;color:#000">
+<tr><td colspan="5" style="text-align:center;font-size:11px;padding:4px;color:#000">OUTBOUND ${n} TRIP SHEETS ${date.slice(5, 7)}/${date.slice(8, 10)}/${date.slice(0, 4)}</td></tr>
+<tr>${['TRIP / TRUCK / TRAILER', 'DRIVERS', 'LOCATION → DESTINATION', 'PU APPT / DISPATCH / DEPARTURE', 'UNSCHEDULED STOPS'].map(th).join('')}</tr>
+<tr><td colspan="5" style="text-align:center;font-size:11px;background:#ddd;padding:2px;color:#000">FLOWERS (FLORIDA)</td></tr>
+${rows.map((r) => { const brk = r.stops.filter((s) => s.duty === 'break' || s.duty === 'sleeper').length; return `<tr style="${r.slow ? 'background:#ffff66' : ''}">${[
+    [`<b>${esc(r.trip)}</b>`, lbl('Truck', r.truck), lbl('Trailer', r.trailer)],
+    [esc(r.drivers)],
+    [esc(r.location), `→ ${esc(r.destination)}`],
+    [r.puAppt && r.puAppt !== '****' ? lbl('Appt', r.puAppt) : null, lbl('Disp', r.dispatch), lbl('Left', r.departure)],
+    [r.stops.length ? esc(`${r.stops.length} (${r.stops.reduce((a, s) => a + s.minutes, 0)} min${brk ? `, ${brk} break${brk === 1 ? '' : 's'}` : ''})`) : ''],
+  ].map(td).join('')}</tr>`; }).join('\n')}
+</table>
+<div style="height:16px;line-height:16px;clear:both">&nbsp;</div>`;
   const stopsHtml = withStops.length ? `<p><b>Unscheduled stops leaving Florida</b> (${STOP_MIN}+ minutes, not the yard or a trip stop):</p><ul>${withStops.map((r) => `<li>Trip ${esc(r.trip)} · truck ${esc(r.truck)}: ${r.stops.map((s) => `${esc(clock(s.fromMs))}${s.ongoing ? ' (still stopped)' : `–${esc(clock(s.toMs))}`} ${s.minutes} min${s.place ? ` at ${esc(s.place)}` : ''}${s.duty ? ` <i>(${esc(DUTY_LABEL[s.duty] || s.duty)})</i>` : ''}`).join('; ')}</li>`).join('')}</ul><p style="font-size:12px;color:#666">Duty status from the drivers' ELD logs: a break / sleeper is a legal rest; "on duty" is usually fuel or paperwork; "personal conveyance" or "no duty status" are the ones to ask about.</p>` : '';
   const html = `<div style="font-family:Arial,sans-serif;font-size:14px">
 <p>Good day,</p>

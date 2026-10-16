@@ -49,6 +49,7 @@ test('report rows: yellow when dispatch → departure is over 30 min; NO GPS wit
   assert.equal(rep.subject, 'OUTBOUND 3 TRIP SHEETS - TUE 10/06/26');
   assert.match(rep.html, /Tuesday Trip sheets/); assert.match(rep.html, /All loads left the yard except truck 2606/);
   assert.match(rep.html, /background:#ffff66/); assert.match(rep.html, /FLOWERS \(FLORIDA\)/);
+  assert.match(rep.html, /colspan="5"/, "five stacked columns fit a phone"); assert.doesNotMatch(rep.html, /white-space:nowrap/);
 });
 
 test('live alert: stopped 20+ min in Florida after leaving the yard, not a trip stop — even in the sleeper', () => {
