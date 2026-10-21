@@ -101,6 +101,12 @@ const stripe = STRIPE_SECRET_KEY
   ? new Stripe(String(STRIPE_SECRET_KEY).trim(), { maxNetworkRetries: 3, timeout: 30000 })
   : null;
 
+// A background job (nightly reads, polling, email checks) whose promise fails with nothing catching it
+// used to take the whole server down ("Exited with status 1"). Log it and keep serving instead.
+// A thrown (synchronous) error still restarts — the process may be in a bad state — but says why first.
+process.on('unhandledRejection', (err) => { console.error('[crash-guard] unhandled rejection (kept running):', (err && err.stack) || err); });
+process.on('uncaughtException', (err) => { console.error('[crash-guard] uncaught exception (restarting):', (err && err.stack) || err); process.exit(1); });
+
 if (!TRACCAR_TOKEN) { console.error('FATAL: set TRACCAR_TOKEN'); process.exit(1); }
 if (!JWT_SECRET) { console.error('FATAL: set JWT_SECRET'); process.exit(1); }
 
