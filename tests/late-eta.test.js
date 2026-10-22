@@ -6,18 +6,18 @@ const H = 3600000;
 const NOW = Date.parse('2026-10-06T18:20:00Z');
 
 test('solo: out of hours → 10h reset; 70-hour cycle nearly used → 34h restart', () => {
-  // 550 mi = 10 h of driving; 0 drive left now → 10 h rest, 10 h drive + 30-min break
-  const reset = (estimateArrival(550, { driveLeftMin: 0, shiftLeftMin: 0, cycleLeftMin: 3000, now: NOW }) - NOW) / H;
+  // 600 mi = 10 h of driving (60 mph); 0 drive left now → 10 h rest, 10 h drive + 30-min break
+  const reset = (estimateArrival(600, { driveLeftMin: 0, shiftLeftMin: 0, cycleLeftMin: 3000, now: NOW }) - NOW) / H;
   assert.ok(reset > 20 && reset < 21, `reset ${reset}`);
-  // 629 mi = 11.4 h: more than one 11-hour day → a second reset
-  const two = (estimateArrival(629, { driveLeftMin: 0, shiftLeftMin: 0, cycleLeftMin: 3000, now: NOW }) - NOW) / H;
+  // 686 mi = 11.4 h: more than one 11-hour day → a second reset
+  const two = (estimateArrival(686, { driveLeftMin: 0, shiftLeftMin: 0, cycleLeftMin: 3000, now: NOW }) - NOW) / H;
   assert.ok(two > 31 && two < 33, `two ${two}`);
-  const restart = (estimateArrival(629, { driveLeftMin: 600, shiftLeftMin: 700, cycleLeftMin: 120, now: NOW }) - NOW) / H;
+  const restart = (estimateArrival(686, { driveLeftMin: 600, shiftLeftMin: 700, cycleLeftMin: 120, now: NOW }) - NOW) / H;
   assert.ok(restart > 45, `restart ${restart}`);                     // 2 h, then 34 h restart, then the rest
 });
 
 test('team: both clocks used — rolling ~nonstop when one is fresh, waits when both are out', () => {
-  const fresh = (estimateArrival(730, { team: true, driveLeftMin: 520, shiftLeftMin: 600, partner: { driveLeftMin: 660, shiftLeftMin: 840 }, now: NOW }) - NOW) / H;
+  const fresh = (estimateArrival(796, { team: true, driveLeftMin: 520, shiftLeftMin: 600, partner: { driveLeftMin: 660, shiftLeftMin: 840 }, now: NOW }) - NOW) / H;
   assert.ok(fresh > 13 && fresh < 14.5, `fresh ${fresh}`);           // 13.3 h of driving, no reset
   const bothOut = (estimateArrival(200, { team: true, driveLeftMin: 0, shiftLeftMin: 0, partner: { driveLeftMin: 0, shiftLeftMin: 0 }, now: NOW }) - NOW) / H;
   assert.ok(bothOut > 13, `bothOut ${bothOut}`);                    // must rest before anyone drives
@@ -51,10 +51,10 @@ test('TruckMate due time alone is a warning ("may miss"), a confirmed appointmen
 test('real road miles are used when known', () => {
   const b = trip('624304', 'DEPSHIP', { billNumber: 'B2', endZoneDescription: 'MIAMI, FL, 33178', pieces: 1, deliverBy: '2026-10-06T21:00:00', deliverByEnd: '2026-10-06T21:00:00', deliveryApptReq: 'True' }, { lat: 26.7, lng: -80.1, hos: { driveLeftMin: 600, shiftLeftMin: 700 } });
   const asked = [];
-  const slow = ctx({ roadMiles: (a, g) => { asked.push(g); return 400; } });   // pretend a 400-mile detour
+  const slow = ctx({ roadMiles: (a, g) => { asked.push(g); return 440; } });   // pretend a 440-mile detour
   const a = codes(b, slow);
   assert.ok(asked.length > 0);
-  assert.match(a[0].detail, /^400 mi/);
+  assert.match(a[0].detail, /^440 mi/);
 });
 
 import { boardEtas } from '../watchtower.js';

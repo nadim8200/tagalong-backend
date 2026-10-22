@@ -86,7 +86,7 @@ test('team out of Miami reaches Chelsea Thursday morning, not Wednesday afternoo
   const chelsea = e.stops.find((s) => s.zip === '02150');
   const h = (chelsea.etaMs - now) / 3600000;
   assert.ok(h > 30 && h < 33, `Chelsea in ${h.toFixed(1)} h (Thu ~5-7 AM)`);
-  assert.ok(stopDwellMin({ consignees: ['a', 'b', 'c', 'd', 'e'], pieces: 70 }) > stopDwellMin({ consignees: ['a'], pieces: 70 }), 'a 5-shop market takes longer');
+  assert.equal(stopDwellMin({ consignees: ['a', 'b', 'c', 'd', 'e'], pieces: 70 }), 60, '1 hour per stop (dispatch rule)');
 });
 
 test('trip sheet "drivers will leave at 20:30": ETAs start at departure, no late alert before it leaves', () => {

@@ -24,7 +24,7 @@
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 
 const MIN = 60000;
-const CRUISE_MPH = 55;
+const CRUISE_MPH = 60;   // dispatch's rule: 60 mph for the whole run
 const SEV = { critical: 3, warning: 2, info: 1 };
 
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
@@ -83,7 +83,7 @@ export function haversineMi(aLat, aLng, bLat, bLng) {
   return 2 * R * Math.asin(Math.sqrt(s));
 }
 
-// Same HOS-aware estimate the console uses (55 mph bent to the DOT clock:
+// Same HOS-aware estimate the console uses (60 mph bent to the DOT clock:
 // 11h drive / 14h shift / 30-min break / 10h reset; teams ~20h per day).
 // restDoneMin: how long a driver who is out of hours has already been parked,
 // so the 10-hour reset isn't assumed to start right now.
@@ -324,14 +324,9 @@ export function passedCount(ordered, pts, at, { awayMi = 15, marginMi = 10 } = {
   return k;
 }
 
-// Time on the dock: unloading grows with boxes, and every extra consignee at the
-// same market (e.g. 5 shops at Chelsea Market) is another check-in and count.
-export function stopDwellMin(st) {
-  const extra = Math.max(0, ((st.customers && st.customers.length) || (st.consignees && st.consignees.length) || 1) - 1);
-  return Math.min(120, 15 + 10 * extra + Math.min(45, (Number(st.pieces) || 0) / 10));
-}
-// A team keeps rolling, but still stops for fuel and the driver swap: ~15 min every 8 hours of driving.
-const teamStopsH = (miles) => Math.floor(miles / CRUISE_MPH / 8) * 0.25;
+// Time at each stop — dispatch's rule: 1 hour per stop, every stop before this one delays it. Pure.
+export const STOP_HOURS = 1;
+export function stopDwellMin() { return STOP_HOURS * 60; }
 
 function routeEtas(f, ctx) {
   if (notStartedCode(f.status) || !f.live || !f.etaGpsOk || f.live.lat == null) return null;
@@ -366,8 +361,7 @@ function routeEtas(f, ctx) {
     miles += road != null ? road : haversineMi(at.lat, at.lng, g.lat, g.lng) * 1.2;
     at = g;
     const eta = miles > 0 ? estimateArrival(miles, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, partner: f.live.hos2 || null, restDoneMin, now: start }) : start;
-    const fuel = f.team ? teamStopsH(miles) * 60 * MIN : 0;
-    out.push({ stop: st, miles, etaMs: (eta || start) + fuel + dock * MIN, stopsBefore: i, leavesAt: start > ctx.now ? start : null });
+    out.push({ stop: st, miles, etaMs: (eta || start) + dock * MIN, stopsBefore: i, leavesAt: start > ctx.now ? start : null });
     dock += stopDwellMin(st);                                    // unloading here delays every later stop
   });
   out.guess = hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stopStartUnknown;
