@@ -790,3 +790,39 @@ test('📞 Call Jarvis from the console: a live web call as staff; only our serv
     assert.equal(r2.out.found, false);
   } finally { board.pop(); }
 });
+
+test('staff: "ETA for Zoom Bloom, trip 625490" answers for Zoom Bloom — not the truck\'s next stop (Clesen); "Sunbloom" sounds like ZOOM-BLOOM', async () => {
+  const { soundsJoined, nearScore: near } = await import('../voice.js');
+  assert.equal(soundsJoined('Sunbloom', 'ZOOM BLOOM - RFW GLENSIDE'), true);
+  assert.equal(soundsJoined('Zoom Bloom', 'ZOOM-BLOOM *'), true);
+  assert.equal(soundsJoined('Sunbloom', 'SUN Valley Arcata'), false);
+  assert.equal(soundsJoined('Sunbloom', 'CLESEN WHOLESALE - NORTHBROOK'), false);
+  assert.ok(near('Sunbloom', 'ZOOM BLOOM - RFW GLENSIDE GLENSIDE') >= 0.5);
+  const directory = { load: async () => ({ people: [{ name: 'Nadim Tellez', phone: '305-555-0711' }] }) };
+  const zb = { trip: { tripNumber: '625490', status: 'DEPSHIP', powerUnit: '2095', trailer: '2069' },
+    freightBills: [{ billNumber: 'N979224', billToName: 'CLESEN WHOLESALE - NORTHBROOK', endZoneDescription: 'NORTHBROOK, IL, 60062', pieces: 27 }, { billNumber: 'C979253', billToName: 'ZOOM-BLOOM *', endZoneDescription: 'GLENSIDE, PA, 19038', pieces: 3 }],
+    _samsara: { location: 'I 44, Oklahoma City, OK', gpsAt: '2026-10-22T13:58:00Z', speedMph: 70 },
+    _manifest: { stops: [{ action: 'DELIVER', customer: 'CLESEN WHOLESALE - NORTHBROOK', city: 'NORTHBROOK', state: 'IL', stopNumber: 2 }, { action: 'DELIVER', customer: 'ZOOM BLOOM - RFW', city: 'GLENSIDE', state: 'PA', stopNumber: 7 }] } };
+  board.push(zb);
+  try {
+    const v = setup({}, { directory });
+    await v.db.set('taWatch:florida-beauty', { etas: { 625490: { stops: [{ label: 'NORTHBROOK, IL, 60062', zip: '60062', miles: 775, etaMs: Date.parse('2026-10-23T09:22:00Z') }, { label: 'GLENSIDE, PA, 19038', zip: '19038', miles: 1712, etaMs: Date.parse('2026-10-24T03:42:00Z') }] } } });
+    const staff = { call_id: 'z1', direction: 'inbound', from_number: '+13055550711' };
+    const r = await v.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Zoom Bloom', trip_number: '625490' }, call: staff });
+    assert.equal(r.out.found, true);
+    assert.match(r.out.speaking_about, /zoom/i);
+    const txt = JSON.stringify(r.out.loads);
+    assert.match(txt, /GLENSIDE/i);
+    assert.doesNotMatch(txt, /NORTHBROOK/i, 'only Zoom Bloom\'s stop');
+    // the whole load (no name): every customer ahead with its ETA, so a name asked later is answered right
+    const w = await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '625490' }, call: { ...staff, call_id: 'z2' } });
+    const ahead = w.out.stops_ahead.find((x) => /GLENSIDE/.test(x.place));
+    assert.deepEqual(ahead.customers, ['ZOOM BLOOM - RFW']);
+    assert.match(ahead.eta, /Oct 23/);
+    assert.match(w.out.say, /next_stop is only the truck's next stop/);
+    // heard as "Sunbloom" with no number → staff get Zoom Bloom as the closest match
+    const s = await v.hit('POST /retell/fn/lookup_load', { args: { customer_name: 'Sunbloom' }, call: { ...staff, call_id: 'z3' } });
+    assert.equal(s.out.found, true);
+    assert.match(JSON.stringify(s.out.loads), /GLENSIDE/i);
+  } finally { board.pop(); }
+});

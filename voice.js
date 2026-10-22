@@ -121,7 +121,7 @@ function tools(base, transferNumber) {
       broker_load_number: { type: 'string', description: 'The broker\'s own load number from their rate confirmation (e.g. RXO 24261611, Red Lab 131963433) — brokers usually call with this' },
       truck_number: { type: 'string', description: 'Truck / tractor / unit number, e.g. 2607' },
       trailer_number: { type: 'string', description: 'Trailer number, e.g. 7131' },
-      customer_name: { type: 'string', description: 'A flower customer / receiver calling about THEIR delivery by business name, e.g. "Springfield Florist", "Johnson\'s Wholesale Florist". If they spelled it, pass the spelled name.' },
+      customer_name: { type: 'string', description: 'A flower customer / receiver by business name, e.g. "Springfield Florist", "Johnson\'s Wholesale Florist". If they spelled it, pass the spelled name. ALWAYS pass it together with a trip / bill / truck number when the caller says both ("ETA for Zoom Bloom, trip 625490") — the answer is then for THAT customer\'s stop.' },
       customer_city: { type: 'string', description: 'The city / town the caller says their delivery goes to, e.g. "Waltham"' },
       caller_confirmed: { type: 'boolean', description: 'true ONLY when you asked "Is that <name from did_you_mean>?" and the caller clearly said yes' },
     }),
@@ -223,6 +223,12 @@ export function voiceFacts(item, eta) {
     stops_delivered: stops.filter((x) => x.delivered).map((x) => x.place),
     stops_already_passed: stops.filter((x) => x.passed).map((x) => x.place),
     stops_remaining: stops.filter((x) => !x.delivered && !x.passed).map((x) => x.place),
+    // the customer at each stop still ahead + its ETA — next_stop may be someone else's
+    stops_ahead: stops.filter((x) => !x.delivered && !x.passed).map((x) => {
+      const l = eta && eta.stops ? eta.stops.find((e) => town(cityOf(e.label)) === town(x.place)) : null;
+      const onSheet = sheet.filter((h) => /DELIVER/i.test(h.action || '') && (town(h.tmPlace) === town(x.place) || town(h.city) === town(x.place))).map((h) => h.customer).filter(Boolean);
+      return { customers: onSheet.length ? [...new Set(onSheet)] : [x.customer].filter(Boolean), place: x.place, eta: l ? fmtLocal(l.etaMs, l.label) : null };
+    }),
     stops_note: stops.some((x) => x.passed) ? 'stops_already_passed = the truck already drove past them, so they were most likely delivered (paperwork not confirmed yet). Never say the truck will go back to them.' : undefined,
     total_stops: stops.length,
   };
@@ -320,8 +326,26 @@ export function nameScore(said, onSheet) {
 }
 // A half-heard name still names the business when its rare word matched ("Carbone Dairy" → CARBONE R.I. — "R.I."
 // sounds like "Dairy"): at least half the caller's words fit and one of them is a distinctive word of 5+ letters. Pure.
+// A name heard as one run-together word, or split differently ("Sunbloom" for ZOOM-BLOOM): the caller's words joined
+// sound like a run of 1–3 words on the sheet joined — same consonants once voiced/unvoiced (Z=S) and M=N. Pure.
+const loose = (w) => voiced(w).replace(/N/g, 'M').replace(/(.)\1+/g, '$1');
+export function soundsJoined(said, onSheet) {
+  const a = nameWords(said).filter((w) => !GENERIC.has(w)).join('');
+  if (a.length < 6 || loose(a).length < 4) return false;
+  const b = nameWords(onSheet);
+  for (let i = 0; i < b.length; i += 1) {
+    for (let n = 1; n <= 3 && i + n <= b.length; n += 1) {
+      const run = b.slice(i, i + n);
+      if (run.some((w) => GENERIC.has(w))) break;
+      const j = run.join('');
+      if (a[0].replace('Z', 'S') === j[0].replace('Z', 'S') && Math.abs(j.length - a.length) <= 3 && loose(j) === loose(a)) return true;
+    }
+  }
+  return false;
+}
 export function nearScore(said, onSheet) {
   const s = nameScore(said, onSheet);
+  if (s < 0.5 && soundsJoined(said, onSheet)) return 0.6;   // staff get it as "closest match"; customers are asked "Is that …?"
   if (s >= 0.75 || s < 0.5) return s;
   const b = nameWords(onSheet);
   return nameWords(said).some((w) => w.length >= 5 && !GENERIC.has(w) && b.some((x) => sameWord(w, x))) ? s : 0;
@@ -832,7 +856,14 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
       const eta = await etaFor(trip);
       // the driver (or Jarvis calling the driver), or a number authorized for every load, gets the full route
       // a phone on the Employees list: any load, any customer or broker
-      if (staffPhone && hit.role !== 'driver') return reply({ found: true, matched_by: hit.by, caller_is: STAFF_IS, ...voiceFacts(hit.item, eta), say: STAFF_RULE });
+      if (staffPhone && hit.role !== 'driver') {
+        // staff named a customer with the number ("Zoom Bloom, trip 625490") → that customer's stop, not the truck's next stop
+        const asked = said || null;
+        const theirs = asked ? customerStops([hit.item], asked, { [trip]: eta }, { staff: true }) : [];
+        const st = theirs.length ? theirs : asked ? customerStops([hit.item], asked, { [trip]: eta }, { near: true, staff: true }) : [];
+        if (st.length) return reply({ found: true, matched_by: `${hit.by} + customer name`, caller_is: STAFF_IS, speaking_about: spokenName(st[0].customer), loads: [customerView(hit.item, eta, st)], say: `${STAFF_RULE} They asked about ${spokenName(st[0].customer)} on this load: give THAT customer's stop and ETA (the truck may stop elsewhere first — say how many stops before theirs only if asked).` });
+        return reply({ found: true, matched_by: hit.by, caller_is: STAFF_IS, ...voiceFacts(hit.item, eta), say: `${STAFF_RULE}${asked ? ` "${asked}" is not a customer on this load as heard — say so, read the customers in stops_ahead, and ask which one.` : ''} If they name a customer, answer from stops_ahead (that customer's place and ETA) — next_stop is only the truck's next stop and may be someone else's.` });
+      }
       if (hit.role === 'driver' || (meta.trip && call.direction === 'outbound') || (profiles && profiles.anyLoad && await profiles.anyLoad(callerPhone(call)))) {
         return reply({ found: true, matched_by: hit.by, caller_is: 'the driver of this load', ...voiceFacts(hit.item, eta) });
       }
