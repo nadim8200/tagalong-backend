@@ -148,6 +148,8 @@ const notStartedCode = (code) => /^(disp|assgn|assigned|printed|avail|avbl|new|p
 const notStarted = (code, f, now) => notStartedCode(code) || !!(f && f.pickupAtMs && now != null && now < f.pickupAtMs);
 const isAtStop = (code) => /^(arrship|arrcons|spot)/i.test(String(code || ''));
 
+// "BROUSSARD", "LA" → "BROUSSARD|LA" — same key as commitments.js (inlined: it imports this file). Pure.
+const commitKey = (city, state) => { const c = String(city || '').split(',')[0].toUpperCase().replace(/[^A-Z ]/g, '').replace(/\s+/g, ' ').trim(); const st = String(state || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2); return c && st ? `${c}|${st}` : null; };
 // Everything the rules need from one board item, flattened once.
 function tripFacts(item, now) {
   const t = (item && item.trip) || item || {};
@@ -232,6 +234,7 @@ function tripFacts(item, now) {
       if (!hits.length) continue;
       st.seq = Math.min(...hits.map((h) => (h.stopNumber != null ? h.stopNumber : 999)));
       st.customers = [...new Set(hits.map((h) => h.customer).filter(Boolean))];
+      st.sheetKeys = hits.map((h) => commitKey(h.city, h.state)).filter(Boolean);
       st.callAhead = hits.flatMap((h) => h.callAhead || []).filter((c) => c && (c.phone || c.contact));
       for (const h of hits) {
         if (!h.apptDate || !h.apptTime) continue;
@@ -242,6 +245,15 @@ function tripFacts(item, now) {
     if (sheet.pickupAt) {
       const ms = localToUtcMs(String(sheet.pickupAt).slice(0, 16), 'America/New_York');
       if (!Number.isNaN(ms)) pickupAtMs = ms;
+    }
+  }
+  // the time dispatch committed to the customer (📅 on the stop — commitments.js) is the stop's appointment
+  const commits = (item && item._commit) || null;
+  if (commits) {
+    for (const st of stops) {
+      const p = String(st.label || '').split(',').map((x) => x.trim());
+      const c = [commitKey(p[0], p[1]), ...(st.sheetKeys || [])].map((k) => k && commits[k]).find((x) => x && x.atMs);
+      if (c) { st.apptMs = c.atMs; st.apptFrom = 'committed'; st.apptNeeded = false; }
     }
   }
   const instr = (item && item._ratecon && Array.isArray(item._ratecon.specialInstructions))
@@ -430,7 +442,7 @@ const RULES = [
     const guess = route.guess;
     const due = t.apptFrom === 'truckmate-due';                     // TruckMate due time, no confirmed appointment
     const where = (t.customers && t.customers[0]) ? `${t.customers[0]} (${t.label.replace(/, \d{5}$/, '')})` : t.label.replace(/, \d{5}$/, '');
-    const src = { handwritten: ' (handwritten on sheet)', printed: ' (trip sheet)', sheet: ' (trip sheet)', ratecon: ' (rate con)', 'truckmate-appt': ' (TruckMate appointment)', 'truckmate-due': ' (TruckMate due time — not a confirmed appointment)' }[t.apptFrom] || '';
+    const src = { committed: ' (time committed to the customer)', handwritten: ' (handwritten on sheet)', printed: ' (trip sheet)', sheet: ' (trip sheet)', ratecon: ' (rate con)', 'truckmate-appt': ' (TruckMate appointment)', 'truckmate-due': ' (TruckMate due time — not a confirmed appointment)' }[t.apptFrom] || '';
     return {
       code: 'late-risk', severity: worst.lateMin > 60 && !guess && !due ? 'critical' : 'warning', key: t.key,
       title: `${due ? 'May miss' : 'Will miss'} ${where} ${due ? 'due time' : 'appointment'} by ~${fmtMin(worst.lateMin)}`,
