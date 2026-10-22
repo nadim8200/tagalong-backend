@@ -34,6 +34,42 @@ export function commitMs(local, state) {
   return Number.isNaN(ms) ? null : ms;
 }
 
+// ---- remembered for next time: per customer + location ----
+// Set once, it carries to the next outbound for the same customer + location: a load on the SAME weekday as
+// before gets the same weekday + time (Wed load → Fri 8 AM); a load on another day gets the same number of
+// days after loading, at the same time. Filled in automatically ("saved from a previous load"), still editable.
+const STAND = (site) => `taCommitStanding:${site}`;
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DAY_NAME = { Sun: 'Sunday', Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
+const isYmd = (x) => /^\d{4}-\d{2}-\d{2}$/.test(String(x || ''));
+export const weekday = (ymd) => DAYS[new Date(`${ymd}T12:00:00Z`).getUTCDay()];
+export const daysBetween = (a, b) => Math.round((Date.parse(`${b}T12:00:00Z`) - Date.parse(`${a}T12:00:00Z`)) / 86400000);
+export const addDays = (ymd, n) => { const d = new Date(`${ymd}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+// "ZOOM BLOOM - RFW", "Glenside", "PA" → "ZOOM BLOOM RFW|GLENSIDE|PA". Pure.
+export function custKey(customer, city, state) {
+  const n = String(customer || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+  const k = stopKey(city, state);
+  return n && k ? `${n}|${k}` : null;
+}
+// What to remember from a committed time on a load. Pure. → { day, offsetDays, time } | null
+export function toStanding(local, loadDate) {
+  if (!isYmd(loadDate) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(local || ''))) return null;
+  const offsetDays = daysBetween(loadDate, local.slice(0, 10));
+  if (offsetDays < 0 || offsetDays > 10) return null;                    // not a believable delivery day
+  return { day: weekday(loadDate), offsetDays, time: local.slice(11, 16) };
+}
+// The remembered time → this load's committed local time. Pure. → { local, rule } | null
+export function fromStanding(mem, loadDate) {
+  if (!mem || !isYmd(loadDate)) return null;
+  const day = weekday(loadDate);
+  const same = mem.byLoadDay && mem.byLoadDay[day];
+  const r = same || mem.last;
+  if (!r || r.offsetDays == null || !r.time) return null;
+  const local = `${addDays(loadDate, r.offsetDays)}T${r.time}`;
+  const when = new Date(`${local}:00Z`).toLocaleString('en-US', { timeZone: 'UTC', weekday: 'long', hour: 'numeric', minute: '2-digit' });
+  return { local, rule: same ? `same as the last ${DAY_NAME[day]} load: ${when}` : `${r.offsetDays} day${r.offsetDays === 1 ? '' : 's'} after loading, ${when.replace(/^\w+,? /, '')}` };
+}
+
 // 6 AM Miami time on the day after `ms`. Pure.
 export function nextMorning(ms) {
   const d = new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -99,13 +135,27 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
     const local = b.local ? String(b.local).slice(0, 16) : null;
     const atMs = local ? commitMs(local, b.state) : null;
     if (local && !atMs) return res.status(400).json({ error: 'Pick a date and time.' });
+    const ck = custKey(b.customer, b.city, b.state);
     const next = await db.update(KEY(site), (cur) => {
       const c = { ...(cur || {}) }; const t = { ...(c[trip] || {}) };
       if (atMs) t[k] = { local, state: String(b.state).toUpperCase().slice(0, 2), atMs, customer: String(b.customer || '').slice(0, 120) || null, place: String(b.place || `${b.city}, ${b.state}`).slice(0, 120), by: who(req), setAt: new Date(now()).toISOString() };
-      else delete t[k];
-      if (Object.keys(t).length) c[trip] = t; else delete c[trip];
+      else t[k] = { cleared: true, by: who(req), setAt: new Date(now()).toISOString() };   // stays cleared — a saved time isn't filled back in
+      c[trip] = t;
       return c;
     }, {});
+    // remember it for this customer + location's next loads (or forget it)
+    if (ck && (b.forget || atMs)) {
+      const st = atMs ? toStanding(local, b.loadDate) : null;
+      await db.update(STAND(site), (cur) => {
+        const m = { ...(cur || {}) };
+        if (b.forget) { delete m[ck]; return m; }
+        if (!st) return m;
+        const prev = m[ck] || {};
+        const rec = { offsetDays: st.offsetDays, time: st.time, by: who(req), at: new Date(now()).toISOString() };
+        m[ck] = { customer: String(b.customer).slice(0, 120), place: `${b.city}, ${b.state}`, byLoadDay: { ...(prev.byLoadDay || {}), [st.day]: rec }, last: { ...rec, day: st.day } };
+        return m;
+      }, {});
+    }
     return res.json(next[trip] || {});
   });
 
@@ -113,6 +163,32 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
   async function overlay(s, trips) {
     if (!enabled) return;
     const c = await all();
+    // a new outbound for a customer + location with a saved time → fill it in (once; dispatch can change or clear it)
+    const mem = (await db.get(STAND(site), {})) || {};
+    const fill = {};
+    if (Object.keys(mem).length) {
+      for (const it of trips) {
+        const trip = tripNo(it); const m = it._manifest || {};
+        if (!trip || !isYmd(m.dateLoaded)) continue;
+        for (const st of m.stops || []) {
+          if (!/DELIVER/i.test(st.action || '')) continue;
+          const k = stopKey(st.city, st.state);
+          if (!k || (c[trip] && c[trip][k]) || (fill[trip] && fill[trip][k])) continue;
+          const f = fromStanding(mem[custKey(st.customer, st.city, st.state)], m.dateLoaded);
+          const atMs = f ? commitMs(f.local, st.state) : null;
+          if (!atMs) continue;
+          fill[trip] = { ...(fill[trip] || {}), [k]: { local: f.local, state: String(st.state).toUpperCase().slice(0, 2), atMs, customer: st.customer || null, place: `${String(st.city).toUpperCase()}, ${String(st.state).toUpperCase()}`, by: 'Jarvis (saved from a previous load)', auto: true, rule: f.rule, setAt: new Date(now()).toISOString() } };
+        }
+      }
+      if (Object.keys(fill).length) {
+        const saved = await db.update(KEY(site), (cur) => {
+          const x = { ...(cur || {}) };
+          for (const [trip, stops] of Object.entries(fill)) x[trip] = { ...stops, ...(x[trip] || {}) };   // never over anything already set
+          return x;
+        }, {});
+        Object.assign(c, saved);
+      }
+    }
     for (const it of trips) { const x = c[tripNo(it)]; if (x) it._commit = x; }
   }
 

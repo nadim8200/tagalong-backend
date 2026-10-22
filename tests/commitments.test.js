@@ -72,11 +72,46 @@ test('set a committed time on a stop → it becomes the stop\'s appointment → 
   assert.equal((await v.c.process('florida-beauty', { trips: [it] })).sent, 0, 'once per stop + time');
   // clearing the time removes it
   await v.hit('PUT /truckmate/commitments/:trip', { city: 'BROUSSARD', state: 'LA', local: null }, { trip: '625552' });
-  assert.deepEqual((await v.hit('GET /truckmate/commitments/:trip', {}, { trip: '625552' })).out, {});
+  const after = (await v.hit('GET /truckmate/commitments/:trip', {}, { trip: '625552' })).out;
+  assert.equal(after['BROUSSARD|LA'].cleared, true); assert.equal(after['BROUSSARD|LA'].atMs, undefined);
 });
 
 test('texts go to phone numbers or employees\' phones', () => {
   const r = resolvePhones(['305-555-0100', 'Frank Ducassi', 'Nobody Here'], { people: [{ name: 'Frank Ducassi', phone: '(305) 748-5611' }] });
   assert.deepEqual(r.phones, ['+13055550100', '+13057485611']);
   assert.deepEqual(r.unresolved, ['Nobody Here']);
+});
+
+import { toStanding, fromStanding, custKey } from '../commitments.js';
+test('saved for next time: same weekday → same weekday + time; another day → same days after loading', () => {
+  assert.deepEqual(toStanding('2026-10-23T08:00', '2026-10-21'), { day: 'Wed', offsetDays: 2, time: '08:00' });
+  assert.equal(toStanding('2026-10-23T08:00', 'someday'), null);
+  const mem = { byLoadDay: { Wed: { offsetDays: 2, time: '08:00' } }, last: { offsetDays: 2, time: '08:00', day: 'Wed' } };
+  assert.deepEqual(fromStanding(mem, '2026-10-28'), { local: '2026-10-30T08:00', rule: 'same as the last Wednesday load: Friday 8:00 AM' });
+  assert.equal(fromStanding(mem, '2026-10-26').local, '2026-10-28T08:00');         // a Monday load: 2 days after
+  assert.match(fromStanding(mem, '2026-10-26').rule, /^2 days after loading/);
+  // a Monday load has its own saved time → Monday loads use it
+  const both = { byLoadDay: { ...mem.byLoadDay, Mon: { offsetDays: 3, time: '06:00' } }, last: mem.last };
+  assert.equal(fromStanding(both, '2026-11-02').local, '2026-11-05T06:00');
+  assert.equal(custKey('ZOOM BLOOM - RFW', 'Glenside', 'pa'), 'ZOOM BLOOM RFW|GLENSIDE|PA');
+});
+
+test('set once → the next outbound for that customer + location gets it automatically; clear sticks; forget stops it', async () => {
+  const v = setup(Date.parse('2026-10-21T20:00:00Z'));
+  await v.hit('PUT /truckmate/commitments/:trip', { city: 'BROUSSARD', state: 'LA', customer: "SPEDALE'S FLORIST INC.*", place: 'BROUSSARD, LA', local: '2026-10-23T08:00', loadDate: '2026-10-21' }, { trip: '625552' });
+  const next = (trip, date) => ({ trip: { tripNumber: trip, status: 'LOADINGMAN' }, freightBills: [], _manifest: { dateLoaded: date, stops: [{ action: 'DELIVER', customer: "SPEDALE'S FLORIST INC.*", city: 'BROUSSARD', state: 'LA' }, { action: 'DELIVER', customer: 'OTHER', city: 'HOUSTON', state: 'TX' }] } });
+  const wed = next('625700', '2026-10-28');
+  await v.c.overlay('florida-beauty', [wed]);
+  assert.equal(wed._commit['BROUSSARD|LA'].local, '2026-10-30T08:00');
+  assert.equal(wed._commit['BROUSSARD|LA'].auto, true);
+  assert.match(wed._commit['BROUSSARD|LA'].rule, /last Wednesday load/);
+  assert.equal(wed._commit['HOUSTON|TX'], undefined, 'other customers: nothing saved');
+  // dispatch clears it on this load → it stays cleared
+  await v.hit('PUT /truckmate/commitments/:trip', { city: 'BROUSSARD', state: 'LA', customer: "SPEDALE'S FLORIST INC.*", local: null }, { trip: '625700' });
+  const again = next('625700', '2026-10-28'); await v.c.overlay('florida-beauty', [again]);
+  assert.equal(again._commit['BROUSSARD|LA'].cleared, true);
+  // forget for future loads → a new load gets nothing
+  await v.hit('PUT /truckmate/commitments/:trip', { city: 'BROUSSARD', state: 'LA', customer: "SPEDALE'S FLORIST INC.*", local: null, forget: true }, { trip: '625700' });
+  const later = next('625800', '2026-11-04'); await v.c.overlay('florida-beauty', [later]);
+  assert.equal(later._commit, undefined);
 });
