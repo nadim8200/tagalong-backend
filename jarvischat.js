@@ -16,7 +16,7 @@
 // ---------------------------------------------------------------
 import { randomBytes } from 'crypto';
 import { slimItem } from './assistant.js';
-import { findLoad, customerStops } from './voice.js';
+import { findLoad, customerStops, customerView, isOcLoad, spokenName } from './voice.js';
 import { contactsFor } from './statusmail.js';
 import { fmtLocal } from './localtime.js';
 
@@ -76,12 +76,26 @@ export function withCache({ system, tools, messages }) {
   const tl = tools.map((t, i) => (i === tools.length - 1 ? { ...t, cache_control: { type: 'ephemeral' } } : t));
   return { system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }], tools: tl, messages: msgs };
 }
+// One driver's hours of service, said plainly (Samsara clocks). Pure.
+export function hosOf(h, name) {
+  if (!h && !name) return null;
+  const m = (x) => (x == null ? null : minsText(Math.max(0, x)));
+  const DUTY = { driving: 'driving', onDuty: 'on duty (not driving)', offDuty: 'off duty', sleeperBed: 'in the sleeper', personalConveyance: 'personal conveyance', yardMove: 'yard move' };
+  return { driver: name || (h && h.driverName) || null, duty: h && h.status ? (DUTY[h.status] || h.status) : 'unknown', driveLeft: m(h && h.driveLeftMin), shiftLeft: m(h && h.shiftLeftMin), cycleLeft70h: m(h && h.cycleLeftMin), breakDueIn: m(h && h.breakInMin), clocksAsOf: h && h.at ? fmtLocal(Date.parse(h.at), 'FL') : null };
+}
+// Both drivers' hours for a load. Pure.
+export function crewHours(it) {
+  const s = (it && it._samsara) || {};
+  return [hosOf(s.hos, s.driver1), s.driver2 || s.hos2 ? hosOf(s.hos2, s.driver2) : null].filter(Boolean);
+}
 const clip = (x, n = 6000) => { const s = typeof x === 'string' ? x : JSON.stringify(x); return s.length > n ? `${s.slice(0, n)}…(truncated)` : s; };
 
 export const TOOLS = [
   { name: 'board_summary', description: 'The live board: how many active loads, open alerts by severity, and a one-line list of loads (trip, status, truck, trailer, from → to, where the truck is). Optional filter text (city, customer, truck, status).', input_schema: { type: 'object', properties: { filter: { type: 'string' } } } },
   { name: 'find_load', description: 'Find a load by trip number, bill number, broker load number, truck, trailer, or a customer name on the trip sheet.', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
-  { name: 'loads_to_place', description: 'Every load on the board with a stop in a city / state (e.g. "Lombard, IL", "Chicago", "NJ") — trip, truck, customer at that stop, delivered or not, and the live ETA. Use for questions like "update on deliveries to Lombard IL".', input_schema: { type: 'object', properties: { place: { type: 'string' } }, required: ['place'] } },
+  { name: 'customer_etas', description: 'ETA for a CUSTOMER / receiver by business name (e.g. "Native", "Zoom Bloom", "Main Wholesale") — the same answer staff get on the phone: every load with a stop for them, where the truck is now (as of when), and for each of their deliveries the city, ETA (local time), appointment / committed time, boxes loaded, trip + truck + trailer. Half-heard or partial names find the closest customer. Optional city.', input_schema: { type: 'object', properties: { customer: { type: 'string' }, city: { type: 'string' } }, required: ['customer'] } },
+  { name: 'truck_hours', description: 'Driving hours (hours of service) for a truck or driver: each driver\'s duty status, drive time left, shift (14-hr) left, 70-hr cycle left and when a break is due (Samsara ELD) — plus the truck\'s current load and where it is. Use for "how many hours does 2217 have", "can 2403 make it", "is the team rested".', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck / unit number, or a driver name' } }, required: ['truck'] } },
+  { name: 'loads_to_place', description: 'A PLACE only (never a customer name — use customer_etas for those): every load on the board with a stop in a city / state (e.g. "Lombard, IL", "Chicago", "NJ") — trip, truck, customer at that stop, delivered or not, and the live ETA. Use for questions like "update on deliveries to Lombard IL".', input_schema: { type: 'object', properties: { place: { type: 'string' } }, required: ['place'] } },
   { name: 'update_email', description: 'EMAIL REPLIES ONLY: when the email asks where loads are / their status / ETAs, list the trips that answer it (and dispatch follow-ups). The reply is then built from live data in the standard delivery-update format — do not write the load details yourself.', input_schema: { type: 'object', properties: { customer: { type: 'string', description: 'Customer / receiver name the update is about (as on the loads), or the place' }, destination: { type: 'string', description: 'Delivery city / state if the question was about a place' }, trips: { type: 'array', items: { type: 'string' } }, followUps: { type: 'array', items: { type: 'object', properties: { issue: { type: 'string' }, next: { type: 'string' }, owner: { type: 'string' }, status: { type: 'string', enum: ['Pending', 'Completed'] } } } } }, required: ['trips'] } },
   { name: 'staff_directory', description: 'Florida Beauty employees by name, department or role (billing, payroll, claims, maintenance, sales, IT…): name, department and extension. Cell phones are never available.', input_schema: { type: 'object', properties: { name_or_department: { type: 'string' } }, required: ['name_or_department'] } },
   { name: 'load_details', description: 'Everything about one load: status, truck/trailer/drivers, live location, every stop with ETA (local time), appointments, rate con, trip sheet, open alerts, to-dos, notes and transfers, holds, emails count.', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
@@ -108,6 +122,8 @@ export const SYSTEM = (who) => `You are Jarvis, the AI dispatcher for Florida Be
 - Florida Beauty staff: staff_directory gives name, department and extension — that is all you ever share about an employee (never a cell phone or personal email).
 - Be brief and practical (a few lines or a short list). Lead with the answer. Use trip numbers.
 - ETAs and appointments: say them as the tools give them (delivery local time with the zone).
+- A customer / business name ("ETA for Native", "where's Zoom Bloom") → customer_etas — a business name is not a place (loads_to_place is only for a city / state). Answer like Jarvis on the phone: for each load, where the truck is now and "as of" when, then each of their deliveries with city, ETA, boxes loaded, trip and truck. If matchedBy is the closest name, say which customer you found.
+- Driving hours / HOS for a truck or driver → truck_hours (each driver's duty status, drive / shift / 70-hr cycle left). Never say the hours aren't available without calling it.
 - Whenever you list or describe a load, include where the truck is now (truckNow.location), whether it is rolling and how fast or stopped and for how long (truckNow.motion; say if the GPS is old), and its next stop with ETA (truckNow.nextStop). Keep each load to one or two lines.
 - When the dispatcher gives you an update, a task or a transfer between teams, record it with add_note (or set_hold) — then confirm in one line what you saved. For a transfer, capture both trucks / teams, the place and the time; ask for anything missing.
 - Anything that reaches outside people (texting or calling a driver, emailing a customer / broker) goes through propose_action — never claim it was sent; say it is waiting for their Confirm.
@@ -167,8 +183,38 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, clients = n
         const q = String(input.query || '');
         const hit = findLoad(all, { trip: q, bill: q, loadNumber: q, truck: q, trailer: q });
         if (hit) return { found: true, trip: tripNo(hit.item), matchedBy: hit.by };
-        const names = customerStops(all, q, (await watch()).etas || {});
+        const etas0 = (await watch()).etas || {};
+        let names = customerStops(all, q, etas0);
+        if (!names.length) names = customerStops(all, q, etas0, { near: true, staff: true });
         return names.length ? { found: true, byCustomerName: names.map((x) => ({ trip: x.trip, customer: x.customer, city: x.city })) } : { found: false };
+      }
+      case 'customer_etas': {
+        const name = String(input.customer || '').trim();
+        if (!name) return { found: false, note: 'Which customer?' };
+        const etas = (await watch()).etas || {};
+        let stops = customerStops(all, name, etas, { staff: true });
+        let matched = 'customer name';
+        if (input.city) { const c = String(input.city).toUpperCase(); const inCity = stops.filter((x) => String(x.city || '').toUpperCase().includes(c)); if (inCity.length) stops = inCity; }
+        if (!stops.length) { stops = customerStops(all, name, etas, { near: true, staff: true }); matched = 'closest name on the board'; }
+        if (!stops.length && clients) {
+          const c = clients.byName(name, { city: input.city })[0];
+          if (c) { stops = clients.loads(all, c).flatMap((it) => customerStops([it], clients.nameOnLoad(it, c), etas, { staff: true })); matched = `client list: ${c.name}`; }
+        }
+        if (!stops.length) return { found: false, note: `No load on the board has a stop for "${name}". It may be delivered already or not dispatched yet — ask for a trip, truck or bill number.` };
+        const trips = [...new Set(stops.map((x) => x.trip))];
+        const loads = trips.map((n) => { const it = all.find((x) => tripNo(x) === n); return { ...(isOcLoad(it) ? { outsideCarrier: true, note: 'Outside carrier — no live tracking yet; Frank Ducassi follows up.' } : {}), ...customerView(it, etas[n], stops.filter((x) => x.trip === n)) }; });
+        return { found: true, customer: spokenName(stops[0].customer), matchedBy: matched, loads };
+      }
+      case 'truck_hours': {
+        const q = String(input.truck || '').trim();
+        const w = await watch();
+        const num = q.replace(/[^0-9A-Z]/gi, '').replace(/^0+/, '');
+        let its = num && /\d/.test(num) ? all.filter((it) => String(tripOf(it).powerUnit || '').replace(/^0+/, '').toUpperCase() === num.toUpperCase()) : [];
+        if (!its.length && q) { const Q = q.toUpperCase(); its = all.filter((it) => { const s2 = it._samsara || {}; return [s2.driver1, s2.driver2].some((d) => d && String(d).toUpperCase().includes(Q)); }); }
+        if (!its.length) return { found: false, note: `Truck / driver "${q}" is not on a load on the live board — no hours to show from here.` };
+        // the truck's load on the road first (not a next load waiting)
+        const it = its.find((x) => /^(depship|depcons|arrcons|arrship|intran|enroute)/i.test(String(tripOf(x).status || ''))) || its[0];
+        return { found: true, truck: tripOf(it).powerUnit, trip: tripNo(it), status: tripOf(it).status || null, truckNow: truckNow(it, w), crew: crewHours(it), team: !!(tripOf(it).driver2), note: 'Hours come from the Samsara ELD; clocksAsOf says how fresh they are.' };
       }
       case 'client_lookup': {
         if (!clients) return { error: 'The client list is not loaded.' };
@@ -240,6 +286,7 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, clients = n
         return {
           ...slimItem(it, openAlerts(w).filter((a) => a.trip === n)),
           truckNow: truckNow(it, w),
+          crewHours: crewHours(it),
           etas: eta ? (eta.stops || []).map((s) => ({ stop: s.label, eta: fmtLocal(s.etaMs, s.label), miles: s.miles, appointment: s.apptMs ? fmtLocal(s.apptMs, s.label) : null })) : null,
           stopsAlreadyPassed: eta ? (eta.passed || []).map((s) => s.label) : [],
           hold: it._hold || null, tasks: (it._tasks || []).filter((t) => !t.done).map((t) => t.title),

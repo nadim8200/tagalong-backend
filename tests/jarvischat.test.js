@@ -147,3 +147,32 @@ test('cheaper: instructions, tools and the conversation so far are marked for pr
   assert.deepEqual(c.messages[2].content[0].cache_control, { type: 'ephemeral' });
   assert.equal(c.messages[0].content, 'hi', 'earlier messages untouched');
 });
+
+test('typed chat gets what the phone gets: "ETA to Native" by customer name, and truck 2217\'s driving hours', async () => {
+  const NATIVE = { trip: { tripNumber: '625490', status: 'DEPSHIP', powerUnit: '2095', trailer: '2069', driver2: '6193' },
+    freightBills: [{ billNumber: 'C1', billToName: 'NATIVE Detroit-WESTLAND', endZoneDescription: 'WESTLAND, MI, 48185', pieces: 28 }],
+    _manifest: { stops: [{ action: 'DELIVER', customer: 'NATIVE Detroit-WESTLAND', city: 'WESTLAND', state: 'MI', stopNumber: 5 }] },
+    _samsara: { location: 'I 44, Oklahoma City, OK', gpsAt: '2026-10-22T13:58:00Z', speedMph: 70, driver1: 'Juan Vanegas', driver2: 'Reynaldo Picado',
+      hos: { status: 'driving', driveLeftMin: 312, shiftLeftMin: 400, cycleLeftMin: 2100, breakInMin: 95, at: '2026-10-22T13:55:00Z' }, hos2: { status: 'sleeperBed', driveLeftMin: 660, shiftLeftMin: 840, cycleLeftMin: 3000 } } };
+  const TRUCK = { ...NATIVE, trip: { ...NATIVE.trip, tripNumber: '625308', powerUnit: '2217' } };
+  const db = memDb(); const app = { get: () => {}, post: () => {} };
+  await db.set('taWatch:florida-beauty', { alerts: {}, etas: { 625490: { stops: [{ label: 'WESTLAND, MI, 48185', zip: '48185', miles: 1123, etaMs: Date.parse('2026-10-23T16:07:00Z') }] } } });
+  const chat = initJarvisChat(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: [JSON.parse(JSON.stringify(LOAD)), NATIVE, TRUCK], unclosed: [] }), env: { ANTHROPIC_API_KEY: 'k' } });
+  const ctx = { user: { id: 7, name: 'Rosa' }, did: [], proposed: [] };
+  const r = await chat.runTool('customer_etas', { customer: 'native' }, ctx);
+  assert.equal(r.found, true);
+  const one = r.loads.find((x) => x.trip === '625490');
+  assert.match(one.truck_now, /Oklahoma City/);
+  assert.match(JSON.stringify(one.deliveries), /WESTLAND/i);
+  assert.match(JSON.stringify(one.deliveries), /Oct 23/);
+  assert.equal((await chat.runTool('customer_etas', { customer: 'Nobody Flowers' }, ctx)).found, false);
+  const h = await chat.runTool('truck_hours', { truck: '2217' }, ctx);
+  assert.equal(h.trip, '625308');
+  assert.deepEqual(h.crew.map((c) => [c.driver, c.duty, c.driveLeft]), [['Juan Vanegas', 'driving', '5h 12m'], ['Reynaldo Picado', 'in the sleeper', '11h 0m']]);
+  assert.equal(h.crew[0].cycleLeft70h, '35h 0m');
+  assert.equal((await chat.runTool('truck_hours', { truck: '9999' }, ctx)).found, false);
+  // the prompt sends business names to customer_etas, not the place search
+  const { SYSTEM, TOOLS: T } = await import('../jarvischat.js');
+  assert.match(SYSTEM('Rosa'), /customer_etas/); assert.match(SYSTEM('Rosa'), /truck_hours/);
+  assert.match(T.find((t) => t.name === 'loads_to_place').description, /never a customer name/);
+});
