@@ -24,7 +24,7 @@
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 
 const MIN = 60000;
-const CRUISE_MPH = 60;   // dispatch's rule: 60 mph for the whole run
+const CRUISE_MPH = 55;   // dispatch's rule: 55 mph for the whole run
 const SEV = { critical: 3, warning: 2, info: 1 };
 
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
@@ -83,7 +83,7 @@ export function haversineMi(aLat, aLng, bLat, bLng) {
   return 2 * R * Math.asin(Math.sqrt(s));
 }
 
-// Same HOS-aware estimate the console uses (60 mph bent to the DOT clock:
+// Same HOS-aware estimate the console uses (55 mph bent to the DOT clock:
 // 11h drive / 14h shift / 30-min break / 10h reset; teams ~20h per day).
 // restDoneMin: how long a driver who is out of hours has already been parked,
 // so the 10-hour reset isn't assumed to start right now.
