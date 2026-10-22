@@ -18,6 +18,7 @@ import { randomBytes } from 'crypto';
 import { slimItem } from './assistant.js';
 import { findLoad, customerStops, customerView, isOcLoad, spokenName } from './voice.js';
 import { contactsFor } from './statusmail.js';
+import { customerAnswer, loadAnswer } from './dispatchcards.js';
 import { fmtLocal } from './localtime.js';
 
 const SITE = 'florida-beauty';
@@ -203,6 +204,8 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, clients = n
         if (!stops.length) return { found: false, note: `No load on the board has a stop for "${name}". It may be delivered already or not dispatched yet — ask for a trip, truck or bill number.` };
         const trips = [...new Set(stops.map((x) => x.trip))];
         const loads = trips.map((n) => { const it = all.find((x) => tripNo(x) === n); return { ...(isOcLoad(it) ? { outsideCarrier: true, note: 'Outside carrier — no live tracking yet; Frank Ducassi follows up.' } : {}), ...customerView(it, etas[n], stops.filter((x) => x.trip === n)) }; });
+        // the console draws trip cards from this (not from the model's words)
+        if (!ctx.customer) { const d = customerAnswer({ heading: spokenName(stops[0].customer), items: all, stops, etas }); if (d) (ctx.dispatch = ctx.dispatch || []).push(d); }
         return { found: true, customer: spokenName(stops[0].customer), matchedBy: matched, loads };
       }
       case 'truck_hours': {
@@ -283,6 +286,7 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, clients = n
         const w = await watch(); const n = tripNo(it);
         const eta = (w.etas || {})[n];
         const notes = ((await db.get(notesKey, {})) || {})[n] || [];
+        if (!ctx.customer) { const d = loadAnswer({ item: it, eta }); if (d) (ctx.dispatch = ctx.dispatch || []).push(d); }
         return {
           ...slimItem(it, openAlerts(w).filter((a) => a.trip === n)),
           truckNow: truckNow(it, w),
@@ -426,9 +430,16 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, clients = n
       messages.push({ role: 'user', content: results });
     }
     const now = new Date().toISOString();
+    // trip cards for this answer: the last lookup of each load / customer (a snapshot, saved with the message)
+    const dispatch = (() => {
+      if (!ctx.dispatch || !ctx.dispatch.length) return null;
+      const last = [...new Map(ctx.dispatch.map((d) => [d.heading || d.trips.map((x) => x.trip).join(','), d])).values()];
+      const shown = new Set(last.filter((d) => d.kind === 'customer').flatMap((d) => d.trips.map((x) => x.trip)));
+      return last.filter((d) => d.kind === 'customer' || !d.trips.every((x) => shown.has(x.trip))).slice(-3);   // a load already in a customer's cards isn't drawn twice
+    })();
     const add = [
       { role: 'user', text: `${text || ''}${uploadNote}`.trim(), at: now, by: user.name },
-      { role: 'assistant', text: answer || 'Done.', at: new Date().toISOString(), actions: ctx.proposed.map((a) => a.id), did: ctx.did.map((d) => `${d.tool}${d.input && d.input.trip ? ` ${d.input.trip}` : ''}`) },
+      { role: 'assistant', text: answer || 'Done.', at: new Date().toISOString(), ...(dispatch ? { dispatch } : {}), actions: ctx.proposed.map((a) => a.id), did: ctx.did.map((d) => `${d.tool}${d.input && d.input.trip ? ` ${d.input.trip}` : ''}`) },
     ];
     await db.update(threadsKey(user.id), (cur) => {
       const th = { ...((cur && cur.threads) || {}) };
@@ -437,7 +448,7 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, clients = n
       const ids = Object.keys(th).sort((a, b) => String(th[b].updatedAt).localeCompare(String(th[a].updatedAt))).slice(0, 30);
       return { threads: Object.fromEntries(ids.map((i) => [i, th[i]])) };
     }, { threads: {} });
-    return { threadId, answer: answer || 'Done.', update: ctx.update || null, actions: ctx.proposed, did: ctx.did.map((d) => ({ tool: d.tool, trip: d.input && d.input.trip, ok: !(d.out && d.out.error) })) };
+    return { threadId, answer: answer || 'Done.', ...(dispatch ? { dispatch } : {}), update: ctx.update || null, actions: ctx.proposed, did: ctx.did.map((d) => ({ tool: d.tool, trip: d.input && d.input.trip, ok: !(d.out && d.out.error) })) };
   }
 
   // uploaded files: trip sheets / rate cons through the packet reader; anything else kept for attach_document
