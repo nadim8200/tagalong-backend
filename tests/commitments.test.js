@@ -115,3 +115,26 @@ test('set once → the next outbound for that customer + location gets it automa
   const later = next('625800', '2026-11-04'); await v.c.overlay('florida-beauty', [later]);
   assert.equal(later._commit, undefined);
 });
+
+test('an appointment written on the trip sheet becomes the stop\'s committed time — same late alert; kept current; never over dispatch', async () => {
+  const v = setup(Date.parse('2026-10-22T12:00:00Z'));
+  const sheet = (time, src = 'handwritten') => ({ trip: { tripNumber: '625207', status: 'DEPSHIP', powerUnit: '2011' }, freightBills: [],
+    _manifest: { dateLoaded: '2026-10-21', stops: [{ action: 'DELIVER', customer: 'HARRIS TEETER LLC', city: 'INDIAN TRAIL', state: 'NC', apptDate: '2026-10-22', apptTime: time, apptSource: src }] } });
+  const it = sheet('19:00'); await v.c.overlay('florida-beauty', [it]);
+  const c = it._commit['INDIAN TRAIL|NC'];
+  assert.equal(c.local, '2026-10-22T19:00'); assert.equal(c.fromSheet, true); assert.match(c.rule, /handwritten/);
+  // the sheet is read again with a new time → updated
+  const it2 = sheet('20:30', 'printed'); await v.c.overlay('florida-beauty', [it2]);
+  assert.equal(it2._commit['INDIAN TRAIL|NC'].local, '2026-10-22T20:30'); assert.match(it2._commit['INDIAN TRAIL|NC'].by, /printed/);
+  // late against it → the same email + text
+  await v.db.set('taWatch:florida-beauty', { etas: { 625207: { stops: [{ label: 'INDIAN TRAIL, NC, 28079', etaMs: Date.parse('2026-10-23T02:30:00Z') }] } } });
+  await v.c.process('florida-beauty', { trips: [it2] });                       // the truck left now
+  v.setNow(Date.parse('2026-10-22T20:00:00Z'));                                // within 6 h of the appointment
+  assert.equal((await v.c.process('florida-beauty', { trips: [it2] })).sent, 1);
+  assert.match(v.mails[0].text, /set by Trip sheet \(printed\)/);
+  // a dispatcher's own time wins, and a re-read sheet doesn't overwrite it
+  await v.hit('PUT /truckmate/commitments/:trip', { city: 'INDIAN TRAIL', state: 'NC', customer: 'HARRIS TEETER LLC', local: '2026-10-22T22:00' }, { trip: '625207' });
+  const it3 = sheet('19:00'); await v.c.overlay('florida-beauty', [it3]);
+  assert.equal(it3._commit['INDIAN TRAIL|NC'].local, '2026-10-22T22:00');
+  assert.equal(it3._commit['INDIAN TRAIL|NC'].by, 'Rosa');
+});

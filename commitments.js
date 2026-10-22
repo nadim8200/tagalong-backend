@@ -163,31 +163,47 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
   async function overlay(s, trips) {
     if (!enabled) return;
     const c = await all();
-    // a new outbound for a customer + location with a saved time → fill it in (once; dispatch can change or clear it)
     const mem = (await db.get(STAND(site), {})) || {};
     const fill = {};
-    if (Object.keys(mem).length) {
-      for (const it of trips) {
-        const trip = tripNo(it); const m = it._manifest || {};
-        if (!trip || !isYmd(m.dateLoaded)) continue;
-        for (const st of m.stops || []) {
-          if (!/DELIVER/i.test(st.action || '')) continue;
-          const k = stopKey(st.city, st.state);
-          if (!k || (c[trip] && c[trip][k]) || (fill[trip] && fill[trip][k])) continue;
-          const f = fromStanding(mem[custKey(st.customer, st.city, st.state)], m.dateLoaded);
-          const atMs = f ? commitMs(f.local, st.state) : null;
-          if (!atMs) continue;
-          fill[trip] = { ...(fill[trip] || {}), [k]: { local: f.local, state: String(st.state).toUpperCase().slice(0, 2), atMs, customer: st.customer || null, place: `${String(st.city).toUpperCase()}, ${String(st.state).toUpperCase()}`, by: 'Jarvis (saved from a previous load)', auto: true, rule: f.rule, setAt: new Date(now()).toISOString() } };
+    for (const it of trips) {
+      const trip = tripNo(it); const m = it._manifest || {};
+      if (!trip) continue;
+      for (const st of m.stops || []) {
+        if (!/DELIVER/i.test(st.action || '')) continue;
+        const k = stopKey(st.city, st.state);
+        if (!k || (fill[trip] && fill[trip][k])) continue;
+        const have = c[trip] && c[trip][k];
+        const base = { state: String(st.state).toUpperCase().slice(0, 2), customer: st.customer || null, place: `${String(st.city).toUpperCase()}, ${String(st.state).toUpperCase()}`, auto: true, setAt: new Date(now()).toISOString() };
+        // 1. an appointment written on the trip sheet (printed or handwritten) is this load's committed time —
+        //    same late check, email and text. Kept up to date if the sheet is read again; never over a dispatcher's.
+        const sheetLocal = isYmd(st.apptDate) && /^\d{2}:\d{2}$/.test(String(st.apptTime || '')) ? `${st.apptDate}T${st.apptTime}` : null;
+        const sheetMs = sheetLocal ? commitMs(sheetLocal, st.state) : null;
+        if (sheetMs && (!have || (have.fromSheet && have.local !== sheetLocal))) {
+          const hand = st.apptSource === 'handwritten';
+          fill[trip] = { ...(fill[trip] || {}), [k]: { ...base, local: sheetLocal, atMs: sheetMs, by: `Trip sheet (${hand ? 'handwritten' : 'printed'})`, fromSheet: true, rule: hand ? 'handwritten on the trip sheet — verify with the customer' : 'printed on the trip sheet' } };
+          continue;
         }
+        if (have) continue;
+        // 2. a new outbound for a customer + location with a saved time → fill it in (once; dispatch can change or clear it)
+        if (!isYmd(m.dateLoaded)) continue;
+        const f = fromStanding(mem[custKey(st.customer, st.city, st.state)], m.dateLoaded);
+        const atMs = f ? commitMs(f.local, st.state) : null;
+        if (!atMs) continue;
+        fill[trip] = { ...(fill[trip] || {}), [k]: { ...base, local: f.local, atMs, by: 'Jarvis (saved from a previous load)', rule: f.rule } };
       }
-      if (Object.keys(fill).length) {
-        const saved = await db.update(KEY(site), (cur) => {
-          const x = { ...(cur || {}) };
-          for (const [trip, stops] of Object.entries(fill)) x[trip] = { ...stops, ...(x[trip] || {}) };   // never over anything already set
-          return x;
-        }, {});
-        Object.assign(c, saved);
-      }
+    }
+    if (Object.keys(fill).length) {
+      const saved = await db.update(KEY(site), (cur) => {
+        const x = { ...(cur || {}) };
+        for (const [trip, stops] of Object.entries(fill)) {
+          const t = { ...(x[trip] || {}) };
+          // never over a dispatcher's time or a cleared stop; a trip-sheet time only replaces an older trip-sheet time
+          for (const [k, v] of Object.entries(stops)) if (!t[k] || (v.fromSheet && t[k].fromSheet)) t[k] = v;
+          x[trip] = t;
+        }
+        return x;
+      }, {});
+      Object.assign(c, saved);
     }
     for (const it of trips) { const x = c[tripNo(it)]; if (x) it._commit = x; }
   }
