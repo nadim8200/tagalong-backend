@@ -48,7 +48,7 @@ export function slimApproaching(trips) {
 // Trailer temps at the loading door: which are off by more than `diff` °F. Pure.
 export function doorTempIssues(rows, diff = DOOR_TEMP_DIFF) {
   return (Array.isArray(rows) ? rows : []).filter((r) => r && r.setTemp != null && r.actualTemp != null && Math.abs(Number(r.actualTemp) - Number(r.setTemp)) > diff)
-    .map((r) => ({ id: r.id, trailer: unit(r.trailerNumber), door: r.doorNumber || null, set: Number(r.setTemp), actual: Number(r.actualTemp), at: r.createdOn || null, atText: r.createdOnStr || null, by: r.createdBy || null, warehouse: r.warehouseName || null, photos: (r.images || []).length }));
+    .map((r) => ({ id: r.id, trailer: unit(r.trailerNumber), door: r.doorNumber || null, set: Number(r.setTemp), actual: Number(r.actualTemp), at: r.createdOn || null, atText: r.createdOnStr || null, by: r.createdBy || null, warehouse: r.warehouseName || null, photos: (r.images || []).length, images: (r.images || []).slice(0, 4) }));
 }
 const fits = (q, name) => { const w = String(q || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter((x) => x.length > 2); const n = String(name || '').toUpperCase(); return !w.length || w.every((x) => n.includes(x)); };
 
@@ -88,7 +88,18 @@ export function initArtisReports({ db, artisWeb, getBoard = null, sendMail = nul
       const what = `Trailer ${x.trailer} was loaded at ${x.actual}°F — set ${x.set}°F (${x.actual > x.set ? '+' : ''}${x.actual - x.set}°F)`;
       const lines = [what, `${x.warehouse || 'Warehouse'} door ${x.door || '—'} · ${x.atText || ''}${x.by ? ` · checked by ${x.by}` : ''}${x.photos ? ` · ${x.photos} photo${x.photos === 1 ? '' : 's'} in ARTIS` : ''}`, t ? `Trip ${tripNo(it)} · truck ${t.powerUnit || '—'} → ${t.destZoneDesc || ''}` : 'No active trip on this trailer yet.', 'Check the reefer before it rolls (or with the driver if it already left). Source: ARTIS Trailer Temp Verifications.'];
       if (to.length) {
-        try { await sendMail({ to, subject: `Reefer: ${what}${t ? ` — trip ${tripNo(it)}` : ''}`, html: `<div style="font-family:Arial,sans-serif;font-size:14px">${lines.map((l) => `<div>${l.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>`).join('')}<p>— Jarvis</p></div>`, text: lines.join('\n') }); } catch (e) { console.warn('[artis-door-temp]', e.message); } // eslint-disable-line no-await-in-loop
+        // the dock's photos (thermometer / reefer display) — shown inside the email body
+        const pics = [];
+        for (const id of x.images || []) {
+          try {
+            const p = await artisWeb.fetchBuffer(`/artis-app/trailer/temp/image/${encodeURIComponent(id)}`); // eslint-disable-line no-await-in-loop
+            const jpg = p.buf[0] === 0xff && p.buf[1] === 0xd8;
+            if (p.buf.length > 100) pics.push({ name: `trailer-${x.trailer}-photo-${pics.length + 1}.${jpg ? 'jpg' : 'png'}`, contentType: jpg ? 'image/jpeg' : 'image/png', bytes: p.buf, cid: `door${id}` });
+          } catch (e) { console.warn('[artis-door-temp] photo', id, e.message); }
+        }
+        const esc = (l) => String(l).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+        const imgs = pics.map((p) => `<img src="cid:${p.cid}" alt="Door temperature photo" style="display:block;width:420px;max-width:100%;border-radius:6px;margin:8px 0">`).join('');
+        try { await sendMail({ to, subject: `Reefer: ${what}${t ? ` — trip ${tripNo(it)}` : ''}`, html: `<div style="font-family:Arial,sans-serif;font-size:14px">${lines.map((l) => `<div>${esc(l)}</div>`).join('')}${imgs}<p>— Jarvis</p></div>`, attachments: pics }); } catch (e) { console.warn('[artis-door-temp]', e.message); } // eslint-disable-line no-await-in-loop
       }
       sent[x.id] = new Date(now()).toISOString();
     }

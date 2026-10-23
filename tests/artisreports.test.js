@@ -25,12 +25,16 @@ test('every 30 min: door-temp alert once (with the trip), ARTIS positions on the
   const db = memDb(); const mails = [];
   const artisWeb = { ready: () => true,
     fetchJson: async (p) => (/trailer\/temps/.test(p) ? DOOR : /rejects/.test(p) ? { rejects: [{ returnedOnStr: '10/22', consigneeName: 'FALL RIVER FLORIST SUPPLY', shipperName: 'AMERICAN FLORAL CARGO', reasonTitle: 'Crushed  boxe(s)', pieces: 5, comments: [{ comment: 'Enter Comment' }] }, { consigneeName: 'OTHER', shipperName: 'X', reasonTitle: 'Wet' }] } : { kpis: { onTimePct: 100 }, groupings: { consignee: [{ name: 'STEMLINE WHOLESALE INC', stats: { avgDeliveryDays: 2 } }] }, weekdayMatrix: [] }),
+    fetchBuffer: async () => ({ buf: Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(200)]), type: 'image/png' }),
     fetchText: async (p) => (/tractor/.test(p) ? page('assets', TRACTORS) : /trailer/.test(p) ? page('assets', []) : /mismatched/.test(p) ? page('tripLegs', [{ legSum: { ls_trip_number: 625145, ls_power_unit: '2209', ls_freight: 'B180474' }, stopStatus: { etaString: 'ARRIVED' } }]) : page('trips', [])) };
   const it = { trip: { tripNumber: '625549', powerUnit: '2604', trailer: '7333', destZoneDesc: 'SANTA ROSA, CA' } };
   const r = initArtisReports({ db, artisWeb, getBoard: async () => ({ trips: [it] }), sendMail: async (m) => mails.push(m), tempTeam: async () => ['dispatch@floridabeauty.us'], now: () => NOW });
   const out = await r.refresh();
   assert.equal(out.doorIssues, 1); assert.equal(mails.length, 1);
   assert.match(mails[0].subject, /Trailer 7333 was loaded at 64°F — set 35°F \(\+29°F\) — trip 625549/);
+  assert.equal(mails[0].attachments.length, 2, 'both door photos');
+  assert.deepEqual(mails[0].attachments.map((p) => [p.cid, p.contentType]), [['door1', 'image/jpeg'], ['door2', 'image/jpeg']]);
+  assert.match(mails[0].html, /<img src="cid:door1"/);
   await r.refresh(); assert.equal(mails.length, 1, 'once per check');
   const b = { trip: { tripNumber: '625549', powerUnit: '2604', trailer: '7333' } }; await r.overlay('florida-beauty', [b]);
   assert.equal(b._artisLoc.truck.location, '2M N of Houston'); assert.equal(b._artisDoorTemp.actual, 64);

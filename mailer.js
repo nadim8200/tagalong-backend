@@ -44,7 +44,7 @@ export async function graph(path, { method = 'GET', body = null } = {}, { env = 
   return j;
 }
 
-// sendMail({ to: [..], subject, html, attachments: [{ name, contentType, bytes }] })
+// sendMail({ to: [..], subject, html, attachments: [{ name, contentType, bytes, cid? }] }) — cid: shown inside the body (<img src="cid:…">)
 // training mode (training.js) rewrites every email unless sent { direct: true }
 let guard = null;
 export const setMailGuard = (fn) => { guard = fn; };
@@ -74,7 +74,7 @@ export async function sendMail(message, { env = process.env, fetchFn = globalThi
       body: { contentType: 'HTML', content: html },
       toRecipients: list.map((address) => ({ emailAddress: { address } })),
       ccRecipients: ccList.map((address) => ({ emailAddress: { address } })),
-      attachments: attachments.map((a) => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: a.name, contentType: a.contentType || 'application/pdf', contentBytes: Buffer.from(a.bytes).toString('base64') })),
+      attachments: attachments.map((a) => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: a.name, contentType: a.contentType || 'application/pdf', contentBytes: Buffer.from(a.bytes).toString('base64'), ...(a.cid ? { isInline: true, contentId: a.cid } : {}) })),
     },
     saveToSentItems: true,
   };
