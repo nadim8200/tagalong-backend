@@ -68,8 +68,8 @@ test('missing boxes reach the Operations check email and the phone answer', () =
   assert.equal(rk.boxes.length, 1);
   assert.match(planEmail([], { risks: rk, now: Date.parse('2026-10-11T16:00:00Z') }).html, /28 not received/);
   const stops = customerStops([it], "Caggiano's Medford", {});
-  assert.equal(stops[0].boxes_loaded, '288 boxes loaded for them');
-  assert.ok(!/missing|not scanned|316/.test(JSON.stringify(stops[0])), 'the customer never hears about missing boxes');
+  assert.equal(stops[0].boxes_loaded, undefined);   // the bill has no box count → no ARTIS number instead
+  assert.ok(!/missing|not scanned|not_received/.test(JSON.stringify(stops[0])), 'nobody on the phone hears ARTIS box numbers');
 });
 
 import { missingFor } from '../voice.js';

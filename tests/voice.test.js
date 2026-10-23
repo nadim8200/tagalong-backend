@@ -665,7 +665,7 @@ test('delivered stops carry when they were delivered (stop-local time; 00:00 = d
 });
 
 // Davis Macon on 624773 (real): sheet 256, TruckMate bills 256, ARTIS 240/240 — bill G5042275 (16) isn't in ARTIS
-test('box count: TruckMate bills are the complete count; ARTIS only takes off what was not received', async () => {
+test('box count: always what the TruckMate bills add up to — no ARTIS numbers, not even for staff', async () => {
   const { customerStops } = await import('../voice.js');
   const load = (artis) => [{ trip: { tripNumber: '624773', powerUnit: '4504' },
     freightBills: [
@@ -675,22 +675,14 @@ test('box count: TruckMate bills are the complete count; ARTIS only takes off wh
     ],
     _manifest: { stops: [{ action: 'DELIVER', customer: 'DAVIS WHOLESALE -MACON', city: 'MACON', state: 'GA', pieces: 256 }] },
     _artis: { stops: [{ consignee: 'DAVIS WHOLESALE -MACON', ...artis }] } }];
-  // all of ARTIS's boxes scanned → the whole 256 went on the truck
-  const ok = customerStops(load({ boxes: 240, scanned: 240, missing: 0 }), 'Davis Wholesale', {}, { staff: true })[0];
-  assert.equal(ok.boxes_loaded, '256 boxes loaded for them');
-  assert.equal(ok.boxes_on_trip_sheet, undefined);          // the sheet agrees
-  assert.equal(ok.boxes_not_received, undefined);
-  assert.equal(ok.boxes_scanned_in_artis, '240 of 240');
-  // ARTIS says 10 never arrived → 246 loaded; staff hear why, customers only the loaded count
-  const short = load({ boxes: 240, scanned: 230, missing: 10 });
-  const staff = customerStops(short, 'Davis Wholesale', {}, { staff: true })[0];
-  assert.equal(staff.boxes_loaded, '246 boxes loaded for them');
-  assert.match(staff.boxes_not_received, /^10 boxes not received/);
-  const cust = customerStops(short, 'Davis Wholesale')[0];
-  assert.equal(cust.boxes, '246 boxes');
-  assert.equal(cust.boxes_not_received, undefined);
-  assert.equal(cust.boxes_scanned_in_artis, undefined);
-  assert.ok(!JSON.stringify(cust).includes('_billBoxes'));
+  // always what the bills add up to (256) — ARTIS's numbers (240 scanned, 10 not received) are never said, not even to staff
+  for (const artis of [{ boxes: 240, scanned: 240, missing: 0 }, { boxes: 240, scanned: 230, missing: 10 }]) {
+    const st = customerStops(load(artis), 'Davis Wholesale', {}, { staff: true })[0];
+    assert.equal(st.boxes_loaded, '256 boxes loaded for them');
+    assert.equal(st.boxes_on_trip_sheet, undefined); assert.equal(st.boxes_not_received, undefined); assert.equal(st.boxes_scanned_in_artis, undefined);
+    assert.equal(customerStops(load(artis), 'Davis Wholesale')[0].boxes, '256 boxes');
+  }
+  assert.ok(!JSON.stringify(customerStops(load({ boxes: 240, scanned: 240, missing: 0 }), 'Davis Wholesale')[0]).includes('_billBoxes'));
 });
 
 test('customers hear location, truck, trailer, trip, total boxes and ETA — delivered is only "Your shipment has been delivered."', async () => {
@@ -916,4 +908,16 @@ test('staff: a customer whose loads are all outside-carrier still hears them (ne
   assert.equal(b.out.not_on_a_trip, true); assert.match(b.out.say, /isn't on any trip in TruckMate yet/);
   const d = await v.hit('POST /retell/fn/lookup_load', { call: { ...call, call_id: 's3' }, args: { bill_number: 'B-180500' } });
   assert.equal(d.out.delivered, true); assert.equal(d.out.trip, '6 2 5 0 0 1');
+});
+
+import { customerStops as cs2 } from '../voice.js';
+test('boxes: ARTIS counts a customer per ship date, not per truck — with their boxes on another truck too, the count is what the trip\'s TruckMate bills add up to (625717 Direct Flowers: 37, not 44)', () => {
+  const bill = (n, p, trip) => ({ billNumber: n, billToName: 'DIRECT FLOWERS OF BOSTON INC', endZoneDescription: 'CHELSEA, MA, 02150', pieces: p });
+  const a = { trip: { tripNumber: '625717', status: 'LOADEDTOGO' }, freightBills: [bill('M1', 9), bill('M2', 6), bill('M3', 1), bill('M4', 2), bill('M5', 15), bill('M6', 4)], _artis: { stops: [{ consignee: 'DIRECT FLOWERS OF BOSTON INC', boxes: 44, scanned: 44, missing: 0 }] } };
+  const b = { trip: { tripNumber: '625642', status: 'DEPSHIP' }, freightBills: [bill('M9', 113)] };
+  const staff = cs2([a, b], 'Direct Flowers', {}, { staff: true }).find((x) => x.trip === '625717');
+  assert.equal(staff.boxes, '37 boxes');
+  assert.equal(staff.boxes_scanned_in_artis, undefined); assert.equal(staff.boxes_not_received, undefined);   // no ARTIS numbers, not even for staff
+  // always what the bills add up to — even alone on the board
+  assert.equal(cs2([a], 'Direct Flowers', {}, { staff: true })[0].boxes, '37 boxes');
 });

@@ -455,20 +455,15 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
   // ARTIS had 240 of 256: bill G5042275 isn't in ARTIS), or ARTIS when it has more. ARTIS says what's still
   // missing — customers only hear what's loaded; staff also hear the sheet count and what wasn't received.
   const boxFor = (x) => {
-    const it = items.find((i) => tripNo(i) === x.trip);
-    const st = it && it._artis && (it._artis.stops || []).find((c) => nameScore(x.customer || '', c.consignee || '') >= 0.75 || nameScore(c.consignee || '', x.customer || '') >= 0.75);
-    if (!st && !x._billBoxes && x._tbBoxes == null) return staff && x._split ? { split_between_trailers: x._split } : {};   // nothing better than the sheet's own words ("139 BOXES", "1 LOAD")
-    // ARTIS's Truck Builder (the digital trip sheet) first; else the bills, or ARTIS's EDI when it has more
-    const total = x._tbBoxes || Math.max(x._billBoxes || 0, (st && st.boxes) || 0) || x._sheetBoxes;
-    if (!total) return {};
-    const missing = Math.min((st && st.missing) || 0, total);
-    const loaded = total - missing;
+    // the count is ALWAYS what this trip's TruckMate bills for the customer add up to — for customers and staff alike.
+    // No ARTIS box numbers at all (ARTIS counts a customer per ship date, not per truck: 625717 Direct Flowers
+    // bills 37, ARTIS 44). No bills → the trip sheet's own count.
+    if (!x._billBoxes) return staff && x._split ? { split_between_trailers: x._split } : {};   // no bills → the sheet's own words stay ("139 BOXES", "1 LOAD")
+    const total = x._billBoxes;
     const plural = (n) => `${n} box${n === 1 ? '' : 'es'}`;
-    return { boxes: plural(loaded), boxes_loaded: `${plural(loaded)} loaded for them`,
+    return { boxes: plural(total), boxes_loaded: `${plural(total)} loaded for them`,
       ...(staff ? {
-        ...(x._tbBoxes == null && x._sheetBoxes != null && x._sheetBoxes !== total ? { boxes_on_trip_sheet: plural(x._sheetBoxes) } : {}),
-        ...(st ? { boxes_scanned_in_artis: `${st.scanned} of ${st.boxes}` } : {}),
-        ...(missing > 0 ? { boxes_not_received: `${plural(missing)} not received from the shipper (ARTIS)${st && st.split ? ' — split order, could be on the other trailer' : ''}` } : {}),
+        ...(x._billBoxes && x._sheetBoxes != null && x._sheetBoxes !== total ? { boxes_on_trip_sheet: plural(x._sheetBoxes) } : {}),
         ...(x._split ? { split_between_trailers: x._split } : {}),
       } : {}) };
   };
@@ -521,7 +516,7 @@ export function spokenName(raw) {
 // words every call uses — so speech-to-text hears "load", not "loan"
 // Florida Beauty's own staff (a phone saved on an employee in Employees) can get any load's ETA.
 const STAFF_IS = 'Florida Beauty staff (phone on the Employees list)';
-const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). ALWAYS start each load with where the truck is right now (truck_now, "as of" as_of, moving or stopped) and which hub it left from (left_from) — before the ETA, without being asked. Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — the complete count from the TruckMate bills), and only if present: the different trip sheet count (boxes_on_trip_sheet) and boxes not received (boxes_not_received). If split_between_trailers is there, say the order is split and how many boxes are on each truck.';
+const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). ALWAYS start each load with where the truck is right now (truck_now, "as of" as_of, moving or stopped) and which hub it left from (left_from) — before the ETA, without being asked. Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — what the TruckMate bills add up to; never any other count), and only if present: the different trip sheet count (boxes_on_trip_sheet). If split_between_trailers is there, say the order is split and how many boxes are on each truck.';
 export const BASE_WORDS = ['Florida Beauty Flora', 'Jarvis', 'ETA', 'load', 'trip number', 'bill number', 'trailer', 'POD', 'BOL', 'rate confirmation'];
 export function customerKeywords(items, max = 100) {
   const n = new Map();

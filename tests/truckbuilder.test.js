@@ -47,14 +47,14 @@ test('624773: the scanned sheet vs ARTIS — 3 box counts off by one, a stop ART
   assert.match(mail.html, /BLOSSOMS AND BLOOMS.*not on this truck in ARTIS/);
 });
 
-test('Jarvis uses the Truck Builder count over the scanned sheet', async () => {
+test('the Truck Builder count is read, but Jarvis never says an ARTIS box count', async () => {
   const [truck] = normalizeTrucks(routes, { hub: 'Miami', date: '2026-10-11' });
   const it = { trip: { tripNumber: '624773', powerUnit: '4504' }, _tb: truck, _manifest: sheet };
   assert.equal(builderBoxesFor(it, 'MID-GA WHOLESALE FLORIST LLC', 'WARWICK, GA'), 97);
   const { customerStops } = await import('../voice.js');
   const st = customerStops([it], 'Mid Georgia Wholesale', {}, { staff: true })[0];
-  assert.equal(st.boxes_loaded, '97 boxes loaded for them');
-  assert.equal(st.boxes_on_trip_sheet, undefined);   // the sheet's "98" was the scan — ARTIS's 97 is the count
+  assert.equal(st.boxes_loaded, undefined);   // no TruckMate bills here → no ARTIS count on the phone (the sheet's own words stay)
+  assert.ok(!/97/.test(JSON.stringify(st)));
 });
 
 test('when to read a hub: after that night\'s trip sheets go quiet for 20 min, else 11:30 PM — once a night', () => {
