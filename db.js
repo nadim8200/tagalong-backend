@@ -188,6 +188,11 @@ export function initDb({ TRACCAR_URL, traccarHeaders, DATABASE_URL }) {
     }
     await ensureReady();
     const client = await pool.connect();
+    // the database can drop a connection mid-update (maintenance, network) — that must fail THIS update, not
+    // crash the server (an 'error' on a checked-out client with no listener is an uncaught exception)
+    let broken = null;
+    const onError = (e) => { broken = e; console.error('[db] connection dropped during an update:', e.message); };
+    client.on('error', onError);
     try {
       await client.query('BEGIN');
       const { rows } = await client.query('SELECT value FROM ta_kv WHERE key = $1 FOR UPDATE', [key]);
@@ -204,7 +209,8 @@ export function initDb({ TRACCAR_URL, traccarHeaders, DATABASE_URL }) {
       try { await client.query('ROLLBACK'); } catch { /* ignore */ }
       throw e;
     } finally {
-      client.release();
+      client.removeListener('error', onError);
+      client.release(broken || undefined);   // a broken connection is thrown away, not reused
     }
   }
 
