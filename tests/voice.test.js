@@ -849,3 +849,11 @@ test('two voices: English Jarvis hands Spanish callers to a Spanish Jarvis (same
   assert.ok(v.retellCalls.filter((c) => c.url.includes('/update-agent/') && c.body.voice_id === 'retell-Alejandro').length >= 1, 'Spanish agent updated with its voice');
   assert.ok(v.retellCalls.filter((c) => c.url.includes('/update-agent/agent_1')).some((c) => c.body.voice_id === 'cartesia-Dallas'));
 });
+
+import { nameScore as ns2 } from '../voice.js';
+test('a name heard without its first syllable still finds the business ("the signers choice" = DESIGNERS CHOICE)', () => {
+  assert.equal(ns2('the signers, Choice', 'DESIGNERS CHOICE'), 1);
+  assert.equal(ns2('the signer choice', "DESIGNER'S CHOICE WHOLESALE"), 1);
+  assert.equal(ns2('the signers choice', 'CHOICE FLOWER EXCHANGE'), 0.5, 'only half fits the other business');
+  assert.equal(ns2('rose wholesale', 'PRIMROSE WHOLESALE'), 0, 'a missing start of 4+ letters is a different word');
+});
