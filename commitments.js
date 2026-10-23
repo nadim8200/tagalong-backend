@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------
 import { localToUtcMs, brokerLoad } from './watchtower.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
+import { renderLateEmail } from './latemail.js';
 
 const MIN = 60000;
 const KEY = (site) => `taCommit:${site}`;
@@ -101,19 +102,13 @@ export function lateMessage(item, s) {
   const t = tripOf(item); const live = item._samsara || {};
   const where = `${s.customer ? `${s.customer}, ` : ''}${s.place}`;
   const subject = `Late for a committed time — trip ${tripNo(item)} · ${where}`;
-  const lines = [
-    `Trip ${tripNo(item)} · truck ${t.powerUnit || '—'} · trailer ${t.trailer || '—'}`,
-    `Stop: ${where}`,
-    `Committed: ${fmtLocalShort(s.atMs, s.place)} (set by ${s.by || 'dispatch'})`,
-    `Projected: ${fmtLocalShort(s.etaMs, s.place)} — about ${hm(s.lateMin)} late (${s.miles != null ? `${s.miles} mi to go, ` : ''}55 mph, driving hours, 1 h per stop)`,
-    live.location ? `Truck now: ${live.location}${live.gpsAt ? ` (as of ${fmtLocalShort(Date.parse(live.gpsAt), 'FL')})` : ''}` : null,
-    'Decide who tells the customer — Jarvis has not contacted them.',
-  ].filter(Boolean);
-  const esc = (x) => String(x).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  // the body (formatting only — same facts the plain list had): delay, appointment vs estimated arrival, action, shipment,
+  // last reported location, how the estimate was made
+  const body = renderLateEmail({ trip: tripNo(item), truck: t.powerUnit || null, trailer: t.trailer || null, receiver: s.customer || null, place: s.place, atMs: s.atMs, etaMs: s.etaMs, lateMin: s.lateMin, miles: s.miles, by: s.by || 'dispatch', rule: s.rule || null, fcfs: !!s.fcfs, hours: s.hours || null, gpsLocation: live.location || null, gpsAt: live.gpsAt ? Date.parse(live.gpsAt) : null });
   return {
     subject,
-    html: `<div style="font-family:Arial,sans-serif;font-size:14px">${lines.map((l) => `<div>${esc(l)}</div>`).join('')}<p>— Jarvis, AI Dispatcher</p></div>`,
-    text: lines.join('\n'),
+    html: body.html,
+    text: body.text,
     sms: `Jarvis: trip ${tripNo(item)} will be ~${hm(s.lateMin)} late to ${where} — committed ${fmtLocalShort(s.atMs, s.place)}, ETA ${fmtLocalShort(s.etaMs, s.place)}.`,
   };
 }

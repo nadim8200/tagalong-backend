@@ -6,6 +6,8 @@
 // test addresses. Password-reset emails still go to the person (they're private).
 // Inbound calls / emails work as usual. Admins turn it on and off.
 // ---------------------------------------------------------------
+import { TRAINING_SLOT, trainingRow } from './latemail.js';
+
 const KEY = 'taTrainingMode';
 const okEmail = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e || ''));
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -15,7 +17,9 @@ export function redirectEmail(m, to) {
   const split = (v) => (Array.isArray(v) ? v : String(v || '').split(/[,;\s]+/)).filter(Boolean);
   const orig = [...split(m.to), ...split(m.cc).map((x) => `${x} (cc)`)];
   const banner = `<div style="font-family:Arial,sans-serif;font-size:13px;background:#fff7cc;border:1px solid #e6c200;padding:8px 10px;margin-bottom:12px"><b>TRAINING PREVIEW — Not sent to customer.</b> It would have gone to: <b>${esc(orig.join(', ') || '(nobody)')}</b></div>`;
-  return { ...m, to, cc: [], subject: `[TRAINING → ${orig.slice(0, 3).join(', ')}${orig.length > 3 ? '…' : ''}] ${m.subject || ''}`.slice(0, 250), html: banner + (m.html || ''), ...(m.text ? { text: `TRAINING PREVIEW — Not sent to customer. It would have gone to: ${orig.join(', ') || '(nobody)'}\n\n${m.text}` } : {}) };
+  // an email with its own spot for the notice (the late-for-committed-time email) gets the compact one there
+  const html = String(m.html || '').includes(TRAINING_SLOT) ? String(m.html).replace(TRAINING_SLOT, trainingRow(orig.join(', '))) : banner + (m.html || '');
+  return { ...m, to, cc: [], subject: `[TRAINING → ${orig.slice(0, 3).join(', ')}${orig.length > 3 ? '…' : ''}] ${m.subject || ''}`.slice(0, 250), html, ...(m.text ? { text: `TRAINING PREVIEW — Not sent to customer. It would have gone to: ${orig.join(', ') || '(nobody)'}\n\n${m.text}` } : {}) };
 }
 // The copy for a text / call / app message that was held. Pure.
 export function heldCopy(kind, { to, text, trip, purpose }) {

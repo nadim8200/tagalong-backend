@@ -46,7 +46,8 @@ test('late check: only after the morning after the truck left (or 6 h before), a
   const m = lateMessage({ trip: { tripNumber: '625552', powerUnit: '2604', trailer: '7309' } }, { ...commits['BROUSSARD|LA'], etaMs: at + 180 * 60000, lateMin: 180, by: 'Rosa' });
   assert.match(m.subject, /Late for a committed time — trip 625552 · SPEDALE'S, BROUSSARD, LA/);
   assert.match(m.sms, /~3h late to SPEDALE'S, BROUSSARD, LA/);
-  assert.match(m.text, /has not contacted them/);
+  assert.match(m.text, /Customer notification: Not sent by Jarvis/);
+  assert.match(m.text, /^DELIVERY DELAY\nEstimated 3 h late/);
 });
 
 test('set a committed time on a stop → it becomes the stop\'s appointment → late email + text once', async () => {
@@ -131,7 +132,7 @@ test('an appointment written on the trip sheet becomes the stop\'s committed tim
   await v.c.process('florida-beauty', { trips: [it2] });                       // the truck left now
   v.setNow(Date.parse('2026-10-22T20:00:00Z'));                                // within 6 h of the appointment
   assert.equal((await v.c.process('florida-beauty', { trips: [it2] })).sent, 1);
-  assert.match(v.mails[0].text, /set by Trip sheet \(printed\)/);
+  assert.match(v.mails[0].text, /Appointment source: Trip sheet \(printed\)\./);
   // a dispatcher's own time wins, and a re-read sheet doesn't overwrite it
   await v.hit('PUT /truckmate/commitments/:trip', { city: 'INDIAN TRAIL', state: 'NC', customer: 'HARRIS TEETER LLC', local: '2026-10-22T22:00' }, { trip: '625207' });
   const it3 = sheet('19:00'); await v.c.overlay('florida-beauty', [it3]);
