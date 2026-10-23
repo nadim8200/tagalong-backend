@@ -885,3 +885,19 @@ test('email the manifest: staff get it in their work email; a customer\'s reques
   const r2 = await v.hit('POST /retell/fn/email_manifest', { call: cust, args: { customer_name: 'Carbone' } });
   assert.equal(r2.out.ok, false); assert.equal(sent.length, 1);
 });
+
+test('a staff caller with no email on the Employees list gets the manifest at their dispatcher-login email', async () => {
+  const sent = [];
+  const item = { trip: { tripNumber: '625667', status: 'DEPSHIP', powerUnit: '4558' }, freightBills: [], _tb: { hub: 'Ventura', stops: [{ consigneeId: '05551', consignee: 'NATIVE FLORAL' }] } };
+  const extra = {
+    artisWeb: { manifestDoc: async ({ clientId }) => ({ id: '9', name: `Trip-Manifest-Detail-625667-${clientId}.pdf` }) },
+    docs: { readDocs: async () => [{ id: '9', data: Buffer.from('%PDF') }] },
+    mail: { ready: () => true, send: async (m) => sent.push(m) },
+    directory: { load: async () => ({ people: [{ name: 'Nadim Tellez', phone: '3055040711', email: null }] }), find: async () => [], main: async () => '305-503-1200' },
+  };
+  const v = setup({}, { board: [item], extra });
+  await v.db.set('taDispatchers', { list: [{ name: 'Nadim Tellez', email: 'ntellez@floridabeauty.us', active: true }] });
+  const call = { call_id: 'p1', call_type: 'phone_call', direction: 'inbound', from_number: '+13055040711' };
+  const r = await v.hit('POST /retell/fn/email_manifest', { call, args: { customer_name: 'Native' } });
+  assert.equal(r.out.ok, true); assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']);
+});
