@@ -176,3 +176,33 @@ test('typed chat gets what the phone gets: "ETA to Native" by customer name, and
   assert.match(SYSTEM('Rosa'), /customer_etas/); assert.match(SYSTEM('Rosa'), /truck_hours/);
   assert.match(T.find((t) => t.name === 'loads_to_place').description, /never a customer name/);
 });
+
+test('trip manifest by trip + stop number, and by date from ARTIS when the trip is off the board', async () => {
+  const board = { trips: [{ ...JSON.parse(JSON.stringify(LOAD)), trip: { ...LOAD.trip, tripNumber: '625541' }, _manifest: { stops: [{ stopNumber: 8, action: 'DELIVER', customer: 'CARBONE R.J CO. CHELSEA', city: 'CHELSEA', state: 'MA' }] } }], unclosed: [] };
+  const asked = [];
+  const artisWeb = {
+    clientIdFor: async ({ name }) => (/CARBONE/i.test(name) ? '04411' : /KUHN/i.test(name) ? '07777' : null),
+    tripStatus: async (id, from, to) => { asked.push({ id, from, to }); return [{ trip: '624900', clientId: '07777', name: 'KUHN FLOWERS', city: 'JACKSONVILLE', delivered: true, boxes: 40 }]; },
+    manifestDoc: async ({ item, clientId }) => ({ id: `d-${item.tripNumber || item.trip.tripNumber}-${clientId}`, name: `Trip-Manifest-Detail-${item.tripNumber || item.trip.tripNumber}-${clientId}.pdf` }),
+  };
+  const h = setup([useTool('trip_manifest', { trip: '625541', stop: 8 }), say('Attached.'), useTool('trip_manifest', { customer: 'Kuhn', date: '2026-10-20' }), say('Attached.')], { artisWeb, getBoard: async () => board });
+  const r1 = await h.call('POST /jarvis/chat', { message: 'manifest for stop 8 on 625541' });
+  assert.match(h.claude.sent[1].messages.at(-1).content[0].content, /Trip-Manifest-Detail-625541-04411/);
+  assert.equal(r1.body.docs[0].id, 'd-625541-04411');
+  await h.call('POST /jarvis/chat', { message: 'trip manifest for Kuhn on Oct 20' });
+  assert.deepEqual(asked[0], { id: '07777', from: '2026-10-19', to: '2026-10-21' });
+  assert.match(h.claude.sent[3].messages.at(-1).content[0].content, /624900.*fromArtisHistory/);
+});
+
+test('client lookup carries the customer\'s geofence; load details carry committed times, ARTIS ETA and geofence visits (staff only)', async () => {
+  const clients = { byId: () => ({ id: '9273', name: 'WESTLAND FLORAL', serviceDays: ['MO'] }), byEmail: () => null, byPhone: () => null, byName: () => [], loads: () => [] };
+  const geofences = { fences: async () => ({ '09273': { lat: 34.39, lng: -119.51, radiusM: 300, active: true } }) };
+  const board = { trips: [{ ...JSON.parse(JSON.stringify(LOAD)), _commit: { 'CLIFTON|NJ': { local: '2026-10-24T06:00' } }, _artisEta: { at: 'x', stops: [{ name: 'MAIN WHOLESALE', etaText: '10/24 06:34 AM', miles: 120 }] } }], unclosed: [] };
+  const h = setup([useTool('client_lookup', { query: '9273' }), say('ok'), useTool('load_details', { trip: '624399' }), say('ok')], { clients, geofences, getBoard: async () => board });
+  await h.call('POST /jarvis/chat', { message: 'info for 9273' });
+  assert.match(h.claude.sent[1].messages.at(-1).content[0].content, /"radiusM":300/);
+  await h.db.set('taStopVisits:florida-beauty', { 624399: { a: { stopKey: 'a', geofence: { name: 'MAIN WHOLESALE', source: 'Customer geofence' }, state: 'departed', enteredAt: 1, exitedAt: 2, dwellMin: 40 } } });
+  await h.call('POST /jarvis/chat', { message: 'details 624399' });
+  const out = h.claude.sent[3].messages.at(-1).content[0].content;
+  assert.match(out, /committedTimes/); assert.match(out, /10\/24 06:34 AM/); assert.match(out, /"minutesThere":40/);
+});

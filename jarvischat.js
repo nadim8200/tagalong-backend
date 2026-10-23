@@ -97,13 +97,13 @@ export const TOOLS = [
   { name: 'customer_etas', description: 'ETA for a CUSTOMER / receiver by business name (e.g. "Native", "Zoom Bloom", "Main Wholesale") — the same answer staff get on the phone: every load with a stop for them, where the truck is now (as of when), and for each of their deliveries the city, ETA (local time), appointment / committed time, boxes loaded, trip + truck + trailer. Half-heard or partial names find the closest customer. Optional city.', input_schema: { type: 'object', properties: { customer: { type: 'string' }, city: { type: 'string' } }, required: ['customer'] } },
   { name: 'artis_report', description: 'ARTIS (the warehouse / EDI system) reports — STAFF ONLY. which: approaching_yard (trucks inbound to the Miami / California yard: ETA, miles left, hours late), truck_location / trailer_location (ARTIS position — use when Samsara GPS is stale or missing), door_temps (trailer temps checked at the loading door vs set temp), temp_alerts (box temperatures taken at receiving), warehouse_rejects (boxes rejected at the warehouse — crushed, wet…), wrong_boxes (boxes put on another customer\'s pallet), not_built (boxes received but not built onto a pallet / truck yet), mismatched_arrived (ARTIS arrival vs TruckMate status disagree), delivery_performance (delivery days / on-time, overall or for a shipper / customer). For PODs / BOLs / invoices use load_documents. Dates YYYY-MM-DD (default today, last 7 days for history reports).', input_schema: { type: 'object', properties: { which: { type: 'string', enum: ['approaching_yard', 'truck_location', 'trailer_location', 'door_temps', 'temp_alerts', 'warehouse_rejects', 'wrong_boxes', 'not_built', 'mismatched_arrived', 'delivery_performance'] }, from: { type: 'string' }, to: { type: 'string' }, customer: { type: 'string', description: 'Customer / consignee or shipper name filter' }, truck: { type: 'string' }, trailer: { type: 'string' }, hub: { type: 'string', description: 'Miami / Florida or California' }, trip: { type: 'string' } }, required: ['which'] } },
   { name: 'load_documents', description: 'A load\'s documents from ARTIS (Synergize): POD, BOL, invoice, rate confirmation, manifest — any bill type, checked now by bill number, scans turned into PDF and attached to your answer (an email reply carries them). type: POD | BOL | Invoice | Rate Confirmation | Manifest (optional). For a big LTL run give the customer (their stop\'s bills) or bill numbers. Customers / brokers get only PODs and BOLs of their own loads.', input_schema: { type: 'object', properties: { trip: { type: 'string' }, bill: { type: 'string', description: 'Bill / PO / broker load number if that is what they gave' }, customer: { type: 'string', description: 'Customer on the load (their stop\'s bills)' }, type: { type: 'string' } } } },
-  { name: 'trip_manifest', description: 'The ARTIS Trip Manifest PDF for ONE customer on a trip (everything loaded for them: farms / shippers, products, POs, boxes, cubes). Fetches it from ARTIS, keeps it on the trip and attaches it to your answer (the dispatcher sees a button to open it; an email reply carries it as an attachment). kind: detail (default), summary, or farm (detail with farm).', input_schema: { type: 'object', properties: { customer: { type: 'string', description: 'Customer / receiver name' }, trip: { type: 'string', description: 'Trip number if known' }, kind: { type: 'string', enum: ['detail', 'summary', 'farm'] } }, required: ['customer'] } },
+  { name: 'trip_manifest', description: 'The ARTIS Trip Manifest PDF for ONE customer on a trip (everything loaded for them: farms / shippers, products, POs, boxes, cubes). Fetches it from ARTIS, keeps it on the trip and attaches it to your answer (the dispatcher sees a button to open it; an email reply carries it as an attachment). Ask by customer, by trip + stop number ("stop 8 on 625541"), and / or a date (YYYY-MM-DD — the load / ship date; also finds delivered and older trips in ARTIS). kind: detail (default), summary, or farm (detail with farm).', input_schema: { type: 'object', properties: { customer: { type: 'string', description: 'Customer / receiver name' }, trip: { type: 'string', description: 'Trip number if known' }, stop: { type: 'number', description: 'Stop number on the trip sheet (with trip)' }, date: { type: 'string', description: 'YYYY-MM-DD load / ship date' }, kind: { type: 'string', enum: ['detail', 'summary', 'farm'] } } } },
   { name: 'truck_hours', description: 'Driving hours (hours of service) for a truck or driver: each driver\'s duty status, drive time left, shift (14-hr) left, 70-hr cycle left and when a break is due (Samsara ELD) — plus the truck\'s current load and where it is. Use for "how many hours does 2217 have", "can 2403 make it", "is the team rested".', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck / unit number, or a driver name' } }, required: ['truck'] } },
   { name: 'loads_to_place', description: 'A PLACE only (never a customer name — use customer_etas for those): every load on the board with a stop in a city / state (e.g. "Lombard, IL", "Chicago", "NJ") — trip, truck, customer at that stop, delivered or not, and the live ETA. Use for questions like "update on deliveries to Lombard IL".', input_schema: { type: 'object', properties: { place: { type: 'string' } }, required: ['place'] } },
   { name: 'update_email', description: 'EMAIL REPLIES ONLY: when the email asks where loads are / their status / ETAs, list the trips that answer it (and dispatch follow-ups). The reply is then built from live data in the standard delivery-update format — do not write the load details yourself.', input_schema: { type: 'object', properties: { customer: { type: 'string', description: 'Customer / receiver name the update is about (as on the loads), or the place' }, destination: { type: 'string', description: 'Delivery city / state if the question was about a place' }, trips: { type: 'array', items: { type: 'string' } }, followUps: { type: 'array', items: { type: 'object', properties: { issue: { type: 'string' }, next: { type: 'string' }, owner: { type: 'string' }, status: { type: 'string', enum: ['Pending', 'Completed'] } } } } }, required: ['trips'] } },
   { name: 'staff_directory', description: 'Florida Beauty employees by name, department or role (billing, payroll, claims, maintenance, sales, IT…): name, department and extension. Cell phones are never available.', input_schema: { type: 'object', properties: { name_or_department: { type: 'string' } }, required: ['name_or_department'] } },
-  { name: 'load_details', description: 'Everything about one load: status, truck/trailer/drivers, live location, every stop with ETA (local time), appointments, rate con, trip sheet, open alerts, to-dos, notes and transfers, holds, emails count.', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
-  { name: 'client_lookup', description: 'Florida Beauty\'s client list (flower + produce customers): find a client by name, client ID, phone or email — official name, address, city, phone / fax, contacts, emails, last delivery — and their loads on the board right now. For our staff only.', input_schema: { type: 'object', properties: { query: { type: 'string', description: 'Name (e.g. "DBEC Wholesale"), 5-digit client ID, phone or email' } }, required: ['query'] } },
+  { name: 'load_details', description: 'Everything about one load: status, truck/trailer/drivers, live location, every stop with ETA (local time), appointments and committed delivery times, ARTIS ETA / miles / delivered time per customer, geofence arrival / departure per stop, ARTIS truck / trailer location, trailer temp at the loading door, ARTIS documents on file (POD / BOL…), rate con, trip sheet, open alerts, to-dos, notes and transfers, holds, emails count.', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
+  { name: 'client_lookup', description: 'Florida Beauty\'s client list (flower + produce customers, synced daily from ARTIS): find a client by name, client ID, phone or email — official name, ARTIS customer ID, address, ZIP, phone / fax, contacts, emails, delivery days, appointment required, warehouse, last delivery, their geofence (location + radius the AI dispatcher uses to see arrivals / departures) — and their loads on the board right now. For our staff only.', input_schema: { type: 'object', properties: { query: { type: 'string', description: 'Name (e.g. "DBEC Wholesale"), 5-digit client ID, phone or email' } }, required: ['query'] } },
   { name: 'cargo_received', description: 'ARTIS (Florida Beauty\'s EDI system): the boxes received / scanned at the terminal for a ship date, per consignee (customer) — boxes and cubes expected vs scanned, missing boxes, farms, products. Optional date (YYYY-MM-DD, default today) and customer name or ARTIS consignee ID. Use for "did all of Kuhn\'s boxes come in today?" or "what\'s still missing for tomorrow?".', input_schema: { type: 'object', properties: { date: { type: 'string' }, customer: { type: 'string' } } } },
   { name: 'day_of_service', description: 'ARTIS: whether a consignee can receive on a ship date (days of service), up to 5 days ahead. consignee_id for one customer, or shipper_id for all consignees a shipper used in the last 30 days.', input_schema: { type: 'object', properties: { consignee_id: { type: 'string' }, shipper_id: { type: 'string' }, date: { type: 'string' } } } },
   { name: 'truck_plan', description: 'Gus\'s truck planning sheet checked against the live board: each truck\'s region (California / Midwest / Northeast…), flowers or broker, current trip status / lateness / when it will be empty, the NEXT trip (B number, info, pickup) and problems (late, can\'t make the next pickup, sheet vs TruckMate / rate con mismatches). Optional truck or region.', input_schema: { type: 'object', properties: { truck: { type: 'string' }, region: { type: 'string' } } } },
@@ -127,7 +127,9 @@ export const SYSTEM = (who) => `You are Jarvis, the AI dispatcher for Florida Be
 - Be brief and practical (a few lines or a short list). Lead with the answer. Use trip numbers.
 - ETAs and appointments: say them as the tools give them (delivery local time with the zone).
 - A customer / business name ("ETA for Native", "where's Zoom Bloom") → customer_etas — a business name is not a place (loads_to_place is only for a city / state). Answer like Jarvis on the phone: for each load, where the truck is now and "as of" when, then each of their deliveries with city, ETA, boxes loaded, trip and truck. If matchedBy is the closest name, say which customer you found.
-- A customer's trip manifest (what was loaded for them — farms, products, POs, boxes) → trip_manifest; say it's attached.
+- A customer's trip manifest (what was loaded for them — farms, products, POs, boxes) → trip_manifest — by customer, by trip + stop number, and / or a date (older / delivered trips too); say it's attached.
+- A customer's info (ARTIS customer ID, address, phone / fax, emails, delivery days, appointment required, geofence) → client_lookup.
+- Committed delivery times, ARTIS's ETA / delivered time, geofence arrival / departure, ARTIS truck / trailer location, door temps and ARTIS documents for a load → load_details.
 - PODs, BOLs, invoices, rate cons on file in ARTIS for a load → load_documents (by trip, bill or customer); say what was found and that it's attached (or that ARTIS has none yet).
 - ARTIS warehouse facts (trucks approaching the yard, trailer temps at the door, box temps at receiving, rejected / wrong-pallet / not-built boxes, delivery performance, a unit's ARTIS position, BOL / POD documents) → artis_report. Internal only — never quote these to customers.
 - Driving hours / HOS for a truck or driver → truck_hours (each driver's duty status, drive / shift / 70-hr cycle left). Never say the hours aren't available without calling it.
@@ -162,7 +164,7 @@ export function customerSafe(x) {
 // Voice conversation in Ask Jarvis: the answer is read out loud, so keep it short.
 export const SPOKEN = `\n\nThis turn is a SPOKEN conversation (the dispatcher talks, your answer is read aloud): answer in 1-3 short plain sentences, no lists, tables, markdown or emojis. Say truck and trailer numbers as written. If there's more, give the key point and say the full detail is on screen. Anything that needs the dispatcher's Confirm: say it's waiting for their Confirm on screen.`;
 
-export function initJarvisChat(app, { requireAuth, db, artis = null, artisWeb = null, artisReports = null, synergize = null, clients = null, planSheet = null, nextLoads = null, playbook = null, directory = null, getBoard, docs = null, packets = null, driver = null, voice = null, reports = {}, mail = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initJarvisChat(app, { requireAuth, db, artis = null, artisWeb = null, artisReports = null, synergize = null, clients = null, geofences = null, planSheet = null, nextLoads = null, playbook = null, directory = null, getBoard, docs = null, packets = null, driver = null, voice = null, reports = {}, mail = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const threadsKey = (uid) => `taJarvisChat:${uid}`;
   const actionsKey = `taJarvisActions:${SITE}`;
@@ -241,35 +243,61 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, artisWeb = 
       }
       case 'trip_manifest': {
         if (!artisWeb) return { error: 'The ARTIS web login is not connected.' };
-        const want = String(input.customer || '').trim();
+        let want = String(input.customer || '').trim();
         const n = String(input.trip || '').replace(/\D/g, '');
+        const stopN = Number(input.stop) || null;
+        const date = /^\d{4}-\d{2}-\d{2}$/.test(String(input.date || '')) ? input.date : null;
         const fit = (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75;
+        // "stop 8 on 625541" → that stop's customer on the trip sheet
+        let place = null;
+        if (stopN && n) {
+          const it0 = byTrip(n);
+          const st0 = it0 && ((it0._manifest && it0._manifest.stops) || []).find((x) => Number(x.stopNumber) === stopN);
+          if (!st0 && !want) return { found: false, note: `Trip ${n} has no stop ${stopN} on its trip sheet (or it's off the board) — ask for the customer.` };
+          if (st0) { want = want || st0.customer || ''; place = { city: st0.city, state: st0.state }; }
+        }
+        if (!want) return { found: false, note: 'Which customer? (or the trip and stop number)' };
         // customers (email): only the sender's own business
         if (ctx.customer && (!ctx.senderClient || !fit(ctx.senderClient, want))) return { found: false, note: 'Manifests go only to the customer the load is for. Say dispatch will send it to them.' };
+        const onDate = (it) => !date || !it._tb || !it._tb.date || it._tb.date === date;
         const hits = [];
         for (const it of all) {
-          if (n && tripNo(it) !== n) continue;
+          if ((n && tripNo(it) !== n) || !onDate(it)) continue;
           for (const st of ((it._tb && it._tb.stops) || [])) if (st.consigneeId && fit(want, st.consignee)) hits.push({ it, st });
         }
         // not on the Truck Builder → the trip sheet's stops, with the ARTIS customer number from ARTIS's customer list
         if (!hits.length && artisWeb.clientIdFor) {
           for (const it of all) {
-            if (n && tripNo(it) !== n) continue;
-            for (const st of ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && fit(want, x.customer || ''))) {
+            if ((n && tripNo(it) !== n) || !onDate(it)) continue;
+            for (const st of ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && fit(want, x.customer || '') && (!stopN || Number(x.stopNumber) === stopN))) {
               const id = await artisWeb.clientIdFor({ name: st.customer, city: st.city, state: st.state }).catch(() => null); // eslint-disable-line no-await-in-loop
               if (id) hits.push({ it, st: { consigneeId: id, consignee: st.customer, city: st.city } });
             }
             if (hits.length >= 3) break;
           }
         }
-        if (!hits.length) return { found: false, note: `No ARTIS customer found for "${want}"${n ? ` on trip ${n}` : ' on the active loads'}.` };
+        // not on the board (delivered, older, or another date) → ARTIS's own trips for that customer
+        if (!hits.length && artisWeb.clientIdFor && artisWeb.tripStatus) {
+          const id = await artisWeb.clientIdFor({ name: want, city: place && place.city, state: place && place.state }).catch(() => null);
+          if (id) {
+            const day = (d, k) => new Date(Date.parse(`${d}T12:00:00Z`) + k * 86400000).toISOString().slice(0, 10);
+            const d0 = date || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+            const list = n ? [{ trip: n, name: want }] : (await artisWeb.tripStatus(id, day(d0, date ? -1 : -7), day(d0, date ? 1 : 2)).catch(() => [])).filter((x) => x.trip && String(x.clientId) === String(id));
+            const seen = new Set();
+            for (const x of list.reverse()) {
+              if (seen.has(x.trip)) continue; seen.add(x.trip);
+              hits.push({ it: { tripNumber: x.trip, _tb: { date: date || day(d0, -7) } }, st: { consigneeId: id, consignee: x.name || want, city: x.city }, artis: x });
+            }
+          }
+        }
+        if (!hits.length) return { found: false, note: `No ARTIS customer / trip found for "${want}"${n ? ` on trip ${n}` : ''}${date ? ` on ${date}` : ' on the active loads or ARTIS\'s last week'}.` };
         const picked = hits.slice(0, 3);
         const out = [];
-        for (const { it, st } of picked) {
+        for (const { it, st, artis: x } of picked) {
           try {
             const d = await artisWeb.manifestDoc({ item: it, clientId: st.consigneeId, kind: input.kind || 'detail', by: ctx.customer ? 'Jarvis (customer email)' : `${ctx.user.name} (Ask Jarvis)` }); // eslint-disable-line no-await-in-loop
             if (d.id) (ctx.docs = ctx.docs || []).push({ id: d.id, name: d.name });
-            out.push({ trip: tripNo(it), customer: st.consignee, city: st.city, attached: d.name });
+            out.push({ trip: tripNo(it), customer: st.consignee, city: st.city, attached: d.name, ...(x ? { fromArtisHistory: true, delivered: x.delivered || undefined, eta: x.etaText || undefined, boxes: x.boxes ?? undefined } : {}) });
           } catch (e) { out.push({ trip: tripNo(it), customer: st.consignee, error: e.message }); }
         }
         return { found: true, manifests: out, more: hits.length > picked.length ? hits.length - picked.length : undefined };
@@ -292,7 +320,9 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, artisWeb = 
         const found = one ? [one] : clients.byName(q, { min: 0.6, max: 5 });
         if (!found.length) return { found: false, note: `No client on the list matches "${q}".` };
         const all = ((await getBoard(SITE)) || {}).trips || [];
-        return { found: true, clients: found.map((c) => ({ ...c, loadsOnBoard: clients.loads(all, c).map((it) => ({ trip: tripNo(it), status: (it.trip || it).status || null, truck: (it.trip || it).powerUnit || null })) })) };
+        const fences = geofences ? await geofences.fences().catch(() => ({})) : {};
+        const fenceOf = (c) => { const f = fences[String(c.id || '').padStart(5, '0')]; return f ? { lat: f.lat, lng: f.lng, radiusM: f.radiusM, on: f.active !== false, map: `https://www.google.com/maps?q=${f.lat},${f.lng}` } : null; };
+        return { found: true, clients: found.map((c) => ({ ...c, geofence: fenceOf(c), loadsOnBoard: clients.loads(all, c).map((it) => ({ trip: tripNo(it), status: (it.trip || it).status || null, truck: (it.trip || it).powerUnit || null })) })) };
       }
       case 'cargo_received': {
         if (!artis || !artis.ready()) return { error: 'ARTIS is not connected yet (login not set in Render).' };
@@ -363,6 +393,15 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, artisWeb = 
           notes: notes.slice(-15).map((x) => ({ at: x.at, by: x.by, kind: x.kind, text: x.text, transfer: x.transfer || undefined })),
           driverChat: it._ocChat || null, pickupFollow: it._pickupFollow || null,
           nextInTruckMate: it._tmNext || [],
+          // staff only — other customers' stops, locations, temps and documents never go into a customer answer
+          ...(ctx.customer ? {} : await (async () => ({
+          committedTimes: it._commit || null,   // per stop: the delivery time we committed to (late alerts use it)
+          artisEta: it._artisEta ? { readAt: it._artisEta.at, stops: (it._artisEta.stops || []).map((x) => ({ customer: x.name, clientId: x.clientId, city: x.city, state: x.state, eta: x.etaText, miles: x.miles, location: x.location, delivered: x.delivered, arrivedAt: x.arrivedAt, boxes: x.boxes })) } : null,
+          geofenceVisits: Object.values((((await db.get(`taStopVisits:${SITE}`, {})) || {})[n]) || {}).map((v) => ({ stop: v.stopKey, place: v.geofence && v.geofence.name, from: v.geofence && v.geofence.source, state: v.state, arrived: v.enteredAt ? new Date(v.enteredAt).toISOString() : null, left: v.exitedAt ? new Date(v.exitedAt).toISOString() : null, minutesThere: v.dwellMin })),
+          artisLocation: it._artisLoc || null,
+          doorTemp: it._artisDoorTemp || null,
+          artisDocs: (it._artisDocs || []).map((d) => ({ bill: d.bill, type: d.type, added: d.created })),
+          }))()),
           artisBoxes: it._artis || null,   // ARTIS: boxes per customer (always the right count), scanned / missing, trip sheet differences   // trips TruckMate already has assigned to this truck after this one
           nextLoads: (it._nextLoad || []).map((n) => ({ truck: n.truck, broker: n.rc.broker, loadNumber: n.rc.loadNumber, bill: n.rc.bill, pickup: n.rc.pickup, delivery: n.rc.delivery, rate: n.rc.rateText || n.rc.rate, notes: n.rc.notes, verified: n.verified ? `${n.verified.by}${n.verified.trip ? ` trip ${n.verified.trip}` : ''}` : 'not yet in TruckMate', sentBy: n.from, at: n.at })),
         };
