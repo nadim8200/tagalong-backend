@@ -1088,6 +1088,23 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
     res.json({ key: !!key(), agentId: cfg.agentId || null, llmId: cfg.llmId || null, setupAt: cfg.at || null, fromNumber: env.RETELL_FROM_NUMBER || null, transfer: env.RETELL_TRANSFER_NUMBER || null, webhook: `${backend()}/retell/webhook` });
   });
 
+  // Jarvis's voice: Retell's voices (filter by gender), and pick one → saved and pushed to the live agent
+  app.get('/voice/voices', requireAuth, async (req, res) => {
+    if (!key()) return res.status(503).json({ error: 'Add RETELL_API_KEY in Render first.' });
+    try {
+      const list = await retell('/list-voices', { method: 'GET' });
+      const g = String(req.query.gender || '').toLowerCase();
+      res.json((Array.isArray(list) ? list : []).filter((v) => !g || String(v.gender || '').toLowerCase() === g).map((v) => ({ id: v.voice_id, name: v.voice_name, provider: v.provider, gender: v.gender, accent: v.accent || null, age: v.age || null, preview: v.preview_audio_url || null })));
+    } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.put('/voice/voice', requireAuth, async (req, res) => {
+    const id = String((req.body || {}).voiceId || '').trim();
+    if (!/^[\w.:-]{3,80}$/.test(id)) return res.status(400).json({ error: 'Pick a voice.' });
+    if (!key()) return res.status(503).json({ error: 'Add RETELL_API_KEY in Render first.' });
+    await db.update(cfgKey, (c) => ({ ...(c || {}), voiceId: id, voiceBy: who(req), voiceAt: new Date().toISOString() }), {});
+    try { res.json({ voiceId: id, ...(await pushJarvis(who(req))) }); } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+
   // Create (or update) Jarvis in Retell from the prompt + tools above.
   app.post('/voice/setup', requireAuth, async (req, res) => {
     if (!key()) return res.status(503).json({ error: 'Add RETELL_API_KEY in Render first.' });
@@ -1122,7 +1139,7 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
       };
       const agentBody = {
         agent_name: 'Jarvis — Florida Beauty Flora dispatch',
-        voice_id: env.RETELL_VOICE_ID || 'retell-Cimo', language: languages(),
+        voice_id: cfg.voiceId || env.RETELL_VOICE_ID || 'retell-Cimo', language: languages(),
         webhook_url: `${base}/retell/webhook`, max_call_duration_ms: 15 * 60000, end_call_after_silence_ms: 30000,
         // hear customer names right: bias the transcriber toward the names on today's loads
         boosted_keywords: [...BASE_WORDS, ...customerKeywords(await items())].slice(0, 100),
@@ -1154,7 +1171,7 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
         const llmId = re.llm_id || cfg.llmId;
         const ver = re.version != null ? re.version : draft.version;
         llm = await retell(`/update-retell-llm/${llmId}${ver != null ? `?version=${ver}` : ''}`, { method: 'PATCH', body: llmBody });
-        if (!env.RETELL_VOICE_ID) delete agentBody.voice_id;     // keep the voice someone picked in Retell
+        if (!cfg.voiceId && !env.RETELL_VOICE_ID) delete agentBody.voice_id;     // keep the voice someone picked in Retell
         agent = await retell(`/update-agent/${cfg.agentId}`, { method: 'PATCH', body: agentBody });
         if (agent.version == null) agent.version = draft.version;
         if (!llm.llm_id) llm.llm_id = llmId;
