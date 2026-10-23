@@ -835,7 +835,8 @@ test('two voices: English Jarvis hands Spanish callers to a Spanish Jarvis (same
   const esAgent = v.retellCalls.filter((c) => c.url.endsWith('/create-agent')).at(-1).body;
   assert.equal(esAgent.voice_id, 'retell-Alejandro'); assert.match(esAgent.agent_name, /Español/);
   assert.equal(esLlm.begin_message, ''); assert.match(esLlm.general_prompt, /do NOT greet again/);
-  assert.deepEqual(esLlm.general_tools.find((t) => t.type === 'agent_swap'), { type: 'agent_swap', name: 'switch_to_english', description: esLlm.general_tools.find((t) => t.type === 'agent_swap').description, agent_id: 'agent_1' });
+  const back = esLlm.general_tools.find((t) => t.type === 'agent_swap');
+  assert.deepEqual([back.name, back.agent_id, back.agent_version, back.post_call_analysis_setting, back.webhook_setting], ['switch_to_english', 'agent_1', 'latest_published', 'only_destination_agent', 'only_source_agent']);
   const enLlm = v.retellCalls.filter((c) => c.url.includes('update-retell-llm/llm_1')).at(-1).body;
   assert.ok(enLlm.general_tools.some((t) => t.type === 'agent_swap' && t.name === 'switch_to_spanish'));
   assert.match(enLlm.general_prompt, /call switch_to_spanish right away/);

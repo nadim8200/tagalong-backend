@@ -1135,7 +1135,9 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
     if (tick.unref) tick.unref();
   }
   const pick = (o, ks) => Object.fromEntries(ks.filter((k) => o && o[k] != null).map((k) => [k, o[k]]));
-  const swapTool = (name, description, agentId) => ({ type: 'agent_swap', name, description, agent_id: agentId });
+  // the call summary is written once (by the agent the call ends with — it has the whole conversation); call events
+  // keep coming from the agent that started the call; always the PUBLISHED other Jarvis
+  const swapTool = (name, description, agentId) => ({ type: 'agent_swap', name, description, agent_id: agentId, agent_version: 'latest_published', post_call_analysis_setting: 'only_destination_agent', webhook_setting: 'only_source_agent', speak_during_execution: false });
   // the Spanish Jarvis: same instructions + tools, Spanish voice / language, a hand-back to the English Jarvis
   async function upsertSpanish(cfg, base, llmEn, agentEn) {
     const llmBody = { ...llmEn, general_prompt: `${PROMPT}\n\n${SPANISH_HANDOFF_ES}`, begin_message: '', start_speaker: 'agent',
