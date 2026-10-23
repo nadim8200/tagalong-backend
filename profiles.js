@@ -118,6 +118,30 @@ export function mergeClientList(store, list, now = new Date().toISOString()) {
   return all;
 }
 
+// ARTIS's customer data onto the profiles (artisclients.js): matched by customer ID, else by name; a customer with
+// no profile gets one. Kept under `artis` (address, ZIP, coordinates, phone, fax, delivery days, appointment
+// required, warehouse) + the customer ID + the business phone as a contact. Dispatch edits are never touched. Pure.
+export function applyArtisTo(store, artis = [], now = new Date().toISOString()) {
+  const pad = (id) => String(id || '').padStart(5, '0');
+  const find = (all, a) => Object.values(all).find((p) => p.type === 'customer' && p.clientId && pad(p.clientId) === a.id) || Object.values(all).find((p) => p.key === profileKey('customer', a.name)) || null;
+  const missing = artis.filter((a) => !find(store, a));
+  const all = missing.length ? mergeInto(store, fromClientList(missing.map((a) => ({ id: a.id, name: a.name, inactive: !a.active, city: a.city, state: a.state, phone: a.phone, phones: [], emails: [], contacts: [] }))), null, now) : { ...store };
+  let n = 0;
+  for (const a of artis) {
+    const p0 = find(all, a);
+    if (!p0) continue;
+    const p = { ...p0, contacts: [...(p0.contacts || [])], locations: [...(p0.locations || [])], sources: [...(p0.sources || [])] };
+    p.artis = { clientId: a.id, address: a.address, address2: a.address2, city: a.city, state: a.state, zip: a.zip, lat: a.lat, lng: a.lng, phone: a.phone, fax: a.fax, serviceDays: a.serviceDays, apptReq: a.apptReq, warehouse: a.warehouse, creditStatus: a.creditStatus, active: a.active, roles: a.roles, syncedAt: now };
+    if (!p.clientId) p.clientId = a.id;
+    if (!p.sources.includes('ARTIS')) p.sources.push('ARTIS');
+    const loc = [a.city, a.state].filter(Boolean).join(', ');
+    if (loc && !p.locations.includes(loc)) p.locations.push(loc);
+    if (a.phone && !p.contacts.some((c) => last10(c.phone) === a.phone)) p.contacts.push({ id: newId(), name: 'Business phone (ARTIS)', role: 'customer', email: null, phone: a.phone, statusEmails: false, authorized: false, source: 'ARTIS', addedAt: now });
+    all[p.id] = p; n += 1;
+  }
+  return { all, updated: n, created: missing.length };
+}
+
 // Can this phone get a customer's delivery details from Jarvis? Pure.
 // → { ok, why, profile }  (strict off, or the profile has no numbers yet → ok)
 export function phoneAllowed({ profiles, settings = {}, customerName, phone }) {
@@ -252,7 +276,7 @@ export function initProfiles(app, { requireAuth, db, getBoard = null, env = proc
   app.get('/truckmate/profiles', requireAuth, async (req, res) => {
     const { all } = await load();
     const qy = String(req.query.q || '').toUpperCase();
-    const list = Object.values(all).filter((p) => (!req.query.type || p.type === req.query.type) && (!qy || `${p.name} ${(p.aliases || []).join(' ')} ${officeLabel(p.office) || ''} ${(p.contacts || []).map((c) => `${c.name} ${c.email} ${c.phone}`).join(' ')}`.toUpperCase().includes(qy)));
+    const list = Object.values(all).filter((p) => (!req.query.type || p.type === req.query.type) && (!qy || `${p.name} ${(p.aliases || []).join(' ')} ${officeLabel(p.office) || ''} ${p.clientId || ''} ${p.artis ? `${p.artis.address || ''} ${p.artis.city || ''} ${p.artis.zip || ''}` : ''} ${(p.contacts || []).map((c) => `${c.name} ${c.email} ${c.phone}`).join(' ')}`.toUpperCase().includes(qy)));
     res.json(list.sort((a, b) => a.name.localeCompare(b.name)).map((p) => ({ id: p.id, type: p.type, name: p.name, office: officeLabel(p.office), contacts: (p.contacts || []).length, authorized: (p.contacts || []).filter((c) => c.authorized).length, statusEmails: (p.contacts || []).filter((c) => c.statusEmails).length, verified: p.verified, lastLoad: (p.loads || [])[0] || null, locations: (p.locations || []).slice(0, 3) })));
   });
   app.get('/truckmate/profiles/settings', requireAuth, async (req, res) => { const { cfg } = await load(); res.json({ strict: !!cfg.strict, anyLoad: cfg.anyLoad || [] }); });
@@ -319,5 +343,11 @@ export function initProfiles(app, { requireAuth, db, getBoard = null, env = proc
   app.delete('/truckmate/profiles/:id', requireAuth, async (req, res) => { await save((all) => { const n = { ...all }; delete n[req.params.id]; return n; }); res.json({ ok: true }); });
 
   console.log(`[profiles] customer & broker profiles ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { sync, overlay, allowed, anyLoad };
+  async function applyArtis(artis) {
+    if (!enabled) return 0;
+    let n = 0;
+    await save((all) => { const r = applyArtisTo(all, artis); n = r.updated; return r.all; });
+    return n;
+  }
+  return { sync, overlay, allowed, anyLoad, applyArtis };
 }

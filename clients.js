@@ -77,7 +77,14 @@ export function initClients({ db = null, score }) {
     if (Array.isArray(saved) && saved.length) { list = saved; idx = clientIndex(list, { score }); }
   }
   refresh().catch(() => {});
+  // the merged list (TruckMate's report + ARTIS customers — artisclients.js), kept in the database
+  async function save(next) {
+    if (!Array.isArray(next) || !next.length) return;
+    list = next; idx = clientIndex(list, { score });
+    if (db && db.enabled) await db.set('taClients:florida-beauty', next);
+  }
   return {
+    save,
     size: () => list.length,
     all: () => list,
     byId: (x) => idx.byId(x), byPhone: (x) => idx.byPhone(x), byEmail: (x) => idx.byEmail(x),

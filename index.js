@@ -59,6 +59,7 @@ import { initCommitments } from './commitments.js';
 import { initArtisWeb } from './artisweb.js';
 import { initArtisReports } from './artisreports.js';
 import { initSynergize } from './synergize.js';
+import { initArtisClients } from './artisclients.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
@@ -744,7 +745,8 @@ const docs = initDocuments(app, { requireAuth: requireDispatch, db });
 // scheduled ETA updates ("ETA every 3 hours on Native until delivered")
 const etaWatch = initEtaWatch(app, { requireAuth: requireDispatch, db, docs, sendMail: (m) => sendMail(m, { env: process.env }) });
 // Geofence stop tracking (validated Samsara address boundaries only).
-const stopVisits = initStopVisits({ db, env: process.env, listAddresses, tokenFrom: samsaraTokenFrom });
+let artisClients = null;   // customer geofences from ARTIS (set up below) — the stop-visit tracker uses them too
+const stopVisits = initStopVisits({ db, env: process.env, listAddresses: async (token) => [...(await listAddresses(token)), ...(artisClients ? await artisClients.asAddresses().catch(() => []) : [])], tokenFrom: samsaraTokenFrom });
 // Outside carriers (OC): carrier list, OC marks, check calls / email check-ins.
 const carriers = initCarriers(app, { requireAuth: requireDispatch, db });
 // OC driver tracking links (TagAlong app / browser) — positions overlay the board.
@@ -826,6 +828,8 @@ const artisWeb = initArtisWeb(app, { requireAuth: requireDispatch, requireAdmin,
 const artisReports = initArtisReports({ db, artisWeb, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), tempTeam: () => alertRecipients.resolve('reefer_temp'), env: process.env });
 // ARTIS Synergize documents (POD / BOL / invoice…) by bill — any bill type; TIFF scans → PDF, kept on the trip
 const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmin, db, docs, artisWeb, getBoard: (site) => truckmate.buildBoard(site), nameFits: (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75 });
+// ARTIS customers → profiles (ID, address, phone, fax, delivery days…), the client list, and customer geofences
+artisClients = initArtisClients(app, { requireAuth: requireDispatch, requireAdmin, db, artisWeb, clients, profiles });
 app.post('/truckmate/artis/reports/run', requireAdmin, async (req, res) => { try { res.json(await artisReports.refresh()); } catch (e) { res.status(502).json({ error: e.message }); } });
 const truckBuilder = initTruckBuilder(app, { requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('tripsheet_check'), env: process.env });
 // road calls (breakdowns / tires) → Michelin ONCall when its API is set up; else the packet for 1-800-TIRE911

@@ -152,11 +152,11 @@ export function geofenceFromAddress(a, rules = RULES) {
   const g = a && a.geofence;
   if (!g) return null;
   if (g.circle && g.circle.latitude != null && g.circle.radiusMeters > 0 && g.circle.radiusMeters <= rules.maxCircleRadiusM) {
-    return { id: String(a.id), name: a.name, source: 'Samsara address', circle: { lat: g.circle.latitude, lng: g.circle.longitude, radiusM: g.circle.radiusMeters } };
+    return { id: String(a.id), name: a.name, source: a.source || 'Samsara address', circle: { lat: g.circle.latitude, lng: g.circle.longitude, radiusM: g.circle.radiusMeters } };
   }
   const verts = g.polygon && g.polygon.vertices;
   if (Array.isArray(verts) && verts.length >= 3) {
-    return { id: String(a.id), name: a.name, source: 'Samsara address', polygon: verts.map((x) => ({ lat: x.latitude, lng: x.longitude })) };
+    return { id: String(a.id), name: a.name, source: a.source || 'Samsara address', polygon: verts.map((x) => ({ lat: x.latitude, lng: x.longitude })) };
   }
   return null;
 }
@@ -173,7 +173,12 @@ export function matchGeofence(stop, addresses) {
     const fa = norm(a.formattedAddress);
     return city && fa.includes(city) && (!st || fa.includes(` ${st} `) || fa.endsWith(` ${st}`) || fa.includes(` ${st}`));
   }).map((a) => geofenceFromAddress(a)).filter(Boolean);
-  return hits.length === 1 ? hits[0] : null;
+  if (hits.length === 1) return hits[0];
+  // a Samsara address and our customer geofence (ARTIS) for the same place → Samsara's (drawn by hand)
+  const sam = hits.filter((h) => h.source === 'Samsara address');
+  if (sam.length === 1) return sam[0];
+  const ours = hits.filter((h) => h.source === 'Customer geofence');
+  return !sam.length && ours.length === 1 ? ours[0] : null;
 }
 
 export function initStopVisits({ db, env = process.env, listAddresses, tokenFrom }) {
