@@ -31,7 +31,7 @@ function setup(extraEnv = {}, opts = {}) {
       : url.includes('create-web-call') ? { call_id: 'web_1', call_status: 'registered', access_token: 'tok_1' } : {};
     return { ok: true, status: 201, json: async () => body };
   };
-  initVoice(app, { ...(opts.help ? { help: opts.help } : {}), ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: board }), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
+  initVoice(app, { ...(opts.help ? { help: opts.help } : {}), ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: opts.board || board }), ...(opts.extra || {}), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
   const hit = async (route, body, { sign = true, user = { name: 'Ana' } } = {}) => {
     const raw = JSON.stringify(body);
     const sig = sign ? await Retell.sign(raw, KEY) : 'v=1,d=bad';
@@ -104,7 +104,7 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   assert.deepEqual(r.out && { llm: r.out.llmId, agent: r.out.agentId }, { llm: 'llm_1', agent: 'agent_1' });
   const llm = v.retellCalls.find((c) => c.url.endsWith('/create-retell-llm')).body;
   assert.match(llm.model, /^claude/);
-  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'report_missing_boxes', 'take_message', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
+  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'report_missing_boxes', 'take_message', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
   assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
   assert.deepEqual(agent.language, ['en-US', 'es-419', 'he-IL']);
@@ -775,7 +775,7 @@ test('📞 Call Jarvis from the console: a live web call as staff; only our serv
     assert.deepEqual(r.out, { ok: true, callId: 'web_1', accessToken: 'tok_1' });
     const sent = v.retellCalls.find((c) => c.url.endsWith('/v2/create-web-call'));
     assert.equal(sent.body.agent_id, 'agent_1');
-    assert.deepEqual(sent.body.metadata, { purpose: 'console', staff: true, by: 'Rosa Diaz' });
+    assert.deepEqual(sent.body.metadata, { purpose: 'console', staff: true, by: 'Rosa Diaz', email: null });
     assert.match(sent.body.retell_llm_dynamic_variables.greeting, /, Rosa! This is Jarvis/);
     assert.equal(JSON.stringify(sent.body).includes(KEY), false, 'the key never goes in the request body');
     assert.equal((await v.hit('POST /voice/web-call', {}, { user: { name: 'Rosa Diaz' } })).code, 429, 'no double start');
@@ -856,4 +856,32 @@ test('a name heard without its first syllable still finds the business ("the sig
   assert.equal(ns2('the signer choice', "DESIGNER'S CHOICE WHOLESALE"), 1);
   assert.equal(ns2('the signers choice', 'CHOICE FLOWER EXCHANGE'), 0.5, 'only half fits the other business');
   assert.equal(ns2('rose wholesale', 'PRIMROSE WHOLESALE'), 0, 'a missing start of 4+ letters is a different word');
+});
+
+
+import { hubSaid } from '../voice.js';
+test('Jarvis says which hub a load left from (ARTIS warehouse, then the terminal); brokers: where it was picked up', () => {
+  assert.equal(hubSaid({ trip: {}, _tb: { hub: 'Ventura' } }), 'our Ventura, California hub');
+  assert.equal(hubSaid({ trip: { origZoneDesc: 'MIAMI TERMINAL' } }), 'our Miami, Florida hub');
+  assert.equal(hubSaid({ trip: { origZoneDesc: 'LEXINGTON, MA, 02421' } }), 'picked up in Lexington, Massachusetts');
+});
+
+test('email the manifest: staff get it in their work email; a customer\'s request goes to dispatch (never emailed from a call)', async () => {
+  const sent = []; const raised = [];
+  const item = { trip: { tripNumber: '625541', status: 'DEPSHIP', powerUnit: '356' }, freightBills: [], _tb: { hub: 'Miami', stops: [{ consigneeId: '04411', consignee: 'CARBONE R.J CO. CHELSEA' }] } };
+  const extra = {
+    artisWeb: { manifestDoc: async ({ clientId }) => ({ id: '77', name: `Trip-Manifest-Detail-625541-${clientId}.pdf` }) },
+    docs: { readDocs: async () => [{ id: '77', data: Buffer.from('%PDF') }] },
+    mail: { ready: () => true, send: async (m) => sent.push(m) },
+    help: { raise: async (r) => raised.push(r) },
+  };
+  const v = setup({}, { board: [item], extra });
+  const staff = { call_id: 'w1', call_type: 'web_call', metadata: { purpose: 'console', staff: true, by: 'Rosa', email: 'rosa@floridabeauty.us' } };
+  const r = await v.hit('POST /retell/fn/email_manifest', { call: staff, args: { customer_name: 'Carbone' } });
+  assert.equal(r.out.ok, true); assert.match(r.out.say, /emailed the trip manifest/);
+  assert.deepEqual(sent[0].to, ['rosa@floridabeauty.us']); assert.equal(sent[0].attachments[0].name, 'Trip-Manifest-Detail-625541-04411.pdf');
+  // a customer who hasn't been looked up on this call gets nothing
+  const cust = { call_id: 'p9', call_type: 'phone_call', direction: 'inbound', from_number: '+16175550100' };
+  const r2 = await v.hit('POST /retell/fn/email_manifest', { call: cust, args: { customer_name: 'Carbone' } });
+  assert.equal(r2.out.ok, false); assert.equal(sent.length, 1);
 });
