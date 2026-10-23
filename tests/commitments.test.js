@@ -200,3 +200,18 @@ test('FCFS on the rate con: no appointment, said so; with receiving hours, late 
   assert.equal(b[0]._commit['MIAMI|FL'].local, '2026-10-27T15:00');
   assert.match(b[0]._commit['MIAMI|FL'].rule, /before they close/);
 });
+
+test('625479: a TruckMate appointment that already passed is never committed after the fact; a truck AT the receiver is not "late"', async () => {
+  const now = Date.parse('2026-10-23T15:00:00Z');
+  const bill = { billNumber: 'B180593', billToName: 'TRAFFIC TECH INC', endZoneDescription: 'MIAMI, FL, 33172', deliverBy: '2026-10-22T15:00:00', deliverByEnd: '2026-10-22T15:00:00' };
+  const it = { trip: { tripNumber: '625479', status: 'ARRCONS', powerUnit: '2608' }, freightBills: [bill] };
+  assert.deepEqual(tmAppointments(it, now), [], 'Oct 22 3 PM already passed');
+  // even with a commitment on file, ARRIVE CONSIGNEE at that stop → no late email
+  const v = setup(now);
+  await v.hit('PUT /truckmate/commitments/:trip', { city: 'MIAMI', state: 'FL', local: '2026-10-22T15:00' }, { trip: '625479' });
+  await v.db.set('taCommitLeft:florida-beauty', { 625479: Date.parse('2026-10-21T14:53:00Z') });
+  await v.db.set('taWatch:florida-beauty', { etas: { 625479: { stops: [{ label: 'MIAMI, FL, 33172', etaMs: now + 5 * 60000, miles: 4 }] } } });
+  assert.equal((await v.c.process('florida-beauty', { trips: [it] })).sent, 0);
+  const rolling = { ...it, trip: { ...it.trip, status: 'DEPSHIP' } };
+  assert.equal((await v.c.process('florida-beauty', { trips: [rolling] })).sent, 1, 'still alerts while it is on the way');
+});

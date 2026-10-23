@@ -176,7 +176,7 @@ export function tmAppointments(item, now = Date.now()) {
     const city = p[0]; const state = (p[1] || '').slice(0, 2).toUpperCase();
     if (!city || !/^[A-Z]{2}$/.test(state)) continue;
     const ms = localToUtcMs(by, STATE_TZ[state] || 'America/New_York');
-    if (Number.isNaN(ms) || ms < now - 24 * 60 * MIN) continue;
+    if (Number.isNaN(ms) || ms < now) continue;   // already passed — never commit a time after the fact
     const k = stopKey(city, state);
     if (!out.has(k) || by < out.get(k).local) out.set(k, { city, state, customer: b.billToName || null, local: by });
   }
@@ -252,7 +252,7 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
         }
         const local = rcLocal(dl, now());
         const atMs = local ? commitMs(local, st) : null;
-        if (!k || !atMs || atMs < now() - 24 * 60 * MIN || (fill[trip] && fill[trip][k])) continue;
+        if (!k || !atMs || atMs < now() || (fill[trip] && fill[trip][k])) continue;
         const have = c[trip] && c[trip][k];
         if (have && (!have.auto || (have.fromRC && have.local === local))) continue;
         fill[trip] = { ...(fill[trip] || {}), [k]: { state: st, customer: dl.name || null, place: `${String(dl.city).toUpperCase()}, ${st}`, auto: true, setAt: new Date(now()).toISOString(), local, atMs, by: 'Rate con (delivery appointment)', fromRC: true, rule: [dl.appointment, dl.refs ? `ref ${dl.refs}` : null].filter(Boolean).join(' · ') || 'the delivery appointment on the rate con' } };
@@ -323,7 +323,11 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
       const it = items.find((x) => tripNo(x) === trip);
       if (!it) continue;
       if (!left[trip] && leftShipper(tripOf(it).status)) { left[trip] = now(); changed = true; }
-      for (const st of lateStops({ commits: c[trip], etas: etas[trip], leftAt: left[trip], now: now() })) {
+      // the truck is AT the receiver (TruckMate "arrive consignee") → that stop isn't late any more, it's there
+      const e = etas[trip];
+      const atStop = /^arrcons/i.test(String(tripOf(it).status || '')) && e && Array.isArray(e.stops) && e.stops[0] ? keyOfLabel(e.stops[0].label) : null;
+      for (const st of lateStops({ commits: c[trip], etas: e, leftAt: left[trip], now: now() })) {
+        if (atStop && st.key === atStop) continue;
         const id = `${trip}|${st.key}|${st.local}`;
         if (sent[id]) continue;
         const m = lateMessage(it, st);
