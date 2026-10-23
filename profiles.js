@@ -269,6 +269,16 @@ export function initProfiles(app, { requireAuth, db, getBoard = null, env = proc
       if (mine.length) it._profiles = mine.map((p) => ({ id: p.id, type: p.type, name: p.name, office: officeLabel(p.office), verified: !!p.verified, contacts: (p.contacts || []).filter((c) => c.statusEmails || c.authorized).map((c) => ({ name: c.name, role: c.role, email: c.email, phone: c.phone, statusEmails: !!c.statusEmails, authorized: !!c.authorized })) }));
     }
   }
+  // the emails Jarvis may send a customer's documents to: ONLY contacts in their profile — the caller's own contact
+  // (matched by the phone they called from) first, else every contact with an email on that profile
+  async function contactEmails({ customerName, phone }) {
+    const { all } = await load();
+    const n = normName(customerName); const P = last10(phone);
+    const mine = Object.values(all || {}).filter((p) => p.type === 'customer' && n && (normName(p.name) === n || (p.aliases || []).some((x) => normName(x) === n) || normName(p.name).includes(n) || n.includes(normName(p.name))));
+    const contacts = mine.flatMap((p) => (p.contacts || []).filter((c) => c && /@/.test(String(c.email || ''))));
+    const me = P ? contacts.find((c) => last10(c.phone) === P) : null;
+    return { profile: mine[0] ? mine[0].name : null, caller: me ? me.email : null, all: [...new Set(contacts.map((c) => String(c.email).trim().toLowerCase()))] };
+  }
   async function allowed({ customerName, phone }) { const { all, cfg } = await load(); return phoneAllowed({ profiles: all, settings: cfg, customerName, phone }); }
   async function anyLoad(phone) { const { cfg } = await load(); const P = last10(phone); return !!(P && (cfg.anyLoad || []).some((x) => last10(x.phone) === P)); }
 
@@ -349,5 +359,5 @@ export function initProfiles(app, { requireAuth, db, getBoard = null, env = proc
     await save((all) => { const r = applyArtisTo(all, artis); n = r.updated; return r.all; });
     return n;
   }
-  return { sync, overlay, allowed, anyLoad, applyArtis };
+  return { sync, overlay, allowed, anyLoad, applyArtis, contactEmails };
 }

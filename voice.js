@@ -24,7 +24,7 @@
 import { isMissingBoxesText } from './missingcase.js';
 import Retell from 'retell-sdk';
 import { contactsFor, billsOf } from './statusmail.js';
-import { fmtLocal } from './localtime.js';
+import { fmtLocal, fmtLocalShort } from './localtime.js';
 import { realUnit } from './units.js';
 
 const API = 'https://api.retellai.com';
@@ -90,7 +90,7 @@ How to help:
 - Loads leave from our Miami, Florida hub or our Ventura, California hub (and some brokers' pickups elsewhere). For every load you describe — customers and staff — say which hub it left from using left_from (e.g. "it left our Ventura, California hub"); never assume Miami.
 - When the caller says WHO should handle a message ("have Valeria call me", "Valeria or Sarai") — even after you saved it — call take_message (again) with for_person set to exactly the names they said, so it reaches those people. Never promise a person without doing that.
 - When a caller asks you to call them back later ("call me in 5 minutes", "call me when you know", "call me to make sure they called"), use schedule_callback with the minutes and what it's about — you CAN call people back. Confirm the time in one short line. Never say you can't call back.
-- Trip manifest (what was loaded for a customer — farms, products, POs, boxes): when anyone asks for it by email ("email me the manifest"), call email_manifest RIGHT AWAY with the business name (and trip if they gave one; for several trips call it once per trip, or once without a trip for all of them). Do NOT say where it will go before the tool answers — staff (Employees list) get it in their own work email; customers' requests go to dispatch. Then say exactly what the tool says. Never use take_message for a manifest, never promise an email the tool didn't send, and never take an email address over the phone.
+- Trip manifest (what was loaded for a customer — farms, products, POs, boxes): when anyone asks for it by email ("email me the manifest"), call email_manifest RIGHT AWAY with the business name (and trip if they gave one; for several trips call it once per trip, or once without a trip for all of them). Do NOT say where it will go before the tool answers — staff (Employees list) get it in their own work email; customers get it only at the contacts in their customer profile. Then say exactly what the tool says. Never use take_message for a manifest, never promise an email the tool didn't send, and never take an email address over the phone.
 - When the caller says you got the wrong business ("no, I said…", "that's not it"), never offer that business again on this call: call lookup_load again with exactly the words they just said (speech-to-text often splits a name — "the signers choice" is DESIGNERS CHOICE), and if it's still not found read them the did_you_mean names. Don't make them spell it until that fails.
 - Hearing people right: phone audio is often noisy. If you're not sure of a name, city or number, repeat it back and ask them to confirm before you look it up ("Did you say Merchantville?"). If they repeat something, use exactly what they repeated. If a name or city isn't found, ask them to spell it (never staff — for staff, ask for another part of the name or a trip / truck number). Read numbers back digit by digit to confirm.
 - When lookup_load returns did_you_mean you have NOT found them: ask "Is that <name>?" and only continue after they clearly say yes — then call lookup_load again with that customer_name and caller_confirmed true. If they say no, ask them to spell it. Never tell a caller about a business they didn't confirm is theirs.
@@ -133,6 +133,7 @@ function tools(base, transferNumber) {
       trailer_number: { type: 'string', description: 'Trailer number, e.g. 7131' },
       customer_name: { type: 'string', description: 'A flower customer / receiver by business name, e.g. "Springfield Florist", "Johnson\'s Wholesale Florist". If they spelled it, pass the spelled name. ALWAYS pass it together with a trip / bill / truck number when the caller says both ("ETA for Zoom Bloom, trip 625490") — the answer is then for THAT customer\'s stop.' },
       customer_city: { type: 'string', description: 'The city / town the caller says their delivery goes to, e.g. "Waltham"' },
+      outbound_day: { type: 'string', description: 'When they ask by outbound day: "Friday", "Monday", "yesterday", "10/23" — the day the truck left (or leaves) our hub' },
       caller_confirmed: { type: 'boolean', description: 'true ONLY when you asked "Is that <name from did_you_mean>?" and the caller clearly said yes' },
     }),
     fn('boxes_check', 'STAFF ONLY (caller_is Florida Beauty staff): ARTIS boxes received / scanned / missing per customer for a ship date. Never use for customers.', {
@@ -162,7 +163,7 @@ function tools(base, transferNumber) {
       about: { type: 'string', description: 'What the callback is about, in a few words (e.g. "ETA and box count for Direct Flowers, trip 625717")' },
       trip_number: { type: 'string', description: 'Trip number if there is one' },
     }, ['minutes', 'about']),
-    fn('email_manifest', 'Email the ARTIS trip manifest PDF for a customer\'s delivery (farms, products, POs, boxes). Staff: sent to their work email now. Customer: dispatch emails it to the address on file.', {
+    fn('email_manifest', 'Email the ARTIS trip manifest PDF for a customer\'s delivery (farms, products, POs, boxes). Staff: sent to their work email now. Customer: sent only to the contacts in their customer profile.', {
       customer_name: { type: 'string', description: 'Business name the manifest is for' },
       trip_number: { type: 'string', description: 'Trip number if they gave one' },
     }, ['customer_name']),
@@ -523,7 +524,7 @@ export function spokenName(raw) {
 // words every call uses — so speech-to-text hears "load", not "loan"
 // Florida Beauty's own staff (a phone saved on an employee in Employees) can get any load's ETA.
 const STAFF_IS = 'Florida Beauty staff (phone on the Employees list)';
-const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). ALWAYS start each load with where the truck is right now (truck_now, "as of" as_of, moving or stopped) and which hub it left from (left_from) — before the ETA, without being asked. If a load has not_left_yet, say it has NOT left — it is still at the hub, no truck or ETA yet — and say trailer_still_at (e.g. "trailer 7 3 3 1 is still in Miami"); never say it left. Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — what the TruckMate bills add up to; never any other count), and only if present: the different trip sheet count (boxes_on_trip_sheet). If split_between_trailers is there, say the order is split and how many boxes are on each truck.';
+const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). ALWAYS start each load with where the truck is right now (truck_now, "as of" as_of, moving or stopped) and which hub it left from and WHEN (left_from + left_at, the date and time it left) — before the ETA, without being asked. If a load has not_left_yet, say it has NOT left — it is still at the hub, no truck or ETA yet — and say trailer_still_at (e.g. "trailer 7 3 3 1 is still in Miami"); never say it left. Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — what the TruckMate bills add up to; never any other count), and only if present: the different trip sheet count (boxes_on_trip_sheet). If split_between_trailers is there, say the order is split and how many boxes are on each truck.';
 export const BASE_WORDS = ['Florida Beauty Flora', 'Jarvis', 'ETA', 'load', 'trip number', 'bill number', 'trailer', 'POD', 'BOL', 'rate confirmation'];
 export function customerKeywords(items, max = 100) {
   const n = new Map();
@@ -605,7 +606,7 @@ export const notLeftYet = (item) => /^(LOADINGMAN|LOADEDTOGO|AVAIL|AVBL|NEW|ASSG
 // How Jarvis wraps up with a customer, by their business name.
 export const CLOSING_RULE = 'Use speaking_with (their business name) naturally while you help them, e.g. "Thanks, Bokhary Farms." Once you have answered, ask: "Is there anything else I can help you with, <speaking_with>?" If they say no, close warmly: "Thank you for calling Florida Beauty Flora, <speaking_with>. If there is nothing else, feel free to hang up whenever you are ready. Have a great day." Then end the call with end_call.';
 export const CUSTOMER_RULE = `After you give an ETA, add once, in the caller's language: "${ETA_DISCLAIMER}" ${CLOSING_RULE} `
-  + 'ALWAYS start with where the truck is right now (truck_now, "as of" as_of) — before the ETA, without being asked — unless the load is delivered. Give a customer only: where the truck is now and which hub it left from (left_from — e.g. "it left our Miami, Florida hub"), the truck, trailer and trip number, their total boxes, and the ETA — nothing else (no cubes or appointments). If a delivery has say_exactly, it is delivered: say only that sentence ("Your shipment has been delivered.") — no time, boxes or location. Answer only with what is here. Never mention other stops, other customers or other cities on the route, and never say where the truck stops before or after them. If asked about the route, just say the truck is on its way to them and give the ETA — do not say you are hiding anything. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.';
+  + 'ALWAYS start with where the truck is right now (truck_now, "as of" as_of) — before the ETA, without being asked — unless the load is delivered. Give a customer ONLY: where the truck is now (truck_now, as of), which hub it left and when (left_from + left_at — e.g. "it left our Miami hub Thursday night, Oct 22 around 8:35 PM"), the truck number, the trailer number, and the ETA — nothing else unless they ask (no boxes, cubes or trip numbers). If it has not left yet (not_left_yet), say so and which day it goes out (outbound). Customers ask by outbound day ("my Friday outbound", "the Monday outbound") — pass outbound_day to lookup_load, or match the load whose outbound is that day. If a delivery has say_exactly, it is delivered: say only that sentence ("Your shipment has been delivered.") — no time, boxes or location. Answer only with what is here. Never mention other stops, other customers or other cities on the route, and never say where the truck stops before or after them. If asked about the route, just say the truck is on its way to them and give the ETA — do not say you are hiding anything. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.';
 // What a CUSTOMER hears: where the truck is now and where it came from, truck, trailer, trip, their total boxes and the ETA — nothing else.
 // Delivered → only "Your shipment has been delivered." (staff get the full view). Pure.
 export const DELIVERED_SAY = 'Your shipment has been delivered.';
@@ -617,7 +618,7 @@ export function customerLean(v) {
       estimated_arrival: d.estimated_arrival, eta_note: d.eta_note, truck_already_passed: d.truck_already_passed, arrived_at_receiver: d.arrived_at_receiver, note: d.note, truck_leaves_terminal_at: d.truck_leaves_terminal_at });
   const ds = v.deliveries ? v.deliveries.map(one) : v.your_delivery ? [one(v.your_delivery)] : null;
   if (ds && ds.every((d) => d.delivered)) return { trip: v.trip, deliveries: ds };
-  return { trip: v.trip, truck: v.truck, trailer: v.trailer, status: v.status, truck_now: v.truck_now, as_of: v.as_of, coming_from: v.coming_from, left_from: v.left_from, not_left_yet: v.not_left_yet, breakdown: v.breakdown,
+  return { trip: v.trip, truck: v.truck, trailer: v.trailer, status: v.status, truck_now: v.truck_now, as_of: v.as_of, coming_from: v.coming_from, left_from: v.left_from, left_at: v.left_at, outbound: v.outbound, not_left_yet: v.not_left_yet, breakdown: v.breakdown,
     departure_delayed: v.departure_delayed, delay_note: v.delay_note, ...(ds ? { deliveries: ds } : {}), ...(v.ask ? { ask: v.ask } : {}) };
 }
 export function customerView(item, eta, deliveries = null) {
@@ -629,7 +630,7 @@ export function customerView(item, eta, deliveries = null) {
     ...held,
     trip: f.trip, status: `${CUSTOMER_STATUS[String(t.status || '').toUpperCase()] || 'on the way'}${/^ARRSHIP$/i.test(String(t.status || '')) && from ? ` in ${from}` : ''}`,
     truck: f.truck, trailer: f.trailer, breakdown: f.breakdown || undefined,
-    truck_now: f.current_location, as_of: f.location_time, moving: f.moving, coming_from: from || undefined, ...(notLeftYet(item) ? { not_left_yet: `still at ${hubSaid(item) || 'the terminal'} — it has not left; no truck / ETA until it is dispatched`, ...trailerStill(item) } : { left_from: hubSaid(item) || undefined }),
+    truck_now: f.current_location, as_of: f.location_time, moving: f.moving, coming_from: from || undefined, outbound: outboundLabel(outboundDate(item)) || undefined, ...(leftAtMs(item) && !notLeftYet(item) ? { left_at: fmtLocalShort(leftAtMs(item), 'FL') } : {}), ...(notLeftYet(item) ? { not_left_yet: `still at ${hubSaid(item) || 'the terminal'} — it has not left; no truck / ETA until it is dispatched`, ...trailerStill(item) } : { left_from: hubSaid(item) || undefined }),
   };
   if (deliveries && deliveries.length) return { ...base, deliveries: deliveries.map(({ trip, truck, status, ...d }) => d) };
   if (f.total_stops === 1) {
@@ -645,6 +646,40 @@ const rcOf = (it) => (it && it._ratecon && (it._ratecon.data || it._ratecon)) ||
 // "Miami, Florida"), then the rate con pickup ("live load in Ventura, California"), then TruckMate.
 const TERMINALS = [[/MIAMI\s+TERMINAL/i, 'Miami', 'FL'], [/VENTURA\s+TERMINAL/i, 'Ventura', 'CA']];
 const placeSaid = (city, st) => { if (!city) return null; const c = String(city).trim().toLowerCase().replace(/\b[a-z]/g, (x) => x.toUpperCase()); const S = String(st || '').trim().toUpperCase(); return S ? `${c}, ${STATE_NAME[S] || S}` : c; };
+// When the truck left (TruckMate's first "depart shipper" / in transit) — ms, or null. Pure.
+export function leftAtMs(item) {
+  const h = (item && item._times && item._times.statusHistory) || [];
+  const x = h.find((s) => /^(DEPSHIP|INTRAN|ENROUTE)/i.test(String(s.status || '')) && s.at);
+  return x ? Date.parse(x.at) : null;
+}
+const nyDate = (ms) => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+// A load's OUTBOUND day (Miami date, YYYY-MM-DD): the day it left; not left yet → ARTIS ship date / trip-sheet load
+// date / dispatch day. Customers ask by it: "my Friday outbound". Pure.
+export function outboundDate(item) {
+  const l = leftAtMs(item); if (l) return nyDate(l);
+  const tb = item && item._tb && item._tb.date; if (/^\d{4}-\d{2}-\d{2}$/.test(String(tb || ''))) return tb;
+  const m = item && item._manifest && item._manifest.dateLoaded; if (/^\d{4}-\d{2}-\d{2}$/.test(String(m || ''))) return m;
+  const d = item && item._times && item._times.dispatchedAt; return d ? nyDate(Date.parse(d)) : null;
+}
+export const outboundLabel = (ymd) => (ymd ? `${new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'long', month: 'short', day: 'numeric' })} outbound` : null);
+// "friday", "monday's", "today", "yesterday", "10/23", "Oct 23" → the dates it can mean (the latest such day in the
+// past week, and the next one). Pure.
+const WD = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+export function outboundDays(said, now = Date.now()) {
+  const x = String(said || '').toLowerCase();
+  const today = nyDate(now); const at = (k) => nyDate(Date.parse(`${today}T12:00:00Z`) + k * 86400000);
+  if (/today|tonight/.test(x)) return [today];
+  if (/yesterday|last night/.test(x)) return [at(-1)];
+  if (/tomorrow/.test(x)) return [at(1)];
+  const w = WD.findIndex((d) => x.includes(d) || x.includes(d.slice(0, 3)));
+  if (w >= 0) { const dow = new Date(`${today}T12:00:00Z`).getUTCDay(); const back = (dow - w + 7) % 7; return [...new Set([at(-back), at(back === 0 ? 7 : 7 - back)])]; }
+  const m = x.match(/(\d{1,2})[/-](\d{1,2})/) || null;
+  const mon = x.match(/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})/);
+  const M = m ? Number(m[1]) : mon ? ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(mon[1]) + 1 : 0;
+  const D = m ? Number(m[2]) : mon ? Number(mon[2]) : 0;
+  if (M && D) return [`${today.slice(0, 4)}-${String(M).padStart(2, '0')}-${String(D).padStart(2, '0')}`];
+  return [];
+}
 // Which of our hubs the load left from ("our Miami, Florida hub") — ARTIS's Truck Builder warehouse first, then the
 // trip sheet / TruckMate terminal; broker loads say where they were picked up. Pure.
 export function hubSaid(item) {
@@ -857,6 +892,16 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
           if (maybe.length) return reply({ found: false, did_you_mean: maybe, say: `Not found as heard. Ask "Is that ${maybe[0]}?"${maybe.length > 1 ? ' (or one of the others)' : ''} — if yes, call lookup_load again with that exact customer_name.` });
           if (staffPhone) return reply({ found: false, caller_is: STAFF_IS, say: `No customer on the board sounds like "${name}". Staff don't spell names or give cities: ask for another part of the name (or the business it's under), or the trip, truck or trailer number, and look it up again. Never say it isn't one of our customers.` });
           return reply({ found: false, say: a.customer_city ? `Nothing found for "${name}" in ${a.customer_city}. Ask for the trailer, bill or PO number — or take a message.` : 'Not found as heard. Ask which city the delivery goes to and ask them to spell the business name, then try again with customer_name and customer_city.' });
+        }
+        // "my Friday outbound": keep the loads whose outbound day is that day (when it left / leaves our hub)
+        if (a.outbound_day) {
+          const days = outboundDays(a.outbound_day);
+          const onDay = days.length ? stops.filter((x) => days.includes(outboundDate(all.find((i) => tripNo(i) === x.trip)))) : stops;
+          if (!onDay.length) {
+            const list = [...new Set(stops.map((x) => outboundLabel(outboundDate(all.find((i) => tripNo(i) === x.trip)))).filter(Boolean))];
+            return reply({ found: true, no_load_that_day: true, speaking_with: spokenName(stops[0].customer), their_outbounds: list, say: `${spokenName(stops[0].customer)} has no load going out ${a.outbound_day} on the board. Their loads on the board: ${list.join(', ') || 'none with a known day'}. Say that and ask which one they mean.` });
+          }
+          stops = onDay;
         }
         const biz = spokenName(stops[0].customer);                        // the real name, not what was misheard
         if (call.call_id && said) callName.set(call.call_id, stops[0].customer);   // a phone guess isn't the caller's name until they say it
@@ -1076,9 +1121,20 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
         await mail.send({ to: [to], subject: `Trip manifest — ${spokenName(files[0].customer)} · trip ${trips}`, html: `<p>The ARTIS trip manifest you asked Jarvis for: <b>${spokenName(files[0].customer)}</b>, trip ${trips}.</p><p>— Jarvis, AI Dispatcher</p>`, attachments });
         return res.json({ ok: true, say: `Done — I emailed the trip manifest for ${spokenName(files[0].customer)} (trip ${trips}) to your work email.` });
       }
+      // a customer: ONLY to contacts in their customer profile — the caller's own contact (by the phone they called
+      // from), else the profile's contacts with an email. Never an address said on the phone.
+      const book = profiles && profiles.contactEmails ? await profiles.contactEmails({ customerName: confirmed || files[0].customer, phone: callerPhone(call) }).catch(() => null) : null;
+      const custTo = book ? (book.caller ? [book.caller] : book.all) : [];
+      if (custTo.length && mail && mail.ready()) {
+        const got = docs && docs.readDocs ? await docs.readDocs({ site: 'florida-beauty', ids: files.filter((f) => f.id).map((f) => f.id) }) : [];
+        const attachments = files.map((f) => ({ name: f.name, contentType: 'application/pdf', bytes: f.bytes || ((got.find((g) => g.id === String(f.id)) || {}).data) })).filter((x) => x.bytes);
+        await mail.send({ to: custTo.slice(0, 5), subject: `Trip manifest — ${spokenName(files[0].customer)}`, html: `<p>Hello,</p><p>Here is the trip manifest you asked for on the phone — what was loaded for <b>${spokenName(files[0].customer)}</b>.</p><p>— Jarvis, Florida Beauty Flora Dispatch</p>`, attachments });
+        const masked = custTo.map((e) => e.replace(/^(.).*(@.*)$/, '$1•••$2'));
+        return res.json({ ok: true, sent_to: masked, say: `Say: "Done — I emailed the trip manifest to ${custTo.length === 1 ? 'the email we have on file for you' : 'the contacts we have on file for your business'}." (Do not read the full address.)` });
+      }
       if (help && help.raise) await help.raise({ source: 'call', ref: `${call.call_id || Date.now()}:manifest`, role: 'customer', teams: ['Dispatch'], from: { name: spokenName(files[0].customer), phone: callerPhone(call) || null }, trip: files[0].trip,
-        need: `${spokenName(files[0].customer)} asked on the phone for their trip manifest by email (trip ${trips}). It's saved on the trip (Trip documents → Manifest) — please email it to their address on file.` });
-      return res.json({ ok: true, say: 'Say: "I\'ve sent your request to dispatch — they\'ll email the manifest to the address we have on file for you shortly."' });
+        need: `${spokenName(files[0].customer)} asked on the phone for their trip manifest by email (trip ${trips}), but their customer profile has no contact email. Add their email to the profile and send it (Trip documents → Manifest).` });
+      return res.json({ ok: true, say: 'Say: "I don\'t have an email on file for your business yet — I\'ve asked dispatch to add it and send you the manifest."' });
     } catch (e) { return res.json({ ok: false, say: `Something went wrong getting the manifest (${e.message}). Offer to have dispatch send it.` }); }
   });
 

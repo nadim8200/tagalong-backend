@@ -972,3 +972,37 @@ test('staff: a trip that has not left says its trailer is still at the hub (Miam
   const cust = cl3(staff);
   assert.match(cust.not_left_yet, /has not left/); assert.equal(cust.trailer_still_at, undefined);
 });
+
+import { outboundDays, outboundDate, outboundLabel, leftAtMs } from '../voice.js';
+test('outbound days: "Friday", "yesterday", "10/23" → dates; a load\'s outbound = the day it left our hub', () => {
+  const now = Date.parse('2026-10-24T15:00:00Z');   // Saturday
+  assert.deepEqual(outboundDays('my Friday outbound', now), ['2026-10-23', '2026-10-30']);
+  assert.deepEqual(outboundDays('yesterday', now), ['2026-10-23']);
+  assert.deepEqual(outboundDays('10/22', now), ['2026-10-22']);
+  assert.deepEqual(outboundDays('Monday', now), ['2026-10-19', '2026-10-26']);
+  const it = { trip: { tripNumber: '1', status: 'DEPSHIP' }, _times: { statusHistory: [{ status: 'LOADEDTOGO', at: '2026-10-22T20:00:00Z' }, { status: 'DEPSHIP', at: '2026-10-23T00:35:00Z' }] } };
+  assert.equal(leftAtMs(it), Date.parse('2026-10-23T00:35:00Z'));
+  assert.equal(outboundDate(it), '2026-10-22');                    // 8:35 PM Thursday in Miami
+  assert.equal(outboundLabel('2026-10-22'), 'Thursday, Oct 22 outbound');
+});
+
+test('a customer asks for "my Friday outbound" (known by their phone): that load — truck, trailer, ETA, where, when it left; manifest only to profile contacts', async () => {
+  const sent = [];
+  const mk = (n, left, unit) => ({ trip: { tripNumber: n, status: 'DEPSHIP', powerUnit: unit, trailer: `T${unit}`, origZoneDesc: 'MIAMI TERMINAL' }, _times: { statusHistory: [{ status: 'DEPSHIP', at: left }] }, _tb: { hub: 'Miami', stops: [{ consigneeId: '42996', consignee: 'DIRECT FLOWERS OF BOSTON INC' }] }, freightBills: [{ billNumber: `M${n}`, billToName: 'DIRECT FLOWERS OF BOSTON INC', endZoneDescription: 'CHELSEA, MA, 02150', pieces: 10 }] });
+  const board = [mk('625642', '2026-10-21T00:30:00Z', '734'), mk('625700', '2026-10-24T00:40:00Z', '2609')];   // Tue night, Fri night
+  const extra = {
+    artisWeb: { clientIdFor: async () => '42996', manifestDoc: async ({ item }) => ({ id: '8', name: `Trip-Manifest-Detail-${item.trip.tripNumber}-42996.pdf` }) },
+    docs: { readDocs: async () => [{ id: '8', data: Buffer.from('%PDF') }] },
+    mail: { ready: () => true, send: async (m) => sent.push(m) },
+    profiles: { allowed: async () => ({ ok: true }), contactEmails: async () => ({ profile: 'DIRECT FLOWERS OF BOSTON INC', caller: 'joe@directflowers.com', all: ['joe@directflowers.com', 'ap@directflowers.com'] }) },
+  };
+  const v = setup({}, { board, extra });
+  const call = { call_id: 'c7', call_type: 'phone_call', direction: 'inbound', from_number: '+16175550100' };
+  const r = await v.hit('POST /retell/fn/lookup_load', { call, args: { customer_name: 'Direct Flowers of Boston', outbound_day: '10/23' } });
+  assert.equal(r.out.found, true); assert.equal(r.out.loads.length, 1);
+  assert.match(r.out.loads[0].outbound, /^Friday, Oct 23 outbound/); assert.ok(r.out.loads[0].left_at);
+  const none = await v.hit('POST /retell/fn/lookup_load', { call: { ...call, call_id: 'c8' }, args: { customer_name: 'Direct Flowers of Boston', outbound_day: '10/19' } });
+  assert.equal(none.out.no_load_that_day, true);
+  const m = await v.hit('POST /retell/fn/email_manifest', { call, args: { customer_name: 'Direct Flowers of Boston', trip_number: '625700' } });
+  assert.equal(m.out.ok, true); assert.deepEqual(sent[0].to, ['joe@directflowers.com']);
+});
