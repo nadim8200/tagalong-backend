@@ -30,6 +30,25 @@ export function heldCopy(kind, { to, text, trip, purpose }) {
   };
 }
 
+// People Jarvis may reach FOR REAL while training mode is on (our own staff who asked Jarvis for something —
+// e.g. Ronen). Emails and phone numbers; everyone else stays redirected / held.
+export const DEFAULT_ALLOW = ['ronen@floridabeauty.us'];
+const digits = (x) => String(x || '').replace(/\D/g, '').slice(-10);
+export function allowedMatch(allow = [], who = '') {
+  const w = String(who || '').trim().toLowerCase();
+  return (allow || []).some((a) => { const x = String(a).trim().toLowerCase(); return x.includes('@') ? x === w : (digits(x).length === 10 && digits(x) === digits(w)); });
+}
+// training mail with approved people: they get the real email; the rest is redirected as before. Pure.
+export function guardWithAllow(m, to, allow) {
+  const split = (v) => (Array.isArray(v) ? v : String(v || '').split(/[,;\s]+/)).filter(Boolean);
+  const rec = split(m.to); const cc = split(m.cc);
+  const ok = rec.filter((x) => allowedMatch(allow, x)); const okCc = cc.filter((x) => allowedMatch(allow, x));
+  const rest = rec.filter((x) => !allowedMatch(allow, x)); const restCc = cc.filter((x) => !allowedMatch(allow, x));
+  if (!rest.length && !restCc.length) return m;                       // only approved people → as is
+  const r = redirectEmail({ ...m, to: rest, cc: restCc }, to);
+  return ok.length || okCc.length ? { ...r, to: [...new Set([...r.to, ...ok, ...okCc])] } : r;
+}
+
 export function initTraining(app, { requireAuth, requireAdmin, db, sendDirect }) {
   const enabled = !!(db && db.enabled);
   let cache = { at: 0, cfg: { on: false, to: [] } };
@@ -37,29 +56,33 @@ export function initTraining(app, { requireAuth, requireAdmin, db, sendDirect })
     if (!enabled) return { on: false, to: [] };
     if (Date.now() - cache.at < 10000) return cache.cfg;
     const c = { on: false, to: [], ...((await db.get(KEY, {})) || {}) };
+    if (!Array.isArray(c.allow)) c.allow = DEFAULT_ALLOW;
     cache = { at: Date.now(), cfg: c };
     return c;
   }
   const active = async () => { const c = await cfg(); return c.on && (c.to || []).length ? c : null; };
 
   // email: redirect (null = not training)
-  async function mailGuard(m) { const c = await active(); return c ? redirectEmail(m, c.to) : m; }
+  async function mailGuard(m) { const c = await active(); return c ? guardWithAllow(m, c.to, c.allow) : m; }
   // text / call / app message: hold it and email a copy → returns a stand-in result, or null when live
   async function hold(kind, info) {
     const c = await active();
     if (!c) return null;
+    if (info && allowedMatch(c.allow, info.to)) return null;          // an approved person → goes out for real
     const copy = heldCopy(kind, info);
     try { await sendDirect({ to: c.to, subject: copy.subject, html: copy.html }); } catch (e) { console.warn('[training] copy:', e.message); }
     return { training: true, held: kind, to: info.to || null };
   }
 
-  app.get('/truckmate/training', requireAuth, async (req, res) => { const c = await cfg(); res.json({ on: !!c.on, to: c.to || [], since: c.since || null, by: c.by || null }); });
+  app.get('/truckmate/training', requireAuth, async (req, res) => { const c = await cfg(); res.json({ on: !!c.on, to: c.to || [], allow: c.allow || [], since: c.since || null, by: c.by || null }); });
   app.put('/admin/training', requireAdmin, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const b = req.body || {};
     const to = [...new Set((Array.isArray(b.to) ? b.to : String(b.to || '').split(/[,;\s]+/)).map((x) => String(x).trim().toLowerCase()).filter(okEmail))].slice(0, 5);
     if (b.on && !to.length) return res.status(400).json({ error: 'Add at least one test email first.' });
-    const next = { on: !!b.on, to, since: b.on ? new Date().toISOString() : null, by: (req.user && (req.user.name || req.user.email)) || 'admin' };
+    const cur = (await db.get(KEY, {})) || {};
+    const allow = Array.isArray(b.allow) ? [...new Set(b.allow.map((x) => String(x).trim().toLowerCase()).filter((x) => okEmail(x) || digits(x).length === 10))].slice(0, 20) : (Array.isArray(cur.allow) ? cur.allow : DEFAULT_ALLOW);
+    const next = { on: b.on != null ? !!b.on : !!cur.on, to: to.length || b.to != null ? to : (cur.to || []), allow, since: b.on ? (cur.on ? cur.since : new Date().toISOString()) : (b.on == null ? cur.since || null : null), by: (req.user && (req.user.name || req.user.email)) || 'admin' };
     await db.set(KEY, next);
     cache = { at: 0, cfg: next };
     res.json(next);

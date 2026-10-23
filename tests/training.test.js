@@ -29,3 +29,15 @@ test('training: emails go to the test addresses with who they were for; texts / 
   await routes['GET /truckmate/training']({}, res);
   assert.equal(out.on, true);
 });
+
+import { guardWithAllow, allowedMatch, DEFAULT_ALLOW } from '../training.js';
+test('training mode: approved staff (Ronen) get Jarvis\'s email for real; everyone else is still redirected', () => {
+  assert.ok(DEFAULT_ALLOW.includes('ronen@floridabeauty.us'));
+  const only = guardWithAllow({ to: ['Ronen@floridabeauty.us'], subject: 'Trip manifest', html: '<p>x</p>' }, ['ntellez@floridabeauty.us'], DEFAULT_ALLOW);
+  assert.deepEqual(only.to, ['Ronen@floridabeauty.us']); assert.equal(only.subject, 'Trip manifest');
+  const mixed = guardWithAllow({ to: ['ops@broker.com', 'ronen@floridabeauty.us'], subject: 'Update', html: '<p>x</p>' }, ['ntellez@floridabeauty.us'], DEFAULT_ALLOW);
+  assert.deepEqual(mixed.to, ['ntellez@floridabeauty.us', 'ronen@floridabeauty.us']); assert.match(mixed.subject, /^\[TRAINING → ops@broker\.com\]/);
+  const other = guardWithAllow({ to: ['ops@broker.com'], subject: 'Update', html: '' }, ['ntellez@floridabeauty.us'], DEFAULT_ALLOW);
+  assert.deepEqual(other.to, ['ntellez@floridabeauty.us']);
+  assert.equal(allowedMatch(['305-555-0100'], '+13055550100'), true);
+});
