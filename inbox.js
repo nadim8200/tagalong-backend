@@ -22,7 +22,8 @@
 // Needs Graph application permissions Mail.Read + Mail.Send (Mail.ReadWrite to
 // mark emails read). Without Mail.Read the inbox just stays off.
 // ---------------------------------------------------------------
-import { graph, mailConfig, sendMail } from './mailer.js';
+import { graph, graphRaw, mailConfig, sendMail } from './mailer.js';
+import { mimeFiles } from './mime.js';
 import { contactsFor } from './statusmail.js';
 import { buildUpdateFor, renderFollowUpNote } from './updateemail.js';
 import { tripBlock, renderOutboundFollowUp, ackKey, validateZone } from './followupmail.js';
@@ -281,6 +282,7 @@ export function initInbox(app, { requireAuth, db, stopTasks = null, roadCalls = 
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const g = (path, opts) => graph(path, opts, { env, fetchFn });
+  const graphRawFn = (path) => graphRaw(path, { env, fetchFn });
   const board = async (site) => { try { return getBoard ? ((await getBoard(site)).trips || []) : []; } catch { return []; } };
   const tripNo = (it) => String((((it && it.trip) || it || {}).tripNumber) || (it && it._id) || '');
   const status = { lastPoll: null, error: null, canRead: null };
@@ -291,7 +293,17 @@ export function initInbox(app, { requireAuth, db, stopTasks = null, roadCalls = 
     if (!docs || !docs.enabled) return [];
     const r = await g(`/messages/${encodeURIComponent(msgId)}/attachments`);
     const out = [];
+    // emails attached to this one (an .eml file or Outlook's "attach item") → the PDFs / pictures inside them
+    const list = [];
     for (const a of (r && r.value) || []) {
+      const eml = a['@odata.type'] === '#microsoft.graph.itemAttachment' || /message\/rfc822/i.test(a.contentType || '') || /\.eml$/i.test(a.name || '');
+      if (!eml) { list.push(a); continue; }
+      try {
+        const raw = a['@odata.type'] === '#microsoft.graph.itemAttachment' ? await graphRawFn(`/messages/${encodeURIComponent(msgId)}/attachments/${encodeURIComponent(a.id)}/$value`) : Buffer.from(a.contentBytes || '', 'base64'); // eslint-disable-line no-await-in-loop
+        for (const f of mimeFiles(raw)) list.push({ '@odata.type': '#microsoft.graph.fileAttachment', name: f.name, contentType: f.contentType, contentBytes: f.contentBytes, size: Math.round(f.contentBytes.length * 0.75), fromEmail: a.name || 'attached email' });
+      } catch (e) { console.warn('[inbox] attached email:', a.name, e.message); }
+    }
+    for (const a of list) {
       if (a['@odata.type'] !== '#microsoft.graph.fileAttachment' || !(OK_ATTACH.test(a.contentType || '') || /\.hei[cf]$/i.test(a.name || '')) || !a.contentBytes || (a.size || 0) > MAX_ATTACH) continue;
       if (a.isInline && (a.size || 0) < 40 * 1024) continue;              // pasted logos / signatures — a pasted trip-sheet photo is bigger
       const r2 = await readableFile({ dataBase64: a.contentBytes, mediaType: a.contentType, filename: a.name }); // eslint-disable-line no-await-in-loop -- iPhone HEIC → JPEG

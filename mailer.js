@@ -44,6 +44,16 @@ export async function graph(path, { method = 'GET', body = null } = {}, { env = 
   return j;
 }
 
+// raw bytes from Graph (e.g. an attached email's MIME: /messages/{id}/attachments/{aid}/$value) → Buffer
+export async function graphRaw(path, { env = process.env, fetchFn = globalThis.fetch } = {}) {
+  const cfg = mailConfig(env);
+  if (!cfg.ready) throw new Error('Outlook is not connected yet.');
+  const t = await token(cfg, fetchFn);
+  const r = await fetchFn(`${GRAPH}/users/${encodeURIComponent(cfg.from)}${path}`, { headers: { Authorization: `Bearer ${t}` } });
+  if (!r.ok) throw new Error(`Outlook (${r.status})`);
+  return Buffer.from(await r.arrayBuffer());
+}
+
 // sendMail({ to: [..], subject, html, attachments: [{ name, contentType, bytes, cid? }] }) — cid: shown inside the body (<img src="cid:…">)
 // training mode (training.js) rewrites every email unless sent { direct: true }
 let guard = null;
