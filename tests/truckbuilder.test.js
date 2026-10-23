@@ -229,3 +229,18 @@ test('sheets that come after the 6 AM read → read ARTIS once more for that nig
   assert.equal(dueNow(ventura, { state: { hubs: { 5: { ...sixAmRun.hubs[5], lateSheets: true } } }, sheets: [sheet], now: Date.parse('2026-10-13T16:00:00Z') }), null);   // only once
   assert.equal(dueNow(ventura, { state: { hubs: { 5: { night: '2026-10-12', at: '2026-10-13T05:00:00Z', reason: '3 trip sheets read' } } }, sheets: [sheet], now: Date.parse('2026-10-13T16:00:00Z') }), null);   // normal night: done
 });
+
+test('9 AM / 3 PM Miami: a quiet re-read of the last 3 nights catches trucks built after the nightly read (no email)', async () => {
+  const m = new Map(); const db = { enabled: true, get: async (k, d) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : d), set: async (k, v) => m.set(k, v) };
+  const calls = []; const mails = [];
+  const routes = [{ name: 'CA', routeTrucks: [{ truckRouteName: 'CA', truckId: '2604', trailerId: '7309', truckInfo: { tripNumber: 625552 }, truckRouteStops: [{ stopOrder: 1, consigneeId: '13363', consigneeName: "SPEDALE'S", consigneeCity: 'BROUSSARD', consigneeState: 'LA', boxes: 62 }] }] }];
+  const fetchFn = async (url, opts = {}) => { calls.push(`${opts.method || 'GET'} ${url}`); if (/login/.test(url)) return { status: 302, headers: { getSetCookie: () => ['JSESSIONID=x'] } }; return { status: 200, text: async () => JSON.stringify(routes) }; };
+  const app = { get: () => {}, post: () => {} };
+  const env = { ARTIS_WEB_USER: 'u', ARTIS_WEB_PASSWORD: 'p', NODE_ENV: 'test' };
+  const tb = initTruckBuilder(app, { requireAdmin: () => {}, db, env, fetchFn, sendMail: async (x) => mails.push(x), now: () => Date.parse('2026-10-23T13:10:00Z') });   // 9:10 AM ET
+  await tb.tick();
+  const st = m.get('taTruckBuilder:florida-beauty');
+  assert.equal(st.trips['625552'].route, 'CA');
+  assert.equal(mails.filter((x) => /refresh/i.test(x.subject || '')).length, 0);
+  const n = calls.length; await tb.tick(); assert.equal(calls.filter((c) => /truck-routes/.test(c)).length, calls.slice(0, n).filter((c) => /truck-routes/.test(c)).length, 'once per slot');
+});

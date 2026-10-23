@@ -367,9 +367,29 @@ export function initTruckBuilder(app, { requireAdmin, db, sendMail = null, recip
     }
   }
 
+  // quiet refresh: trucks ARTIS builds after the nightly read (routes, stops, boxes) — last 3 nights, both hubs, no email
+  async function refreshRecent({ nights = 3 } = {}) {
+    if (!enabled()) return null;
+    const cookie = await signIn();
+    const plan = HUBS.map((hub) => { const t = hubClock(hub.tz, now()).date; const ds = [t]; for (let i = 1; i < nights; i++) ds.push(prevDay(ds[ds.length - 1])); return { hub, dates: ds }; });
+    const rows = await readAndStore(cookie, plan);
+    const st = await load();
+    st.refresh = { at: new Date(now()).toISOString(), trucks: rows.length, done: (st.refresh && st.refresh.done) || {} };
+    await db.set(KEY, st);
+    return { trucks: rows.length };
+  }
+  // 9 AM and 3 PM Miami time — just before the ARTIS ETA reads (10 AM / 4 PM). Pure.
+  const refreshSlot = (st) => { const c = hubClock('America/New_York', now()); const slot = c.hour === 15 ? 'pm' : c.hour === 9 ? 'am' : null; /* only in that hour — one try per slot */ const k = slot ? `${c.date}|${slot}` : null; return k && !((st.refresh && st.refresh.done) || {})[k] ? k : null; };
+
   async function tick() {
     if (!enabled()) return;
     const st = await load();
+    const rk = refreshSlot(st);
+    if (rk) {
+      st.refresh = { ...(st.refresh || {}), done: Object.fromEntries([...Object.entries((st.refresh && st.refresh.done) || {}), [rk, new Date(now()).toISOString()]].slice(-10)) };
+      await db.set(KEY, st);
+      await refreshRecent().then((r) => r && console.log(`[truckbuilder] ${rk} refresh: ${r.trucks} trucks`)).catch((e) => console.warn('[truckbuilder] refresh:', e.message));
+    }
     const sheets = Object.values((await db.get(`taTruckMateManifest:${SITE}`, {})) || {});
     for (const hub of HUBS) {
       const due = dueNow(hub, { state: st, sheets, now: now() });   // after the night's trip sheets, or 6 AM hub time
@@ -408,10 +428,15 @@ export function initTruckBuilder(app, { requireAdmin, db, sendMail = null, recip
     try { res.json(await run(hub, { dates: /^\d{4}-\d{2}-\d{2}$/.test(date) ? [date] : [hubClock(hub.tz, now()).date], night: `manual ${new Date(now()).toISOString()}`, reason: 'admin run', email: !!(req.body && req.body.email) })); } catch (e) { res.status(502).json({ error: e.message }); }
   });
 
+  // admin: re-read the last 3 nights now, quietly (routes for trucks built after the nightly read)
+  app.post('/truckmate/truck-builder/refresh', requireAdmin, async (req, res) => {
+    if (!cfg().ready) return res.status(400).json({ error: 'Set ARTIS_WEB_USER and ARTIS_WEB_PASSWORD in Render first.' });
+    try { res.json(await refreshRecent()); } catch (e) { res.status(502).json({ error: e.message }); }
+  });
   // admin: read the last 4 nights again (both hubs) — the trips on the road
   app.post('/truckmate/truck-builder/backfill', requireAdmin, async (req, res) => {
     if (!cfg().ready) return res.status(400).json({ error: 'Set ARTIS_WEB_USER and ARTIS_WEB_PASSWORD in Render first.' });
     try { res.json(await backfill({ force: true })); } catch (e) { res.status(502).json({ error: e.message }); }
   });
-  return { overlay, run, tick, backfill };
+  return { overlay, run, tick, backfill, refreshRecent };
 }
