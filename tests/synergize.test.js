@@ -18,7 +18,7 @@ test('ARTIS scans: a TIFF becomes a PDF; PDFs pass through; zips are left in ART
   assert.equal(syncSlotDue({}, Date.parse('2026-10-22T13:30:00Z')), null);
 });
 
-const DOCS = { B180174: [{ In_DocId: 'Syn1', In_DocName: 'POD_ B180174.PDF', In_DocTypeName: 'POD', Bill_Number: 'B180174', In_DocCreated: '10/6/2026 14:27 EDT' }, { In_DocId: 'Syn2', In_DocName: 'INV.pdf', In_DocTypeName: 'Invoice', Bill_Number: 'B180174' }, { In_DocId: 'Syn3', In_DocName: 'MP2.zip', In_DocTypeName: 'POD', Bill_Number: 'B180174' }] };
+const DOCS = { B180174: [{ In_DocId: 'Syn1', In_DocName: 'POD_ B180174.PDF', In_DocTypeName: 'POD', Bill_Number: 'B180174', In_DocCreated: '10/6/2026 14:27 EDT' }, { In_DocId: 'Syn2', In_DocName: 'INV.pdf', In_DocTypeName: 'Invoice', Bill_Number: 'B180174 ' }, { In_DocId: 'Syn3', In_DocName: 'MP2.zip', In_DocTypeName: 'POD', Bill_Number: 'B180174' }] };
 const ITEM = { trip: { tripNumber: '623522' }, freightBills: [{ billNumber: 'B180174', billToName: 'PTC LOGISTICS LLC' }, { billNumber: 'B180175', billToName: 'OTHER BROKER' }] };
 
 test('documents by bill are stored once on the trip; small loads checked twice a day; customers get only their own POD / BOL', async () => {

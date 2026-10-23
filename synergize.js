@@ -27,7 +27,7 @@ const CUSTOMER_OK = new Set(['POD', 'BOL']);   // what a customer / broker may r
 // "Rate Confirmation" + B180474 → "RateCon-B180474.pdf". Pure.
 export function docFileName(d) {
   const t = { 'Rate Confirmation': 'RateCon', Invoice: 'Invoice', POD: 'POD', BOL: 'BOL', Manifest: 'Manifest' }[d.In_DocTypeName] || String(d.In_DocTypeName || 'Document').replace(/\W+/g, '');
-  return `${t}-${d.Bill_Number || 'bill'}-${String(d.In_DocId || '').replace(/\W+/g, '')}.pdf`;
+  return `${t}-${String(d.Bill_Number || 'bill').trim()}-${String(d.In_DocId || '').replace(/\W+/g, '')}.pdf`;
 }
 // One scanned page, made small enough to keep: at most ~150 dpi on a letter page (1275 px wide); fax scans
 // (CCITT, black & white) as a grayscale PNG, photos / colour scans as a JPEG. Pure.
@@ -103,7 +103,8 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
         const id = String(d.In_DocId || d.In_DocIdentifier || '');
         if (!id) continue;
         if (known[id]) { found.push(known[id]); continue; }
-        const meta = { artisId: id, bill: d.Bill_Number || bill, type: d.In_DocTypeName || 'Document', created: d.In_DocCreated || null, createdMs: d.In_DocCreatedTs || null, billTo: d.BILL_TO_NAME || null, original: d.In_DocName || null };
+        // ARTIS pads some bill numbers with a space
+        const meta = { artisId: id, bill: String(d.Bill_Number || bill).trim(), type: d.In_DocTypeName || 'Document', created: d.In_DocCreated || null, createdMs: d.In_DocCreatedTs || null, billTo: d.BILL_TO_NAME || null, original: d.In_DocName || null };
         try {
           const q = new URLSearchParams(Object.fromEntries(Object.entries(d).filter(([, v]) => v != null)));
           const raw = await artisWeb.fetchBuffer(`/shipDocs/getDoc?${q}`); // eslint-disable-line no-await-in-loop
@@ -154,7 +155,8 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
     if (customer && !list.length) return { allowed: false, documents: [] };
     const want = bills && bills.length ? bills : list.map((b) => b.billNumber).filter(Boolean).slice(0, 40);
     const found = await checkBills(trip, want);
-    const docsOut = found.filter((d) => (!type || new RegExp(type, 'i').test(d.type)) && (!customer || CUSTOMER_OK.has(d.type)) && want.includes(d.bill));
+    const wanted = new Set(want.map((b) => String(b).trim().toUpperCase()));
+    const docsOut = found.filter((d) => (!type || new RegExp(type, 'i').test(d.type)) && (!customer || CUSTOMER_OK.has(d.type)) && wanted.has(String(d.bill).trim().toUpperCase()));
     return { allowed: true, documents: docsOut, checkedBills: want.length };
   }
 
