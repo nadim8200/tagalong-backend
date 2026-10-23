@@ -138,3 +138,50 @@ test('an appointment written on the trip sheet becomes the stop\'s committed tim
   assert.equal(it3._commit['INDIAN TRAIL|NC'].local, '2026-10-22T22:00');
   assert.equal(it3._commit['INDIAN TRAIL|NC'].by, 'Rosa');
 });
+
+import { tmAppointments } from '../commitments.js';
+test('a broker load takes its committed time from TruckMate\'s delivery appointment (kept current, never over dispatch)', async () => {
+  const now = Date.parse('2026-10-23T16:00:00Z');
+  const bill = (x) => ({ billNumber: 'B180626', billToName: 'ARRIVE LOGISTICS LLC', endZoneDescription: 'MIAMI, FL, 33172', deliverBy: '2026-10-27T07:00:00', deliverByEnd: '2026-10-27T07:00:00', ...x });
+  const item = (b) => ({ trip: { tripNumber: '625658', status: 'INTRAN' }, freightBills: [b] });
+  assert.deepEqual(tmAppointments(item(bill()), now), [{ city: 'MIAMI', state: 'FL', customer: 'ARRIVE LOGISTICS LLC', local: '2026-10-27T07:00' }]);
+  assert.deepEqual(tmAppointments(item(bill({ deliverByEnd: '2026-10-29T23:59:00' })), now), [], 'a window is not an appointment');
+  assert.deepEqual(tmAppointments(item(bill({ billNumber: 'M5048614' })), now), [], 'flower / LTL bills: not here');
+  const h = setup(now);
+  const its = [item(bill())];
+  await h.c.overlay('florida-beauty', its);
+  assert.equal(its[0]._commit['MIAMI|FL'].local, '2026-10-27T07:00');
+  assert.equal(its[0]._commit['MIAMI|FL'].by, 'TruckMate (delivery appointment)');
+  // TruckMate moves it → follows
+  const moved = [item(bill({ deliverBy: '2026-10-27T09:00:00', deliverByEnd: '2026-10-27T09:00:00' }))];
+  await h.c.overlay('florida-beauty', moved);
+  assert.equal(moved[0]._commit['MIAMI|FL'].local, '2026-10-27T09:00');
+  // a dispatcher's time wins after that
+  await h.hit('PUT /truckmate/commitments/:trip', { city: 'MIAMI', state: 'FL', local: '2026-10-27T06:00', customer: 'ARRIVE LOGISTICS LLC' }, { trip: '625658' });
+  const again = [item(bill())];
+  await h.c.overlay('florida-beauty', again);
+  assert.equal(again[0]._commit['MIAMI|FL'].local, '2026-10-27T06:00');
+});
+
+import { rcLocal } from '../commitments.js';
+test('the rate con\'s delivery appointment becomes the committed time (over TruckMate, never over dispatch)', async () => {
+  const now = Date.parse('2026-10-23T16:00:00Z');
+  assert.equal(rcLocal({ date: '10/27/2026', time: '0700' }, now), '2026-10-27T07:00');
+  assert.equal(rcLocal({ date: 'Oct 27', appointment: '7:00 AM - 3:00 PM' }, now), '2026-10-27T07:00');
+  assert.equal(rcLocal({ date: '10/27', time: 'FCFS' }, now), null, 'no clock time → not an appointment');
+  const bill = { billNumber: 'B180626', billToName: 'ARRIVE LOGISTICS LLC', endZoneDescription: 'MIAMI, FL, 33172', deliverBy: '2026-10-27T07:00:00', deliverByEnd: '2026-10-27T07:00:00' };
+  const item = (rc) => ({ trip: { tripNumber: '625658', status: 'INTRAN' }, freightBills: [bill], _ratecon: rc });
+  const h = setup(now);
+  const a = [item(null)]; await h.c.overlay('florida-beauty', a);
+  assert.equal(a[0]._commit['MIAMI|FL'].fromTM, true);
+  const b = [item({ deliveries: [{ name: 'Sedano\'s DC', city: 'Miami', state: 'FL', date: '10/27/2026', time: '0530', refs: 'PO 88812' }] })];
+  await h.c.overlay('florida-beauty', b);
+  assert.equal(b[0]._commit['MIAMI|FL'].local, '2026-10-27T05:30');
+  assert.equal(b[0]._commit['MIAMI|FL'].by, 'Rate con (delivery appointment)');
+  assert.match(b[0]._commit['MIAMI|FL'].rule, /PO 88812/);
+  const c = [item(null)]; await h.c.overlay('florida-beauty', c);
+  assert.equal(c[0]._commit['MIAMI|FL'].local, '2026-10-27T05:30', 'TruckMate never replaces the rate con');
+  await h.hit('PUT /truckmate/commitments/:trip', { city: 'MIAMI', state: 'FL', local: '2026-10-27T06:00' }, { trip: '625658' });
+  const d = [item({ deliveries: [{ city: 'Miami', state: 'FL', date: '10/27/2026', time: '0530' }] })]; await h.c.overlay('florida-beauty', d);
+  assert.equal(d[0]._commit['MIAMI|FL'].local, '2026-10-27T06:00', 'dispatch wins');
+});

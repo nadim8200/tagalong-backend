@@ -52,7 +52,11 @@ export function slimItem(it, alerts = []) {
     live: it._samsara ? { location: s.location || null, gpsAt: s.gpsAt || null, mph: s.speedMph ?? null, duty: (s.hos && s.hos.status) || null, driveLeftMin: (s.hos && s.hos.driveLeftMin) ?? null, faults: (s.dtcCodes || []).length } : null,
     bills,
     sheet: m ? { uploadedAt: m.uploadedAt, version: m.version, pickupPlan: m.pickupPlan || null, unreadable: m.unreadable || [], stops: (m.stops || []).map((x) => ({ n: x.stopNumber, action: x.action, customer: x.customer, city: x.city, state: x.state, pieces: x.pieces, appt: [x.apptDate, x.apptTime].filter(Boolean).join(' ') || null, apptFrom: x.apptSource || null, tmPlace: x.tmPlace || null, matchedBy: x.tmMatchedBy || null, callAheads: (x.callAhead || []).length })) } : null,
-    rateCon: rc ? { broker: rc.broker, loadNumber: rc.loadNumber, rate: rc.rateText || rc.rate, instructions: rc.specialInstructions || [], signedOff: it._rccheck ? Object.values(it._rccheck).filter((c) => c && c.done).length : 0 } : null,
+    rateCon: rc ? { broker: rc.broker, loadNumber: rc.loadNumber, rate: rc.rateText || rc.rate, references: rc.referenceNumbers || [],
+      // pickup / delivery numbers, appointments, names and phones as written on the rate con
+      pickups: (rc.pickups || []).map((s) => ({ name: s.name, city: s.city, state: s.state, date: s.date, time: s.time, appointment: s.appointment, refs: s.refs, phone: s.phone })),
+      deliveries: (rc.deliveries || []).map((s) => ({ name: s.name, city: s.city, state: s.state, date: s.date, time: s.time, appointment: s.appointment, refs: s.refs, phone: s.phone })),
+      instructions: rc.specialInstructions || [], signedOff: it._rccheck ? Object.values(it._rccheck).filter((c) => c && c.done).length : 0 } : null,
     outsideCarrier: it._oc ? { carrier: it._oc.carrierName || it._oc.name || null, crew: it._oc.crew, truck: it._oc.truck, trailer: it._oc.trailer, missing: it._oc.missing || [] } : null,
     times: it._times || null,
     breakdown: it._breakdown || null,

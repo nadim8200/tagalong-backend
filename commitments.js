@@ -6,7 +6,7 @@
 // one email + one text to the people set in Employees → Alert emails ("Late for a committed time").
 // Internal only — the customer is never contacted automatically.
 // ---------------------------------------------------------------
-import { localToUtcMs } from './watchtower.js';
+import { localToUtcMs, brokerLoad } from './watchtower.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 
 const MIN = 60000;
@@ -118,6 +118,59 @@ export function lateMessage(item, s) {
   };
 }
 
+// A rate con stop's date + time as written ("10/27/2026" + "0700", "Oct 27" + "7:00 AM", "2026-10-27" + "07:00-15:00")
+// → 'YYYY-MM-DDTHH:MM' (the window's start), or null when there's no clear date AND clock time. Pure.
+const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+export function rcLocal(stop = {}, now = Date.now()) {
+  const all = [stop.date, stop.time, stop.appointment].filter(Boolean).join(' ');
+  const two = (n) => String(n).padStart(2, '0');
+  let y; let mo; let d; let rest = all;
+  let m = all.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) { [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]; }
+  else if ((m = all.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))) { mo = Number(m[1]); d = Number(m[2]); y = m[3] ? Number(m[3].length === 2 ? `20${m[3]}` : m[3]) : null; }
+  else if ((m = all.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:,?\s+(\d{4}))?/i))) { mo = MONTHS[m[1].toLowerCase()]; d = Number(m[2]); y = m[3] ? Number(m[3]) : null; }
+  if (!m || !(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return null;
+  rest = all.replace(m[0], ' ');
+  if (!y) {
+    const today = new Date(now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    y = Number(today.slice(0, 4));
+    if (Date.parse(`${y}-${two(mo)}-${two(d)}T12:00:00Z`) < Date.parse(`${today}T12:00:00Z`) - 60 * 86400000) y += 1;
+  }
+  let h = null; let mi = 0;
+  let t = rest.match(/\b(\d{1,2}):(\d{2})\s*([ap])?\.?m?\b/i);
+  if (t) { h = Number(t[1]); mi = Number(t[2]); }
+  else if ((t = rest.match(/\b(\d{1,2})\s*([ap])\.?m\b/i))) h = Number(t[1]);
+  else if ((t = rest.match(/\b([01]\d|2[0-3])([0-5]\d)\s*(?:hrs?|h)?\b/i))) { h = Number(t[1]); mi = Number(t[2]); }
+  if (h == null) return null;
+  const ap = t[3] || t[2];
+  if (ap && /[ap]/i.test(ap) && h <= 12) { if (/p/i.test(ap) && h < 12) h += 12; if (/a/i.test(ap) && h === 12) h = 0; }
+  if (h > 23 || mi > 59) return null;
+  return `${y}-${two(mo)}-${two(d)}T${two(h)}:${two(mi)}`;
+}
+
+// A broker load's delivery appointments in TruckMate (per stop, from the bills): an exact clock time
+// (deliverBy = deliverByEnd) or one TruckMate flags as an appointment — never a multi-day window or a bare
+// midnight date. → [{ city, state, customer, local: 'YYYY-MM-DDTHH:MM' }]. Pure.
+export function tmAppointments(item, now = Date.now()) {
+  if (!brokerLoad(item)) return [];
+  const yes = (v) => v === true || v === 'True' || v === 'true' || v === 'Y';
+  const out = new Map();
+  for (const b of (item.freightBills || item.orders || tripOf(item).freightBills || [])) {
+    if (b.actualDelivery) continue;
+    const by = String(b.deliverBy || '').slice(0, 16); const end = String(b.deliverByEnd || '').slice(0, 16);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(by) || /T00:00$/.test(by)) continue;
+    if (!(end === by || !end || yes(b.deliveryApptReq) || yes(b.deliveryApptMade))) continue;
+    const p = String(b.endZoneDescription || '').split(',').map((x) => x.trim());
+    const city = p[0]; const state = (p[1] || '').slice(0, 2).toUpperCase();
+    if (!city || !/^[A-Z]{2}$/.test(state)) continue;
+    const ms = localToUtcMs(by, STATE_TZ[state] || 'America/New_York');
+    if (Number.isNaN(ms) || ms < now - 24 * 60 * MIN) continue;
+    const k = stopKey(city, state);
+    if (!out.has(k) || by < out.get(k).local) out.set(k, { city, state, customer: b.billToName || null, local: by });
+  }
+  return [...out.values()];
+}
+
 export function initCommitments(app, { requireAuth, db, getBoard = null, sendMail = null, emails = async () => [], phones = async () => [], sendSms = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
@@ -168,6 +221,19 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
     for (const it of trips) {
       const trip = tripNo(it); const m = it._manifest || {};
       if (!trip) continue;
+      // 0. the rate con's delivery appointments (broker loads) — over the trip sheet / TruckMate / a saved time,
+      //    never over a time dispatch set or cleared; follows a new rate con version
+      const rc = it._ratecon && (it._ratecon.data || it._ratecon);
+      for (const dl of (rc && Array.isArray(rc.deliveries) ? rc.deliveries : [])) {
+        const st = String(dl.state || '').toUpperCase().slice(0, 2);
+        const k = stopKey(dl.city, st);
+        const local = rcLocal(dl, now());
+        const atMs = local ? commitMs(local, st) : null;
+        if (!k || !atMs || atMs < now() - 24 * 60 * MIN || (fill[trip] && fill[trip][k])) continue;
+        const have = c[trip] && c[trip][k];
+        if (have && (!have.auto || (have.fromRC && have.local === local))) continue;
+        fill[trip] = { ...(fill[trip] || {}), [k]: { state: st, customer: dl.name || null, place: `${String(dl.city).toUpperCase()}, ${st}`, auto: true, setAt: new Date(now()).toISOString(), local, atMs, by: 'Rate con (delivery appointment)', fromRC: true, rule: [dl.appointment, dl.refs ? `ref ${dl.refs}` : null].filter(Boolean).join(' · ') || 'the delivery appointment on the rate con' } };
+      }
       for (const st of m.stops || []) {
         if (!/DELIVER/i.test(st.action || '')) continue;
         const k = stopKey(st.city, st.state);
@@ -191,6 +257,17 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
         if (!atMs) continue;
         fill[trip] = { ...(fill[trip] || {}), [k]: { ...base, local: f.local, atMs, by: 'Jarvis (saved from a previous load)', rule: f.rule } };
       }
+      // broker loads: TruckMate's delivery appointment is the committed time (kept up to date if TruckMate changes it;
+      // never over a dispatcher's time or a trip-sheet appointment)
+      for (const a of tmAppointments(it, now())) {
+        const k = stopKey(a.city, a.state);
+        if (!k || (fill[trip] && fill[trip][k])) continue;
+        const have = c[trip] && c[trip][k];
+        if (have && !(have.fromTM && have.local !== a.local)) continue;
+        const atMs = commitMs(a.local, a.state);
+        if (!atMs) continue;
+        fill[trip] = { ...(fill[trip] || {}), [k]: { state: a.state, customer: a.customer, place: `${String(a.city).toUpperCase()}, ${a.state}`, auto: true, setAt: new Date(now()).toISOString(), local: a.local, atMs, by: 'TruckMate (delivery appointment)', fromTM: true, rule: 'the delivery appointment in TruckMate' } };
+      }
     }
     if (Object.keys(fill).length) {
       const saved = await db.update(KEY(site), (cur) => {
@@ -198,7 +275,7 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
         for (const [trip, stops] of Object.entries(fill)) {
           const t = { ...(x[trip] || {}) };
           // never over a dispatcher's time or a cleared stop; a trip-sheet time only replaces an older trip-sheet time
-          for (const [k, v] of Object.entries(stops)) if (!t[k] || (v.fromSheet && t[k].fromSheet)) t[k] = v;
+          for (const [k, v] of Object.entries(stops)) if (!t[k] || (v.fromSheet && t[k].fromSheet) || (v.fromTM && t[k].fromTM) || (v.fromRC && t[k].auto)) t[k] = v;
           x[trip] = t;
         }
         return x;
