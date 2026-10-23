@@ -88,6 +88,8 @@ How to help:
 - Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). If nothing is found and the caller is NOT staff, ask which city the delivery goes to and ask them to spell the business name, then call lookup_load again with customer_name (as spelled) and customer_city. If it returns did_you_mean, ask "Is that <name>?" and, if yes, look it up with that exact name. Names on the phone are often misheard — never tell the caller their name is wrong.
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Loads leave from our Miami, Florida hub or our Ventura, California hub (and some brokers' pickups elsewhere). For every load you describe — customers and staff — say which hub it left from using left_from (e.g. "it left our Ventura, California hub"); never assume Miami.
+- When the caller says WHO should handle a message ("have Valeria call me", "Valeria or Sarai") — even after you saved it — call take_message (again) with for_person set to exactly the names they said, so it reaches those people. Never promise a person without doing that.
+- When a caller asks you to call them back later ("call me in 5 minutes", "call me when you know", "call me to make sure they called"), use schedule_callback with the minutes and what it's about — you CAN call people back. Confirm the time in one short line. Never say you can't call back.
 - Trip manifest (what was loaded for a customer — farms, products, POs, boxes): when anyone asks for it by email ("email me the manifest"), call email_manifest RIGHT AWAY with the business name (and trip if they gave one; for several trips call it once per trip, or once without a trip for all of them). Do NOT say where it will go before the tool answers — staff (Employees list) get it in their own work email; customers' requests go to dispatch. Then say exactly what the tool says. Never use take_message for a manifest, never promise an email the tool didn't send, and never take an email address over the phone.
 - When the caller says you got the wrong business ("no, I said…", "that's not it"), never offer that business again on this call: call lookup_load again with exactly the words they just said (speech-to-text often splits a name — "the signers choice" is DESIGNERS CHOICE), and if it's still not found read them the did_you_mean names. Don't make them spell it until that fails.
 - Hearing people right: phone audio is often noisy. If you're not sure of a name, city or number, repeat it back and ask them to confirm before you look it up ("Did you say Merchantville?"). If they repeat something, use exactly what they repeated. If a name or city isn't found, ask them to spell it (never staff — for staff, ask for another part of the name or a trip / truck number). Read numbers back digit by digit to confirm.
@@ -155,6 +157,11 @@ function tools(base, transferNumber) {
       trip_number: { type: 'string' },
       urgent: { type: 'boolean', description: 'true if it cannot wait (late, upset customer, safety)' },
     }, ['message']),
+    fn('schedule_callback', 'Call the caller back later — when they ask "call me back in 5 minutes", "call me when you know", "call me to confirm they called me". Jarvis calls their number at that time, looks the load up again and gives the update.', {
+      minutes: { type: 'number', description: 'How many minutes from now (2–240)' },
+      about: { type: 'string', description: 'What the callback is about, in a few words (e.g. "ETA and box count for Direct Flowers, trip 625717")' },
+      trip_number: { type: 'string', description: 'Trip number if there is one' },
+    }, ['minutes', 'about']),
     fn('email_manifest', 'Email the ARTIS trip manifest PDF for a customer\'s delivery (farms, products, POs, boxes). Staff: sent to their work email now. Customer: dispatch emails it to the address on file.', {
       customer_name: { type: 'string', description: 'Business name the manifest is for' },
       trip_number: { type: 'string', description: 'Trip number if they gave one' },
@@ -516,7 +523,7 @@ export function spokenName(raw) {
 // words every call uses — so speech-to-text hears "load", not "loan"
 // Florida Beauty's own staff (a phone saved on an employee in Employees) can get any load's ETA.
 const STAFF_IS = 'Florida Beauty staff (phone on the Employees list)';
-const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). ALWAYS start each load with where the truck is right now (truck_now, "as of" as_of, moving or stopped) and which hub it left from (left_from) — before the ETA, without being asked. Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — what the TruckMate bills add up to; never any other count), and only if present: the different trip sheet count (boxes_on_trip_sheet). If split_between_trailers is there, say the order is split and how many boxes are on each truck.';
+const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). ALWAYS start each load with where the truck is right now (truck_now, "as of" as_of, moving or stopped) and which hub it left from (left_from) — before the ETA, without being asked. If a load has not_left_yet, say it has NOT left — it is still at the hub, no truck or ETA yet — and say trailer_still_at (e.g. "trailer 7 3 3 1 is still in Miami"); never say it left. Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — what the TruckMate bills add up to; never any other count), and only if present: the different trip sheet count (boxes_on_trip_sheet). If split_between_trailers is there, say the order is split and how many boxes are on each truck.';
 export const BASE_WORDS = ['Florida Beauty Flora', 'Jarvis', 'ETA', 'load', 'trip number', 'bill number', 'trailer', 'POD', 'BOL', 'rate confirmation'];
 export function customerKeywords(items, max = 100) {
   const n = new Map();
@@ -581,7 +588,20 @@ ${call.recording_url ? `<p><a href="${escH(call.recording_url)}">Listen to the r
 
 // What a customer or broker hears: where the truck is now and THEIR stop only —
 // never the other stops on the trip (not before, not after). Pure.
-const CUSTOMER_STATUS = { DISP: 'scheduled, not picked up yet', ASSGN: 'scheduled, not picked up yet', ARRSHIP: 'being loaded', DEPSHIP: 'picked up and on the way', ARRCONS: 'on the way', DEPCONS: 'on the way' };
+const CUSTOMER_STATUS = { DISP: 'scheduled, not picked up yet', ASSGN: 'scheduled, not picked up yet', ARRSHIP: 'being loaded', DEPSHIP: 'picked up and on the way', ARRCONS: 'on the way', DEPCONS: 'on the way',
+  LOADINGMAN: 'being loaded at the terminal — not dispatched yet', LOADEDTOGO: 'loaded and waiting to be dispatched — it has not left yet', AVAIL: 'not dispatched yet', NEW: 'not dispatched yet' };
+// for staff: a trip that hasn't left → its trailer is still at the hub ("trailer 7331 is still in Miami"), with ARTIS's
+// yard position when it has one. Customers never get this field (customerLean leaves it out). Pure.
+export function trailerStill(item) {
+  const t = tripOf(item); const tr = String(t.trailer || '').trim();
+  if (!tr) return {};
+  const hub = /ventura/i.test(hubSaid(item) || '') ? 'Ventura, California' : 'Miami';
+  const loc = item && item._artisLoc && item._artisLoc.trailer;
+  const where = loc && (loc.location || loc.place || loc.address);
+  return { trailer_still_at: `trailer ${tr} is still in ${hub}${where ? ` (ARTIS: ${where})` : ''}` };
+}
+// still at the hub (being loaded / loaded, not dispatched) — it has NOT left. Pure.
+export const notLeftYet = (item) => /^(LOADINGMAN|LOADEDTOGO|AVAIL|AVBL|NEW|ASSGN|DISP|PLAN)/i.test(String(tripOf(item).status || '')) || (!String(tripOf(item).powerUnit || '').trim() && !/^(DEPSHIP|INTRAN|ENROUTE|ARRCONS|DEPCONS)/i.test(String(tripOf(item).status || '')));
 // How Jarvis wraps up with a customer, by their business name.
 export const CLOSING_RULE = 'Use speaking_with (their business name) naturally while you help them, e.g. "Thanks, Bokhary Farms." Once you have answered, ask: "Is there anything else I can help you with, <speaking_with>?" If they say no, close warmly: "Thank you for calling Florida Beauty Flora, <speaking_with>. If there is nothing else, feel free to hang up whenever you are ready. Have a great day." Then end the call with end_call.';
 export const CUSTOMER_RULE = `After you give an ETA, add once, in the caller's language: "${ETA_DISCLAIMER}" ${CLOSING_RULE} `
@@ -597,7 +617,7 @@ export function customerLean(v) {
       estimated_arrival: d.estimated_arrival, eta_note: d.eta_note, truck_already_passed: d.truck_already_passed, arrived_at_receiver: d.arrived_at_receiver, note: d.note, truck_leaves_terminal_at: d.truck_leaves_terminal_at });
   const ds = v.deliveries ? v.deliveries.map(one) : v.your_delivery ? [one(v.your_delivery)] : null;
   if (ds && ds.every((d) => d.delivered)) return { trip: v.trip, deliveries: ds };
-  return { trip: v.trip, truck: v.truck, trailer: v.trailer, status: v.status, truck_now: v.truck_now, as_of: v.as_of, coming_from: v.coming_from, left_from: v.left_from, breakdown: v.breakdown,
+  return { trip: v.trip, truck: v.truck, trailer: v.trailer, status: v.status, truck_now: v.truck_now, as_of: v.as_of, coming_from: v.coming_from, left_from: v.left_from, not_left_yet: v.not_left_yet, breakdown: v.breakdown,
     departure_delayed: v.departure_delayed, delay_note: v.delay_note, ...(ds ? { deliveries: ds } : {}), ...(v.ask ? { ask: v.ask } : {}) };
 }
 export function customerView(item, eta, deliveries = null) {
@@ -609,7 +629,7 @@ export function customerView(item, eta, deliveries = null) {
     ...held,
     trip: f.trip, status: `${CUSTOMER_STATUS[String(t.status || '').toUpperCase()] || 'on the way'}${/^ARRSHIP$/i.test(String(t.status || '')) && from ? ` in ${from}` : ''}`,
     truck: f.truck, trailer: f.trailer, breakdown: f.breakdown || undefined,
-    truck_now: f.current_location, as_of: f.location_time, moving: f.moving, coming_from: from || undefined, left_from: hubSaid(item) || undefined,
+    truck_now: f.current_location, as_of: f.location_time, moving: f.moving, coming_from: from || undefined, ...(notLeftYet(item) ? { not_left_yet: `still at ${hubSaid(item) || 'the terminal'} — it has not left; no truck / ETA until it is dispatched`, ...trailerStill(item) } : { left_from: hubSaid(item) || undefined }),
   };
   if (deliveries && deliveries.length) return { ...base, deliveries: deliveries.map(({ trip, truck, status, ...d }) => d) };
   if (f.total_stops === 1) {
@@ -965,6 +985,29 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
     } catch (e) { res.json({ saved: false, say: 'Could not save — offer to transfer to dispatch.' }); }
   });
 
+  // a call back later, when the caller asks for one: saved now, placed by the timer below at that time
+  const cbKey = `taJarvisCallbacks:${site}`;
+  app.post('/retell/fn/schedule_callback', verified, async (req, res) => {
+    const a = argsOf(req); const call = callOf(req);
+    try {
+      const mins = Math.round(Number(a.minutes));
+      if (!(mins >= 2 && mins <= 240)) return res.json({ ok: false, say: 'Ask when they want the call — anywhere from a couple of minutes to four hours.' });
+      const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
+      // the number to call: the phone they called from; a console call → their phone on the Employees list
+      let phone = call.call_type === 'web_call' ? null : callerPhone(call);
+      const by = consoleCall(call) ? String((call.metadata && call.metadata.by) || '') : '';
+      const me = phone ? people.find((p) => p && p.phone && last10(p.phone) === last10(phone)) : people.find((p) => p && p.phone && by && Math.max(nameScore(by, p.name || ''), nameScore(p.name || '', by)) >= 0.75);
+      if (!phone && me) phone = me.phone;
+      if (!phone || last10(phone).length !== 10) return res.json({ ok: false, say: 'I don\'t have a number to call them back on. Offer to take a message instead.' });
+      const pending = ((await db.get(cbKey, [])) || []).filter((x) => x.status === 'scheduled' && last10(x.phone) === last10(phone));
+      if (pending.length >= 3) return res.json({ ok: false, say: 'They already have three callbacks scheduled — say you\'ll call on those.' });
+      const trip = String(a.trip_number || callTrip.get(call.call_id) || '').replace(/\D/g, '') || null;
+      const item = { id: `cb${Date.now().toString(36)}`, dueAt: Date.now() + mins * 60000, phone: e164(phone), name: (me && me.name) || callName.get(call.call_id) || null, staff: !!(me || consoleCall(call)), about: String(a.about || '').slice(0, 200), trip, fromCall: call.call_id || null, status: 'scheduled', at: new Date().toISOString() };
+      await db.update(cbKey, (cur) => [item, ...(Array.isArray(cur) ? cur : [])].slice(0, 200), []);
+      return res.json({ ok: true, minutes: mins, say: `Say: "Sure — I'll call you back in ${mins} minute${mins === 1 ? '' : 's'}${item.about ? ` about ${item.about}` : ''}."` });
+    } catch (e) { return res.json({ ok: false, say: 'Could not schedule it — offer to take a message instead.' }); }
+  });
+
   // the trip manifest by email: staff → their work email now; a customer → dispatch emails it to the address on file
   app.post('/retell/fn/email_manifest', verified, async (req, res) => {
     const a = argsOf(req); const call = callOf(req);
@@ -991,6 +1034,20 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
           for (const st of ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && fit(x.customer))) {
             const id = await artisWeb.clientIdFor({ name: st.customer, city: st.city, state: st.state }).catch(() => null); // eslint-disable-line no-await-in-loop
             if (id) hits.push({ it, clientId: id, name: st.customer });
+          }
+          if (hits.length >= 3) break;
+        }
+      }
+      // no Truck Builder / trip sheet yet (a trip still loading): the TruckMate bills name the customer
+      if (!hits.length && artisWeb.clientIdFor) {
+        const seen = new Set();
+        for (const it of all) {
+          if (n && tripNo(it) !== n) continue;
+          for (const b of (it.freightBills || it.orders || tripOf(it).freightBills || []).filter((x) => fit(x.billToName))) {
+            const p = String(b.endZoneDescription || '').split(',').map((x) => x.trim());
+            const id = (b.consignee && b.consignee.clientId) || await artisWeb.clientIdFor({ name: b.billToName, city: p[0], state: p[1] }).catch(() => null); // eslint-disable-line no-await-in-loop
+            const k = `${tripNo(it)}|${id}`;
+            if (id && !seen.has(k)) { seen.add(k); hits.push({ it, clientId: String(id), name: String(b.billToName).replace(/\s*\*$/, '') }); }
           }
           if (hits.length >= 3) break;
         }
@@ -1494,6 +1551,34 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
   console.log(`[voice] Jarvis voice ${key() ? 'ready (Retell key set)' : 'off — needs RETELL_API_KEY'}`);
   // Jarvis phones one of OUR people (a contact set up in the console) to read out a callback
   // request. At most one call per number every 10 minutes.
+  // place the callbacks that are due (every 30 s): Jarvis calls, looks the load up again and gives the update
+  async function placeDueCallbacks() {
+    if (!key() || !env.RETELL_FROM_NUMBER) return;
+    const cfg = await db.get(cfgKey, {}); if (!cfg.agentId) return;
+    const due = ((await db.get(cbKey, [])) || []).filter((x) => x.status === 'scheduled' && x.dueAt <= Date.now());
+    for (const cb of due) {
+      let status = 'called'; let callId = null; let error = null;
+      try {
+        // training mode: a customer's callback is held (a copy is emailed); our own staff are called for real
+        const held = !cb.staff && training ? await training.hold('call', { to: cb.phone, trip: cb.trip, purpose: `callback the caller asked for: ${cb.about}`, text: cb.about }) : null; // eslint-disable-line no-await-in-loop
+        if (held) status = 'held (training mode)';
+        else {
+          const first = String(cb.name || '').split(/\s+/)[0];
+          const mins = Math.max(1, Math.round((Date.now() - Date.parse(cb.at)) / 60000));
+          const c = await retell('/v2/create-phone-call', { body: { // eslint-disable-line no-await-in-loop
+            from_number: e164(env.RETELL_FROM_NUMBER), to_number: cb.phone, override_agent_id: cfg.agentId,
+            metadata: { trip: cb.trip, purpose: 'callback', by: 'Jarvis (callback they asked for)' },
+            retell_llm_dynamic_variables: { greeting: `Hi${first ? ` ${first}` : ''}, it's Jarvis from Florida Beauty Flora calling you back${cb.about ? ` about ${cb.about.replace(/[.]+$/, '')}` : ''}. This call may be recorded.`,
+              call_context: `This is the callback they asked for ${mins} minutes ago about: "${cb.about}"${cb.trip ? ` (trip ${cb.trip})` : ''}. Look it up again now with lookup_load${cb.trip ? ` (trip ${cb.trip})` : ''} and give them the update right away — what changed, or that nothing has changed yet. Then ask if they need anything else.` },
+          } });
+          callId = c.call_id || null;
+          await db.update(callsKey, (cur) => [{ callId, at: new Date().toISOString(), direction: 'outbound', phone: cb.phone, trip: cb.trip, purpose: 'callback', by: 'Jarvis (callback they asked for)', status: c.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []); // eslint-disable-line no-await-in-loop
+        }
+      } catch (e) { status = 'failed'; error = e.message; }
+      await db.update(cbKey, (cur) => (Array.isArray(cur) ? cur : []).map((x) => (x.id === cb.id ? { ...x, status, callId, error, doneAt: new Date().toISOString() } : x)), []); // eslint-disable-line no-await-in-loop
+    }
+  }
+  if (enabled && env.NODE_ENV !== 'test') { const cbt = setInterval(() => { placeDueCallbacks().catch((e) => console.warn('[voice] callbacks:', e.message)); }, 30000); if (cbt.unref) cbt.unref(); }
   async function callStaff({ to, name, message, trip = null, by = 'Jarvis (callback request)' }) {
     if (!key() || !env.RETELL_FROM_NUMBER) return { skipped: 'Jarvis calls are not set up (Retell)' };
     const cfg = await db.get(cfgKey, {});
@@ -1513,5 +1598,5 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
     await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: num, trip, purpose: 'staff-alert', by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
     return { called: true, callId: call.call_id };
   }
-  return { findLoad, live, placeCall, callsFor, callStaff, useOutreach: (fn) => { outreach = fn; } };
+  return { findLoad, live, placeCall, callsFor, callStaff, placeDueCallbacks, useOutreach: (fn) => { outreach = fn; } };
 }

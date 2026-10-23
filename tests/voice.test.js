@@ -31,7 +31,7 @@ function setup(extraEnv = {}, opts = {}) {
       : url.includes('create-web-call') ? { call_id: 'web_1', call_status: 'registered', access_token: 'tok_1' } : {};
     return { ok: true, status: 201, json: async () => body };
   };
-  initVoice(app, { ...(opts.help ? { help: opts.help } : {}), ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: opts.board || board }), ...(opts.extra || {}), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
+  const api = initVoice(app, { ...(opts.help ? { help: opts.help } : {}), ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: opts.board || board }), ...(opts.extra || {}), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
   const hit = async (route, body, { sign = true, user = { name: 'Ana' } } = {}) => {
     const raw = JSON.stringify(body);
     const sig = sign ? await Retell.sign(raw, KEY) : 'v=1,d=bad';
@@ -43,7 +43,7 @@ function setup(extraEnv = {}, opts = {}) {
     await next();
     return { code, out };
   };
-  return { hit, db, logged, checkins, retellCalls };
+  return { hit, db, logged, checkins, retellCalls, api };
 }
 
 test('finds the load by trip, bill, truck, or the caller\'s phone (driver or contact)', () => {
@@ -104,7 +104,7 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   assert.deepEqual(r.out && { llm: r.out.llmId, agent: r.out.agentId }, { llm: 'llm_1', agent: 'agent_1' });
   const llm = v.retellCalls.find((c) => c.url.endsWith('/create-retell-llm')).body;
   assert.match(llm.model, /^claude/);
-  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'report_missing_boxes', 'take_message', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
+  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'report_missing_boxes', 'take_message', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
   assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
   assert.deepEqual(agent.language, ['en-US', 'es-419', 'he-IL']);
@@ -920,4 +920,55 @@ test('boxes: ARTIS counts a customer per ship date, not per truck — with their
   assert.equal(staff.boxes_scanned_in_artis, undefined); assert.equal(staff.boxes_not_received, undefined);   // no ARTIS numbers, not even for staff
   // always what the bills add up to — even alone on the board
   assert.equal(cs2([a], 'Direct Flowers', {}, { staff: true })[0].boxes, '37 boxes');
+});
+
+
+test('"call me back in 5 minutes": Jarvis books it and calls back with the update (staff for real; a customer held in training)', async () => {
+  const dir = { load: async () => ({ people: [{ name: 'Ronen Koubi', phone: '3052063095' }] }), find: async () => [], main: async () => '305-503-1200' };
+  const v = setup({}, { extra: { directory: dir } });
+  await v.hit('POST /voice/setup', {});
+  const call = { call_id: 'r1', call_type: 'phone_call', direction: 'inbound', from_number: '+13052063095' };
+  const r = await v.hit('POST /retell/fn/schedule_callback', { call, args: { minutes: 5, about: 'ETA and box count for Direct Flowers, trip 625717', trip_number: '625717' } });
+  assert.equal(r.out.ok, true); assert.match(r.out.say, /call you back in 5 minutes/);
+  assert.equal((await v.hit('POST /retell/fn/schedule_callback', { call, args: { minutes: 600, about: 'x' } })).out.ok, false, 'within 4 hours');
+  await v.db.update('taJarvisCallbacks:florida-beauty', (cur) => cur.map((x) => ({ ...x, dueAt: Date.now() - 1 })), []);
+  await v.api.placeDueCallbacks();
+  const placed = v.retellCalls.find((c) => c.url.includes('create-phone-call'));
+  assert.equal(placed.body.to_number, '+13052063095');
+  assert.match(placed.body.retell_llm_dynamic_variables.greeting, /^Hi Ronen, it's Jarvis from Florida Beauty Flora calling you back about ETA and box count/);
+  assert.match(placed.body.retell_llm_dynamic_variables.call_context, /Look it up again now with lookup_load \(trip 625717\)/);
+  assert.equal((await v.db.get('taJarvisCallbacks:florida-beauty'))[0].status, 'called');
+  await v.api.placeDueCallbacks();
+  assert.equal(v.retellCalls.filter((c) => c.url.includes('create-phone-call')).length, 1, 'once');
+});
+
+import { notLeftYet } from '../voice.js';
+test('a trip still loading at the hub has NOT left (no "left Miami")', () => {
+  assert.equal(notLeftYet({ trip: { status: 'LOADEDTOGO', powerUnit: '' } }), true);
+  assert.equal(notLeftYet({ trip: { status: 'DEPSHIP', powerUnit: '734' } }), false);
+});
+
+test('manifest for a trip still loading (no Truck Builder, no trip sheet): found from the TruckMate bills', async () => {
+  const sent = [];
+  const item = { trip: { tripNumber: '625717', status: 'LOADEDTOGO', powerUnit: '' }, freightBills: [{ billNumber: 'M5049950', billToName: 'DIRECT FLOWERS OF BOSTON INC', endZoneDescription: 'CHELSEA, MA, 02150', pieces: 9 }] };
+  const extra = {
+    artisWeb: { clientIdFor: async () => '42996', manifestDoc: async ({ clientId }) => ({ id: '5', name: `Trip-Manifest-Detail-625717-${clientId}.pdf` }) },
+    docs: { readDocs: async () => [{ id: '5', data: Buffer.from('%PDF') }] },
+    mail: { ready: () => true, send: async (m) => sent.push(m) },
+    directory: { load: async () => ({ people: [{ name: 'Ronen Koubi', phone: '3052063095', email: 'ronen@floridabeauty.us' }] }), find: async () => [], main: async () => '305-503-1200' },
+  };
+  const v = setup({}, { board: [item], extra });
+  const r = await v.hit('POST /retell/fn/email_manifest', { call: { call_id: 'r2', call_type: 'phone_call', direction: 'inbound', from_number: '+13052063095' }, args: { customer_name: 'Direct Flowers of Boston', trip_number: '625717' } });
+  assert.equal(r.out.ok, true); assert.equal(sent[0].attachments[0].name, 'Trip-Manifest-Detail-625717-42996.pdf'); assert.deepEqual(sent[0].to, ['ronen@floridabeauty.us']);
+});
+
+import { trailerStill, customerView as cv3, customerLean as cl3 } from '../voice.js';
+test('staff: a trip that has not left says its trailer is still at the hub (Miami or Ventura); customers just hear it has not left', () => {
+  const it = { trip: { tripNumber: '625717', status: 'LOADEDTOGO', powerUnit: '', trailer: '7331', origZoneDesc: 'MIAMI TERMINAL' }, freightBills: [{ billNumber: 'M1', billToName: 'DIRECT FLOWERS OF BOSTON INC', endZoneDescription: 'CHELSEA, MA, 02150', pieces: 9 }] };
+  assert.deepEqual(trailerStill(it), { trailer_still_at: 'trailer 7331 is still in Miami' });
+  assert.deepEqual(trailerStill({ ...it, _tb: { hub: 'Ventura' } }), { trailer_still_at: 'trailer 7331 is still in Ventura, California' });
+  const staff = cv3(it, null);
+  assert.match(staff.not_left_yet, /has not left/); assert.equal(staff.trailer_still_at, 'trailer 7331 is still in Miami'); assert.equal(staff.left_from, undefined);
+  const cust = cl3(staff);
+  assert.match(cust.not_left_yet, /has not left/); assert.equal(cust.trailer_still_at, undefined);
 });
