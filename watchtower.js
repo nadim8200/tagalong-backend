@@ -263,6 +263,8 @@ function tripFacts(item, now) {
       const p = String(st.label || '').split(',').map((x) => x.trim());
       const c = [commitKey(p[0], p[1]), ...(st.sheetKeys || [])].map((k) => k && commits[k]).find((x) => x && x.atMs);
       if (c) { st.apptMs = c.atMs; st.apptFrom = 'committed'; st.apptNeeded = false; }
+      // first come, first served (rate con) — no appointment needed
+      else if ([commitKey(p[0], p[1]), ...(st.sheetKeys || [])].some((k) => k && commits[k] && commits[k].fcfs)) { st.apptNeeded = false; st.fcfs = true; }
     }
   }
   const instr = (item && item._ratecon && Array.isArray(item._ratecon.specialInstructions))

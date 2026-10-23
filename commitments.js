@@ -148,6 +148,18 @@ export function rcLocal(stop = {}, now = Date.now()) {
   return `${y}-${two(mo)}-${two(d)}T${two(h)}:${two(mi)}`;
 }
 
+// "FCFS" / "first come, first served" on a rate con stop: no appointment needed — but say so. With receiving hours
+// ("FCFS 0700-1500") the truck has to get there before they close. → { day, hours, closeLocal } | null. Pure.
+export function rcFcfs(stop = {}, now = Date.now()) {
+  const all = [stop.date, stop.time, stop.appointment].filter(Boolean).join(' ');
+  if (!/\bFCFS\b|first[\s-]*come/i.test(all)) return null;
+  const day = (rcLocal({ date: stop.date || '', time: '12:00' }, now) || '').slice(0, 10) || null;
+  const hrsText = [stop.time, stop.appointment].filter(Boolean).join(' ').replace(/\bFCFS\b|first[\s-]*come,?\s*first[\s-]*serve[d]?/gi, ' ');
+  const w = hrsText.match(/(\d{1,2}(?::?\d{2})?\s*(?:[ap]\.?m\.?)?)\s*(?:-|–|to)\s*(\d{1,2}(?::?\d{2})?\s*(?:[ap]\.?m\.?)?)/i);
+  const closeLocal = w && stop.date ? rcLocal({ date: stop.date, time: w[2] }, now) : null;
+  return { day, hours: w ? `${w[1].trim()}–${w[2].trim()}` : null, closeLocal };
+}
+
 // A broker load's delivery appointments in TruckMate (per stop, from the bills): an exact clock time
 // (deliverBy = deliverByEnd) or one TruckMate flags as an appointment — never a multi-day window or a bare
 // midnight date. → [{ city, state, customer, local: 'YYYY-MM-DDTHH:MM' }]. Pure.
@@ -227,6 +239,17 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
       for (const dl of (rc && Array.isArray(rc.deliveries) ? rc.deliveries : [])) {
         const st = String(dl.state || '').toUpperCase().slice(0, 2);
         const k = stopKey(dl.city, st);
+        // FCFS: no appointment — shown as such (and "before they close" when the rate con gives receiving hours)
+        const fc = rcFcfs(dl, now());
+        if (fc && k && !(fill[trip] && fill[trip][k])) {
+          const have = c[trip] && c[trip][k];
+          const closeMs = fc.closeLocal ? commitMs(fc.closeLocal, st) : null;
+          const sig = `fcfs|${fc.day || ''}|${fc.hours || ''}`;
+          if (!(have && (!have.auto || (have.fromRC && have.sig === sig)))) {
+            fill[trip] = { ...(fill[trip] || {}), [k]: { state: st, customer: dl.name || null, place: `${String(dl.city).toUpperCase()}, ${st}`, auto: true, setAt: new Date(now()).toISOString(), fcfs: true, day: fc.day, hours: fc.hours, sig, local: closeMs ? fc.closeLocal : null, atMs: closeMs, by: 'Rate con (FCFS)', fromRC: true, rule: fc.hours ? `first come, first served · receiving ${fc.hours} — arrive before they close` : 'first come, first served — no appointment needed' } };
+          }
+          continue;
+        }
         const local = rcLocal(dl, now());
         const atMs = local ? commitMs(local, st) : null;
         if (!k || !atMs || atMs < now() - 24 * 60 * MIN || (fill[trip] && fill[trip][k])) continue;

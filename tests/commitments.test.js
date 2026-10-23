@@ -185,3 +185,18 @@ test('the rate con\'s delivery appointment becomes the committed time (over Truc
   const d = [item({ deliveries: [{ city: 'Miami', state: 'FL', date: '10/27/2026', time: '0530' }] })]; await h.c.overlay('florida-beauty', d);
   assert.equal(d[0]._commit['MIAMI|FL'].local, '2026-10-27T06:00', 'dispatch wins');
 });
+
+import { rcFcfs } from '../commitments.js';
+test('FCFS on the rate con: no appointment, said so; with receiving hours, late means after they close', async () => {
+  const now = Date.parse('2026-10-23T16:00:00Z');
+  assert.deepEqual(rcFcfs({ date: '10/27/2026', time: 'FCFS' }, now), { day: '2026-10-27', hours: null, closeLocal: null });
+  assert.equal(rcFcfs({ date: '10/27/2026', appointment: 'FCFS 0700-1500' }, now).closeLocal, '2026-10-27T15:00');
+  assert.equal(rcFcfs({ date: '10/27/2026', time: '0700' }, now), null);
+  const item = (time) => ({ trip: { tripNumber: '625658', status: 'INTRAN' }, freightBills: [{ billNumber: 'B180626', endZoneDescription: 'MIAMI, FL, 33172' }], _ratecon: { deliveries: [{ city: 'Miami', state: 'FL', date: '10/27/2026', time }] } });
+  const h = setup(now);
+  const a = [item('FCFS')]; await h.c.overlay('florida-beauty', a);
+  assert.equal(a[0]._commit['MIAMI|FL'].fcfs, true); assert.equal(a[0]._commit['MIAMI|FL'].atMs, null);
+  const b = [item('FCFS 0700-1500')]; await h.c.overlay('florida-beauty', b);
+  assert.equal(b[0]._commit['MIAMI|FL'].local, '2026-10-27T15:00');
+  assert.match(b[0]._commit['MIAMI|FL'].rule, /before they close/);
+});
