@@ -13,6 +13,7 @@ import { STATE_TZ, fmtLocalShort } from './localtime.js';
 const SITE = 'florida-beauty';
 const LOG = (site) => `taEtaLog:${site}`;
 const SENT = (site) => `taEtaReportSent:${site}`;
+const TIMES = (site) => `taStopTimes:${site}`;    // every finished stop visit, kept 30 days (the stop-times report)
 const MIN = 60000;
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || (it && it._id) || '');
@@ -72,10 +73,13 @@ export function reportRows(item, log = {}, visits = {}) {
     const art = ((item._artisEta && item._artisEta.stops) || []).find((a) => a.delivered && placeKey(`${a.city}, ${a.state}`) === s.key);
     const actual = visit ? { ms: visit.enteredAt, from: 'arrived (geofence)' } : tmMs ? { ms: tmMs, from: 'delivered (TruckMate)' } : art && art.arrivedAt ? { text: art.arrivedAt, from: 'delivered (ARTIS)' } : null;
     const h = log[s.key] || {};
-    return { label: s.label, customers: [...s.customers], ours: h.ours || [], artis: h.artis || [], actual };
+    const stay = visit ? { arrivedMs: visit.enteredAt || null, leftMs: visit.exitedAt || null, minutes: visit.dwellMin != null ? visit.dwellMin : (visit.enteredAt && visit.exitedAt ? Math.round((visit.exitedAt - visit.enteredAt) / MIN) : null) } : null;
+    return { label: s.label, customers: [...s.customers], ours: h.ours || [], artis: h.artis || [], actual, stay };
   });
 }
 
+// "1 h 25 min" / "40 min". Pure.
+export const hm = (m) => (m == null ? '—' : m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}` : `${m} min`);
 const off = (etaMs, actualMs) => {
   if (!etaMs || !actualMs) return '';
   const d = Math.round((actualMs - etaMs) / MIN); const a = Math.abs(d);
@@ -85,7 +89,7 @@ const off = (etaMs, actualMs) => {
 // the email. Pure.
 export function renderReport(item, rows, reason = 'finished') {
   const t = tripOf(item); const n = tripNo(item);
-  const subject = `ETA report — trip ${n}${t.powerUnit ? ` · truck ${t.powerUnit}` : ''} (${reason === 'delivered' ? 'delivered' : 'finished'})`;
+  const subject = `Trip report: ETAs and time at each stop — trip ${n}${t.powerUnit ? ` · truck ${t.powerUnit}` : ''} (${reason === 'delivered' ? 'delivered' : 'finished'})`;
   const when = (ms, place) => (ms ? fmtLocalShort(ms, place) : '—');
   const cell = 'padding:6px 8px;border-top:1px solid #E2E8F0;vertical-align:top;font-size:13px;color:#172538;';
   const body = rows.map((r) => {
@@ -97,22 +101,41 @@ export function renderReport(item, rows, reason = 'finished') {
 <td style="${cell}">${first ? `${when(first.etaMs, r.label)}<br><span style="color:#596A7F">given ${when(first.at, 'FL')}</span>` : '—'}</td>
 <td style="${cell}">${last ? `${when(last.etaMs, r.label)}<br><span style="color:#596A7F">given ${when(last.at, 'FL')}</span>` : '—'}</td>
 <td style="${cell}"><b>${act}</b>${r.actual ? `<br><span style="color:#596A7F">${esc(r.actual.from)}</span>` : ''}</td>
-<td style="${cell}">${r.actual && r.actual.ms ? `first: ${off(first && first.etaMs, r.actual.ms) || '—'}<br>last: ${off(last && last.etaMs, r.actual.ms) || '—'}` : '—'}</td></tr>
-${hist || art ? `<tr><td colspan="5" style="padding:0 8px 8px;font-size:12px;color:#596A7F;">${hist ? `<b>Our ETAs along the way</b> (given → ETA):<br>${hist}` : ''}${art ? `<br><b>ARTIS ETA</b> (read → ETA):<br>${art}` : ''}</td></tr>` : ''}`;
+<td style="${cell}">${r.actual && r.actual.ms ? `first: ${off(first && first.etaMs, r.actual.ms) || '—'}<br>last: ${off(last && last.etaMs, r.actual.ms) || '—'}` : '—'}</td>
+<td style="${cell}">${r.stay && r.stay.minutes != null ? `<b>${hm(r.stay.minutes)}</b><br><span style="color:#596A7F">${when(r.stay.arrivedMs, r.label)} → ${r.stay.leftMs ? when(r.stay.leftMs, r.label) : 'still there'}</span>` : r.stay && r.stay.arrivedMs ? `arrived ${when(r.stay.arrivedMs, r.label)}<br><span style="color:#596A7F">no exit recorded</span>` : '—'}</td></tr>
+${hist || art ? `<tr><td colspan="6" style="padding:0 8px 8px;font-size:12px;color:#596A7F;">${hist ? `<b>Our ETAs along the way</b> (given → ETA):<br>${hist}` : ''}${art ? `<br><b>ARTIS ETA</b> (read → ETA):<br>${art}` : ''}</td></tr>` : ''}`;
   }).join('');
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#172538;max-width:760px">
-<h2 style="font-size:20px;margin:0 0 4px">ETA report — trip ${esc(n)}</h2>
-<div style="color:#596A7F;font-size:13px;margin-bottom:12px">Truck ${esc(t.powerUnit || '—')} · trailer ${esc(t.trailer || '—')} · ${esc(t.origZoneDesc || '')} → ${esc(t.destZoneDesc || '')}. The ETAs we gave along the way vs when the truck actually got to each customer.</div>
+<h2 style="font-size:20px;margin:0 0 4px">Trip report — trip ${esc(n)}</h2>
+<div style="color:#596A7F;font-size:13px;margin-bottom:12px">Truck ${esc(t.powerUnit || '—')} · trailer ${esc(t.trailer || '—')} · ${esc(t.origZoneDesc || '')} → ${esc(t.destZoneDesc || '')}. The ETAs we gave along the way vs when the truck actually got to each customer, and how long it took at each stop.</div>
 <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;border:1px solid #E2E8F0">
-<tr style="background:#F4F6F9"><th align="left" style="padding:6px 8px;font-size:12px">Customer · stop</th><th align="left" style="padding:6px 8px;font-size:12px">First ETA</th><th align="left" style="padding:6px 8px;font-size:12px">Last ETA</th><th align="left" style="padding:6px 8px;font-size:12px">Actual</th><th align="left" style="padding:6px 8px;font-size:12px">Off by</th></tr>
-${body || `<tr><td colspan="5" style="${cell}">No stops on this trip.</td></tr>`}
+<tr style="background:#F4F6F9"><th align="left" style="padding:6px 8px;font-size:12px">Customer · stop</th><th align="left" style="padding:6px 8px;font-size:12px">First ETA</th><th align="left" style="padding:6px 8px;font-size:12px">Last ETA</th><th align="left" style="padding:6px 8px;font-size:12px">Actual</th><th align="left" style="padding:6px 8px;font-size:12px">Off by</th><th align="left" style="padding:6px 8px;font-size:12px">Time at stop</th></tr>
+${body || `<tr><td colspan="6" style="${cell}">No stops on this trip.</td></tr>`}
 </table>
-<p style="color:#596A7F;font-size:12px">Times in ET (stop's local time in parentheses when it isn't Eastern). Our ETA = 55 mph, driving hours and 1 h per stop. Actual = the truck entering the customer's geofence, else the delivered time in TruckMate / ARTIS.</p>
+<p style="color:#596A7F;font-size:12px">Times in ET (stop's local time in parentheses when it isn't Eastern). Our ETA = 55 mph, driving hours and 1 h per stop. Actual = the truck entering the customer's geofence, else the delivered time in TruckMate / ARTIS. Time at stop = from entering to leaving the customer's geofence.</p>
 <p style="font-size:13px">— Jarvis, AI Dispatcher</p></div>`;
   return { subject, html };
 }
 
-export function initEtaReport({ db, sendMail = null, recipients = async () => [], now = () => Date.now() }) {
+// finished stop visits (geofence in → out) with the trip, truck, customer and place → the stop-times log. Pure.
+export function stopTimesFrom(visitsByTrip = {}, items = [], have = {}) {
+  const out = { ...have };
+  const byTrip = new Map(items.map((it) => [tripNo(it), it]));
+  for (const [trip, vs] of Object.entries(visitsByTrip || {})) {
+    const it = byTrip.get(String(trip));
+    for (const v of Object.values(vs || {})) {
+      if (!v || !v.enteredAt || !v.exitedAt) continue;
+      const k = `${trip}|${v.stopKey}`;
+      if (out[k]) continue;
+      const st = it && ((it._manifest && it._manifest.stops) || []).find((x) => x.key === v.stopKey);
+      out[k] = { trip: String(trip), truck: v.unit || (it ? String(tripOf(it).powerUnit || '') || null : null), customer: (st && st.customer) || (v.geofence && v.geofence.name) || null,
+        place: st && st.city ? `${st.city}, ${st.state || ''}`.trim() : null, arrivedMs: v.enteredAt, leftMs: v.exitedAt, minutes: v.dwellMin != null ? v.dwellMin : Math.round((v.exitedAt - v.enteredAt) / MIN), source: (v.geofence && v.geofence.source) || null };
+    }
+  }
+  return out;
+}
+
+export function initEtaReport({ app = null, requireAuth = null, db, sendMail = null, recipients = async () => [], now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   // after each Watchtower cycle: log this cycle's ETAs
   async function process(site, board) {
@@ -126,6 +149,24 @@ export function initEtaReport({ db, sendMail = null, recipients = async () => []
       for (const [k, v] of Object.entries(next)) { const last = Math.max(0, ...Object.values(v).flatMap((s) => [...(s.ours || []), ...(s.artis || [])].map((e) => e.at))); if (at - last > 10 * 24 * 60 * MIN) delete next[k]; }
       return next;
     }, {});
+    // finished stop visits → the stop-times log (30 days)
+    const visits = (await db.get(`taStopVisits:${site}`, {})) || {};
+    await db.update(TIMES(site), (cur) => {
+      const next = stopTimesFrom(visits, items, cur || {});
+      for (const [k, v] of Object.entries(next)) if (at - (v.leftMs || 0) > 30 * 24 * 60 * MIN) delete next[k];
+      return next;
+    }, {});
+  }
+  // the console's "Stop times" report: every stop, how long the truck was there (newest first)
+  if (app && requireAuth) {
+    app.get('/truckmate/stop-times', requireAuth, async (req, res) => {
+      if (!enabled) return res.json({ rows: [] });
+      const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
+      const since = now() - days * 24 * 60 * MIN;
+      const rows = Object.values((await db.get(TIMES(String(req.query.site || SITE)), {})) || {}).filter((r) => r.leftMs >= since).sort((a, b) => b.arrivedMs - a.arrivedMs);
+      const mins = rows.map((r) => r.minutes).filter((m) => m != null);
+      res.json({ days, count: rows.length, avgMinutes: mins.length ? Math.round(mins.reduce((a, b) => a + b, 0) / mins.length) : null, rows: rows.slice(0, 1000) });
+    });
   }
   // the trip finished → the report (once per trip)
   async function onFinished(site, rec, reason) {
