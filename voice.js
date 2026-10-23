@@ -57,6 +57,9 @@ export const GREETING = "Hi, this is Jarvis, Florida Beauty Flora's assistant. T
 
 // Said once, right after giving a customer or broker an ETA (in the caller's language).
 export const ETA_DISCLAIMER = 'Please keep in mind this is an estimated time of arrival and it may change with traffic, weather or road conditions. If anything changes, we will keep you updated.';
+// Two voices: the English Jarvis hands Spanish speakers to the Spanish Jarvis (same call) and back.
+export const SPANISH_HANDOFF_EN = 'Spanish callers: as soon as the caller says a full sentence in Spanish or asks for Spanish, call switch_to_spanish right away and say nothing before it — the Spanish-speaking Jarvis continues this same call and hears everything said so far. One word like "Hola" or "Sí" is not enough. Hebrew stays with you (answer in Hebrew).';
+export const SPANISH_HANDOFF_ES = 'You are the Spanish-speaking Jarvis: this call was just handed to you from the English Jarvis — do NOT greet again or repeat the recording notice; continue the conversation in Latin American Spanish, answering what the caller just said. If the caller switches to English or Hebrew (a full sentence) or asks for English, call switch_to_english right away and say nothing before it.';
 export const PROMPT = `You are Jarvis, the automated dispatch assistant for Florida Beauty Flora (a Miami flower and freight trucking company). You talk on the phone with truck drivers, customers (receivers, florists) and freight brokers.
 
 Language: speak English, Spanish or Hebrew — answer in the language the caller is using. Stay in English unless the caller says a full sentence in Spanish or Hebrew; one word like "Oye", "Hola", "Sí", "Bueno" or "Shalom" is not a switch. The greeting is in English only. Keep every answer short and natural for a phone call (one to three sentences), friendly and professional.
@@ -1098,11 +1101,15 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
   app.put('/voice/voice', requireAuth, async (req, res) => {
-    const id = String((req.body || {}).voiceId || '').trim();
-    if (!/^[\w.:-]{3,80}$/.test(id)) return res.status(400).json({ error: 'Pick a voice.' });
+    const b = req.body || {};
+    const id = String(b.voiceId || '').trim();
+    const es = b.spanishVoiceId === null ? null : String(b.spanishVoiceId || '').trim();   // null = no Spanish voice (one voice for all)
+    if (id && !/^[\w.:-]{3,80}$/.test(id)) return res.status(400).json({ error: 'Pick a voice.' });
+    if (es && !/^[\w.:-]{3,80}$/.test(es)) return res.status(400).json({ error: 'Pick a Spanish voice.' });
+    if (!id && es === '') return res.status(400).json({ error: 'Pick a voice.' });
     if (!key()) return res.status(503).json({ error: 'Add RETELL_API_KEY in Render first.' });
-    await db.update(cfgKey, (c) => ({ ...(c || {}), voiceId: id, voiceBy: who(req), voiceAt: new Date().toISOString() }), {});
-    try { res.json({ voiceId: id, ...(await pushJarvis(who(req))) }); } catch (e) { res.status(502).json({ error: e.message }); }
+    await db.update(cfgKey, (c) => ({ ...(c || {}), ...(id ? { voiceId: id } : {}), ...(es !== '' ? { spanishVoiceId: es } : {}), voiceBy: who(req), voiceAt: new Date().toISOString() }), {});
+    try { res.json(await pushJarvis(who(req))); } catch (e) { res.status(502).json({ error: e.message }); }
   });
 
   // Create (or update) Jarvis in Retell from the prompt + tools above.
@@ -1126,6 +1133,31 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
       } catch (e) { console.warn('[voice] keyword refresh:', e.message); }
     }, 20 * 60000);
     if (tick.unref) tick.unref();
+  }
+  const pick = (o, ks) => Object.fromEntries(ks.filter((k) => o && o[k] != null).map((k) => [k, o[k]]));
+  const swapTool = (name, description, agentId) => ({ type: 'agent_swap', name, description, agent_id: agentId });
+  // the Spanish Jarvis: same instructions + tools, Spanish voice / language, a hand-back to the English Jarvis
+  async function upsertSpanish(cfg, base, llmEn, agentEn) {
+    const llmBody = { ...llmEn, general_prompt: `${PROMPT}\n\n${SPANISH_HANDOFF_ES}`, begin_message: '', start_speaker: 'agent',
+      general_tools: [...llmEn.general_tools, swapTool('switch_to_english', 'Hand this call back to the English-speaking Jarvis (same call). Use it as soon as the caller switches to English or asks for English. Say nothing before it.', cfg.agentId)] };
+    const agentBody = { ...agentEn, agent_name: 'Jarvis — Florida Beauty Flora dispatch (Español)', voice_id: cfg.spanishVoiceId };   // same languages as the English Jarvis (so it still understands English / Hebrew to hand back)
+    let agent; let llm;
+    if (!cfg.esAgentId) {
+      llm = await retell('/create-retell-llm', { body: llmBody });
+      agent = await retell('/create-agent', { body: { ...agentBody, response_engine: { type: 'retell-llm', llm_id: llm.llm_id, ...(llm.version != null ? { version: llm.version } : {}) } } });
+    } else {
+      let draft = await retell(`/get-agent/${cfg.esAgentId}`, { method: 'GET' });
+      if (draft.is_published) draft = await retell(`/create-agent-version/${cfg.esAgentId}`, { body: { base_version: draft.version } });
+      const re = draft.response_engine || {};
+      const llmId = re.llm_id || cfg.esLlmId;
+      const ver = re.version != null ? re.version : draft.version;
+      llm = await retell(`/update-retell-llm/${llmId}${ver != null ? `?version=${ver}` : ''}`, { method: 'PATCH', body: llmBody });
+      agent = await retell(`/update-agent/${cfg.esAgentId}`, { method: 'PATCH', body: agentBody });
+      if (agent.version == null) agent.version = draft.version;
+      if (!llm.llm_id) llm.llm_id = llmId;
+    }
+    if (agent.version != null) await retell(`/publish-agent-version/${agent.agent_id}`, { body: { version: agent.version, version_title: `Jarvis ES update ${new Date().toISOString().slice(0, 16)}` } });
+    return { esAgentId: agent.agent_id, esLlmId: llm.llm_id, esVersion: agent.version ?? null, spanishError: null };
   }
   async function pushJarvis(by) {
     const base = backend();
@@ -1157,6 +1189,16 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
         ...(env.RETELL_AMBIENT === 'off' ? {} : { ambient_sound: env.RETELL_AMBIENT || 'call-center', ambient_sound_volume: Number(env.RETELL_AMBIENT_VOLUME || 0.4) }),
         normalize_for_speech: true,
       };
+      // Spanish callers: a second Jarvis with its own voice takes over the SAME call (Retell agent transfer)
+      // and hands it back if they switch to English. Only when a Spanish voice is picked.
+      let spanish = null;
+      if (cfg.agentId && cfg.spanishVoiceId) {
+        try {
+          spanish = await upsertSpanish(cfg, base, llmBody, agentBody);
+          llmBody.general_tools = [...llmBody.general_tools, swapTool('switch_to_spanish', 'Hand this call to the Spanish-speaking Jarvis (same call, Mexican Spanish voice). Use it as soon as the caller says a full sentence in Spanish or asks for Spanish. Say nothing before it.', spanish.esAgentId)];
+          llmBody.general_prompt = `${PROMPT}\n\n${SPANISH_HANDOFF_EN}`;
+        } catch (e) { console.warn('[voice] spanish agent:', e.message); spanish = { spanishError: e.message }; }
+      }
       let agent; let llm;
       if (!cfg.agentId) {
         llm = await retell('/create-retell-llm', { body: llmBody });
@@ -1202,7 +1244,7 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
           countries = { asked: want, inbound: got, outbound: n.allowed_outbound_country_list || null, ok: !!(got && want.every((c) => got.includes(c))) };
         } catch (e) { console.warn('[voice] countries:', e.message); countries = { asked: want, ok: false, error: e.message }; }
       }
-      const next = { countries, llmId: llm.llm_id, agentId: agent.agent_id, llmVersion: llm.version ?? null, agentVersion: agent.version ?? null, published, phone, at: new Date().toISOString(), by, keywords: agentBody.boosted_keywords.join('|') };
+      const next = { ...pick(cfg, ['voiceId', 'voiceBy', 'voiceAt', 'spanishVoiceId', 'esAgentId', 'esLlmId']), ...(spanish || {}), countries, llmId: llm.llm_id, agentId: agent.agent_id, llmVersion: llm.version ?? null, agentVersion: agent.version ?? null, published, phone, at: new Date().toISOString(), by, keywords: agentBody.boosted_keywords.join('|') };
       await db.set(cfgKey, next);
       return next;
     }
