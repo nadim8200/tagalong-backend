@@ -244,3 +244,17 @@ test('9 AM / 3 PM Miami: a quiet re-read of the last 3 nights catches trucks bui
   assert.equal(mails.filter((x) => /refresh/i.test(x.subject || '')).length, 0);
   const n = calls.length; await tb.tick(); assert.equal(calls.filter((c) => /truck-routes/.test(c)).length, calls.slice(0, n).filter((c) => /truck-routes/.test(c)).length, 'once per slot');
 });
+
+test('a Truck Builder truck with no trip number (NE / 733) is linked to the board trip by truck', async () => {
+  const m = new Map(); const db = { enabled: true, get: async (k, d) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : d), set: async (k, v) => m.set(k, v) };
+  const routes = [{ name: 'NE', routeTrucks: [{ truckRouteName: 'NE', truckId: '733', trailerId: '7235', truckInfo: {}, truckRouteStops: [{ stopOrder: 1, consigneeId: '02281', consigneeName: 'DESIGNERS CHOICE BOSTON', consigneeCity: 'BOSTON', consigneeState: 'MA', boxes: 1 }] }] }];
+  const fetchFn = async (url) => (/login/.test(url) ? { status: 302, headers: { getSetCookie: () => ['JSESSIONID=x'] } } : { status: 200, text: async () => JSON.stringify(routes) });
+  const tb = initTruckBuilder({ get: () => {}, post: () => {} }, { requireAdmin: () => {}, db, env: { ARTIS_WEB_USER: 'u', ARTIS_WEB_PASSWORD: 'p', NODE_ENV: 'test' }, fetchFn, now: () => Date.parse('2026-10-23T13:10:00Z') });
+  await tb.refreshRecent();
+  const it = { trip: { tripNumber: '625534', powerUnit: '733', trailer: '7235' } };
+  await tb.overlay('florida-beauty', [it]);
+  assert.equal(it._tb.route, 'NE'); assert.equal(it._tb.trip, '625534'); assert.equal(it._tb.linkedBy, 'truck');
+  assert.equal(it._tb.stops[0].consigneeId, '02281');
+  const other = { trip: { tripNumber: '1', powerUnit: '733', trailer: '9999' } }; await tb.overlay('florida-beauty', [other]);
+  assert.equal(other._tb, undefined, 'another trailer on that truck is not this run');
+});

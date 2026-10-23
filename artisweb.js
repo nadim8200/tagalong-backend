@@ -10,6 +10,7 @@
 // One sign-in at a time; a refused sign-in waits an hour before trying again (no lock-outs).
 // ---------------------------------------------------------------
 import { webConfig } from './truckbuilder.js';
+import { nameScore } from './voice.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taArtisEta:${SITE}`;
@@ -43,6 +44,21 @@ export function slimStatus(t, clientId) {
     arrived: !!(t.arrived || i.arrived), delivered: !!(t.delivered || i.delivered), arrivedAt: t.arrivedAt || null,
     shippers: (t.tripStatusDetails || []).length,
   };
+}
+// ARTIS's customer list entry "DESIGNERS CHOICE BOSTON - 02281 - BOSTON, MA" → { id, name, city, state }. Pure.
+export function parseConsignee(x) {
+  const m = String((x && x.text) || '').match(/ - (\d{3,6}) - ([^,]*),\s*([A-Z]{2})\s*$/);
+  return { id: String((x && x.value) || (m && m[1]) || ''), name: String((x && x.clientName) || '').trim(), city: m ? m[2].trim().toUpperCase() : '', state: m ? m[3] : '' };
+}
+// The ARTIS customer for a stop by name (+ city / state when several match). Pure. → id | null
+export function pickConsignee(list, { name, city = '', state = '' }) {
+  const fit = (c) => Math.max(nameScore(name, c.name), nameScore(c.name, name));
+  const hits = (list || []).map((c) => ({ c, s: fit(c) })).filter((x) => x.s >= 0.75);
+  if (!hits.length) return null;
+  const town = String(city || '').toUpperCase().split(',')[0].trim();
+  const st = String(state || '').toUpperCase();
+  hits.sort((a, b) => ((town && b.c.city === town ? 1 : 0) + (st && b.c.state === st ? 0.5 : 0) + b.s) - ((town && a.c.city === town ? 1 : 0) + (st && a.c.state === st ? 0.5 : 0) + a.s));
+  return hits[0].c.id || null;
 }
 // When the twice-a-day read is due: 10 AM and 4 PM Miami time, once each per day. Pure.
 export function etaSlotDue(state = {}, now = Date.now()) {
@@ -112,6 +128,17 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
     return { ...out, customer: stop ? stop.consignee : null };
   }
 
+  // ARTIS's customer list (kept 12 h) — finds a stop's ARTIS customer number by name + city
+  let consigneeCache = { at: 0, list: [] };
+  async function consignees() {
+    if (now() - consigneeCache.at < 12 * 60 * MIN && consigneeCache.list.length) return consigneeCache.list;
+    const j = await (async () => { const t = await (await get(`/artis_ms/clients/edi/all_consignees/json?qs=${now()}`)).text(); try { return JSON.parse(t); } catch { return null; } })();
+    const list = (Array.isArray(j) ? j : []).map(parseConsignee).filter((c) => c.id && c.name);
+    if (list.length) consigneeCache = { at: now(), list };
+    return list;
+  }
+  async function clientIdFor({ name, city, state }) { return name ? pickConsignee(await consignees(), { name, city, state }) : null; }
+
   // the twice-a-day read: ARTIS's ETA for every customer stop on the active ARTIS runs
   async function readEtas() {
     const board = getBoard ? await getBoard(SITE) : { trips: [] };
@@ -155,10 +182,12 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
     if (!enabled()) return res.status(503).json({ error: 'ARTIS web login is not set up (ARTIS_WEB_USER / ARTIS_WEB_PASSWORD).' });
     try {
       const trip = String(req.params.trip || '').replace(/\D/g, '');
-      const clientId = String((req.body && req.body.clientId) || '').replace(/[^\w]/g, '');
-      const kind = MANIFEST_KINDS[(req.body && req.body.kind)] ? req.body.kind : 'detail';
+      const b = req.body || {};
+      // the ARTIS customer number, or found by the stop's customer name + city (truck not linked on the Truck Builder)
+      const clientId = String(b.clientId || '').replace(/[^\w]/g, '') || await clientIdFor({ name: String(b.customer || '').slice(0, 120), city: String(b.city || '').slice(0, 60), state: String(b.state || '').slice(0, 2) });
+      const kind = MANIFEST_KINDS[b.kind] ? b.kind : 'detail';
       const item = (((await getBoard(SITE)) || {}).trips || []).find((x) => tripNo(x) === trip) || { trip: { tripNumber: trip } };
-      if (!clientId) return res.status(400).json({ error: 'Which customer (ARTIS client ID)?' });
+      if (!clientId) return res.status(404).json({ error: `Couldn't find "${b.customer || 'that customer'}" in ARTIS's customer list.` });
       const by = (req.user && (req.user.name || req.user.email)) || 'dispatcher';
       return res.json(await manifestDoc({ item, clientId, kind, by }));
     } catch (e) { return res.status(502).json({ error: e.message }); }
@@ -173,5 +202,5 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
   const fetchText = async (path) => (await get(path)).text();
   const fetchBuffer = async (path) => { const r = await get(path); return { buf: Buffer.from(await r.arrayBuffer()), type: String(r.headers.get('content-type') || '').toLowerCase() }; };
   const fetchJson = async (path) => { const t = await fetchText(path); try { return JSON.parse(t); } catch { throw new Error('ARTIS did not answer with data (session?)'); } };
-  return { tripStatus, manifestPdf, manifestDoc, readEtas, overlay, fetchText, fetchJson, fetchBuffer, ready: enabled };
+  return { tripStatus, manifestPdf, manifestDoc, readEtas, overlay, fetchText, fetchJson, fetchBuffer, clientIdFor, ready: enabled };
 }

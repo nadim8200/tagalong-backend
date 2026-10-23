@@ -62,3 +62,12 @@ test('twice-a-day read stores ARTIS ETAs per trip + customer; the manifest PDF i
   const own = await chat.runTool('trip_manifest', { customer: "Spedale's" }, { ...ctx, docs: [], customer: true, senderClient: "SPEDALE'S FLORIST INC" });
   assert.equal(own.found, true);
 });
+
+import { parseConsignee, pickConsignee } from '../artisweb.js';
+test('ARTIS customer list: a stop\'s customer number by name, the right city when several match', () => {
+  const list = [{ value: '02281', text: 'DESIGNERS CHOICE BOSTON - 02281 - BOSTON, MA', clientName: 'DESIGNERS CHOICE BOSTON' }, { value: '51299', text: "DESIGNER'S CHOICE KY - 51299 - LOUISVILLE, KY", clientName: "DESIGNER'S CHOICE KY" }, { value: '02530', text: "DESIGNER'S CHOICE PA - 02530 - MECHANICSBURG, PA", clientName: "DESIGNER'S CHOICE PA" }].map(parseConsignee);
+  assert.deepEqual(list[0], { id: '02281', name: 'DESIGNERS CHOICE BOSTON', city: 'BOSTON', state: 'MA' });
+  assert.equal(pickConsignee(list, { name: 'DESIGNERS CHOICE BOSTON', city: 'BOSTON', state: 'MA' }), '02281');
+  assert.equal(pickConsignee(list, { name: "Designer's Choice PA", city: 'Mechanicsburg' }), '02530');
+  assert.equal(pickConsignee(list, { name: 'Zoom Bloom' }), null);
+});

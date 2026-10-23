@@ -251,7 +251,18 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, artisWeb = 
           if (n && tripNo(it) !== n) continue;
           for (const st of ((it._tb && it._tb.stops) || [])) if (st.consigneeId && fit(want, st.consignee)) hits.push({ it, st });
         }
-        if (!hits.length) return { found: false, note: `No ARTIS stop for "${want}"${n ? ` on trip ${n}` : ' on the active runs'} — the load may not be on ARTIS's Truck Builder.` };
+        // not on the Truck Builder → the trip sheet's stops, with the ARTIS customer number from ARTIS's customer list
+        if (!hits.length && artisWeb.clientIdFor) {
+          for (const it of all) {
+            if (n && tripNo(it) !== n) continue;
+            for (const st of ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || '') && fit(want, x.customer || ''))) {
+              const id = await artisWeb.clientIdFor({ name: st.customer, city: st.city, state: st.state }).catch(() => null); // eslint-disable-line no-await-in-loop
+              if (id) hits.push({ it, st: { consigneeId: id, consignee: st.customer, city: st.city } });
+            }
+            if (hits.length >= 3) break;
+          }
+        }
+        if (!hits.length) return { found: false, note: `No ARTIS customer found for "${want}"${n ? ` on trip ${n}` : ' on the active loads'}.` };
         const picked = hits.slice(0, 3);
         const out = [];
         for (const { it, st } of picked) {

@@ -310,6 +310,10 @@ export function initTruckBuilder(app, { requireAdmin, db, sendMail = null, recip
     const st = await load();
     for (const r of rows) st.trips[r.trip] = r;
     for (const [k, v] of Object.entries(st.trips)) if (Date.parse(v.readAt) < now() - 10 * 86400000) delete st.trips[k];
+    // trucks the Truck Builder has with NO trip number (e.g. NE / 733) — linked to the board's trip by truck later
+    st.untripped = { ...(st.untripped || {}) };
+    for (const day of cache.values()) for (const t of day.all) if (!t.trip && t.truck) st.untripped[`${t.hub}|${t.date}|${String(t.truck).replace(/^0+/, '')}`] = { ...t, readAt: new Date(now()).toISOString() };
+    for (const [k, v] of Object.entries(st.untripped)) if (Date.parse(v.readAt) < now() - 6 * 86400000) delete st.untripped[k];
     await db.set(KEY, st);
     return rows;
   }
@@ -405,8 +409,15 @@ export function initTruckBuilder(app, { requireAdmin, db, sendMail = null, recip
   async function overlay(site, trips) {
     if (!(db && db.enabled)) return;
     const st = await load();
+    const unitOf = (x) => String(x == null ? '' : x).trim().replace(/^0+(?=\d)/, '').toUpperCase();
     for (const it of trips) {
-      const r = st.trips[String(tripOf(it).tripNumber || '')];
+      let r = st.trips[String(tripOf(it).tripNumber || '')];
+      // the Truck Builder has the truck but no trip number on it → the latest night with that truck (and trailer, when both known)
+      if (!r && st.untripped && tripOf(it).powerUnit) {
+        const t = tripOf(it);
+        const cands = Object.values(st.untripped).filter((u) => unitOf(u.truck) === unitOf(t.powerUnit) && (!u.trailer || !t.trailer || unitOf(u.trailer) === unitOf(t.trailer))).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+        if (cands[0]) r = { ...cands[0], trip: String(t.tripNumber), linkedBy: 'truck' };
+      }
       if (!r) continue;
       it._tb = r;
       it._manifest = mergeStops(it._manifest || null, r, it);
