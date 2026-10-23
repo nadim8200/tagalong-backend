@@ -4,6 +4,8 @@
 // (kind "artisdoc"). Read-only, same ARTIS web login.
 //  • twice a day (11 AM / 5 PM Miami) for loads with a few bills (broker / produce loads) — while active and for
 //    5 days after they leave the board (documents arrive after delivery);
+//  • BROKER loads (B bills) every 2 hours 6 AM–10 PM while on the board (first check right when they show up);
+//    a rate con found there is read and put on the load when it has none (dispatch's upload always wins);
 //  • on demand for a stop's bills (LTL runs have 100+ bills — too many to poll) and for Jarvis.
 // ---------------------------------------------------------------
 import UTIF from 'utif2';
@@ -11,6 +13,7 @@ import pngjs from 'pngjs';
 import jpeg from 'jpeg-js';
 import { PDFDocument } from 'pdf-lib';
 import { pageVar } from './artisreports.js';
+import { brokerLoad } from './watchtower.js';
 
 const { PNG } = pngjs;
 const SITE = 'florida-beauty';
@@ -82,7 +85,14 @@ export function syncSlotDue(state = {}, now = Date.now()) {
   return k && !(state.done || {})[k] ? k : null;
 }
 
-export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs, artisWeb, getBoard = null, nameFits = null, now = () => Date.now() }) {
+// Broker loads to check now: never checked, or last checked 2+ h ago — only 6 AM–10 PM Miami. Pure.
+export function brokerDue(items = [], checked = {}, now = Date.now(), every = 2 * 60 * MIN) {
+  const h = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', hourCycle: 'h23' }).format(new Date(now)));
+  if (h < 6 || h >= 22) return [];
+  return items.filter((it) => brokerLoad(it) && !it._oc && now - (checked[tripNo(it)] || 0) >= every);
+}
+
+export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs, artisWeb, getBoard = null, nameFits = null, onRateCon = null, now = () => Date.now() }) {
   const enabled = () => !!(db && db.enabled && artisWeb && artisWeb.ready && artisWeb.ready() && docs && docs.storeDocs);
   const st = async () => (await db.get(KEY, null)) || { trips: {}, docs: {}, watch: {}, done: {} };
 
@@ -113,6 +123,8 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
           const [stored] = await docs.storeDocs({ site: SITE, kind: 'artisdoc', trip, files: [{ filename: docFileName(d), mediaType: 'application/pdf', dataBase64: pdf.toString('base64') }], by }); // eslint-disable-line no-await-in-loop
           known[id] = { ...meta, docId: String(stored.id), name: docFileName(d) };
           found.push(known[id]);
+          // a rate con in ARTIS → on the load when dispatch hasn't put one there
+          if (onRateCon && /rate/i.test(meta.type)) await onRateCon(trip, { filename: docFileName(d), dataBase64: pdf.toString('base64') }).catch((e) => console.warn('[synergize] rate con:', e.message)); // eslint-disable-line no-await-in-loop
         } catch (e) { console.warn('[synergize]', bill, e.message); }
       }
     }
@@ -163,10 +175,24 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
   if (enabled()) {
     const t = setInterval(async () => {
       try {
-        const s = await st(); const k = syncSlotDue(s, now()); if (!k) return;
+        const s = await st(); const k = syncSlotDue(s, now());
+        if (k) {
         await db.update(KEY, (cur) => ({ ...(cur || {}), done: Object.fromEntries([...Object.entries(((cur && cur.done) || {})), [k, new Date(now()).toISOString()]].slice(-20)) }), {});
         const r = await sync(); console.log(`[synergize] ${k}: ${r.trips} loads checked, ${r.documents} documents`);
+        }
       } catch (e) { console.warn('[synergize]', e.message); }
+      // broker loads: every 2 hours (and right when they show up)
+      try {
+        const items = getBoard ? (((await getBoard(SITE)) || {}).trips || []) : [];
+        const s = await st();
+        const due = brokerDue(items, s.brokerChecked || {}, now()).slice(0, 15);
+        for (const it of due) {
+          const b = billsOf(it).map((x) => x.billNumber).filter(Boolean);
+          await checkBills(tripNo(it), b); // eslint-disable-line no-await-in-loop
+          await db.update(KEY, (cur) => ({ ...(cur || {}), brokerChecked: Object.fromEntries(Object.entries({ ...((cur && cur.brokerChecked) || {}), [tripNo(it)]: now() }).slice(-300)) }), {}); // eslint-disable-line no-await-in-loop
+        }
+        if (due.length) console.log(`[synergize] broker loads: ${due.length} checked`);
+      } catch (e) { console.warn('[synergize] broker:', e.message); }
     }, 10 * MIN);
     if (t.unref) t.unref();
   }

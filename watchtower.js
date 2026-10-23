@@ -146,6 +146,15 @@ const notStartedCode = (code) => /^(disp|assgn|assigned|printed|avail|avbl|new|p
 // not started = TruckMate says so, or the trip sheet says the driver picks the
 // load up later ("picking it up Friday around 6 AM") and that time hasn't come
 const notStarted = (code, f, now) => notStartedCode(code) || !!(f && f.pickupAtMs && now != null && now < f.pickupAtMs);
+// A broker load: its bills are B numbers (broker bills) and it isn't on an ARTIS Truck Builder run — or a rate con is on it. Pure.
+export function brokerLoad(item) {
+  if (!item) return false;
+  if (item._ratecon) return true;
+  if (item._tb) return false;
+  const t = item.trip || item;
+  const bills = ((item.freightBills || item.orders || t.freightBills || [])).map((b) => String(b.billNumber || '').trim()).filter(Boolean);
+  return bills.length > 0 && bills.length <= 12 && bills.every((b) => /^B\d/i.test(b));
+}
 const isAtStop = (code) => /^(arrship|arrcons|spot)/i.test(String(code || ''));
 
 // "BROUSSARD", "LA" → "BROUSSARD|LA" — same key as commitments.js (inlined: it imports this file). Pure.
@@ -287,6 +296,10 @@ function tripFacts(item, now) {
     etaGpsOk: gpsAgeMin != null && (gpsAgeMin <= 30 || (gpsAgeMin <= 360 && live && live.speedMph != null && live.speedMph <= 2)),
     gpsAgeMin,
     instrPending: instr.filter((s) => !(checks[s] && checks[s].done)).length,
+    // a broker load (B bills, not an ARTIS run) has to have its rate con on file
+    broker: brokerLoad(item),
+    hasRateCon: !!(item && item._ratecon),
+    billNo: String((billsRaw[0] && billsRaw[0].billNumber) || '').trim(),
     tasks: (item && item._tasks) || [],
     instrTotal: instr.length,
     hold: (item && item._hold) || null,
@@ -683,6 +696,14 @@ const RULES = [
       code: 'tracking-lost', severity: 'warning',
       title: f.live && f.gpsAgeMin != null ? `No GPS for ${fmtMin(f.gpsAgeMin)}` : 'No live tracking for this truck',
       detail: 'In transit but not reporting. Call the driver for a location check.',
+    };
+  },
+  function rateConMissing(f) {
+    if (!f.broker || f.hasRateCon || f.oc || isDone(f.status)) return null;
+    return {
+      code: 'ratecon-missing', severity: 'warning',
+      title: `Rate con not on file${f.billNo ? ` (${f.billNo})` : ''}`,
+      detail: 'Broker load — dispatch, please upload the rate confirmation on the card (or email it to Jarvis). Jarvis also checks ARTIS (Synergize) for it every 2 hours and attaches it when it shows up.',
     };
   },
   function handlingPending(f) {

@@ -827,7 +827,7 @@ const artisWeb = initArtisWeb(app, { requireAuth: requireDispatch, requireAdmin,
 // the rest of ARTIS: door temps (reefer alert), tractor / trailer positions, approaching yard; reports for Jarvis
 const artisReports = initArtisReports({ db, artisWeb, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), tempTeam: () => alertRecipients.resolve('reefer_temp'), env: process.env });
 // ARTIS Synergize documents (POD / BOL / invoice…) by bill — any bill type; TIFF scans → PDF, kept on the trip
-const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmin, db, docs, artisWeb, getBoard: (site) => truckmate.buildBoard(site), nameFits: (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75 });
+const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmin, db, docs, artisWeb, getBoard: (site) => truckmate.buildBoard(site), onRateCon: (trip, file) => ratecon.attachIfMissing('florida-beauty', trip, file), nameFits: (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75 });
 // ARTIS customers → profiles (ID, address, phone, fax, delivery days…), the client list, and customer geofences
 artisClients = initArtisClients(app, { requireAuth: requireDispatch, requireAdmin, db, artisWeb, clients, profiles });
 app.post('/truckmate/artis/reports/run', requireAdmin, async (req, res) => { try { res.json(await artisReports.refresh()); } catch (e) { res.status(502).json({ error: e.message }); } });

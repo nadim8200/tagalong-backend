@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------
 import { nameScore } from './voice.js';
 import { linkSheetStops } from './manifest.js';
+import { brokerLoad } from './watchtower.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taTruckBuilder:${SITE}`;
@@ -413,7 +414,8 @@ export function initTruckBuilder(app, { requireAdmin, db, sendMail = null, recip
     for (const it of trips) {
       let r = st.trips[String(tripOf(it).tripNumber || '')];
       // the Truck Builder has the truck but no trip number on it → the latest night with that truck (and trailer, when both known)
-      if (!r && st.untripped && tripOf(it).powerUnit) {
+      // (never onto a broker load — the truck finished its run and is hauling B bills now)
+      if (!r && st.untripped && tripOf(it).powerUnit && !brokerLoad(it)) {
         const t = tripOf(it);
         const cands = Object.values(st.untripped).filter((u) => unitOf(u.truck) === unitOf(t.powerUnit) && (!u.trailer || !t.trailer || unitOf(u.trailer) === unitOf(t.trailer))).sort((a, b) => String(b.date).localeCompare(String(a.date)));
         if (cands[0]) r = { ...cands[0], trip: String(t.tripNumber), linkedBy: 'truck' };

@@ -164,6 +164,21 @@ export function initRateCon(app, { requireAuth, db, env = process.env, docs = nu
     return record;
   }
 
+  // A rate con found in ARTIS (Synergize) for a load that has none yet → read it and put it on the load
+  // (never replaces one dispatch uploaded). file: { filename, dataBase64 } (PDF).
+  async function attachIfMissing(site, trip, file, by = 'Jarvis (ARTIS Synergize)') {
+    if (!key || !(db && db.enabled)) return null;
+    const cur = ((await db.get(storeKey(site), {})) || {})[String(trip)];
+    if (cur) return null;
+    const pages = [{ filename: file.filename, mediaType: 'application/pdf', dataBase64: file.dataBase64 }];
+    const parsed = await readRateConPages(pages, { key, model });
+    const record = { ...parsed, filename: file.filename, pageCount: 1, uploadedAt: new Date().toISOString(), uploadedBy: by, source: 'ARTIS (Synergize)' };
+    if (docs && docs.enabled) {
+      try { const stored = await docs.storeDocs({ site, kind: 'ratecon', trip: String(trip), files: pages, by }); record.docIds = stored.map((d) => d.id); record.version = stored.length ? stored[0].version : null; } catch (e) { record.docError = `Original not stored: ${e.message}`; }
+    }
+    return saveRateCon(site, trip, record);
+  }
+
   console.log('[ratecon] rate-confirmation reader ready' + (key ? '' : ' (no ANTHROPIC_API_KEY — uploads will 503)'));
-  return { read: (pages) => readRateConPages(pages, { key, model }), save: saveRateCon, enabled: !!key, whoAmI, onSaved: (fn) => onSaved.push(fn) };
+  return { read: (pages) => readRateConPages(pages, { key, model }), save: saveRateCon, attachIfMissing, enabled: !!key, whoAmI, onSaved: (fn) => onSaved.push(fn) };
 }
