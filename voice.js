@@ -58,6 +58,8 @@ export const GREETING = "Hi, this is Jarvis, Florida Beauty Flora's assistant. T
 // Said once, right after giving a customer or broker an ETA (in the caller's language).
 export const ETA_DISCLAIMER = 'Please keep in mind this is an estimated time of arrival and it may change with traffic, weather or road conditions. If anything changes, we will keep you updated.';
 // Two voices: the English Jarvis hands Spanish speakers to the Spanish Jarvis (same call) and back.
+export const SWAP_LINE_ES = 'Un momento, le paso con mi compañero en español.';
+export const SWAP_LINE_EN = 'One moment, let me pass you to my colleague in English.';
 export const SPANISH_HANDOFF_EN = 'Spanish callers: as soon as the caller says a full sentence in Spanish or asks for Spanish, call switch_to_spanish right away and say nothing before it — the Spanish-speaking Jarvis continues this same call and hears everything said so far. One word like "Hola" or "Sí" is not enough. Hebrew stays with you (answer in Hebrew).';
 export const SPANISH_HANDOFF_ES = 'You are the Spanish-speaking Jarvis: this call was just handed to you from the English Jarvis — do NOT greet again or repeat the recording notice; continue the conversation in Latin American Spanish, answering what the caller just said. If the caller switches to English or Hebrew (a full sentence) or asks for English, call switch_to_english right away and say nothing before it.';
 export const PROMPT = `You are Jarvis, the automated dispatch assistant for Florida Beauty Flora (a Miami flower and freight trucking company). You talk on the phone with truck drivers, customers (receivers, florists) and freight brokers.
@@ -1137,11 +1139,12 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
   const pick = (o, ks) => Object.fromEntries(ks.filter((k) => o && o[k] != null).map((k) => [k, o[k]]));
   // the call summary is written once (by the agent the call ends with — it has the whole conversation); call events
   // keep coming from the agent that started the call; always the PUBLISHED other Jarvis
-  const swapTool = (name, description, agentId) => ({ type: 'agent_swap', name, description, agent_id: agentId, agent_version: 'latest_published', post_call_analysis_setting: 'only_destination_agent', webhook_setting: 'only_source_agent', speak_during_execution: false });
+  // a short line is said while the call is handed over, so the new voice isn't a surprise
+  const swapTool = (name, description, agentId, line) => ({ type: 'agent_swap', name, description, agent_id: agentId, agent_version: 'latest_published', post_call_analysis_setting: 'only_destination_agent', webhook_setting: 'only_source_agent', speak_during_execution: true, execution_message_type: 'static_text', execution_message_description: line });
   // the Spanish Jarvis: same instructions + tools, Spanish voice / language, a hand-back to the English Jarvis
   async function upsertSpanish(cfg, base, llmEn, agentEn) {
     const llmBody = { ...llmEn, general_prompt: `${PROMPT}\n\n${SPANISH_HANDOFF_ES}`, begin_message: '', start_speaker: 'agent',
-      general_tools: [...llmEn.general_tools, swapTool('switch_to_english', 'Hand this call back to the English-speaking Jarvis (same call). Use it as soon as the caller switches to English or asks for English. Say nothing before it.', cfg.agentId)] };
+      general_tools: [...llmEn.general_tools, swapTool('switch_to_english', 'Hand this call back to the English-speaking Jarvis (same call). Use it as soon as the caller switches to English or asks for English. Say nothing before it.', cfg.agentId, SWAP_LINE_EN)] };
     const agentBody = { ...agentEn, agent_name: 'Jarvis — Florida Beauty Flora dispatch (Español)', voice_id: cfg.spanishVoiceId };   // same languages as the English Jarvis (so it still understands English / Hebrew to hand back)
     let agent; let llm;
     if (!cfg.esAgentId) {
@@ -1197,7 +1200,7 @@ export function initVoice(app, { requireAuth, db, missingBoxes = null, missingCa
       if (cfg.agentId && cfg.spanishVoiceId) {
         try {
           spanish = await upsertSpanish(cfg, base, llmBody, agentBody);
-          llmBody.general_tools = [...llmBody.general_tools, swapTool('switch_to_spanish', 'Hand this call to the Spanish-speaking Jarvis (same call, Mexican Spanish voice). Use it as soon as the caller says a full sentence in Spanish or asks for Spanish. Say nothing before it.', spanish.esAgentId)];
+          llmBody.general_tools = [...llmBody.general_tools, swapTool('switch_to_spanish', 'Hand this call to the Spanish-speaking Jarvis (same call, Mexican Spanish voice). Use it as soon as the caller says a full sentence in Spanish or asks for Spanish. Say nothing before it.', spanish.esAgentId, SWAP_LINE_ES)];
           llmBody.general_prompt = `${PROMPT}\n\n${SPANISH_HANDOFF_EN}`;
         } catch (e) { console.warn('[voice] spanish agent:', e.message); spanish = { spanishError: e.message }; }
       }

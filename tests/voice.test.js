@@ -827,6 +827,7 @@ test('staff: "ETA for Zoom Bloom, trip 625490" answers for Zoom Bloom — not th
   } finally { board.pop(); }
 });
 
+const enLlmSwap = (v) => v.retellCalls.filter((c) => c.url.includes('update-retell-llm/llm_1')).at(-1).body.general_tools.find((t) => t.name === 'switch_to_spanish');
 test('two voices: English Jarvis hands Spanish callers to a Spanish Jarvis (same call) and back; the picks survive updates', async () => {
   const v = setup();
   await v.hit('POST /voice/setup', {});
@@ -837,6 +838,8 @@ test('two voices: English Jarvis hands Spanish callers to a Spanish Jarvis (same
   assert.equal(esLlm.begin_message, ''); assert.match(esLlm.general_prompt, /do NOT greet again/);
   const back = esLlm.general_tools.find((t) => t.type === 'agent_swap');
   assert.deepEqual([back.name, back.agent_id, back.agent_version, back.post_call_analysis_setting, back.webhook_setting], ['switch_to_english', 'agent_1', 'latest_published', 'only_destination_agent', 'only_source_agent']);
+  assert.deepEqual([back.speak_during_execution, back.execution_message_type, back.execution_message_description], [true, 'static_text', 'One moment, let me pass you to my colleague in English.']);
+  assert.equal(enLlmSwap(v).execution_message_description, 'Un momento, le paso con mi compañero en español.');
   const enLlm = v.retellCalls.filter((c) => c.url.includes('update-retell-llm/llm_1')).at(-1).body;
   assert.ok(enLlm.general_tools.some((t) => t.type === 'agent_swap' && t.name === 'switch_to_spanish'));
   assert.match(enLlm.general_prompt, /call switch_to_spanish right away/);
