@@ -46,6 +46,7 @@ export function ocFor(item, store) {
   const unit = String(t.powerUnit || '');
   const mark = (store.marks || {})[trip] || null;
   if (mark && mark.cleared) return null;
+  if (t.tmPowerUnit && !mark) return null;   // a TruckMate tag for one of OUR trucks (units.js: OC2 = 4550) — not an outside carrier
   const sheet = item && item._manifest && item._manifest.outsideCarrier;
   const fromSheet = sheet && sheet.isOutsideCarrier ? sheet : null;
   const code = isOcUnit(unit) ? unit.toUpperCase().replace(/[\s-]/g, '') : null;

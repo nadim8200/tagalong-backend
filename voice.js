@@ -25,6 +25,7 @@ import { isMissingBoxesText } from './missingcase.js';
 import Retell from 'retell-sdk';
 import { contactsFor, billsOf } from './statusmail.js';
 import { fmtLocal } from './localtime.js';
+import { realUnit } from './units.js';
 
 const API = 'https://api.retellai.com';
 // Truck / trailer / trip / bill numbers are read digit by digit on the phone: "2026" → "2 0 2 6".
@@ -784,6 +785,7 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
   });
   app.post('/retell/fn/lookup_load', verified, async (req, res) => {
     const a = argsOf(req); const call = callOf(req);
+    if (a.truck_number) a.truck_number = realUnit(a.truck_number);   // "OC2" is truck 4550
     const reply = (j) => {
       if (call.call_id) callLookups.set(call.call_id, [...(callLookups.get(call.call_id) || []), { at: new Date().toISOString(), asked: a, answer: JSON.stringify(j).slice(0, 2500) }].slice(-6));
       return res.json(spokenNumbers(j));

@@ -13,6 +13,7 @@ import { compareWithTruckMate, keyStops, linkSheetStops } from './manifest.js';
 import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, analyzeReeferReadings, listAddresses, readingsDefinitions, capabilityProbe, vehicleGpsHistory, vehicleForUnit, trailerLocations } from './samsara.js';
 import { buildFleet, updateStill, withStill } from './fleetmap.js';
 import { tripTimes } from './triptimes.js';
+import { applyUnitAliases } from './units.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -525,7 +526,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   async function buildBoard(site) {
     const store = (db && db.enabled) ? await db.get(`taTruckMateActive:${site}`, { trips: {} }) : { trips: {} };
     const recs = Object.values(store.trips || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    const trips = recs.map((r) => { if (r.item) r.item._times = tripTimes(r); return r.item; });
+    const trips = applyUnitAliases(recs.map((r) => { if (r.item) r.item._times = tripTimes(r); return r.item; }));
     // Overlay LIVE Samsara data (driver names, GPS/fuel/engine, reefer temp) on
     // each trip so the dispatcher can cross-check it against TruckMate. Cached
     // ~60s; if Samsara is down or unconfigured we just skip the overlay.

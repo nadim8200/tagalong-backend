@@ -20,6 +20,7 @@ import { findLoad, customerStops, customerView, isOcLoad, spokenName, nameScore 
 import { contactsFor } from './statusmail.js';
 import { customerAnswer, loadAnswer } from './dispatchcards.js';
 import { fmtLocal } from './localtime.js';
+import { realUnit } from './units.js';
 
 const SITE = 'florida-beauty';
 const API = 'https://api.anthropic.com/v1/messages';
@@ -179,6 +180,9 @@ export function initJarvisChat(app, { requireAuth, db, artis = null, artisWeb = 
 
   // ---- tools ----
   async function runTool(name, input, ctx) {
+    // "OC2" is truck 4550 (TruckMate / EDI tag) — tools look for the real truck
+    if (input && typeof input.truck === 'string') input.truck = realUnit(input.truck);
+    if (input && typeof input.query === 'string') input.query = realUnit(input.query);
     const board = await getBoard(SITE).catch(() => null);
     const all = (board && board.trips) || [];
     const byTrip = (t) => all.find((it) => tripNo(it) === String(t || '').replace(/\D/g, ''));
