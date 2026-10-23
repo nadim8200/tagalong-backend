@@ -901,3 +901,19 @@ test('a staff caller with no email on the Employees list gets the manifest at th
   const r = await v.hit('POST /retell/fn/email_manifest', { call, args: { customer_name: 'Native' } });
   assert.equal(r.out.ok, true); assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']);
 });
+
+test('staff: a customer whose loads are all outside-carrier still hears them (never "no loads"); a bill not on a trip is said plainly; a delivered bill says delivered', async () => {
+  const staffDir = { load: async () => ({ people: [{ name: 'Steven', phone: '3055550123' }] }), find: async () => [], main: async () => '305-503-1200' };
+  const oc = (n, unit, bill) => ({ trip: { tripNumber: n, status: 'DEPSHIP', statusDesc: 'DEPART SHIPPER', powerUnit: unit }, freightBills: [{ billNumber: bill, billToName: 'NATIVE CHICAGO - LOMBARD', endZoneDescription: 'LOMBARD, IL, 60148', pieces: 12 }] });
+  const v = setup({}, { board: [oc('625486', 'OC01', 'C979197'), oc('625575', 'OC 978', 'M5048958')], extra: { directory: staffDir } });
+  await v.db.set('taTruckMateDelivered:florida-beauty', { items: [{ tripNumber: '625001', billNumbers: ['B180500'], destinationZone: 'MIAMI, FL', deliveredAt: '2026-10-23T12:00:00Z' }] });
+  const call = { call_id: 's1', call_type: 'phone_call', direction: 'inbound', from_number: '+13055550123' };
+  const r = await v.hit('POST /retell/fn/lookup_load', { call, args: { customer_name: 'Native Lombard' } });
+  assert.equal(r.out.found, true); assert.equal(r.out.outside_carrier_loads.length, 2);
+  assert.match(r.out.say, /HAS 2 active loads, all with outside carriers/);
+  assert.deepEqual(r.out.outside_carrier_loads.map((x) => x.unit), ['OC01', 'OC 978']);
+  const b = await v.hit('POST /retell/fn/lookup_load', { call: { ...call, call_id: 's2' }, args: { bill_number: 'B180513' } });
+  assert.equal(b.out.not_on_a_trip, true); assert.match(b.out.say, /isn't on any trip in TruckMate yet/);
+  const d = await v.hit('POST /retell/fn/lookup_load', { call: { ...call, call_id: 's3' }, args: { bill_number: 'B-180500' } });
+  assert.equal(d.out.delivered, true); assert.equal(d.out.trip, '6 2 5 0 0 1');
+});
