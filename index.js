@@ -56,6 +56,9 @@ import { initClients } from './clients.js';
 import { nameScore } from './voice.js';
 import { initMilestones } from './milestones.js';
 import { initCommitments } from './commitments.js';
+import { initArtisWeb } from './artisweb.js';
+import { initArtisReports } from './artisreports.js';
+import { initSynergize } from './synergize.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
@@ -797,6 +800,7 @@ const inbox = initInbox(app, { stopTasks, roadCalls: { checkDriver: (...a) => (r
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
+    senderClient: (() => { const c = clients.byEmail(from.address); return c ? c.name : null; })(),   // their own manifests only
     text: `[Email from ${from.name || ''} <${from.address}>]${(() => { const c = clients.byEmail(from.address); return c ? `\n[Sender is on our client list: ${c.name}${c.city ? ` — ${c.city}, ${c.state || ''}` : ''}. Look their loads up by that business name.]` : ''; })()}\nSubject: ${subject || ''}\n\n${String(text || '').slice(0, 3500)}`,
   } : {
     mode: 'staff_email', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: from.name || from.address, email: from.address },
@@ -816,6 +820,13 @@ const alertRecipients = initAlertRecipients(app, { requireAuth: requireDispatch,
 const commitments = initCommitments(app, { requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), emails: () => alertRecipients.resolve('late_commitment'), phones: () => alertRecipients.phones('late_commitment'), sendSms: (to, text) => rc.sendSms('__shared', { to, text }) });
 const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: (k) => alertRecipients.resolve(k), env: process.env });
 // Missing boxes a customer asked about → email the "Customer asked about a load with missing boxes" list
+// ARTIS Trip Status (ETA twice a day) + Trip Manifest PDFs, same read-only web login as the Truck Builder
+const artisWeb = initArtisWeb(app, { requireAuth: requireDispatch, requireAdmin, db, docs, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+// the rest of ARTIS: door temps (reefer alert), tractor / trailer positions, approaching yard; reports for Jarvis
+const artisReports = initArtisReports({ db, artisWeb, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), tempTeam: () => alertRecipients.resolve('reefer_temp'), env: process.env });
+// ARTIS Synergize documents (POD / BOL / invoice…) by bill — any bill type; TIFF scans → PDF, kept on the trip
+const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmin, db, docs, artisWeb, getBoard: (site) => truckmate.buildBoard(site), nameFits: (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75 });
+app.post('/truckmate/artis/reports/run', requireAdmin, async (req, res) => { try { res.json(await artisReports.refresh()); } catch (e) { res.status(502).json({ error: e.message }); } });
 const truckBuilder = initTruckBuilder(app, { requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('tripsheet_check'), env: process.env });
 // road calls (breakdowns / tires) → Michelin ONCall when its API is set up; else the packet for 1-800-TIRE911
 roadCalls = initRoadCalls(app, { requireAuth: requireDispatch, db, docs, help,
@@ -826,7 +837,7 @@ roadCalls = initRoadCalls(app, { requireAuth: requireDispatch, db, docs, help,
 const macroPoint = initMacroPoint(app, { requireAdmin, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 missingCases = initMissingCases({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('missing_boxes_case'), getBoard: (site) => truckmate.buildBoard(site) });
 const missingBoxes = initMissingBoxes({ db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('artis_missing_call') });
-truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => commitments.overlay(...a), (...a) => truckBuilder.overlay(...a), (...a) => artis.overlay(...a), (...a) => stopTasks.overlay(...a), (...a) => macroPoint.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
+truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => commitments.overlay(...a), (...a) => truckBuilder.overlay(...a), (...a) => artisWeb.overlay(...a), (...a) => artisReports.overlay(...a), (...a) => synergize.overlay(...a), (...a) => artis.overlay(...a), (...a) => stopTasks.overlay(...a), (...a) => macroPoint.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => rundowns.onFinished(site, rec, reason) });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
@@ -852,7 +863,7 @@ voice.useOutreach((ev) => outreach.notify(ev));
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { photos: () => (tempPhotos ? tempPhotos.latestPhotos() : []), requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport });
-jarvisChat = initJarvisChat(app, { artis, clients, planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
+jarvisChat = initJarvisChat(app, { artis, artisWeb, artisReports, synergize, clients, planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });

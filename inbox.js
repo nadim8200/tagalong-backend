@@ -979,8 +979,10 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
         const jThread = (prev && prev.jarvisThread) || e.jarvisThread || [...Array(12)].map(() => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
         const r = await askJarvis({ mode: staff ? 'staff' : 'customer', threadId: jThread, from: e.from, subject: e.subject, text: e.text, trips: e.trips || [], done: [] });
         if (r && r.answer) {
-          await update(site, e.id, (x) => ({ ...x, draft: r.answer, draftDocs: [], jarvisThread: jThread }));
-          return res.json({ draft: r.answer, docs: [], facts: true });
+          // documents Jarvis attached (e.g. the customer's ARTIS trip manifest) — sent only when the dispatcher sends the reply
+          const jdocs = (r.docs || []).map((d) => ({ id: String(d.id), name: d.name }));
+          await update(site, e.id, (x) => ({ ...x, draft: r.answer, draftDocs: jdocs, jarvisThread: jThread }));
+          return res.json({ draft: r.answer, docs: jdocs, facts: true });
         }
       }
       const d = await makeDraft(site, e, await board(site));

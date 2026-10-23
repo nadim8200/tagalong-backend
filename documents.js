@@ -18,7 +18,7 @@ import crypto from 'node:crypto';
 import { PDFDocument } from 'pdf-lib';
 import { readableFile } from './heic.js';
 
-const KINDS = new Set(['ratecon', 'tripsheet', 'packet', 'driverdoc', 'rundown', 'email']);   // email = attachment received by Jarvis   // rundown = the load's full PDF report   // driverdoc = POD / BOL sent by the driver
+const KINDS = new Set(['ratecon', 'tripsheet', 'packet', 'driverdoc', 'rundown', 'email', 'manifest', 'artisdoc']);   // artisdoc = POD / BOL / invoice from ARTIS (Synergize)   // manifest = ARTIS Trip Manifest PDF for one customer   // email = attachment received by Jarvis   // rundown = the load's full PDF report   // driverdoc = POD / BOL sent by the driver
 const MAX_FILE_BYTES = 14 * 1024 * 1024;
 const OK_TYPES = /^(application\/pdf|image\/(jpeg|png|webp|heic|heif|gif))$/i;
 
