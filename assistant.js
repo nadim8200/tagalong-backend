@@ -66,7 +66,7 @@ export function slimItem(it, alerts = []) {
   };
 }
 
-export function initAssistant(app, { db, env = process.env, buildBoard, voice = null, outbound = null, flowerReport = null }) {
+export function initAssistant(app, { db, env = process.env, buildBoard, voice = null, outbound = null, flowerReport = null, stopTimes = null }) {
   const secret = () => String(env.ASSISTANT_READ_KEY || '').trim();   // a pasted trailing newline must not break it
   const enabled = () => secret().length >= 24;
   const site = (req) => String(req.query.site || 'florida-beauty');
@@ -113,6 +113,7 @@ export function initAssistant(app, { db, env = process.env, buildBoard, voice = 
       if (it._manifest) item.sheetVsTruckMate = compareWithTruckMate(it._manifest, it).map((d) => d.msg);
       const fmtEt = (ms) => (ms ? new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : null);
       const e = (w.etas || {})[n];
+      item.stopTimes = stopTimes ? await stopTimes.query({ site: s, trip: n, days: 30 }).catch(() => null) : null;
       item.etas = e ? { at: fmtEt(e.at), team: e.team, leavesAt: fmtEt(e.leavesAt), passed: (e.passed || []).map((x) => x.label), stops: (e.stops || []).map((x) => ({ stop: x.label, miles: x.miles, eta: fmtEt(x.etaMs) })) } : null;
       send(res, item);
     } catch (e) { res.status(500).json({ error: e.message }); }

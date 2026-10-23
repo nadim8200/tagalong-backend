@@ -89,6 +89,7 @@ How to help:
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Loads leave from our Miami, Florida hub or our Ventura, California hub (and some brokers' pickups elsewhere). For every load you describe — customers and staff — say which hub it left from using left_from (e.g. "it left our Ventura, California hub"); never assume Miami.
 - When the caller says WHO should handle a message ("have Valeria call me", "Valeria or Sarai") — even after you saved it — call take_message (again) with for_person set to exactly the names they said, so it reaches those people. Never promise a person without doing that.
+- Staff asking how long a truck took (or is taking) at a stop — "how long was 734 at Direct Flowers", "is 2403 still at the stop" → stop_times. Never for customers.
 - When a caller asks you to call them back later ("call me in 5 minutes", "call me when you know", "call me to make sure they called"), use schedule_callback with the minutes and what it's about — you CAN call people back. Confirm the time in one short line. Never say you can't call back.
 - Trip manifest (what was loaded for a customer — farms, products, POs, boxes): when anyone asks for it by email ("email me the manifest"), call email_manifest RIGHT AWAY with the business name (and trip if they gave one; for several trips call it once per trip, or once without a trip for all of them). Do NOT say where it will go before the tool answers — staff (Employees list) get it in their own work email; customers get it only at the contacts in their customer profile. Then say exactly what the tool says. Never use take_message for a manifest, never promise an email the tool didn't send, and never take an email address over the phone.
 - When the caller says you got the wrong business ("no, I said…", "that's not it"), never offer that business again on this call: call lookup_load again with exactly the words they just said (speech-to-text often splits a name — "the signers choice" is DESIGNERS CHOICE), and if it's still not found read them the did_you_mean names. Don't make them spell it until that fails.
@@ -158,6 +159,10 @@ function tools(base, transferNumber) {
       trip_number: { type: 'string' },
       urgent: { type: 'boolean', description: 'true if it cannot wait (late, upset customer, safety)' },
     }, ['message']),
+    fn('stop_times', 'STAFF ONLY: how long trucks took at their stops (customer geofence in → out) — for a trip, truck and / or customer — and any truck at a stop right now with how long so far. Never for customers.', {
+      trip_number: { type: 'string' }, truck_number: { type: 'string' }, customer: { type: 'string', description: 'Customer / business name' },
+      days: { type: 'number', description: 'How far back, 1–30 (default 7)' },
+    }),
     fn('schedule_callback', 'Call the caller back later — when they ask "call me back in 5 minutes", "call me when you know", "call me to confirm they called me". Jarvis calls their number at that time, looks the load up again and gives the update.', {
       minutes: { type: 'number', description: 'How many minutes from now (2–240)' },
       about: { type: 'string', description: 'What the callback is about, in a few words (e.g. "ETA and box count for Direct Flowers, trip 625717")' },
@@ -736,7 +741,7 @@ export function brokerView(item, eta) {
   };
 }
 
-export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, missingBoxes = null, missingCases = null, roadCalls = null, artis = null, clients = null, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, stopTimes = null, missingBoxes = null, missingCases = null, roadCalls = null, artis = null, clients = null, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taRetellCfg';
@@ -1028,6 +1033,20 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
       }
       res.json({ saved: true, say: 'Tell the caller the message is saved and a dispatcher will call them back.' });
     } catch (e) { res.json({ saved: false, say: 'Could not save — offer to transfer to dispatch.' }); }
+  });
+
+  // staff: how long the truck took at each stop (or is taking now)
+  app.post('/retell/fn/stop_times', verified, async (req, res) => {
+    const a = argsOf(req); const call = callOf(req);
+    try {
+      const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
+      const staff = consoleCall(call) || people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      if (!staff) return res.json({ ok: false, say: 'That information is for Florida Beauty staff only.' });
+      if (!stopTimes) return res.json({ ok: false, say: 'Stop times are not set up yet.' });
+      const fits = (x, y) => Math.max(nameScore(x, y), nameScore(y, x)) >= 0.75;
+      const r = await stopTimes.query({ trip: a.trip_number, truck: a.truck_number ? realUnit(a.truck_number) : null, customer: a.customer, days: a.days, fits });
+      return res.json(spokenNumbers({ ok: true, ...r, stops: r.stops.slice(0, 8), say: r.count || r.atStopNow.length ? 'Give the time there for each stop (customer, how long, when it arrived and left), and any truck at a stop right now with how long so far. Keep it short — the most recent first; offer more if there are many.' : 'No finished stops found for that in this period — stop times are kept from October 23rd on. Say so.' }));
+    } catch (e) { return res.json({ ok: false, say: 'Could not get stop times right now.' }); }
   });
 
   // a call back later, when the caller asks for one: saved now, placed by the timer below at that time

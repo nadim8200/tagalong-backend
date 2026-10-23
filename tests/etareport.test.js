@@ -47,3 +47,16 @@ test('stop times: every finished geofence visit — trip, truck, customer, place
   assert.deepEqual(Object.values(rows).map((r) => [r.trip, r.truck, r.customer, r.place, r.minutes]), [['625645', '4550', 'OSCAR FLOWERS', 'MT RAINIER, MD', 40]]);
   assert.equal(hm(85), '1 h 25 min'); assert.equal(hm(40), '40 min');
 });
+
+
+test('Jarvis / API query: finished stops by trip, truck or customer, and a truck at a stop right now', async () => {
+  const mm = new Map(); const db = { enabled: true, get: async (k, fb) => (mm.has(k) ? mm.get(k) : fb), set: async (k, v) => mm.set(k, v), update: async (k, fn, fb) => { const v = fn(mm.has(k) ? mm.get(k) : fb); mm.set(k, v); return v; } };
+  const now = Date.parse('2026-10-24T15:00:00Z');
+  await db.set('taStopTimes:florida-beauty', { 'a|s1': { trip: '625642', truck: '734', customer: 'DIRECT FLOWERS OF BOSTON INC', place: 'CHELSEA, MA', arrivedMs: now - 5 * H, leftMs: now - 3 * H, minutes: 120 } });
+  await db.set('taStopVisits:florida-beauty', { 625645: { s2: { stopKey: 's2', unit: '4550', state: 'at_stop', geofence: { name: 'OSCAR FLOWERS' }, enteredAt: now - 25 * M } } });
+  const r = initEtaReport({ db, now: () => now });
+  const q = await r.query({ customer: 'direct flowers' });
+  assert.equal(q.count, 1); assert.equal(q.stops[0].time_there, '2 h'); assert.equal(q.average, '2 h');
+  const live = await r.query({ truck: '4550' });
+  assert.deepEqual(live.atStopNow.map((x) => [x.customer, x.there_so_far]), [['OSCAR FLOWERS', '25 min']]);
+});

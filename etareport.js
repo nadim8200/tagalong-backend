@@ -185,5 +185,23 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     await db.update(SENT(site), (cur) => Object.fromEntries(Object.entries({ ...(cur || {}), [n]: new Date(now()).toISOString() }).slice(-1000)), {});
     return m;
   }
-  return { process, onFinished, site: SITE };
+  // for Jarvis (chat, phone, email answers) and the read-only API: finished stops + a truck at a stop right now
+  async function query({ trip = null, truck = null, customer = null, days = 7, site = SITE, fits = null } = {}) {
+    if (!enabled) return { stops: [], atStopNow: [] };
+    const since = now() - Math.min(30, Math.max(1, Number(days) || 7)) * 24 * 60 * MIN;
+    const n = trip ? String(trip).replace(/\D/g, '') : null; const u = truck ? String(truck).replace(/^0+/, '').toUpperCase() : null;
+    const want = (r) => (!n || r.trip === n) && (!u || String(r.truck || '').replace(/^0+/, '').toUpperCase() === u) && (!customer || (fits ? fits(customer, r.customer || '') : String(r.customer || '').toUpperCase().includes(String(customer).toUpperCase())));
+    const say = (r) => ({ trip: r.trip, truck: r.truck, customer: r.customer, place: r.place, arrived: fmtLocalShort(r.arrivedMs, r.place || 'FL'), left: r.leftMs ? fmtLocalShort(r.leftMs, r.place || 'FL') : null, time_there: hm(r.minutes) });
+    const done = Object.values((await db.get(TIMES(site), {})) || {}).filter((r) => r.leftMs >= since && want(r)).sort((a, b) => b.arrivedMs - a.arrivedMs);
+    const visits = (await db.get(`taStopVisits:${site}`, {})) || {};
+    const live = [];
+    for (const [t, vs] of Object.entries(visits)) for (const v of Object.values(vs || {})) {
+      if (!v || !v.enteredAt || v.exitedAt || !/at_stop|departing/.test(String(v.state || ''))) continue;
+      const r = { trip: String(t), truck: v.unit || null, customer: (v.geofence && v.geofence.name) || null, place: null, arrivedMs: v.enteredAt, minutes: Math.round((now() - v.enteredAt) / MIN) };
+      if (want(r)) live.push({ trip: r.trip, truck: r.truck, customer: r.customer, arrived: fmtLocalShort(r.arrivedMs, 'FL'), there_so_far: hm(r.minutes) });
+    }
+    const mins = done.map((r) => r.minutes).filter((m) => m != null);
+    return { stops: done.slice(0, 40).map(say), count: done.length, average: mins.length ? hm(Math.round(mins.reduce((a, b) => a + b, 0) / mins.length)) : null, atStopNow: live.slice(0, 20) };
+  }
+  return { process, onFinished, query, site: SITE };
 }

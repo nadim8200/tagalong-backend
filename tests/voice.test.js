@@ -104,7 +104,7 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   assert.deepEqual(r.out && { llm: r.out.llmId, agent: r.out.agentId }, { llm: 'llm_1', agent: 'agent_1' });
   const llm = v.retellCalls.find((c) => c.url.endsWith('/create-retell-llm')).body;
   assert.match(llm.model, /^claude/);
-  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'report_missing_boxes', 'take_message', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
+  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'report_missing_boxes', 'take_message', 'stop_times', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
   assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
   assert.deepEqual(agent.language, ['en-US', 'es-419', 'he-IL']);
@@ -1005,4 +1005,16 @@ test('a customer asks for "my Friday outbound" (known by their phone): that load
   assert.equal(none.out.no_load_that_day, true);
   const m = await v.hit('POST /retell/fn/email_manifest', { call, args: { customer_name: 'Direct Flowers of Boston', trip_number: '625700' } });
   assert.equal(m.out.ok, true); assert.deepEqual(sent[0].to, ['joe@directflowers.com']);
+});
+
+
+test('stop times on the phone: staff only', async () => {
+  const stopTimes = { query: async (q) => ({ stops: [{ trip: '625642', truck: '734', customer: 'DIRECT FLOWERS OF BOSTON INC', arrived: 'Oct 23, 2:00 PM ET', left: 'Oct 23, 4:05 PM ET', time_there: '2 h 5 min' }], count: 1, average: '2 h 5 min', atStopNow: [], asked: q }) };
+  const dir = { load: async () => ({ people: [{ name: 'Ronen Koubi', phone: '3052063095' }] }), find: async () => [], main: async () => '305-503-1200' };
+  const v = setup({}, { extra: { stopTimes, directory: dir } });
+  const staff = await v.hit('POST /retell/fn/stop_times', { call: { call_id: 's1', call_type: 'phone_call', direction: 'inbound', from_number: '+13052063095' }, args: { truck_number: 'OC2', customer: 'Direct Flowers' } });
+  assert.equal(staff.out.ok, true); assert.equal(staff.out.stops[0].time_there, '2 h 5 min');
+  assert.equal(staff.out.asked.truck, '4 5 5 0', 'OC2 is truck 4550');
+  const cust = await v.hit('POST /retell/fn/stop_times', { call: { call_id: 'c1', call_type: 'phone_call', direction: 'inbound', from_number: '+16175550100' }, args: { truck_number: '734' } });
+  assert.equal(cust.out.ok, false);
 });
