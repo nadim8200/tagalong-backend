@@ -203,5 +203,30 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     const mins = done.map((r) => r.minutes).filter((m) => m != null);
     return { stops: done.slice(0, 40).map(say), count: done.length, average: mins.length ? hm(Math.round(mins.reduce((a, b) => a + b, 0) / mins.length)) : null, atStopNow: live.slice(0, 20) };
   }
-  return { process, onFinished, query, site: SITE };
+  // the ETAs we gave vs when the truck got there, per stop — for a trip on the board or already finished
+  async function etaVsActual(item, site = SITE) {
+    if (!enabled || !item) return [];
+    const n = tripNo(item);
+    const log = ((await db.get(LOG(site), {})) || {})[n] || {};
+    const visits = ((await db.get(`taStopVisits:${site}`, {})) || {})[n] || {};
+    const times = Object.values((await db.get(TIMES(site), {})) || {}).filter((r) => r.trip === n);
+    return reportRows(item, log, visits).map((r) => {
+      const first = r.ours[0]; const last = r.ours[r.ours.length - 1];
+      // arrival: geofence (live visit, else the stop-times log for this place), else TruckMate / ARTIS delivered
+      const t = times.find((x) => x.place && placeKey(x.place) === placeKey(r.label));
+      const arrived = r.actual && r.actual.from.startsWith('arrived') ? r.actual : t ? { ms: t.arrivedMs, from: 'arrived (geofence)' } : r.actual;
+      const at = (ms) => (ms ? fmtLocalShort(ms, r.label) : null);
+      return {
+        customer: r.customers.join(', ') || null, stop: r.label,
+        eta_we_gave_first: first ? `${at(first.etaMs)} (given ${fmtLocalShort(first.at, 'FL')})` : null,
+        eta_we_gave_last: last && last !== first ? `${at(last.etaMs)} (given ${fmtLocalShort(last.at, 'FL')})` : null,
+        artis_eta: r.artis.length ? at(r.artis[r.artis.length - 1].etaMs) : null,
+        actual_arrival: arrived ? (arrived.ms ? at(arrived.ms) : arrived.text) : null, arrival_from: arrived ? arrived.from : null,
+        off_by_last_eta: arrived && arrived.ms && last ? off(last.etaMs, arrived.ms) : null,
+        off_by_first_eta: arrived && arrived.ms && first ? off(first.etaMs, arrived.ms) : null,
+        time_at_stop: r.stay && r.stay.minutes != null ? hm(r.stay.minutes) : (t ? hm(t.minutes) : null),
+      };
+    });
+  }
+  return { process, onFinished, query, etaVsActual, site: SITE };
 }

@@ -24,3 +24,14 @@ test('by truck or by delivered day too', () => {
   assert.equal(searchPast(store, { customer: 'Direct Flowers', outboundDay: 'Monday', now }).length, 0);
   assert.equal(pastView(store['625540'], { customer: 'Somebody Else' }), null);
 });
+
+import { outboundDays } from '../voice.js';
+test('"when was Carbone Derry delivered this week" — spans: this week, last week, last few days', () => {
+  const sat = Date.parse('2026-10-24T15:00:00Z');
+  assert.deepEqual(outboundDays('this week', sat), ['2026-10-24', '2026-10-23', '2026-10-22', '2026-10-21', '2026-10-20', '2026-10-19']);
+  assert.equal(outboundDays('last week', sat)[0], '2026-10-12'); assert.equal(outboundDays('last week', sat).length, 7);
+  assert.equal(outboundDays('last 3 days', sat).length, 4);
+  const derry = { 625489: { finishedAt: '2026-10-24T01:15:00Z', rec: { item: { trip: { tripNumber: '625489', powerUnit: '736', origZoneDesc: 'VENTURA TERMINAL' }, freightBills: [{ billNumber: 'C979217', billToName: 'CARBONE -DERRY BILLING', endZoneDescription: 'DERRY, NH, 03038', pieces: 1, actualDelivery: '2026-10-23T20:23:31' }] } } } };
+  const r = searchPast(derry, { customer: 'Carbone Dairy', deliveredDay: 'this week', now: sat });
+  assert.equal(r.length, 1); assert.equal(r[0].stops[0].customer, 'CARBONE -DERRY BILLING');
+});

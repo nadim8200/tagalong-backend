@@ -60,3 +60,16 @@ test('Jarvis / API query: finished stops by trip, truck or customer, and a truck
   const live = await r.query({ truck: '4550' });
   assert.deepEqual(live.atStopNow.map((x) => [x.customer, x.there_so_far]), [['OSCAR FLOWERS', '25 min']]);
 });
+
+test('ETA we gave vs actual arrival, per stop (trip on the board or finished)', async () => {
+  const mm = new Map(); const db = { enabled: true, get: async (k, fb) => (mm.has(k) ? mm.get(k) : fb), set: async (k, v) => mm.set(k, v), update: async (k, fn, fb) => { const v = fn(mm.has(k) ? mm.get(k) : fb); mm.set(k, v); return v; } };
+  const t0 = Date.parse('2026-10-23T12:00:00Z');
+  const r = initEtaReport({ db, now: () => t0 });
+  await db.set('taEtaLog:florida-beauty', { 625645: { 'FALL RIVER|MA': { label: 'FALL RIVER, MA, 02720', ours: [{ at: t0, etaMs: t0 + 15 * H }, { at: t0 + 10 * H, etaMs: t0 + 16 * H }] } } });
+  await db.set('taStopVisits:florida-beauty', { 625645: { s6: { stopKey: 's6', enteredAt: t0 + 16 * H + 40 * M, exitedAt: t0 + 18 * H, dwellMin: 80 } } });
+  const rows = await r.etaVsActual(item);
+  const fr = rows.find((x) => /FALL RIVER/.test(x.stop));
+  assert.ok(fr.eta_we_gave_first && fr.eta_we_gave_last);
+  assert.ok(fr.actual_arrival); assert.equal(fr.arrival_from, 'arrived (geofence)');
+  assert.equal(fr.off_by_last_eta, '40 min later'); assert.equal(fr.off_by_first_eta, '1 h 40 min later'); assert.equal(fr.time_at_stop, '1 h 20 min');
+});

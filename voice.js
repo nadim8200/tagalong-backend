@@ -90,6 +90,7 @@ How to help:
 - Loads leave from our Miami, Florida hub or our Ventura, California hub (and some brokers' pickups elsewhere). For every load you describe — customers and staff — say which hub it left from using left_from (e.g. "it left our Ventura, California hub"); never assume Miami.
 - When the caller says WHO should handle a message ("have Valeria call me", "Valeria or Sarai") — even after you saved it — call take_message (again) with for_person set to exactly the names they said, so it reaches those people. Never promise a person without doing that.
 - A load that already delivered / finished (lookup_load can't find it on the board, or they ask "when did it deliver", "the one that left Tuesday"): use past_loads — by customer, truck, trip, outbound_day or delivered_day. Never say a load doesn't exist before checking past_loads.
+- Staff asking what ETA we gave vs when the truck got there ("what ETA did we give Carbone and when did we get there") → eta_vs_actual.
 - Staff asking how long a truck took (or is taking) at a stop — "how long was 734 at Direct Flowers", "is 2403 still at the stop" → stop_times. Never for customers.
 - When a caller asks you to call them back later ("call me in 5 minutes", "call me when you know", "call me to make sure they called"), use schedule_callback with the minutes and what it's about — you CAN call people back. Confirm the time in one short line. Never say you can't call back.
 - Trip manifest (what was loaded for a customer — farms, products, POs, boxes): when anyone asks for it by email ("email me the manifest"), call email_manifest RIGHT AWAY with the business name (and trip if they gave one; for several trips call it once per trip, or once without a trip for all of them). Do NOT say where it will go before the tool answers — staff (Employees list) get it in their own work email; customers get it only at the contacts in their customer profile. Then say exactly what the tool says. Never use take_message for a manifest, never promise an email the tool didn't send, and never take an email address over the phone.
@@ -163,7 +164,10 @@ function tools(base, transferNumber) {
     fn('past_loads', 'Loads that already FINISHED (delivered / closed — not on the board any more), kept 60 days: by customer, truck, trip, bill, the day it left our hub (outbound_day) or the day it delivered (delivered_day). Gives when it left, from which hub, truck, trailer and when each stop was delivered. Use when lookup_load says it is not on the board, or they ask about a load that already delivered.', {
       customer_name: { type: 'string' }, truck_number: { type: 'string' }, trip_number: { type: 'string' }, bill_number: { type: 'string' },
       outbound_day: { type: 'string', description: 'The day it left our hub: "Tuesday", "10/20"' },
-      delivered_day: { type: 'string', description: 'The day it delivered: "Thursday", "10/22"' },
+      delivered_day: { type: 'string', description: 'When it delivered: a day ("Thursday", "10/22") or a span ("this week", "last week", "last 3 days")' },
+    }),
+    fn('eta_vs_actual', 'STAFF ONLY: the ETA we gave vs when the truck actually got there, per stop — first / last ETA we gave, ARTIS ETA, actual arrival, how far off, time at the stop — for a trip (on the board or finished) or a customer.', {
+      trip_number: { type: 'string' }, customer: { type: 'string' }, delivered_day: { type: 'string', description: 'optional: "this week", "Thursday", "10/22"' },
     }),
     fn('stop_times', 'STAFF ONLY: how long trucks took at their stops (customer geofence in → out) — for a trip, truck and / or customer — and any truck at a stop right now with how long so far. Never for customers.', {
       trip_number: { type: 'string' }, truck_number: { type: 'string' }, customer: { type: 'string', description: 'Customer / business name' },
@@ -679,6 +683,12 @@ const WD = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 's
 export function outboundDays(said, now = Date.now()) {
   const x = String(said || '').toLowerCase();
   const today = nyDate(now); const at = (k) => nyDate(Date.parse(`${today}T12:00:00Z`) + k * 86400000);
+  // a span: "this week" (Monday → today), "last week" (Mon–Sun before), "last 3 days" / "past few days"
+  const dow0 = (new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7;   // Monday = 0
+  if (/this week/.test(x)) return Array.from({ length: dow0 + 1 }, (_, i) => at(-i));
+  if (/last week|past week/.test(x) && !/days?/.test(x)) return Array.from({ length: 7 }, (_, i) => at(-dow0 - 7 + i));
+  const span = x.match(/(?:last|past)\s+(\d+|few|couple)\s+days?/);
+  if (span) { const k = /few/.test(span[1]) ? 3 : /couple/.test(span[1]) ? 2 : Math.min(30, Number(span[1])); return Array.from({ length: k + 1 }, (_, i) => at(-i)); }
   if (/today|tonight/.test(x)) return [today];
   if (/yesterday|last night/.test(x)) return [at(-1)];
   if (/tomorrow/.test(x)) return [at(1)];
@@ -1066,6 +1076,29 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
       if (!found.length) return res.json({ ok: false, say: 'No finished load matches that in the last 60 days. Say so and ask for the trip, bill or truck number.' });
       return res.json(spokenNumbers({ ok: true, past_loads: staff ? found : found.map(({ trip, finished, ...v }) => v), say: `Give for each: which hub it left and when (left_from + left_at), the truck and trailer, and when it was delivered${customer ? ` to ${spokenName(customer)}` : ''} (delivered_at — the stop's local time).${staff ? ' Staff may hear the trip number and boxes too.' : ''} If several match, ask which one.` }));
     } catch (e) { return res.json({ ok: false, say: 'Could not look up past loads right now.' }); }
+  });
+
+  // staff: the ETA we gave vs when the truck got there
+  app.post('/retell/fn/eta_vs_actual', verified, async (req, res) => {
+    const a = argsOf(req); const call = callOf(req);
+    try {
+      const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
+      const staff = consoleCall(call) || people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      if (!staff) return res.json({ ok: false, say: 'That information is for Florida Beauty staff only.' });
+      if (!pastLoads || !pastLoads.etaVsActual) return res.json({ ok: false, say: 'Not available right now.' });
+      const all = await items();
+      const fit2 = (x, y) => Math.max(nameScore(x, y), nameScore(y, x)) >= 0.75;
+      let trips = [];
+      if (a.trip_number) { const r = await pastLoads.etaVsActual({ trip: a.trip_number, board: all }); if (r) trips = [r]; }
+      else if (a.customer) {
+        const onBoard = all.filter((it) => (billsOf(it) || []).some((b) => fit2(a.customer, b.billToName || ''))).map((it) => tripNo(it));
+        const past = (await pastLoads.search({ customer: a.customer, deliveredDay: a.delivered_day || null })).map((v) => v.trip);
+        for (const n of [...new Set([...onBoard, ...past])].slice(0, 6)) { const r = await pastLoads.etaVsActual({ trip: n, board: all }); if (r) trips.push(r); } // eslint-disable-line no-await-in-loop
+      }
+      if (a.customer) trips = trips.map((t) => ({ ...t, stops: t.stops.filter((x) => x.customer && fit2(a.customer, x.customer)) })).filter((t) => t.stops.length);
+      if (!trips.length) return res.json({ ok: false, say: 'Nothing found for that. Ask for the trip number.' });
+      return res.json(spokenNumbers({ ok: true, trips, say: 'For each stop: the last ETA we gave (and the first if different), when the truck actually got there, and how far off. Keep it short; most recent first. ETAs are logged from October 23rd on — older trips may only have the arrival.' }));
+    } catch (e) { return res.json({ ok: false, say: 'Could not get that right now.' }); }
   });
 
   // staff: how long the truck took at each stop (or is taking now)

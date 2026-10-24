@@ -62,15 +62,35 @@ export function searchPast(store = {}, { trip = null, truck = null, bill = null,
     if (dd && dd.length && !v._deliveredDays.some((d) => dd.includes(d))) continue;
     out.push(v);
   }
-  return out.sort((a, b) => String(b._outbound || '').localeCompare(String(a._outbound || ''))).slice(0, 6).map(({ _outbound, _deliveredDays, ...v }) => v);
+  return out.sort((a, b) => String(b._outbound || '').localeCompare(String(a._outbound || ''))).slice(0, 12).map(({ _outbound, _deliveredDays, ...v }) => v);
 }
 
-export function initPastLoads({ db, now = () => Date.now() }) {
+export function initPastLoads({ db, etaReport = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   async function search(q = {}, site = 'florida-beauty') {
     if (!enabled) return [];
     const store = (await db.get(`taRundowns:${site}`, {})) || {};
-    return searchPast(store, { ...q, now: now() });
+    const found = searchPast(store, { ...q, now: now() });
+    // each stop: the ETA we gave (first / last) and when the truck actually got there
+    if (etaReport && etaReport.etaVsActual) {
+      for (const v of found) {
+        const rec = store[v.trip]; const it = rec && rec.rec && rec.rec.item;
+        const rows = it ? await etaReport.etaVsActual(it, site).catch(() => []) : []; // eslint-disable-line no-await-in-loop
+        for (const st of v.stops) {
+          const r = rows.find((x) => String(x.stop || '').toUpperCase().startsWith(String(st.city || '').toUpperCase()) && (!x.customer || fits(st.customer, x.customer) || x.customer.includes(st.customer)));
+          if (r) Object.assign(st, Object.fromEntries(Object.entries({ eta_we_gave_first: r.eta_we_gave_first, eta_we_gave_last: r.eta_we_gave_last, artis_eta: r.artis_eta, actual_arrival: r.actual_arrival, off_by_last_eta: r.off_by_last_eta, time_at_stop: r.time_at_stop }).filter(([, x]) => x)));
+        }
+      }
+    }
+    return found;
   }
-  return { search, ymd };
+  // a trip on the board or finished: the ETAs we gave vs when the truck got there, per stop
+  async function etaVsActual({ trip, board = [] }, site = 'florida-beauty') {
+    if (!enabled || !etaReport) return null;
+    const n = String(trip || '').replace(/\D/g, '');
+    let it = (board || []).find((x) => tripNo(x) === n);
+    if (!it) { const rec = ((await db.get(`taRundowns:${site}`, {})) || {})[n]; it = rec && rec.rec && rec.rec.item; }
+    return it ? { trip: n, truck: String(tripOf(it).powerUnit || '') || null, stops: await etaReport.etaVsActual(it, site) } : null;
+  }
+  return { search, etaVsActual, ymd };
 }
