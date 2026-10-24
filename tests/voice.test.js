@@ -104,7 +104,7 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   assert.deepEqual(r.out && { llm: r.out.llmId, agent: r.out.agentId }, { llm: 'llm_1', agent: 'agent_1' });
   const llm = v.retellCalls.find((c) => c.url.endsWith('/create-retell-llm')).body;
   assert.match(llm.model, /^claude/);
-  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'report_missing_boxes', 'take_message', 'past_loads', 'eta_vs_actual', 'stop_times', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
+  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'report_missing_boxes', 'take_message', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
   assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
   assert.deepEqual(agent.language, ['en-US', 'es-419', 'he-IL']);
@@ -1017,4 +1017,25 @@ test('stop times on the phone: staff only', async () => {
   assert.equal(staff.out.asked.truck, '4 5 5 0', 'OC2 is truck 4550');
   const cust = await v.hit('POST /retell/fn/stop_times', { call: { call_id: 'c1', call_type: 'phone_call', direction: 'inbound', from_number: '+16175550100' }, args: { truck_number: '734' } });
   assert.equal(cust.out.ok, false);
+});
+
+test('miles on the phone: staff only', async () => {
+  const miles = { ask: async (q) => ({ found: true, from: 'truck 2403', to: 'Carbone Derry (DERRY, NH 03038)', miles: 212, driving_miles: true, asked: q }) };
+  const dir = { load: async () => ({ people: [{ name: 'Ronen Koubi', phone: '3052063095' }] }), find: async () => [], main: async () => '305-503-1200' };
+  const v = setup({}, { extra: { miles, directory: dir } });
+  const staff = await v.hit('POST /retell/fn/miles', { call: { call_id: 'm1', call_type: 'phone_call', direction: 'inbound', from_number: '+13052063095' }, args: { from: '2403', to: 'Carbone Derry' } });
+  assert.equal(staff.out.ok, true); assert.equal(staff.out.miles, 212);
+  const cust = await v.hit('POST /retell/fn/miles', { call: { call_id: 'm2', call_type: 'phone_call', direction: 'inbound', from_number: '+16175550100' }, args: { from: '2403', to: 'Boston' } });
+  assert.equal(cust.out.ok, false);
+});
+
+test('past loads on the phone: no load left the day asked → say so, then the nearest by the day it left', async () => {
+  const seen = [];
+  const pastLoads = { search: async (q) => { seen.push(q); return q.outboundDay ? [] : [{ trip: '625387', truck: '2406', left_from: 'our Miami hub', left_at: 'Mon, Oct 19, 7:47 PM', outbound: 'Monday, Oct 19 outbound', stops: [{ customer: 'DIRECT FLOWERS OF MIAMI', city: 'WOODBRIDGE, VA', delivered_at: 'Tue, Oct 20, 9:23 PM' }] }]; } };
+  const dir = { load: async () => ({ people: [{ name: 'Nadim Tellez', phone: '3055550711' }] }), find: async () => [], main: async () => '305-503-1200' };
+  const v = setup({}, { extra: { pastLoads, directory: dir } });
+  const r = await v.hit('POST /retell/fn/past_loads', { call: { call_id: 'p1', call_type: 'phone_call', direction: 'inbound', from_number: '+13055550711' }, args: { customer_name: 'Direct Flowers', outbound_day: 'Tuesday' } });
+  assert.equal(r.out.no_load_left_that_day, true);
+  assert.match(r.out.say, /no finished load for Direct Flowers left our hub on Tuesday/);
+  assert.equal(seen.length, 2); assert.equal(seen[1].outboundDay, null);
 });
