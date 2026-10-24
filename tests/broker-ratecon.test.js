@@ -20,6 +20,7 @@ test('no rate con on a broker load → ask dispatch; gone once it is on file or 
   assert.equal(rc({ ...BROKER, _ratecon: { broker: 'Arrive' } }).length, 0);
   assert.equal(rc({ ...BROKER, trip: { ...BROKER.trip, status: 'DELVD' } }).length, 0);
   assert.equal(rc({ ...BROKER, _tb: { hub: 'Miami' } }).length, 0, 'never on an LTL run');
+  assert.equal(rc({ ...BROKER, trip: { ...BROKER.trip, status: 'ASSGN', powerUnit: '' } }).length, 0, 'just booked, no truck yet');
 });
 
 test('broker loads are checked in Synergize right away, then every 2 h, 6 AM–10 PM', () => {

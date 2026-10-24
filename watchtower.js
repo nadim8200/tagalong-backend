@@ -702,6 +702,7 @@ const RULES = [
   },
   function rateConMissing(f) {
     if (!f.broker || f.hasRateCon || f.oc || isDone(f.status)) return null;
+    if (!f.unit && notStartedCode(f.status)) return null;   // just booked — no truck on it yet: not a problem yet
     return {
       code: 'ratecon-missing', severity: 'warning',
       title: `Rate con not on file${f.billNo ? ` (${f.billNo})` : ''}`,
