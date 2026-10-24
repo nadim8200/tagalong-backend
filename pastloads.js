@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------
 import { leftAtMs, outboundDate, outboundDays, outboundLabel, hubSaid, deliveredWhen, nameScore } from './voice.js';
 import { fmtLocalShort } from './localtime.js';
+import { tripTimes } from './triptimes.js';
 
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || (it && it._id) || '');
@@ -16,7 +17,10 @@ export const fits = (a, b) => Math.max(nameScore(a || '', b || ''), nameScore(b 
 // one finished trip, said plainly: truck, trailer, which hub it left and when, each customer's stop and when it
 // was delivered. `customer` → only that customer's stops. Pure.
 export function pastView(rec, { customer = null } = {}) {
-  const it = rec && rec.rec && rec.rec.item; if (!it) return null;
+  const it0 = rec && rec.rec && rec.rec.item; if (!it0) return null;
+  // the saved record has the raw trip, not the board's status history — rebuild it (when it left) like the board does
+  let it = it0;
+  if (!(it0._times && (it0._times.statusHistory || []).length)) { try { it = { ...it0, _times: tripTimes(rec.rec) }; } catch { it = it0; } }
   const t = tripOf(it);
   const groups = new Map();
   for (const b of billsOf(it)) {
