@@ -32,8 +32,9 @@ export function openStops(item, from = null) {
   const norm = (c) => String(c || '').toUpperCase().replace(/[^A-Z ]/g, '').trim();
   const open = [...groups.values()].filter((g) => !g.delivered);
   for (const g of open) {
-    const hit = sheet.find((s) => norm(s.city) === norm(g.place.split(',')[0]));
-    g.seq = hit && hit.stopNumber != null ? Number(hit.stopNumber) : null;
+    const city = norm(g.place.split(',')[0]);
+    const hit = sheet.find((s) => norm(s.city) === city || norm(String(s.tmPlace || '').split(',')[0]) === city); // the sheet's city can be misspelled (PISTACAWAY)
+    g.seq = hit ? Number(hit.stopNumber != null ? hit.stopNumber : hit.n) : null;
   }
   return open.sort((a, b) => (a.seq != null ? a.seq : 999) - (b.seq != null ? b.seq : 999));
 }

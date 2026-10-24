@@ -20,6 +20,12 @@ test('openStops: undelivered stops in trip-sheet order', () => {
   assert.equal(s[0].boxes, 37);
 });
 
+test('openStops: a misspelled sheet city still orders by the matched TruckMate place (n)', () => {
+  const it = { trip: { freightBills: [{ billToName: 'B', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 1 }, { billToName: 'A', endZoneDescription: 'PISCATAWAY, NJ, 08854', pieces: 1 }] },
+    _manifest: { stops: [{ n: 2, action: 'DELIVER', city: 'PISTACAWAY', tmPlace: 'PISCATAWAY, NJ' }, { n: 3, action: 'DELIVER', city: 'CLIFTON', tmPlace: 'CLIFTON, NJ' }] } };
+  assert.deepEqual(openStops(it).map((x) => x.customers[0]), ['A', 'B']);
+});
+
 test('resolvePoint: hub, truck GPS, customer on a load, missing truck', async () => {
   assert.match((await resolvePoint('Miami', { board, geocode })).label, /Miami hub/);
   assert.match((await resolvePoint('our Ventura hub', { board, geocode })).label, /Ventura/);
