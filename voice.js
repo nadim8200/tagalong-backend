@@ -89,6 +89,7 @@ How to help:
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
 - Loads leave from our Miami, Florida hub or our Ventura, California hub (and some brokers' pickups elsewhere). For every load you describe — customers and staff — say which hub it left from using left_from (e.g. "it left our Ventura, California hub"); never assume Miami.
 - When the caller says WHO should handle a message ("have Valeria call me", "Valeria or Sarai") — even after you saved it — call take_message (again) with for_person set to exactly the names they said, so it reaches those people. Never promise a person without doing that.
+- A load that already delivered / finished (lookup_load can't find it on the board, or they ask "when did it deliver", "the one that left Tuesday"): use past_loads — by customer, truck, trip, outbound_day or delivered_day. Never say a load doesn't exist before checking past_loads.
 - Staff asking how long a truck took (or is taking) at a stop — "how long was 734 at Direct Flowers", "is 2403 still at the stop" → stop_times. Never for customers.
 - When a caller asks you to call them back later ("call me in 5 minutes", "call me when you know", "call me to make sure they called"), use schedule_callback with the minutes and what it's about — you CAN call people back. Confirm the time in one short line. Never say you can't call back.
 - Trip manifest (what was loaded for a customer — farms, products, POs, boxes): when anyone asks for it by email ("email me the manifest"), call email_manifest RIGHT AWAY with the business name (and trip if they gave one; for several trips call it once per trip, or once without a trip for all of them). Do NOT say where it will go before the tool answers — staff (Employees list) get it in their own work email; customers get it only at the contacts in their customer profile. Then say exactly what the tool says. Never use take_message for a manifest, never promise an email the tool didn't send, and never take an email address over the phone.
@@ -159,6 +160,11 @@ function tools(base, transferNumber) {
       trip_number: { type: 'string' },
       urgent: { type: 'boolean', description: 'true if it cannot wait (late, upset customer, safety)' },
     }, ['message']),
+    fn('past_loads', 'Loads that already FINISHED (delivered / closed — not on the board any more), kept 60 days: by customer, truck, trip, bill, the day it left our hub (outbound_day) or the day it delivered (delivered_day). Gives when it left, from which hub, truck, trailer and when each stop was delivered. Use when lookup_load says it is not on the board, or they ask about a load that already delivered.', {
+      customer_name: { type: 'string' }, truck_number: { type: 'string' }, trip_number: { type: 'string' }, bill_number: { type: 'string' },
+      outbound_day: { type: 'string', description: 'The day it left our hub: "Tuesday", "10/20"' },
+      delivered_day: { type: 'string', description: 'The day it delivered: "Thursday", "10/22"' },
+    }),
     fn('stop_times', 'STAFF ONLY: how long trucks took at their stops (customer geofence in → out) — for a trip, truck and / or customer — and any truck at a stop right now with how long so far. Never for customers.', {
       trip_number: { type: 'string' }, truck_number: { type: 'string' }, customer: { type: 'string', description: 'Customer / business name' },
       days: { type: 'number', description: 'How far back, 1–30 (default 7)' },
@@ -741,7 +747,7 @@ export function brokerView(item, eta) {
   };
 }
 
-export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, stopTimes = null, missingBoxes = null, missingCases = null, roadCalls = null, artis = null, clients = null, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, stopTimes = null, pastLoads = null, missingBoxes = null, missingCases = null, roadCalls = null, artis = null, clients = null, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taRetellCfg';
@@ -890,6 +896,14 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
           const near = customerStops(all, name, etas, { near: true, staff: staffPhone });
           if (near.length && staffPhone) stops = near;
         }
+        if (!stops.length && pastLoads) {
+          // nothing on the board for them — their finished loads (delivered / closed) may be what they mean
+          const past = await pastLoads.search({ customer: name, outboundDay: a.outbound_day || null }).catch(() => []);
+          if (past.length) {
+            if (call.call_id && said) callName.set(call.call_id, past[0].stops[0] ? past[0].stops[0].customer : name);
+            return reply({ found: true, already_finished: true, speaking_with: spokenName((past[0].stops[0] || {}).customer || name), past_loads: staffPhone ? past : past.map(({ trip: tn, finished, ...v }) => v), say: `Nothing for them on the board right now — these loads already finished. Give: which hub it left and when (left_from + left_at), the truck and trailer, and when it was delivered (delivered_at).${staffPhone ? ' Staff may also hear the trip number and boxes.' : ''} If several, ask which one.` });
+          }
+        }
         if (!stops.length) {
           const nearNames = [...new Set(customerStops(all, name, etas, { near: true }).map((x) => spokenName(x.customer)))];
           const maybe = [...new Set([...nearNames, ...nameCandidates(all, name, a.customer_city)])].slice(0, 3);
@@ -903,6 +917,9 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
           const days = outboundDays(a.outbound_day);
           const onDay = days.length ? stops.filter((x) => days.includes(outboundDate(all.find((i) => tripNo(i) === x.trip)))) : stops;
           if (!onDay.length) {
+            // not on the board any more (delivered / closed) → the finished trips
+            const past = pastLoads ? await pastLoads.search({ customer: stops[0].customer, outboundDay: a.outbound_day }).catch(() => []) : [];
+            if (past.length) return reply({ found: true, already_finished: true, speaking_with: spokenName(stops[0].customer), past_loads: staffPhone ? past : past.map(({ trip: tn, finished, ...v }) => v), say: `That load is already finished (off the board). Give: which hub it left and when (left_from + left_at), the truck and trailer, and when it was delivered to them (delivered_at, the stop's local time).${staffPhone ? ' Staff may also hear the trip number and boxes.' : ''}` });
             const list = [...new Set(stops.map((x) => outboundLabel(outboundDate(all.find((i) => tripNo(i) === x.trip)))).filter(Boolean))];
             return reply({ found: true, no_load_that_day: true, speaking_with: spokenName(stops[0].customer), their_outbounds: list, say: `${spokenName(stops[0].customer)} has no load going out ${a.outbound_day} on the board. Their loads on the board: ${list.join(', ') || 'none with a known day'}. Say that and ask which one they mean.` });
           }
@@ -1033,6 +1050,22 @@ export function initVoice(app, { requireAuth, db, artisWeb = null, docs = null, 
       }
       res.json({ saved: true, say: 'Tell the caller the message is saved and a dispatcher will call them back.' });
     } catch (e) { res.json({ saved: false, say: 'Could not save — offer to transfer to dispatch.' }); }
+  });
+
+  // finished loads (off the board): staff any; a customer only their own business, only their own stops
+  app.post('/retell/fn/past_loads', verified, async (req, res) => {
+    const a = argsOf(req); const call = callOf(req);
+    try {
+      if (!pastLoads) return res.json({ ok: false, say: 'Past loads are not available right now.' });
+      const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
+      const staff = consoleCall(call) || people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const confirmed = callName.get(call.call_id);
+      if (!staff && !confirmed) return res.json({ ok: false, say: 'First find their business with lookup_load (customer name) — past loads go only to the business they belong to.' });
+      const customer = staff ? (a.customer_name || null) : confirmed;
+      const found = await pastLoads.search({ customer, truck: a.truck_number ? realUnit(a.truck_number) : null, trip: a.trip_number, bill: a.bill_number, outboundDay: a.outbound_day, deliveredDay: a.delivered_day });
+      if (!found.length) return res.json({ ok: false, say: 'No finished load matches that in the last 60 days. Say so and ask for the trip, bill or truck number.' });
+      return res.json(spokenNumbers({ ok: true, past_loads: staff ? found : found.map(({ trip, finished, ...v }) => v), say: `Give for each: which hub it left and when (left_from + left_at), the truck and trailer, and when it was delivered${customer ? ` to ${spokenName(customer)}` : ''} (delivered_at — the stop's local time).${staff ? ' Staff may hear the trip number and boxes too.' : ''} If several match, ask which one.` }));
+    } catch (e) { return res.json({ ok: false, say: 'Could not look up past loads right now.' }); }
   });
 
   // staff: how long the truck took at each stop (or is taking now)
