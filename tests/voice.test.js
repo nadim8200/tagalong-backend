@@ -834,7 +834,7 @@ test('two voices: English Jarvis hands Spanish callers to a Spanish Jarvis (same
   assert.equal(enLlmSwap(v).execution_message_description, 'Un momento, le paso con mi compañero en español.');
   const enLlm = v.retellCalls.filter((c) => c.url.includes('update-retell-llm/llm_1')).at(-1).body;
   assert.ok(enLlm.general_tools.some((t) => t.type === 'agent_swap' && t.name === 'switch_to_spanish'));
-  assert.match(enLlm.general_prompt, /call switch_to_spanish right away/);
+  assert.match(enLlm.general_prompt, /decide ONLY from the caller.s LATEST message/);
   assert.equal(v.retellCalls.filter((c) => c.url.includes('/update-agent/agent_1')).at(-1).body.voice_id, 'cartesia-Dallas');
   // a later update (e.g. new customer names) keeps both voices
   await v.hit('POST /voice/setup', {});
