@@ -205,7 +205,7 @@ function etaTo(item, here, zip, { geo, now }) {
   if (miles < 3) return { miles: 0, atMs: now, here: true };
   const hos = ((item && item._samsara) || {}).hos || {};
   const team = !!(tripOf(item).driver2);
-  return { miles: Math.round(miles), atMs: estimateArrival(miles, { team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, now }) };
+  return { miles: Math.round(miles), atMs: estimateArrival(miles, { team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, breakInMin: hos.breakInMin, partner: ((item && item._samsara) || {}).hos2 || null, now }) };
 }
 
 // Where the load is picked up: our Miami yard / lot / cooler, or the shipper's zip.

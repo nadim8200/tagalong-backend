@@ -112,7 +112,7 @@ export function initMiles({ db, env = process.env, fetchFn = globalThis.fetch, g
       if (!g) { legs.push({ stop: st.place, customers: st.customers, miles: null, note: 'could not place this stop' }); continue; }
       const r = await road(at, g); // eslint-disable-line no-await-in-loop
       total += r.miles; exact = exact && r.exact; at = g;
-      const eta = estimateArrival(total, { team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, now: now() });
+      const eta = estimateArrival(total, { team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, breakInMin: hos.breakInMin, now: now() });
       legs.push({ stop: st.place, customers: st.customers, boxes: st.boxes || null, leg_miles: r.miles, miles_from_truck: total, driving_eta: eta ? new Date(eta).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET' : null });
     }
     return { legs, total_miles: total, exact };
@@ -139,7 +139,7 @@ export function initMiles({ db, env = process.env, fetchFn = globalThis.fetch, g
     if (!b) return { found: false, note: `Could not place "${to}".` };
     const r = await road(a, b);
     const hos = ((a.item && a.item._samsara) || {}).hos || {};
-    const eta = a.truck && r.miles ? estimateArrival(r.miles, { team: !!tripOf(a.item).driver2, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, now: now() }) : null;
+    const eta = a.truck && r.miles ? estimateArrival(r.miles, { team: !!tripOf(a.item).driver2, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, breakInMin: hos.breakInMin, now: now() }) : null;
     return {
       found: true, from: a.label, to: b.label, miles: r.miles, driving_miles: r.exact,
       drive_time: r.minutes ? `${Math.floor(r.minutes / 60)}h ${r.minutes % 60}m without stops` : null,

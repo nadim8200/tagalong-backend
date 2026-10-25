@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldLog, foldLog, reportRows, renderReport, initEtaReport, placeKey, stopTimesFrom, hm } from '../etareport.js';
+import { shouldLog, foldLog, reportRows, renderReport, initEtaReport, placeKey, stopTimesFrom, hm, keyEtas, worthSending } from '../etareport.js';
 
 const H = 3600000; const M = 60000;
 const item = { trip: { tripNumber: '625645', powerUnit: '4550', trailer: '2077', origZoneDesc: 'MIAMI TERMINAL', destZoneDesc: 'FALL RIVER, MA, 02720' },
@@ -35,8 +35,16 @@ test('emailed once when the trip finishes', async () => {
   const mm = new Map(); const db = { enabled: true, get: async (k, fb) => (mm.has(k) ? mm.get(k) : fb), set: async (k, v) => mm.set(k, v), update: async (k, fn, fb) => { const v = fn(mm.has(k) ? mm.get(k) : fb); mm.set(k, v); return v; } };
   const sent = [];
   const r = initEtaReport({ db, sendMail: async (x) => sent.push(x), recipients: async () => ['ntellez@floridabeauty.us'] });
+  const t0 = Date.parse('2026-10-23T12:00:00Z');
+  const done = { ...item, freightBills: item.freightBills.map((b) => ({ ...b, actualDelivery: b.actualDelivery || '2026-10-24T08:00:00' })) };
+  await db.set('taEtaLog:florida-beauty', foldLog({}, [done], { 625645: { stops: [{ label: 'MOUNT RAINIER, MD, 20712', etaMs: t0 + 4 * H }] } }, t0));
+  await r.onFinished('florida-beauty', { item: done }, 'delivered');
+  assert.equal(sent.length, 0, 'off until turned on');
+  await db.set('taEtaReportMail:florida-beauty', { on: true });
   await r.onFinished('florida-beauty', { item }, 'delivered');
-  await r.onFinished('florida-beauty', { item }, 'delivered');
+  assert.equal(sent.length, 0, 'a stop with no delivery time → no email');
+  await r.onFinished('florida-beauty', { item: done }, 'delivered');
+  await r.onFinished('florida-beauty', { item: done }, 'delivered');
   assert.equal(sent.length, 1); assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']);
 });
 
@@ -72,4 +80,29 @@ test('ETA we gave vs actual arrival, per stop (trip on the board or finished)', 
   assert.ok(fr.eta_we_gave_first && fr.eta_we_gave_last);
   assert.ok(fr.actual_arrival); assert.equal(fr.arrival_from, 'arrived (geofence)');
   assert.equal(fr.off_by_last_eta, '40 min later'); assert.equal(fr.off_by_first_eta, '1 h 40 min later'); assert.equal(fr.time_at_stop, '1 h 20 min');
+});
+
+
+test('report: a truck sitting still is one ETA line, not forty; empty reports are not sent', () => {
+  const t0 = Date.parse('2026-10-24T23:06:00Z');
+  const still = Array.from({ length: 40 }, (_, i) => ({ at: t0 + i * 20 * M, etaMs: t0 + 25 * H + i * 20 * M, miles: 45 }));
+  const k = keyEtas(still);
+  assert.ok(k.length <= 6); assert.equal(k[0], still[0]); assert.equal(k[k.length - 1], still[39]);
+  assert.deepEqual(keyEtas(still.slice(0, 2)), still.slice(0, 2));
+  assert.equal(worthSending({ trip: { powerUnit: '' } }, [{ ours: [1], actual: { ms: 1 } }]).ok, false);
+  assert.equal(worthSending({ trip: { powerUnit: '602' } }, [{ ours: [1], actual: null }]).ok, false);
+  assert.equal(worthSending({ trip: { powerUnit: '2612' } }, [{ ours: [], actual: { ms: 1 } }]).ok, false);
+  assert.equal(worthSending({ trip: { powerUnit: '2612' } }, [{ ours: [1], actual: { ms: 1 } }]).ok, true);
+});
+
+
+test('the ETA log: a parked truck is one line while it sits, a new one when it moves on', () => {
+  const t0 = Date.parse('2026-10-24T22:58:00Z'); const since = t0 - 40 * M;
+  let log = {};
+  for (let i = 0; i < 12; i++) log = foldLog(log, [item], { 625645: { stops: [{ label: 'FALL RIVER, MA, 02720', etaMs: t0 + i * 20 * M + 40 * M, miles: 38, parkedSinceMs: since }] } }, t0 + i * 20 * M);
+  assert.equal(log['625645']['FALL RIVER|MA'].ours.length, 1);
+  log = foldLog(log, [item], { 625645: { stops: [{ label: 'FALL RIVER, MA, 02720', etaMs: t0 + 5 * H, miles: 30 }] } }, t0 + 5 * H);
+  assert.equal(log['625645']['FALL RIVER|MA'].ours.length, 2);
+  const m = renderReport(item, reportRows(item, log['625645'], {}), 'delivered');
+  assert.match(m.html, /parked since/);
 });

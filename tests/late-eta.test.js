@@ -64,3 +64,33 @@ test('cards get the same stop ETAs the alerts use', () => {
   assert.equal(e.team, true); assert.equal(e.stops[0].zip, '33178');
   assert.ok(e.stops[0].etaMs > NOW && e.stops[0].miles > 50);
 });
+
+
+test('unloading uses the solo driver\'s 14-hour shift; Samsara\'s break-due is used; teams swap (15 min)', async () => {
+  const { planArrivals } = await import('../watchtower.js');
+  // solo, fresh: 4 stops 100 mi apart with 3 h unloading each → the shift runs out before the 4th → 10 h rest
+  const four = planArrivals([1, 2, 3, 4].map(() => ({ miles: 100, dwellMin: 180 })), { driveLeftMin: 660, shiftLeftMin: 840, now: NOW }).map((x) => (x - NOW) / H);
+  assert.ok(four[2] < 12, `3rd stop ${four[2]}`); assert.ok(four[3] > 20, `4th stop after a rest: ${four[3]}`);
+  // break due in 30 min → the 30-minute break comes after 30 min of driving, not after 8 h
+  const soon = (planArrivals([{ miles: 110 }], { driveLeftMin: 600, shiftLeftMin: 700, breakInMin: 30, now: NOW })[0] - NOW) / H;
+  assert.ok(soon > 2.4 && soon < 2.6, `break included: ${soon}`);
+  const none = (planArrivals([{ miles: 110 }], { driveLeftMin: 600, shiftLeftMin: 700, now: NOW })[0] - NOW) / H;
+  assert.ok(none < 2.1, `no break due: ${none}`);
+  // team: 1100 mi (20 h) → one swap at ~11 h, 15 min added
+  const team = (planArrivals([{ miles: 1100 }], { team: true, driveLeftMin: 660, shiftLeftMin: 840, partner: { driveLeftMin: 660, shiftLeftMin: 840 }, now: NOW })[0] - NOW) / H;
+  assert.ok(team > 20.2 && team < 20.4, `team ${team}`);
+  // parked 8 h already, out of hours → only 2 h of rest left before it rolls
+  const rest = (planArrivals([{ miles: 55 }], { driveLeftMin: 0, shiftLeftMin: 0, restDoneMin: 480, now: NOW })[0] - NOW) / H;
+  assert.ok(rest > 2.9 && rest < 3.1, `rest credit ${rest}`);
+});
+
+test('parked 38 mi out with a 6 AM appointment: ETA is the appointment, marked parked + waiting', () => {
+  const now = Date.parse('2026-10-25T00:00:00Z');                          // Sat 8 PM Eastern
+  const it = { trip: { tripNumber: '9', status: 'DEPSHIP', powerUnit: '2213' },
+    freightBills: [{ billNumber: 'B1', endZoneDescription: 'KINSTON, NC, 28501', pieces: 1, deliverBy: '2026-10-25T06:00:00', deliverByEnd: '2026-10-25T06:00:00', deliveryApptReq: 'True' }],
+    _samsara: { gpsAt: '2026-10-24T23:59:00Z', speedMph: 0, lat: 35.7, lng: -77.6, hos: { driveLeftMin: 300, shiftLeftMin: 400 } } };
+  const e = boardEtas({ trips: [it] }, { now, geo: () => ({ lat: 35.26, lng: -77.58 }), unitState: () => ({ stoppedSince: now - 90 * 60000 }) })['9'];
+  assert.equal(e.stops[0].waitingForAppt, true);
+  assert.equal(e.stops[0].parkedSinceMs, now - 90 * 60000);
+  assert.equal(e.stops[0].etaMs, Date.parse('2026-10-25T10:00:00Z'));
+});

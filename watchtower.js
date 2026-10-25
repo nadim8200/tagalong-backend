@@ -84,57 +84,81 @@ export function haversineMi(aLat, aLng, bLat, bLng) {
 }
 
 // Same HOS-aware estimate the console uses (55 mph bent to the DOT clock:
-// 11h drive / 14h shift / 30-min break / 10h reset; teams ~20h per day).
-// restDoneMin: how long a driver who is out of hours has already been parked,
-// so the 10-hour reset isn't assumed to start right now.
-export function estimateArrival(miles, { team, driveLeftMin, shiftLeftMin, cycleLeftMin = null, restDoneMin = 0, partner = null, now = Date.now() } = {}) {
+// 11h drive / 14h shift / 30-min break after 8h driving / 10h reset / 70h cycle → 34h restart).
+// One leg; planArrivals does a whole run (several stops, unloading time counted on the driver's clock).
+export function estimateArrival(miles, opts = {}) {
   if (!miles || miles <= 0) return null;
-  const H = 3600000;
-  let need = miles / CRUISE_MPH;                                  // hours behind the wheel
+  return planArrivals([{ miles }], opts)[0];
+}
+
+export const TEAM_SWAP_MIN = 15;   // pulling over to change drivers
+// A run hour by hour, the way the drivers' clocks actually work. legs: [{ miles, dwellMin }] — drive the leg, arrive
+// (that's the ETA), then unload dwellMin, which is on-duty time: it uses the shift and the 70-hour cycle, and 30+ min
+// of it counts as the 30-minute break. Solo: one driver, rests when out of hours. Team: one drives until out of hours
+// (or due a break), they swap (15 min), the other has been resting in the sleeper meanwhile.
+//   driveLeftMin / shiftLeftMin / cycleLeftMin / breakInMin — the driver's live clocks (Samsara); partner — the
+//   co-driver's; restDoneMin — how long the truck has already been parked (counts toward a rest needed right now).
+// Returns the arrival time (ms) at the end of each leg. Pure.
+export function planArrivals(legs, { team, driveLeftMin, shiftLeftMin, cycleLeftMin = null, breakInMin = null, restDoneMin = 0, partner = null, now = Date.now() } = {}) {
+  const H = 3600000; const SWAP = TEAM_SWAP_MIN / 60;
   const hrs = (m, d) => Math.max(0, m != null ? m / 60 : d);
-  if (team) {
-    // Two drivers alternate: one drives until out of hours while the other
-    // rests in the sleeper; both clocks (11 drive / 14 shift / 70 cycle) count.
-    const fresh = () => ({ drive: 11, shift: 14, cycle: 70, rest: 0 });
-    let cur = { drive: hrs(driveLeftMin, 11), shift: hrs(shiftLeftMin, 14), cycle: hrs(cycleLeftMin, 70), rest: 0 };
-    let oth = partner ? { drive: hrs(partner.driveLeftMin, 11), shift: hrs(partner.shiftLeftMin, 14), cycle: hrs(partner.cycleLeftMin, 70), rest: 0 } : { ...fresh(), rest: 10 };
-    const restOther = (h) => { oth.rest += h; if (oth.rest >= 10 && oth.cycle > 0.01) { oth.drive = 11; oth.shift = 14; } };
-    let t = 0; let guard = 0;
-    while (need > 0.01 && guard++ < 200) {
-      const can = Math.min(cur.drive, cur.shift, cur.cycle);
-      if (can > 0.01) {
-        const d = Math.min(need, can);
-        t += d; need -= d; cur.drive -= d; cur.shift -= d; cur.cycle -= d; cur.rest = 0; restOther(d);
-        [cur, oth] = [oth, cur];
-        continue;
+  const clocks = (c, fresh) => {
+    const drive = hrs(c && c.driveLeftMin, 11); const shift = hrs(c && c.shiftLeftMin, 14); const cycle = hrs(c && c.cycleLeftMin, 70);
+    // driving since the last break: from Samsara's "break due in"; unknown → assume they just had one
+    const since = c && c.breakInMin != null ? Math.max(0, 8 - c.breakInMin / 60) : 0;
+    return { drive, shift, cycle, since, rest: fresh ? 10 : 0 };
+  };
+  const me = clocks({ driveLeftMin, shiftLeftMin, cycleLeftMin, breakInMin }, false);
+  let credit = Math.max(0, restDoneMin / 60);                  // parked already → counts toward a rest needed now
+  // a team covers the 30-minute break with the swap (the other driver is resting in the sleeper) — no forced
+  // 8-hour stop, they change over when one runs out of hours
+  const canDrive = (d) => Math.min(d.drive, d.shift, d.cycle, team ? Infinity : 8 - d.since);
+  const outOfHours = (d) => Math.min(d.drive, d.shift, d.cycle) <= 0.01;
+  const rested = (d, h) => {                                   // off duty / sleeper for h hours
+    d.rest += h;
+    if (d.rest >= 0.5) d.since = 0;
+    if (d.rest >= 34) { d.drive = 11; d.shift = 14; d.cycle = 70; } else if (d.rest >= 10 && d.cycle > 0.01) { d.drive = 11; d.shift = 14; }
+  };
+  const onDuty = (d, h, driving) => { d.shift -= h; d.cycle -= h; d.rest = 0; if (driving) { d.drive -= h; d.since += h; } else if (h >= 0.5) d.since = 0; };
+  let t = 0; let drove = false;
+  const out = [];
+  if (!team) {
+    for (const leg of legs) {
+      let need = Math.max(0, (Number(leg.miles) || 0) / CRUISE_MPH); let guard = 0;
+      while (need > 0.01 && guard++ < 200) {
+        const can = canDrive(me);
+        if (can > 0.01) { const d = Math.min(need, can); t += d; need -= d; onDuty(me, d, true); drove = true; continue; }
+        if (!outOfHours(me)) { t += 0.5; me.shift -= 0.5; me.since = 0; continue; }          // 30-minute break
+        const full = me.cycle <= 0.01 ? 34 : 10;                                              // 70 used up → 34-hour restart
+        const wait = Math.max(0.25, full - (drove ? 0 : Math.min(credit, full)));
+        credit = 0; t += wait; me.rest = 0; rested(me, full);
       }
-      if (Math.min(oth.drive, oth.shift, oth.cycle) > 0.01) { [cur, oth] = [oth, cur]; continue; }
-      if (cur.cycle <= 0.01 && oth.cycle <= 0.01) { t += 34; cur = fresh(); oth = fresh(); continue; }   // both out of the 70: 34-hour restart
-      const wait = Math.max(0.25, Math.min(cur.cycle > 0.01 ? 10 - cur.rest : Infinity, oth.cycle > 0.01 ? 10 - oth.rest : Infinity));
-      t += wait;
-      for (const x of [cur, oth]) { x.rest += wait; if (x.rest >= 10 && x.cycle > 0.01) { x.drive = 11; x.shift = 14; } }
+      out.push(now + t * H);
+      const dw = (Number(leg.dwellMin) || 0) / 60;
+      if (dw > 0) { t += dw; onDuty(me, dw, false); }
     }
-    return now + t * H;
+    return out;
   }
-  // Solo: today's clocks, then 10-hour resets; the 70-hour cycle forces a 34-hour restart.
-  let t = now;
-  let restCredit = Math.max(0, Math.min(10, restDoneMin / 60));
-  let cycle = hrs(cycleLeftMin, 70);
-  let first = driveLeftMin != null ? driveLeftMin / 60 : 11;
-  if (shiftLeftMin != null) first = Math.min(first, shiftLeftMin / 60);
-  first = Math.max(0, Math.min(first, cycle));
-  let d = Math.min(need, first);
-  t += (d + (d > 8 ? 0.5 : 0)) * H;
-  need -= d; cycle -= d;
-  let guard = 0;
-  while (need > 0.01 && guard++ < 60) {
-    if (cycle <= 0.01) { t += Math.max(0, 34 - restCredit) * H; cycle = 70; } else t += (10 - Math.min(restCredit, 10)) * H;
-    restCredit = 0;
-    d = Math.min(need, 11, cycle);
-    t += (d + (d > 8 ? 0.5 : 0)) * H;
-    need -= d; cycle -= d;
+  let cur = me;
+  let oth = partner ? clocks(partner, false) : clocks(null, true);
+  if (!partner) oth.rest = 10;                                  // no clocks for the co-driver: assume rested
+  for (const leg of legs) {
+    let need = Math.max(0, (Number(leg.miles) || 0) / CRUISE_MPH); let guard = 0;
+    while (need > 0.01 && guard++ < 400) {
+      const can = canDrive(cur);
+      if (can > 0.01) { const d = Math.min(need, can); t += d; need -= d; onDuty(cur, d, true); rested(oth, d); drove = true; continue; }
+      if (canDrive(oth) > 0.01) { t += SWAP; rested(oth, SWAP); [cur, oth] = [oth, cur]; cur.rest = 0; rested(oth, 0); continue; }   // swap
+      if (cur.cycle <= 0.01 && oth.cycle <= 0.01) { const w = Math.max(0.25, 34 - (drove ? 0 : Math.min(credit, 34))); credit = 0; t += w; cur.rest = 0; oth.rest = 0; rested(cur, 34); rested(oth, 34); continue; }
+      const left = [cur, oth].filter((d) => d.cycle > 0.01).map((d) => 10 - d.rest);
+      let wait = Math.max(0.25, Math.min(...left));
+      if (!drove && credit > 0) { const c = Math.min(credit, wait - 0.25); wait -= c; credit = 0; rested(cur, c); rested(oth, c); }
+      t += wait; rested(cur, wait); rested(oth, wait);
+    }
+    out.push(now + t * H);
+    const dw = (Number(leg.dwellMin) || 0) / 60;
+    if (dw > 0) { t += dw; onDuty(cur, dw, false); rested(oth, dw); }
   }
-  return t;
+  return out;
 }
 
 const isDone = (code) => /^(delvd|deliv|del$|cmplt|complete|canc|void|avail|avbl|new)/i.test(String(code || ''));
@@ -285,7 +309,7 @@ function tripFacts(item, now) {
     unit: String(t.powerUnit || ''),
     trailer: String(t.trailer || t.trailer2 || ''),
     driver: (live && live.driver1) || t.driver || '',
-    team: !!(t.driver2 || (live && live.hos2 && live.hos2.status)),
+    team: !!(t.driver2 || (live && ((live.hos2 && live.hos2.status) || live.driver2 || live.driver2Info))),
     status: String(t.status || ''),
     origin: t.origZoneDesc || '',
     dest: t.destZoneDesc || '',
@@ -379,17 +403,27 @@ function routeEtas(f, ctx) {
   const passed = sorted.slice(0, nPassed);
   const ordered = sorted.slice(nPassed);
   const hos = f.live.hos || {};
-  const restDoneMin = (hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stoppedMin) ? f.stoppedMin : 0;
-  const out = [];
-  let miles = 0; let dock = 0; let at = { lat: f.live.lat, lng: f.live.lng };
-  ordered.forEach((st, i) => {
+  // parked (≤2 mph for 30+ min): the time already parked counts toward a rest the driver needs now
+  const parked = f.live.speedMph != null && f.live.speedMph <= 2 && f.stoppedMin >= 30 && !f.stopStartUnknown;
+  const parkedSinceMs = parked ? ctx.now - f.stoppedMin * MIN : null;
+  const restDoneMin = parked || (hos.driveLeftMin != null && hos.driveLeftMin <= 0) ? (f.stoppedMin || 0) : 0;
+  const legs = []; let at = { lat: f.live.lat, lng: f.live.lng }; let miles = 0;
+  for (const st of ordered) {
     const g = pts.get(st.key);
     const road = ctx.roadMiles ? ctx.roadMiles(at, g) : null;      // real driving miles when known
-    miles += road != null ? road : haversineMi(at.lat, at.lng, g.lat, g.lng) * 1.2;
+    const leg = road != null ? road : haversineMi(at.lat, at.lng, g.lat, g.lng) * 1.2;
+    legs.push({ miles: leg, dwellMin: stopDwellMin(st) });          // unloading here uses the driver's shift too
     at = g;
-    const eta = miles > 0 ? estimateArrival(miles, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, partner: f.live.hos2 || null, restDoneMin, now: start }) : start;
-    out.push({ stop: st, miles, etaMs: (eta || start) + dock * MIN, stopsBefore: i, leavesAt: start > ctx.now ? start : null });
-    dock += stopDwellMin(st);                                    // unloading here delays every later stop
+  }
+  const times = planArrivals(legs, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, breakInMin: hos.breakInMin, partner: f.live.hos2 || null, restDoneMin, now: start });
+  const out = [];
+  ordered.forEach((st, i) => {
+    miles += legs[i].miles;
+    let etaMs = legs[i].miles > 0.5 || i ? times[i] : start;
+    // parked with an appointment still ahead: it rolls for the appointment, not "right now"
+    const waitingForAppt = !!(parked && st.apptMs && st.apptMs > etaMs && st.apptMs - ctx.now < 36 * 60 * MIN && i === 0);
+    if (waitingForAppt) etaMs = st.apptMs;
+    out.push({ stop: st, miles, etaMs, stopsBefore: i, leavesAt: start > ctx.now ? start : null, parkedSinceMs: i === 0 ? parkedSinceMs : null, waitingForAppt });
   });
   out.guess = hos.driveLeftMin != null && hos.driveLeftMin <= 0 && f.stopStartUnknown;
   out.passed = passed;
@@ -795,7 +829,7 @@ export function boardEtas(board, ctxIn) {
     if (!route) continue;
     out[f.trip] = {
       at: ctx.now, team: f.team, guess: !!route.guess,
-      stops: route.map((r) => ({ key: r.stop.key, zip: r.stop.zip || null, label: r.stop.label, miles: Math.round(r.miles), etaMs: r.etaMs, apptMs: r.stop.apptMs ?? null, apptFrom: r.stop.apptFrom || null })),
+      stops: route.map((r) => ({ key: r.stop.key, zip: r.stop.zip || null, label: r.stop.label, miles: Math.round(r.miles), etaMs: r.etaMs, apptMs: r.stop.apptMs ?? null, apptFrom: r.stop.apptFrom || null, parkedSinceMs: r.parkedSinceMs || null, waitingForAppt: !!r.waitingForAppt })),
       leavesAt: route[0] ? route[0].leavesAt : null,
       passed: (route.passed || []).map((st) => ({ key: st.key, zip: st.zip || null, label: st.label })),
     };

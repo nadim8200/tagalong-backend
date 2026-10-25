@@ -85,7 +85,8 @@ test('team out of Miami reaches Chelsea Thursday morning, not Wednesday afternoo
   const e = boardEtas({ trips: [it] }, { now, geo: (z) => (G2[z] ? { lat: G2[z][0], lng: G2[z][1] } : null), unitState: () => ({}) })['624481'];
   const chelsea = e.stops.find((s) => s.zip === '02150');
   const h = (chelsea.etaMs - now) / 3600000;
-  assert.ok(h > 30 && h < 33, `Chelsea in ${h.toFixed(1)} h (Thu ~5-7 AM)`);
+  // 1579 mi at 55 mph = 28.7 h + 4 stops × 1 h + two 15-min driver swaps ≈ 33.2 h (Thu ~8 AM)
+  assert.ok(h > 30 && h < 34, `Chelsea in ${h.toFixed(1)} h (Thu morning)`);
   assert.equal(stopDwellMin({ consignees: ['a', 'b', 'c', 'd', 'e'], pieces: 70 }), 60, '1 hour per stop (dispatch rule)');
 });
 

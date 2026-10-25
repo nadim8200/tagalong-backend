@@ -37,7 +37,10 @@ export function foldLog(log = {}, items = [], etas = {}, at = Date.now()) {
     for (const s of ((etas[n] && etas[n].stops) || [])) {
       const k = placeKey(s.label); if (!k || !s.etaMs) continue;
       const cur = (t[k] && t[k].ours) || [];
-      if (shouldLog(cur, s.etaMs, at)) t[k] = { ...(t[k] || {}), label: s.label, ours: [...cur, { at, etaMs: s.etaMs, miles: s.miles ?? null }].slice(-40) };
+      // a parked truck: one line for the whole time it sits there (its ETA only slides with the clock)
+      const last = cur[cur.length - 1];
+      if (s.parkedSinceMs && last && last.parkedSince === s.parkedSinceMs) continue;
+      if (s.parkedSinceMs || shouldLog(cur, s.etaMs, at)) t[k] = { ...(t[k] || {}), label: s.label, ours: [...cur, { at, etaMs: s.etaMs, miles: s.miles ?? null, ...(s.parkedSinceMs ? { parkedSince: s.parkedSinceMs } : {}), ...(s.waitingForAppt ? { appt: true } : {}) }].slice(-40) };
     }
     for (const a of ((it._artisEta && it._artisEta.stops) || [])) {
       if (a.delivered || !a.etaMs || !a.city || !a.state) continue;
@@ -78,6 +81,27 @@ export function reportRows(item, log = {}, visits = {}) {
   });
 }
 
+// the ETAs worth showing: the first, every real change (moved an hour+ from the last one shown) and the last —
+// at most 6. A truck sitting still re-logs every 20 min with the ETA sliding 20 min; that's one line, not forty. Pure.
+export function keyEtas(ours = []) {
+  if (ours.length <= 2) return ours;
+  const kept = [ours[0]];
+  for (const e of ours.slice(1, -1)) if (Math.abs(e.etaMs - kept[kept.length - 1].etaMs) >= 60 * MIN) kept.push(e);
+  kept.push(ours[ours.length - 1]);
+  if (kept.length <= 6) return kept;
+  const mid = kept.slice(1, -1); const step = mid.length / 4;
+  return [kept[0], ...[0, 1, 2, 3].map((i) => mid[Math.floor(i * step)]), kept[kept.length - 1]];
+}
+// send the report only when it says something: a truck, an actual arrival at EVERY stop, and ETAs we gave. Pure.
+export function worthSending(item, rows) {
+  const t = tripOf(item);
+  if (!String(t.powerUnit || '').trim()) return { ok: false, why: 'no truck on the trip' };
+  if (!rows.length) return { ok: false, why: 'no stops' };
+  if (rows.some((r) => !r.actual)) return { ok: false, why: 'a stop has no arrival / delivery time' };
+  if (!rows.some((r) => r.ours.length)) return { ok: false, why: 'no ETAs were given on this trip' };
+  return { ok: true };
+}
+
 // "1 h 25 min" / "40 min". Pure.
 export const hm = (m) => (m == null ? '—' : m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}` : `${m} min`);
 const off = (etaMs, actualMs) => {
@@ -95,7 +119,8 @@ export function renderReport(item, rows, reason = 'finished') {
   const body = rows.map((r) => {
     const first = r.ours[0]; const last = r.ours[r.ours.length - 1];
     const act = r.actual ? (r.actual.ms ? when(r.actual.ms, r.label) : esc(r.actual.text)) : 'not recorded';
-    const hist = r.ours.map((e) => `${when(e.at, 'FL')} → <b>${when(e.etaMs, r.label)}</b>${e.miles != null ? ` (${e.miles} mi out)` : ''}`).join('<br>');
+    const shown = keyEtas(r.ours); const hidden = r.ours.length - shown.length;
+    const hist = shown.map((e) => `${when(e.at, 'FL')} → <b>${when(e.etaMs, r.label)}</b>${e.miles != null ? ` (${e.miles} mi out)` : ''}${e.parkedSince ? ` — parked since ${when(e.parkedSince, 'FL')}${e.appt ? ', waiting for the appointment' : ''}` : ''}`).join('<br>') + (hidden > 0 ? `<br><i>(${hidden} more updates with small changes not shown)</i>` : '');
     const art = r.artis.map((e) => `${when(e.at, 'FL')} → ${when(e.etaMs, r.label)}`).join('<br>');
     return `<tr><td style="${cell}"><b>${esc(r.customers.join(', ') || r.label)}</b><br><span style="color:#596A7F">${esc(r.label)}</span></td>
 <td style="${cell}">${first ? `${when(first.etaMs, r.label)}<br><span style="color:#596A7F">given ${when(first.at, 'FL')}</span>` : '—'}</td>
@@ -103,7 +128,7 @@ export function renderReport(item, rows, reason = 'finished') {
 <td style="${cell}"><b>${act}</b>${r.actual ? `<br><span style="color:#596A7F">${esc(r.actual.from)}</span>` : ''}</td>
 <td style="${cell}">${r.actual && r.actual.ms ? `first: ${off(first && first.etaMs, r.actual.ms) || '—'}<br>last: ${off(last && last.etaMs, r.actual.ms) || '—'}` : '—'}</td>
 <td style="${cell}">${r.stay && r.stay.minutes != null ? `<b>${hm(r.stay.minutes)}</b><br><span style="color:#596A7F">${when(r.stay.arrivedMs, r.label)} → ${r.stay.leftMs ? when(r.stay.leftMs, r.label) : 'still there'}</span>` : r.stay && r.stay.arrivedMs ? `arrived ${when(r.stay.arrivedMs, r.label)}<br><span style="color:#596A7F">no exit recorded</span>` : '—'}</td></tr>
-${hist || art ? `<tr><td colspan="6" style="padding:0 8px 8px;font-size:12px;color:#596A7F;">${hist ? `<b>Our ETAs along the way</b> (given → ETA):<br>${hist}` : ''}${art ? `<br><b>ARTIS ETA</b> (read → ETA):<br>${art}` : ''}</td></tr>` : ''}`;
+${hist || art ? `<tr><td colspan="6" style="padding:0 8px 8px;font-size:12px;color:#596A7F;">${hist ? `<b>Our ETAs along the way</b> (when given → the ETA):<br>${hist}` : ''}${art ? `<br><b>ARTIS ETA</b> (read → ETA):<br>${art}` : ''}</td></tr>` : ''}`;
   }).join('');
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#172538;max-width:760px">
 <h2 style="font-size:20px;margin:0 0 4px">Trip report — trip ${esc(n)}</h2>
@@ -135,6 +160,7 @@ export function stopTimesFrom(visitsByTrip = {}, items = [], have = {}) {
   return out;
 }
 
+const MAIL_ON = (site) => `taEtaReportMail:${site}`;
 export function initEtaReport({ app = null, requireAuth = null, db, sendMail = null, recipients = async () => [], now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   // after each Watchtower cycle: log this cycle's ETAs
@@ -157,6 +183,16 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
       return next;
     }, {});
   }
+  // the trip-report email: off by default; dispatch turns it on (or off) here
+  if (app && requireAuth) {
+    app.get('/truckmate/eta-report/mail', requireAuth, async (req, res) => res.json(enabled ? ((await db.get(MAIL_ON(String(req.query.site || SITE)), {})) || {}) : {}));
+    app.post('/truckmate/eta-report/mail', requireAuth, async (req, res) => {
+      if (!enabled) return res.status(503).json({ error: 'no database' });
+      const v = { on: !!(req.body && req.body.on), by: (req.user && (req.user.name || req.user.email)) || null, at: new Date(now()).toISOString() };
+      await db.set(MAIL_ON(String(req.query.site || SITE)), v);
+      res.json(v);
+    });
+  }
   // the console's "Stop times" report: every stop, how long the truck was there (newest first)
   if (app && requireAuth) {
     app.get('/truckmate/stop-times', requireAuth, async (req, res) => {
@@ -174,12 +210,13 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     const n = tripNo(rec.item); if (!n) return null;
     const sent = (await db.get(SENT(site), {})) || {};
     if (sent[n]) return null;
+    if (!((await db.get(MAIL_ON(site), {})) || {}).on) return null;   // off until turned on from the console
     const to = await recipients();
     if (!to.length) return null;
     const log = ((await db.get(LOG(site), {})) || {})[n] || {};
     const visits = ((await db.get(`taStopVisits:${site}`, {})) || {})[n] || {};
     const rows = reportRows(rec.item, log, visits);
-    if (!rows.length) return null;
+    if (!worthSending(rec.item, rows).ok) return null;
     const m = renderReport(rec.item, rows, reason);
     await sendMail({ to, subject: m.subject, html: m.html });
     await db.update(SENT(site), (cur) => Object.fromEntries(Object.entries({ ...(cur || {}), [n]: new Date(now()).toISOString() }).slice(-1000)), {});
