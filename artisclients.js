@@ -131,12 +131,20 @@ export function headingTo(fences = [], items = [], etas = {}) {
       (out[f.id] = out[f.id] || []).push({
         trip: n, truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null, stop, etaMs: e && !holdEta ? e.etaMs : null,
         atHub: holdEta ? hub : null, departed,
+        milesAway: e && !holdEta && e.miles != null ? Math.round(e.miles) : null,   // from the truck, along the route (same as the ETA)
         // who's on it: Samsara's names for the trip's driver codes (else TruckMate's codes); OC loads → the trip sheet's
         drivers: (() => {
           if (it._oc && (it._oc.driverName || it._oc.driver2Name)) return [it._oc.driverName, it._oc.driver2Name].filter(Boolean);
           const sm = it._samsara || {};
           const names = [sm.driver1 || (t.driver ? `driver ${t.driver}` : null), sm.driver2 || (t.driver2 ? `driver ${t.driver2}` : null)].filter(Boolean);
           return names;
+        })(),
+        // the uploaded trip sheet's pages (to open it from the map), else the packet's manifest pages
+        sheetIds: (() => {
+          const m = it._manifest;
+          let ids = m && Array.isArray(m.docIds) ? m.docIds.map(String) : [];
+          if (!ids.length) ids = ((it._packet || [])).filter((x) => /^manifest/.test(x.type || '') && x.docId).sort((a, c) => (a.file - c.file) || (a.page - c.page)).map((x) => String(x.docId));
+          return [...new Set(ids)];
         })(),
         // each driver's hours (Samsara clocks), same order as drivers — OC loads have none
         driverHours: it._oc ? [] : [(it._samsara || {}).hos, (it._samsara || {}).hos2].filter((h, i) => h && [(it._samsara || {}).driver1 || t.driver, (it._samsara || {}).driver2 || t.driver2][i])
