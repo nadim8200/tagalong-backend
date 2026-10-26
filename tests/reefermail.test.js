@@ -71,3 +71,19 @@ test('resend one door-temp alert: same subject (marked [RESEND]), same recipient
   assert.equal(mails[0].attachments.length, 1); assert.match(mails[0].html, /Inspection photos · 1/); assert.match(mails[0].html, /625668/);
   assert.equal((await r.resendDoorTemp('9999')).ok, false);
 });
+
+test('billing email example: the latest stored POD / BOL from Synergize → the billing email (with the PDFs)', async () => {
+  const { initSynergize } = await import('../synergize.js');
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
+  m.set('taSynergize:florida-beauty', { trips: {
+    625480: [{ artisId: 'S1', type: 'POD', bill: 'B180594', docId: '11', createdMs: 100 }, { artisId: 'S2', type: 'Rate Confirmation', bill: 'B180594', docId: '12', createdMs: 101 }],
+    625502: [{ artisId: 'S3', type: 'BOL', bill: 'B180600', docId: '13', createdMs: 200 }],
+  }, docs: {}, watch: {}, done: {} });
+  const sent = [];
+  const app = { get: () => {}, post: () => {}, put: () => {} };
+  const s = initSynergize(app, { requireAuth: () => {}, db, docs: { storeDocs: async () => [], readDocs: async ({ ids }) => ids.map((id) => ({ id, data: Buffer.from(`pdf${id}`) })) }, artisWeb: { ready: () => true }, onBillingDocs: async (trip, found) => sent.push({ trip, found }) });
+  assert.deepEqual(await s.billingExample(), { ok: true, trip: '625502', documents: ['BOL B180600'] });
+  assert.equal(sent[0].found[0].bytes.toString(), 'pdf13');
+  assert.deepEqual((await s.billingExample('625480')).documents, ['POD B180594'], 'rate cons are not billing paperwork');
+  assert.equal((await s.billingExample('1')).ok, false);
+});

@@ -245,5 +245,24 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
   });
   app.post('/truckmate/artis/documents-sync', requireAdmin || requireAuth, async (req, res) => { try { res.json(await sync()); } catch (e) { res.status(502).json({ error: e.message }); } });
 
-  return { checkBills, sync, overlay, forTrip };
+  // an example of the billing email from documents already found (a given trip, else the latest with a POD / BOL)
+  async function billingExample(trip = null) {
+    if (!onBillingDocs) return { ok: false, error: 'Billing email is not wired.' };
+    const s0 = await st();
+    const want = trip ? String(trip).replace(/\D/g, '') : null;
+    const pick = Object.entries(s0.trips || {})
+      .map(([n, list]) => [n, (list || []).filter((d) => d && d.docId && BILLING_TYPES.test(d.type || ''))])
+      .filter(([n, l]) => l.length && (!want || n === want))
+      .sort((a, b) => Math.max(...b[1].map((d) => Number(d.createdMs) || 0)) - Math.max(...a[1].map((d) => Number(d.createdMs) || 0)))[0];
+    if (!pick) return { ok: false, error: want ? `No POD / BOL from Synergize stored for trip ${want}.` : 'No POD / BOL from Synergize stored yet.' };
+    const [n, list] = pick;
+    const files = await docs.readDocs({ site: SITE, ids: list.map((d) => String(d.docId)) });
+    const byId = new Map(files.map((f) => [String(f.id), f]));
+    const found = list.map((d) => ({ ...d, bytes: (byId.get(String(d.docId)) || {}).data || null })).filter((d) => d.bytes);
+    if (!found.length) return { ok: false, error: `Trip ${n}'s documents could not be read.` };
+    await onBillingDocs(n, found);
+    return { ok: true, trip: n, documents: found.map((d) => `${d.type} ${d.bill}`) };
+  }
+
+  return { billingExample, checkBills, sync, overlay, forTrip };
 }

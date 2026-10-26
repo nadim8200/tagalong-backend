@@ -1030,6 +1030,13 @@ const artisWeb = initArtisWeb(app, { requireAuth: requireDispatch, requireAdmin:
 // the rest of ARTIS: door temps (reefer alert), tractor / trailer positions, approaching yard; reports for Jarvis
 const artisReports = initArtisReports({ db, artisWeb, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), tempTeam: () => alertRecipients.resolve('reefer_temp'), env: process.env });
 // resend one reefer door-temp alert (to see the email) — only while training mode is on, so it can't reach the real list
+// an example of the Synergize POD / BOL billing email (training mode only — it would go to Billing / Dispatch)
+app.post('/admin/billing-email/example', requireCompanyAdmin, async (req, res) => {
+  try {
+    if (!(await training.active())) return res.status(409).json({ error: 'Examples are only sent in training mode (it would go to the real Billing / Dispatch address).' });
+    res.json(await synergize.billingExample((req.body || {}).trip || null));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.post('/admin/reefer-alert/resend', requireCompanyAdmin, async (req, res) => {
   try {
     if (!(await training.active())) return res.status(409).json({ error: 'Resend is only allowed in training mode (it would go to the real reefer list).' });
