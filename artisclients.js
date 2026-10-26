@@ -124,6 +124,17 @@ export function headingTo(fences = [], items = [], etas = {}) {
       (out[f.id] = out[f.id] || []).push({
         trip: n, truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null, stop, etaMs: e ? e.etaMs : null,
         status: t.statusDesc || t.status || null, statusCode: t.status || null,
+        statusAt: (() => { const h = ((it._times && it._times.statusHistory) || []); return h.length ? h[h.length - 1].at : null; })(),
+        stopsLeft: new Set(bills.map((x) => String(x.endZone || x.endZoneDescription || ''))).size,
+        oc: !!(it._oc || /^OC\d/i.test(String(t.powerUnit || ''))),
+        // outside carrier: what Jarvis read on the trip sheet (carrier, their truck #, driver, crew)
+        ocInfo: it._oc ? { carrier: it._oc.carrierName || it._oc.carrier || null, truck: it._oc.truck || null, trailer: it._oc.trailer || null, driver: it._oc.driverName || null, driverPhone: it._oc.driverPhone || null, driver2: it._oc.driver2Name || null, driver2Phone: it._oc.driver2Phone || null, crew: it._oc.crew || null, dispatchPhone: it._oc.dispatchPhone || null, from: it._oc.source || null } : null,
+        // this customer's stop on the trip sheet: boxes, receiving hours; when it was loaded / dispatched
+        sheet: (() => {
+          const m = it._manifest; if (!m) return null;
+          const st = (m.stops || []).find((x) => /DELIVER/i.test(x.action || '') && ((z && String(x.zip || '') === z) || sameCustomer(x.customer, b.billToName)));
+          return { pieces: (st && st.piecesText) || null, receiving: (st && st.receivingHours) || null, dateLoaded: m.dateLoaded || null, dispatchTime: m.dispatchTime || null, tempF: m.maintainTempF != null ? m.maintainTempF : null };
+        })(),
         pickup: t.origZoneDesc || b.startZoneDescription || null, pickupBy: b.pickUpBy || null, deliverBy: b.deliverBy || b.deliverByEnd || null,
         truckNow: live.lat != null ? { location: live.location || null, at: live.gpsAt || null, mph: live.speedMph != null ? live.speedMph : null } : null,
       });

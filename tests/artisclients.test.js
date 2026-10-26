@@ -97,4 +97,18 @@ test('loads headed to a customer: with no ETA the card gets TruckMate status, pi
   assert.equal(h.pickupBy, '2026-10-26T00:00:00');
   assert.equal(h.deliverBy, '2026-10-28T07:00:00');
   assert.deepEqual(h.truckNow, { location: 'I 75, Slater, FL', at: '2026-10-26T21:00:09Z', mph: 75 });
+  assert.equal(h.stopsLeft, 1); assert.equal(h.oc, false);
+});
+
+test('loads headed to a customer: an outside-carrier load carries what Jarvis read on the trip sheet', () => {
+  const fences = [{ id: 'nf', name: 'NATIVE FLORAL -DORAVILLE', zip: '30340' }];
+  const items = [{ trip: { tripNumber: 625670, powerUnit: 'OC01', trailer: '', status: 'ARRCONS', statusDesc: 'ARRIVE CONSIGNEE' },
+    freightBills: [{ billToName: 'NATIVE FLORAL -DORAVILLE', endZone: '30340', endZoneDescription: 'DORAVILLE, GA, 30340', deliverBy: '2026-10-23T00:00:00' }],
+    _times: { statusHistory: [{ status: 'ARRCONS', at: '2026-10-26T11:04:00Z' }] },
+    _oc: { isOC: true, code: 'OC01', source: 'trip sheet', truck: '20', trailer: '1023', driverName: 'AJAY', driverPhone: '4045550000', crew: 'solo' },
+    _manifest: { dateLoaded: '2026-10-23', dispatchTime: '6:00 PM', stops: [{ action: 'LOAD', customer: 'VENTURA TERMINAL' }, { action: 'DELIVER', customer: 'NATIVE FLORAL DORAVILLE', zip: '30340', piecesText: '35 BOXES 70 BINS', receivingHours: 'MONDAY BEFORE 4 AM' }] } }];
+  const [h] = headingTo(fences, items, {}).nf;
+  assert.equal(h.oc, true); assert.equal(h.statusAt, '2026-10-26T11:04:00Z'); assert.equal(h.stopsLeft, 1);
+  assert.deepEqual(h.ocInfo, { carrier: null, truck: '20', trailer: '1023', driver: 'AJAY', driverPhone: '4045550000', driver2: null, driver2Phone: null, crew: 'solo', dispatchPhone: null, from: 'trip sheet' });
+  assert.deepEqual(h.sheet, { pieces: '35 BOXES 70 BINS', receiving: 'MONDAY BEFORE 4 AM', dateLoaded: '2026-10-23', dispatchTime: '6:00 PM', tempF: null });
 });
