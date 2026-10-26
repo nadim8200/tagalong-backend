@@ -110,7 +110,8 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
     cache = { at: Date.now(), d };
     return d;
   }
-  const isAdmin = (u) => !!(u && (u.admin || u.role === 'admin'));
+  // the platform admin, or a company admin (Florida Beauty: Nadim, Ronen)
+  const isAdmin = (u) => !!(u && (u.admin || u.role === 'admin' || u.companyAdmin));
 
   // the Employees tab is for admins only (Jarvis itself uses the directory for everyone)
   app.get('/truckmate/directory', requireAuth, async (req, res) => {
@@ -122,7 +123,7 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
   app.put('/admin/directory', requireAdmin, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const b = req.body || {};
-    const people = (Array.isArray(b.people) ? b.people : []).filter((p) => p && p.name).slice(0, 400).map((p, i) => ({ id: p.id || `s${Date.now().toString(36)}${i}`, name: String(p.name).slice(0, 80), department: String(p.department || 'Other').slice(0, 60), departmentExt: p.departmentExt ? String(p.departmentExt).slice(0, 30) : null, ext: p.ext ? String(p.ext).replace(/[^\d/ ]/g, '').slice(0, 12) || null : null, phone: last10(p.phone), note: p.note ? String(p.note).slice(0, 60) : null, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(p.email || '')) ? String(p.email).toLowerCase() : null, channels: { text: !p.channels || p.channels.text !== false, email: !p.channels || p.channels.email !== false, call: !!(p.channels && p.channels.call) }, active: p.active !== false }));
+    const people = (Array.isArray(b.people) ? b.people : []).filter((p) => p && p.name).slice(0, 400).map((p, i) => ({ id: p.id || `s${Date.now().toString(36)}${i}`, name: String(p.name).slice(0, 80), department: String(p.department || 'Other').slice(0, 60), departmentExt: p.departmentExt ? String(p.departmentExt).slice(0, 30) : null, ext: p.ext ? String(p.ext).replace(/[^\d/ ]/g, '').slice(0, 12) || null : null, phone: last10(p.phone), note: p.note ? String(p.note).slice(0, 60) : null, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(p.email || '')) ? String(p.email).toLowerCase() : null, channels: { text: !p.channels || p.channels.text !== false, email: !p.channels || p.channels.email !== false, call: !!(p.channels && p.channels.call) }, active: p.active !== false, ...(p.team ? { team: true } : {}) }));
     const cur = await load();
     const d = { main: String(b.main || MAIN_NUMBER).slice(0, 20), people, groups: Array.isArray(b.groups) ? cleanGroups(b.groups) : (cur.groups || SEED_GROUPS), updatedAt: new Date().toISOString() };
     await db.set(KEY, d); cache = { at: Date.now(), d };

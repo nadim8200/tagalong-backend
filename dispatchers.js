@@ -77,7 +77,12 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
           const d = (await list()).find((x) => x.id === req.user.id);
           if (d && d.active !== false && d.mustChange) return res.status(403).json({ error: 'Set your own password first.', mustChange: true });
           if (d && d.active !== false && String(d.company || DEFAULT_COMPANY) !== String(req.user.company || DEFAULT_COMPANY)) return res.status(401).json({ error: 'Your account was moved — sign in again.' });
-          if (d && d.active !== false) return next();
+          // admin rights follow the account, not the token: taken away → gone on the next request
+          if (d && d.active !== false) {
+            req.user.companyAdmin = !!d.companyAdmin;
+            if (!d.companyAdmin && dispatcherMayUse(req.method, req.originalUrl || req.path, req.user) === 'settings') return res.status(403).json({ error: 'Only an admin can change settings. Ask an admin.' });
+            return next();
+          }
           return res.status(401).json({ error: 'This dispatcher account was turned off. Ask an admin.' });
         } catch { return res.status(503).json({ error: 'Could not check your account.' }); }
       }

@@ -99,3 +99,13 @@ test('a new AI-dispatcher customer: next customer ID + its first admin login (te
     assert.equal(dup.status, 409);
   } finally { srv.close(); }
 });
+
+
+test('admin rights follow the account: taken away → settings locked on the next request, even with the old token', async () => {
+  const mm = new Map([['taDispatchers', { list: [{ id: 'D1', email: 'r@x.com', name: 'R', company: 'florida-beauty', companyAdmin: false, active: true, pass: 'x' }] }]]);
+  const db = { enabled: true, get: async (k, fb) => (mm.has(k) ? mm.get(k) : fb), set: async (k, v) => mm.set(k, v), update: async (k, fn, fb) => { const v = fn(mm.has(k) ? mm.get(k) : fb); mm.set(k, v); return v; } };
+  const { requireDispatch } = initDispatchers(express(), { requireAuth: (req, res, next) => { req.user = { id: 'D1', role: 'dispatcher', company: 'florida-beauty', companyAdmin: true }; next(); }, db, hashPassword: (p) => p, verifyPassword: () => true, sign: () => 't', setCookie: () => {} });
+  const go = (method, path) => new Promise((resolve) => { const req = { method, path, originalUrl: path }; requireDispatch(req, { status: (c) => ({ json: () => resolve(c) }) }, () => resolve(200)); });
+  assert.equal(await go('PUT', '/truckmate/profiles/5'), 403);
+  assert.equal(await go('GET', '/truckmate/active'), 200);
+});
