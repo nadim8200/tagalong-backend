@@ -122,3 +122,16 @@ test('loads headed to a customer: when the stop was added, and when the truck le
   const after = headingTo(fences, [{ trip: { tripNumber: 625890, powerUnit: '1910', status: 'DEPSHIP' }, freightBills: [{ ...bill, actualPickup: '2026-10-26T19:30:00' }], _times: { statusHistory: [{ status: 'LOADINGMAN', at: '2026-10-26T21:56:02Z' }, { status: 'DEPSHIP', at: '2026-10-26T23:40:00Z' }] } }], {}).pw[0];
   assert.equal(after.leftAt, '2026-10-26T23:40:00Z'); assert.equal(after.pickedUpAt, '2026-10-26T19:30:00');
 });
+
+test('loads headed to a customer: truck still at our Miami / Ventura hub and not departed → no ETA, says where it is', () => {
+  const fences = [{ id: 'df', name: 'DIRECT FLORAL SOURCE - FT WORTH', zip: '76114' }];
+  const bill = { billToName: 'DIRECT FLORAL SOURCE - FT WORTH', endZoneDescription: 'FT WORTH, TX, 76114' };
+  const etas = { 625901: { stops: [{ zip: '76114', etaMs: 1793187000000 }] } };
+  const atYard = { _samsara: { lat: 25.801931, lng: -80.309705 }, _times: { statusHistory: [{ status: 'LOADINGMAN', at: 'x' }, { status: 'LOADEDTOGO', at: 'y' }] } };
+  const h = headingTo(fences, [{ trip: { tripNumber: 625901, powerUnit: '2090', status: 'LOADEDTOGO' }, freightBills: [bill], ...atYard }], etas).df[0];
+  assert.equal(h.etaMs, null); assert.equal(h.atHub, 'Miami'); assert.equal(h.departed, false);
+  const gone = headingTo(fences, [{ trip: { tripNumber: 625901, powerUnit: '2090', status: 'DEPSHIP' }, freightBills: [bill], _samsara: { lat: 25.80, lng: -80.31 }, _times: { statusHistory: [{ status: 'DEPSHIP', at: 'z' }] } }], etas).df[0];
+  assert.equal(gone.etaMs, 1793187000000, 'departed (still near the yard) → the ETA shows');
+  const away = headingTo(fences, [{ trip: { tripNumber: 625901, powerUnit: '2090', status: 'LOADEDTOGO' }, freightBills: [bill], _samsara: { lat: 30.4, lng: -84.2 } }], etas).df[0];
+  assert.equal(away.etaMs, 1793187000000); assert.equal(away.atHub, null);
+});

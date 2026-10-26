@@ -11,6 +11,7 @@
 // Read-only on ARTIS (same web login as the Truck Builder).
 // ---------------------------------------------------------------
 import { pageVar } from './artisreports.js';
+import { hubAt } from './fleetmap.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taArtisClients:${SITE}`;
@@ -119,10 +120,17 @@ export function headingTo(fences = [], items = [], etas = {}) {
       if (!f || done.has(f.id)) continue;
       done.add(f.id);
       const e = ((etas[n] && etas[n].stops) || []).find((s) => String(s.label || '').toUpperCase() === stop.toUpperCase() || String(s.zip || '') === z);
+      // not departed yet and the truck still at our Miami / Ventura hub → no ETA (it isn't moving); the card says where it is
+      const live0 = it._samsara || it.live || {};
+      const leftH = ((it._times && it._times.statusHistory) || []).some((x) => /^(DEPSHIP|INTRAN|ENROUTE|ARRCONS|DEPCONS)/i.test(String(x.status || '')));
+      const departed = leftH || /^(DEPSHIP|INTRAN|ENROUTE|ARRCONS|DEPCONS|DELV|CMPLT|COMPLETE)/i.test(String(t.status || '')) || bills.some((x) => x.actualPickup);
+      const hub = live0.lat != null ? hubAt({ lat: live0.lat, lng: live0.lng }) : null;
+      const holdEta = !departed && !!hub;
       // with no ETA (not picked up yet, no GPS…) the card says why: TruckMate's status, the pickup, the due time, where the truck is
       const live = it._samsara || it.live || {};
       (out[f.id] = out[f.id] || []).push({
-        trip: n, truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null, stop, etaMs: e ? e.etaMs : null,
+        trip: n, truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null, stop, etaMs: e && !holdEta ? e.etaMs : null,
+        atHub: holdEta ? hub : null, departed,
         status: t.statusDesc || t.status || null, statusCode: t.status || null,
         statusAt: (() => { const h = ((it._times && it._times.statusHistory) || []); return h.length ? h[h.length - 1].at : null; })(),
         stopsLeft: new Set(bills.map((x) => String(x.endZone || x.endZoneDescription || ''))).size,
