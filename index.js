@@ -15,6 +15,8 @@
 // Broker/family accounts are stored server-side inside Traccar (a host device's
 // attributes) — no separate database needed. Passwords are salted+hashed.
 // ---------------------------------------------------------------
+import { proxyRule, holdsDevice, isAdminUser, allowRoles } from './access.js';
+import { initSignin } from './signin.js';
 import { initMiles } from './miles.js';
 import { loginGuardMiddleware, sessionTooOld, STAFF_SESSION_DAYS, keepsLongSession } from './loginguard.js';
 import express from 'express';
@@ -211,25 +213,37 @@ const norm = (e) => String(e || '').toLowerCase().trim();
 
 // ---- owner / admin login (verified by Traccar) ----
 // password guessing → locked out (every sign-in / reset route)
-app.use(/^\/auth\/(?:[a-z]+\/)?(?:login|reset|forgot|password-reset)$/, loginGuardMiddleware());
+app.use(/^\/auth\/(?:[a-z]+\/)?(?:login|signin|reset|forgot|password-reset)$/, loginGuardMiddleware());
 
+// Traccar email + password → { u, sess } (u = the full Traccar user) or null. Throws when Traccar can't be reached.
+async function traccarCheck(email, password) {
+  const body = new URLSearchParams({ email, password });
+  const r = await fetch(`${TRACCAR_URL}/api/session`, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+  });
+  if (!r.ok) return null;
+  const u = await r.json();
+  return { u, sess: { id: u.id, email: u.email, name: u.name, role: u.administrator ? 'admin' : 'owner', admin: !!u.administrator } };
+}
 app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'Email and password required.' });
   try {
-    const body = new URLSearchParams({ email, password });
-    const r = await fetch(`${TRACCAR_URL}/api/session`, {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
-    });
-    if (!r.ok) return res.status(401).json({ error: 'Wrong email or password.' });
-    const u = await r.json();
-    const sess = { id: u.id, email: u.email, name: u.name, role: u.administrator ? 'admin' : 'owner', admin: !!u.administrator };
-    const token = setSession(res, sess);
-    res.json({ ...u, ...sess, token }); // full Traccar user + a token the client stores
+    const c = await traccarCheck(email, password);
+    if (!c) return res.status(401).json({ error: 'Wrong email or password.' });
+    const token = setSession(res, c.sess);
+    res.json({ ...c.u, ...c.sess, token }); // full Traccar user + a token the client stores
   } catch { res.status(502).json({ error: 'Could not reach the tracking server.' }); }
 });
 
 // ---- broker / family signup + login (server-side accounts) ----
+// a broker / family / fleet email + password → the session user, or null
+async function accountCheck(kind, listKey, e, password) {
+  const acc = await readAccounts();
+  const rec = acc[listKey].find((x) => x.email === e);
+  if (!rec || !verifyPassword(password, rec.pass)) return null;
+  return { id: rec.id, email: rec.email, name: rec.name, company: rec.company, role: kind };
+}
 function makeAccountRoutes(kind, listKey) {
   app.post(`/auth/${kind}/signup`, async (req, res) => {
     const { email, password, name, company } = req.body || {};
@@ -259,10 +273,8 @@ function makeAccountRoutes(kind, listKey) {
     const { password } = req.body || {};
     if (!e || !password) return res.status(400).json({ error: 'Email and password required.' });
     try {
-      const acc = await readAccounts();
-      const rec = acc[listKey].find((x) => x.email === e);
-      if (!rec || !verifyPassword(password, rec.pass)) return res.status(401).json({ error: 'Wrong email or password.' });
-      const user = { id: rec.id, email: rec.email, name: rec.name, company: rec.company, role: kind };
+      const user = await accountCheck(kind, listKey, e, password);
+      if (!user) return res.status(401).json({ error: 'Wrong email or password.' });
       const token = setSession(res, user);
       res.json({ ...user, token });
     } catch { res.status(502).json({ error: 'Login failed, try again.' }); }
@@ -320,6 +332,8 @@ function requireAuth(req, res, next) {
   if (sessionTooOld(req.user)) return res.status(401).json({ error: 'Session expired.' });
   return next();
 }
+// two middlewares as one (for modules that take a single requireAuth)
+const chain = (a, b) => (req, res, next) => a(req, res, () => b(req, res, next));
 app.get('/auth/me', requireAuth, (req, res) => res.json(req.user));
 
 // ---- self-serve account deletion (App Store Guideline 5.1.1(v)) ----
@@ -485,9 +499,41 @@ app.post('/auth/password-reset', async (req, res) => {
 });
 
 // ---- authenticated transparent proxy to Traccar (token added here) ----
+// does this signed-in account hold this car (owner / approved family / approved broker / its fleet)?
+async function userHoldsDevice(user, deviceId) {
+  if (isAdminUser(user)) return true;
+  const id = Number(deviceId); if (!id) return false;
+  try {
+    const all = await (await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders })).json();
+    const d = (all || []).find((x) => x.id === id);
+    if (!d) return false;
+    if (user.role !== 'owner') return holdsDevice(user, d);
+    const s = await ownerScope(user.id);
+    // also the cars Traccar itself gives this user (older cars linked only by a user-device permission)
+    let mine = null;
+    try { const r = await fetch(`${TRACCAR_URL}/api/devices?userId=${encodeURIComponent(user.id)}`, { headers: traccarHeaders }); if (r.ok) mine = new Set((await r.json()).map((x) => x.id)); } catch { mine = null; }
+    return holdsDevice(user, d, { ownerOwns: (dev) => ownerOwns(dev, s), ownerIds: mine });
+  } catch { return false; }
+}
+
 app.all('/api/traccar/*', requireAuth, async (req, res) => {
   const path = req.params[0] || '';
   const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+  // only what this kind of account's own app uses (access.js) — the proxy speaks to Traccar as admin
+  const rule = proxyRule(req.user, req.method, path, req.body);
+  if (rule.deny) return res.status(403).json({ error: 'Your account does not include this.', why: rule.deny });
+  if (rule.device != null && !(await userHoldsDevice(req.user, rule.device))) return res.status(403).json({ error: 'That vehicle is not on your account.' });
+  let sendBody = rule.body || req.body;
+  // own profile: the locked fields (admin flag, limits, account / customer ids) keep their current values
+  if (rule.keepFields) {
+    try {
+      const cur = ((await (await fetch(`${TRACCAR_URL}/api/users`, { headers: traccarHeaders })).json()) || []).find((u) => String(u.id) === String(req.user.id));
+      if (!cur) return res.status(404).json({ error: 'Profile not found.' });
+      rule.keepFields.forEach((k) => { if (k in cur) sendBody[k] = cur[k]; });
+      sendBody.attributes = { ...(sendBody.attributes || {}) };
+      rule.keepAttrs.forEach((k) => { if (cur.attributes && k in cur.attributes) sendBody.attributes[k] = cur.attributes[k]; else delete sendBody.attributes[k]; });
+    } catch { return res.status(502).json({ error: 'Upstream tracking server error.' }); }
+  }
   const init = {
     method: req.method,
     headers: {
@@ -495,11 +541,13 @@ app.all('/api/traccar/*', requireAuth, async (req, res) => {
       ...(req.method !== 'GET' && req.method !== 'HEAD' ? { 'Content-Type': req.get('content-type') || 'application/json' } : {}),
     },
   };
-  if (req.method !== 'GET' && req.method !== 'HEAD') init.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+  if (req.method !== 'GET' && req.method !== 'HEAD') init.body = typeof sendBody === 'string' ? sendBody : JSON.stringify(sendBody);
   try {
     const r = await fetch(`${TRACCAR_URL}/api/${path}${qs}`, init);
     res.status(r.status);
     const ct = r.headers.get('content-type') || '';
+    // exports (xlsx / kml / csv …) are never filtered → admins only
+    if (!isAdminUser(req.user) && ct && !ct.includes('application/json') && !ct.startsWith('text/plain')) return res.status(403).json({ error: 'Not available on your account.' });
     if (ct.includes('application/json')) {
       let payload = await r.json().catch(() => ({}));
       payload = await scopeResponse(req.user, path, payload);
@@ -708,13 +756,13 @@ const push = initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env: proc
 
 // Dispatch loads + the API a partner TMS integrates against. Safely no-ops
 // (503 with a clear message) until DATABASE_URL is configured.
-initLoads(app, { requireAuth, db, pool: db.pool });
+initLoads(app, { requireAuth: chain(requireAuth, allowRoles('fleet')), db, pool: db.pool });
 
 // Driver proof-of-delivery capture (counts as DATA, plus the photo evidence).
-initPod(app, { requireAuth, db, pool: db.pool });
+initPod(app, { requireAuth: chain(requireAuth, allowRoles('fleet')), db, pool: db.pool });
 
 // The AI dispatcher's continuous review — what needs a human right now.
-initDispatcher(app, { requireAuth, db, pool: db.pool });
+initDispatcher(app, { requireAuth: chain(requireAuth, allowRoles('fleet')), db, pool: db.pool });
 
 // Customer call-ahead (call or text, contact's choice). DRY-RUN until
 // NOTIFY_ALLOW_SEND=true — see the compliance note at the top of notify.js.
@@ -722,15 +770,25 @@ initDispatcher(app, { requireAuth, db, pool: db.pool });
 
 // Live fleet state from the company's own telematics (Samsara), classified so
 // dormant units and trucks parked at a terminal don't drown the review.
-initFleet(app, { requireAuth, db, env: process.env });
+initFleet(app, { requireAuth: chain(requireAuth, allowRoles('fleet')), db, env: process.env });
 
 // RingCentral: SMS from the company's own business numbers, plus the call log
 // so "was this customer actually called?" comes from records, not memory.
-const rc = initRingCentral(app, { requireAuth, db, pool: db.pool, env: process.env });
+const rc = initRingCentral(app, { requireAuth: chain(requireAuth, allowRoles('dispatcher')), db, pool: db.pool, env: process.env });
 // Original uploaded documents (rate cons, trip sheets) kept privately in Postgres.
 // Dispatch side (console, Jarvis, loads, emails, calls): admins and active dispatcher accounts only —
 // a TagAlong customer login can't reach it.
-const { requireDispatch, requireAdmin } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true }) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
+const { requireDispatch, requireAdmin, signIn: dispatcherSignIn } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true }) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
+// one sign-in for every kind of account → lands on that person's service (signin.js)
+initSignin(app, {
+  db, requireAdmin,
+  setCookie: (res, t, kind) => res.cookie(COOKIE, t, kind === 'dispatcher' ? { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 } : cookieOpts),
+  checks: {
+    traccar: async (e, pw) => { const c = await traccarCheck(e, pw); return c ? { kind: c.sess.admin ? 'admin' : 'owner', user: { ...c.u, ...c.sess }, token: issue(c.sess) } : null; },
+    dispatcher: async (e, pw, req) => { const r = await dispatcherSignIn(e, pw, req); return !r || r.error ? r : { user: r.user, token: r.token, mustChange: r.mustChange }; },
+    ...Object.fromEntries([['fleet', 'fleets'], ['broker', 'brokers'], ['member', 'members']].map(([kind, list]) => [kind, async (e, pw) => { const u = await accountCheck(kind, list, e, pw); return u ? { user: u, token: issue(u) } : null; }])),
+  },
+});
 // who gets which push notifications — one admin screen for all of them
 const pushRules = initPushRules(app, { requireAdmin, db, push, listDispatchers: async () => (((await db.get('taDispatchers', { list: [] })) || {}).list || []).map(({ pass, reset, ...d }) => d) });
 // company directory: staff names + extensions (shareable); cells / emails are system-only
@@ -885,7 +943,7 @@ initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
 // falls back to Twilio. DRY-RUN until NOTIFY_ALLOW_SEND=true — see notify.js.
-initNotify(app, { requireAuth, db, pool: db.pool, env: process.env, ringcentral: rc });
+initNotify(app, { requireAuth: chain(requireAuth, allowRoles('fleet')), db, pool: db.pool, env: process.env, ringcentral: rc });
 
 // Dynamic BPO campaign portal — live call workspace (claims + per-lead updates).
 initDbpo(app, { db, requireAuth: requireAdmin });

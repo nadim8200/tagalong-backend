@@ -134,7 +134,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   // backend for vehicles, and our backend talks to Samsara.
   const cfgKey = 'taFleetTelematics';
 
-  async function tokenFor(ownerKey) {
+  async function tokenFor(ownerKey, user = null) {
     // Per-company token first; fall back to a server-wide one for our own
     // testing. Never expose either.
     if (db && db.enabled) {
@@ -142,7 +142,8 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
       const cfg = all[ownerKey];
       if (cfg && cfg.samsaraToken) return cfg.samsaraToken;
     }
-    return env.SAMSARA_TOKEN || null;
+    // our own company's Samsara account — admins only, never a customer's fleet portal
+    return user && (user.admin || user.role === 'admin') ? (env.SAMSARA_TOKEN || null) : null;
   }
 
   // Connect (or replace) a fleet's Samsara credentials.
@@ -182,7 +183,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   app.get('/fleet/live', requireAuth, async (req, res) => {
     try {
       const owner = String(req.user.company || req.user.id);
-      const token = await tokenFor(owner);
+      const token = await tokenFor(owner, req.user);
       if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
       const r = await fetch('https://api.samsara.com/fleet/vehicles/stats?types=gps,engineStates', {
         headers: { Authorization: `Bearer ${token}` },
@@ -209,7 +210,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   app.get('/fleet/hos', requireAuth, async (req, res) => {
     try {
       const owner = String(req.user.company || req.user.id);
-      const token = await tokenFor(owner);
+      const token = await tokenFor(owner, req.user);
       if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
       const r = await fetch('https://api.samsara.com/fleet/hos/clocks?limit=200', {
         headers: { Authorization: `Bearer ${token}` },
@@ -276,7 +277,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   app.get('/fleet/drivers', requireAuth, async (req, res) => {
     try {
       const owner = String(req.user.company || req.user.id);
-      const token = await tokenFor(owner);
+      const token = await tokenFor(owner, req.user);
       if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
       const headers = { Authorization: `Bearer ${token}` };
 
@@ -542,7 +543,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   app.get('/fleet/discover', requireAuth, async (req, res) => {
     try {
       const owner = String(req.user.company || req.user.id);
-      const token = await tokenFor(owner);
+      const token = await tokenFor(owner, req.user);
       if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
       const headers = { Authorization: `Bearer ${token}` };
 
@@ -625,7 +626,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   app.get('/fleet/vehicles/full', requireAuth, async (req, res) => {
     try {
       const owner = String(req.user.company || req.user.id);
-      const token = await tokenFor(owner);
+      const token = await tokenFor(owner, req.user);
       if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
       // Chunked into groups of four and merged — see fetchVehicleStats. This
       // endpoint previously asked for eleven types in one call, two of them
@@ -956,7 +957,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
   app.get('/fleet/runs', requireAuth, async (req, res) => {
     try {
       const owner = String(req.user.company || req.user.id);
-      const token = await tokenFor(owner);
+      const token = await tokenFor(owner, req.user);
       if (!token) return res.status(503).json({ error: 'No telematics account connected.' });
       const headers = { Authorization: `Bearer ${token}` };
       const now = Date.now();

@@ -457,7 +457,7 @@ export function initPush(app, { TRACCAR_URL, traccarHeaders, requireAuth, env, d
     return {
       ...rec,
       account: ua.account || rec.account || '',
-      cid: rec.cid || ua.customerId || '',
+      cid: ua.customerId || (ua.account ? '' : rec.cid) || '',   // the account's own id wins over what the phone sent
     };
   }
   // geofenceId → friendly name (strip our ⭐/⏱ prefixes)

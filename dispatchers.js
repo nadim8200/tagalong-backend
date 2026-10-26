@@ -42,7 +42,8 @@ const ADMIN_ONLY = [
   /^\/truckmate\/consent\/settings/,
 ];
 export function dispatcherMayUse(method, path) {
-  const p = String(path || '').split('?')[0];
+  // Express matches routes regardless of case — check the lower-cased path so /Truckmate/Profiles can't slip past
+  const p = String(path || '').split('?')[0].toLowerCase();
   if (!CONSOLE.test(p)) return 'outside';
   if (String(method).toUpperCase() !== 'GET' && String(method).toUpperCase() !== 'HEAD' && ADMIN_ONLY.some((re) => re.test(p))) return 'settings';
   return null;
@@ -78,21 +79,28 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
   }
   const requireAdmin = (req, res, next) => requireAuth(req, res, () => (isAdmin(req.user) ? next() : res.status(403).json({ error: 'Admins only.' })));
 
+  // check a dispatcher's email + password (and record the sign-in) → { user, token, mustChange } | { error, status } | null
+  async function signIn(e, pw, req) {
+    const d = (await list(true)).find((x) => x.email === e);
+    if (!d || !verifyPassword(pw, d.pass)) return null;
+    if (d.active === false) return { error: 'This dispatcher account is turned off. Ask an admin.', status: 401 };
+    const user = { id: d.id, email: d.email, name: d.name, role: 'dispatcher' };
+    const token = sign(user, '7d');
+    const at = new Date().toISOString();
+    const seen = { at, ip: String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim() || null, device: String(req.headers['user-agent'] || '').slice(0, 160) || null };
+    await save((l) => l.map((x) => (x.id === d.id ? { ...x, lastLoginAt: at, logins: [seen, ...(x.logins || [])].slice(0, 20) } : x)));
+    return { user, token, mustChange: !!d.mustChange };
+  }
   app.post('/auth/dispatcher/login', async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const e = norm(req.body && req.body.email); const pw = String((req.body && req.body.password) || '');
     if (!e || !pw) return res.status(400).json({ error: 'Email and password required.' });
     try {
-      const d = (await list(true)).find((x) => x.email === e);
-      if (!d || !verifyPassword(pw, d.pass)) return res.status(401).json({ error: 'Wrong email or password.' });
-      if (d.active === false) return res.status(401).json({ error: 'This dispatcher account is turned off. Ask an admin.' });
-      const user = { id: d.id, email: d.email, name: d.name, role: 'dispatcher' };
-      const token = sign(user, '7d');
-      setCookie(res, token);
-      const at = new Date().toISOString();
-      const seen = { at, ip: String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim() || null, device: String(req.headers['user-agent'] || '').slice(0, 160) || null };
-      await save((l) => l.map((x) => (x.id === d.id ? { ...x, lastLoginAt: at, logins: [seen, ...(x.logins || [])].slice(0, 20) } : x)));
-      res.json({ ...user, token, mustChange: !!d.mustChange });
+      const r = await signIn(e, pw, req);
+      if (!r) return res.status(401).json({ error: 'Wrong email or password.' });
+      if (r.error) return res.status(r.status || 401).json({ error: r.error });
+      setCookie(res, r.token);
+      res.json({ ...r.user, token: r.token, mustChange: r.mustChange });
     } catch { res.status(502).json({ error: 'Login failed, try again.' }); }
   });
 
@@ -199,5 +207,5 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     try { await save((l) => l.filter((x) => x.id !== req.params.id)); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  return { requireDispatch, requireAdmin };
+  return { requireDispatch, requireAdmin, signIn: (e, pw, req) => (enabled ? signIn(e, pw, req) : null) };
 }
