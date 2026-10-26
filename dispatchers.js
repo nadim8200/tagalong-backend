@@ -198,7 +198,9 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
   app.post('/admin/dispatchers', requireUserAdmin, async (req, res) => {
     const b = req.body || {};
     const e = norm(b.email); const name = String(b.name || '').trim().slice(0, 80);
-    const pw = String(b.password || '');
+    // temp: true → we make a temporary password (shown once) — the Employees page "Give login" button
+    const temp = !b.password && b.temp ? tempPassword() : null;
+    const pw = String(temp || b.password || '');
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e) || !name) return res.status(400).json({ error: 'Name and a valid email are required.' });
     if (pw.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
     try {
@@ -208,7 +210,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
       const company = adminCompany(req) || String(b.company || DEFAULT_COMPANY);
       const d = { id: `D${Date.now()}${randomBytes(2).toString('hex')}`, email: e, name, pass: hashPassword(pw), active: true, mustChange: true, company, ...(b.companyAdmin ? { companyAdmin: true } : {}), createdAt: at, createdBy: who(req), passwordLog: [{ at, by: who(req), how: 'first password set by admin' }] };
       await save((l) => [...l, d]);
-      res.json(view(d));
+      res.json({ ...view(d), ...(temp ? { tempPassword: temp } : {}) });
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
   app.put('/admin/dispatchers/:id', requireUserAdmin, async (req, res) => {
