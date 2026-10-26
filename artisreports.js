@@ -76,6 +76,37 @@ export function initArtisReports({ db, artisWeb, getBoard = null, sendMail = nul
     await alertDoorTemps(out.doorIssues);
     return { tractors: Object.keys(out.tractors || {}).length, trailers: Object.keys(out.trailers || {}).length, approaching: Object.values(out.approaching).reduce((n, l) => n + l.length, 0), doorIssues: out.doorIssues.length, errors };
   }
+  // one door-temp alert email (body: reefermail.js; subject / recipients / photos as always)
+  async function sendDoorTemp(x, items, to, { subjectPrefix = '' } = {}) {
+    const it = items.find((i) => unit(tripOf(i).trailer) === x.trailer);
+    const t = it ? tripOf(it) : null;
+    const what = `Trailer ${x.trailer} was loaded at ${x.actual}°F — set ${x.set}°F (${x.actual > x.set ? '+' : ''}${x.actual - x.set}°F)`;
+    // the dock's photos (thermometer / reefer display) — shown inside the email body
+    const pics = [];
+    for (const id of x.images || []) {
+      try {
+        const p = await artisWeb.fetchBuffer(`/artis-app/trailer/temp/image/${encodeURIComponent(id)}`); // eslint-disable-line no-await-in-loop
+        const jpg = p.buf[0] === 0xff && p.buf[1] === 0xd8;
+        if (p.buf.length > 100) pics.push({ name: `trailer-${x.trailer}-photo-${pics.length + 1}.${jpg ? 'jpg' : 'png'}`, contentType: jpg ? 'image/jpeg' : 'image/png', bytes: p.buf, cid: `door${id}` });
+      } catch (e) { console.warn('[artis-door-temp] photo', id, e.message); }
+    }
+    // the body (layout only — subject, recipients, photos attached / inline are as before)
+    const body = renderDoorTempEmail(x, { trip: t ? { number: tripNo(it), truck: t.powerUnit || null, destination: t.destZoneDesc || null } : null, photos: pics.map((p) => ({ cid: p.cid, bytes: p.bytes })) });
+    try { await sendMail({ to, subject: `${subjectPrefix}Reefer: ${what}${t ? ` — trip ${tripNo(it)}` : ''}`, html: body.html, text: body.text, attachments: pics }); } catch (e) { console.warn('[artis-door-temp]', e.message); } // eslint-disable-line no-await-in-loop
+  }
+  // resend one check that already alerted (latest for a trailer, or by its id) — the caller makes sure it's safe
+  async function resendDoorTemp(key) {
+    const st = (await db.get(KEY, {})) || {};
+    const k = String(key || '').trim();
+    const list = (st.doorIssues || []).filter((x) => String(x.id) === k || x.trailer === unit(k));
+    const x = list[list.length - 1];
+    if (!x) return { ok: false, error: `No door-temp alert for ${k} in the last day.` };
+    const items = getBoard ? (((await getBoard(SITE)) || {}).trips || []) : [];
+    const to = await tempTeam();
+    if (!to.length) return { ok: false, error: 'No one is on the reefer temperature list.' };
+    await sendDoorTemp(x, items, to, { subjectPrefix: '[RESEND] ' });
+    return { ok: true, id: x.id, trailer: x.trailer, at: x.atText };
+  }
   // a trailer loaded far off its set temp → one email to the reefer temperature list (with the trip when we have it)
   async function alertDoorTemps(issues) {
     if (!issues.length || !sendMail) return;
@@ -85,23 +116,7 @@ export function initArtisReports({ db, artisWeb, getBoard = null, sendMail = nul
     const items = getBoard ? (((await getBoard(SITE)) || {}).trips || []) : [];
     const to = await tempTeam();
     for (const x of fresh) {
-      const it = items.find((i) => unit(tripOf(i).trailer) === x.trailer);
-      const t = it ? tripOf(it) : null;
-      const what = `Trailer ${x.trailer} was loaded at ${x.actual}°F — set ${x.set}°F (${x.actual > x.set ? '+' : ''}${x.actual - x.set}°F)`;
-      if (to.length) {
-        // the dock's photos (thermometer / reefer display) — shown inside the email body
-        const pics = [];
-        for (const id of x.images || []) {
-          try {
-            const p = await artisWeb.fetchBuffer(`/artis-app/trailer/temp/image/${encodeURIComponent(id)}`); // eslint-disable-line no-await-in-loop
-            const jpg = p.buf[0] === 0xff && p.buf[1] === 0xd8;
-            if (p.buf.length > 100) pics.push({ name: `trailer-${x.trailer}-photo-${pics.length + 1}.${jpg ? 'jpg' : 'png'}`, contentType: jpg ? 'image/jpeg' : 'image/png', bytes: p.buf, cid: `door${id}` });
-          } catch (e) { console.warn('[artis-door-temp] photo', id, e.message); }
-        }
-        // the body (layout only — subject, recipients, photos attached / inline are as before)
-        const body = renderDoorTempEmail(x, { trip: t ? { number: tripNo(it), truck: t.powerUnit || null, destination: t.destZoneDesc || null } : null, photos: pics.map((p) => ({ cid: p.cid, bytes: p.bytes })) });
-        try { await sendMail({ to, subject: `Reefer: ${what}${t ? ` — trip ${tripNo(it)}` : ''}`, html: body.html, text: body.text, attachments: pics }); } catch (e) { console.warn('[artis-door-temp]', e.message); } // eslint-disable-line no-await-in-loop
-      }
+      if (to.length) await sendDoorTemp(x, items, to);
       sent[x.id] = new Date(now()).toISOString();
     }
     await db.set(SENT, Object.fromEntries(Object.entries(sent).slice(-500)));
@@ -185,5 +200,5 @@ export function initArtisReports({ db, artisWeb, getBoard = null, sendMail = nul
     const t = setInterval(() => { if (now() - last < 29 * MIN) return; last = now(); refresh().then((r) => console.log(`[artis-reports] ${r.tractors} tractors, ${r.trailers} trailers, ${r.approaching} approaching, ${r.doorIssues} door-temp issues${r.errors.length ? `, errors: ${r.errors.join('; ')}` : ''}`)).catch((e) => console.warn('[artis-reports]', e.message)); }, 5 * MIN);
     if (t.unref) t.unref();
   }
-  return { refresh, overlay, report };
+  return { refresh, overlay, report, resendDoorTemp };
 }

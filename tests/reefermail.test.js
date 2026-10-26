@@ -58,3 +58,16 @@ test('image size from the photo bytes (PNG / JPEG), null when unknown', () => {
   assert.deepEqual(imageSize(jpg), { w: 800, h: 600 });
   assert.equal(imageSize(Buffer.alloc(30)), null);
 });
+
+test('resend one door-temp alert: same subject (marked [RESEND]), same recipients and photos, new body', async () => {
+  const { initArtisReports } = await import('../artisreports.js');
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v) };
+  m.set('taArtisReports:florida-beauty', { doorIssues: [{ id: 7388, trailer: '7388', door: '25', set: 35, actual: 46, atText: '10/26/2026 04:31:29 PM EDT', by: 'Melvis Rodriguez', warehouse: 'Miami', photos: 1, images: [9] }] });
+  const mails = [];
+  const r = initArtisReports({ db, artisWeb: { ready: () => true, fetchBuffer: async () => ({ buf: Buffer.concat([PNG, Buffer.alloc(200)]), type: 'image/png' }) }, getBoard: async () => ({ trips: [{ trip: { tripNumber: '625668', powerUnit: '1910', trailer: '7388', destZoneDesc: 'MIAMI, FL, 33122' } }] }), sendMail: async (x) => mails.push(x), tempTeam: async () => ['dispatches@floridabeauty.us'] });
+  assert.deepEqual(await r.resendDoorTemp('7388'), { ok: true, id: 7388, trailer: '7388', at: '10/26/2026 04:31:29 PM EDT' });
+  assert.equal(mails[0].subject, '[RESEND] Reefer: Trailer 7388 was loaded at 46°F — set 35°F (+11°F) — trip 625668');
+  assert.deepEqual(mails[0].to, ['dispatches@floridabeauty.us']);
+  assert.equal(mails[0].attachments.length, 1); assert.match(mails[0].html, /Inspection photos · 1/); assert.match(mails[0].html, /625668/);
+  assert.equal((await r.resendDoorTemp('9999')).ok, false);
+});

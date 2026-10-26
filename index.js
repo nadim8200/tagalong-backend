@@ -1029,6 +1029,13 @@ const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin: requi
 const artisWeb = initArtisWeb(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, docs, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // the rest of ARTIS: door temps (reefer alert), tractor / trailer positions, approaching yard; reports for Jarvis
 const artisReports = initArtisReports({ db, artisWeb, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), tempTeam: () => alertRecipients.resolve('reefer_temp'), env: process.env });
+// resend one reefer door-temp alert (to see the email) — only while training mode is on, so it can't reach the real list
+app.post('/admin/reefer-alert/resend', requireCompanyAdmin, async (req, res) => {
+  try {
+    if (!(await training.active())) return res.status(409).json({ error: 'Resend is only allowed in training mode (it would go to the real reefer list).' });
+    res.json(await artisReports.resendDoorTemp((req.body || {}).trailer || (req.body || {}).id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 // ARTIS Synergize documents (POD / BOL / invoice…) by bill — any bill type; TIFF scans → PDF, kept on the trip
 const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, docs, artisWeb, getBoard: (site) => truckmate.buildBoard(site), onRateCon: (trip, file) => ratecon.attachIfMissing('florida-beauty', trip, file),
   // new POD / BOL from Synergize → Billing (Accounting's group email; Dispatch until Accounting has one)
