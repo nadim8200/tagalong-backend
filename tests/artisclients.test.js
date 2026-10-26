@@ -98,6 +98,7 @@ test('loads headed to a customer: with no ETA the card gets TruckMate status, pi
   assert.equal(h.deliverBy, '2026-10-28T07:00:00');
   assert.deepEqual(h.truckNow, { location: 'I 75, Slater, FL', at: '2026-10-26T21:00:09Z', mph: 75 });
   assert.equal(h.stopsLeft, 1); assert.equal(h.oc, false);
+  assert.equal(h.leftAt, null); assert.equal(h.addedAt, null);
 });
 
 test('loads headed to a customer: an outside-carrier load carries what Jarvis read on the trip sheet', () => {
@@ -111,4 +112,13 @@ test('loads headed to a customer: an outside-carrier load carries what Jarvis re
   assert.equal(h.oc, true); assert.equal(h.statusAt, '2026-10-26T11:04:00Z'); assert.equal(h.stopsLeft, 1);
   assert.deepEqual(h.ocInfo, { carrier: null, truck: '20', trailer: '1023', driver: 'AJAY', driverPhone: '4045550000', driver2: null, driver2Phone: null, crew: 'solo', dispatchPhone: null, from: 'trip sheet' });
   assert.deepEqual(h.sheet, { pieces: '35 BOXES 70 BINS', receiving: 'MONDAY BEFORE 4 AM', dateLoaded: '2026-10-23', dispatchTime: '6:00 PM', tempF: null });
+});
+
+test('loads headed to a customer: when the stop was added, and when the truck left', () => {
+  const fences = [{ id: 'pw', name: 'PANHANDLE WHOLESALE FLORIST', zip: '79110' }];
+  const bill = { billToName: 'PANHANDLE WHOLESALE FLORIST', endZoneDescription: 'AMARILLO, TX, 79110', createdTime: '2026-10-24T10:15:16' };
+  const before = headingTo(fences, [{ trip: { tripNumber: 625890, powerUnit: '1910', status: 'LOADEDTOGO' }, freightBills: [bill], _times: { statusHistory: [{ status: 'LOADINGMAN', at: '2026-10-26T21:56:02Z' }] } }], {}).pw[0];
+  assert.equal(before.addedAt, '2026-10-24T10:15:16'); assert.equal(before.leftAt, null);
+  const after = headingTo(fences, [{ trip: { tripNumber: 625890, powerUnit: '1910', status: 'DEPSHIP' }, freightBills: [{ ...bill, actualPickup: '2026-10-26T19:30:00' }], _times: { statusHistory: [{ status: 'LOADINGMAN', at: '2026-10-26T21:56:02Z' }, { status: 'DEPSHIP', at: '2026-10-26T23:40:00Z' }] } }], {}).pw[0];
+  assert.equal(after.leftAt, '2026-10-26T23:40:00Z'); assert.equal(after.pickedUpAt, '2026-10-26T19:30:00');
 });

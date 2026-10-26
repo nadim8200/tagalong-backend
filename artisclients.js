@@ -126,6 +126,11 @@ export function headingTo(fences = [], items = [], etas = {}) {
         status: t.statusDesc || t.status || null, statusCode: t.status || null,
         statusAt: (() => { const h = ((it._times && it._times.statusHistory) || []); return h.length ? h[h.length - 1].at : null; })(),
         stopsLeft: new Set(bills.map((x) => String(x.endZone || x.endZoneDescription || ''))).size,
+        // when this customer's stop went on (the bill was entered in TruckMate, as written) → once the truck leaves,
+        // the day it went out (TruckMate's DEPART SHIPPER / in transit, else the bill's actual pickup)
+        addedAt: b.createdTime || null,
+        leftAt: (() => { const h = ((it._times && it._times.statusHistory) || []).find((x) => /^(DEPSHIP|INTRAN|ENROUTE)/i.test(String(x.status || '')) && x.at); return h ? h.at : null; })(),
+        pickedUpAt: b.actualPickup || null,
         oc: !!(it._oc || /^OC\d/i.test(String(t.powerUnit || ''))),
         // outside carrier: what Jarvis read on the trip sheet (carrier, their truck #, driver, crew)
         ocInfo: it._oc ? { carrier: it._oc.carrierName || it._oc.carrier || null, truck: it._oc.truck || null, trailer: it._oc.trailer || null, driver: it._oc.driverName || null, driverPhone: it._oc.driverPhone || null, driver2: it._oc.driver2Name || null, driver2Phone: it._oc.driver2Phone || null, crew: it._oc.crew || null, dispatchPhone: it._oc.dispatchPhone || null, from: it._oc.source || null } : null,
