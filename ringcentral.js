@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 // ---------------------------------------------------------------
 // RingCentral — SMS from the company's own business number, plus call logging.
 //
@@ -32,6 +33,19 @@ const RC_DEFAULT_SERVER = 'https://platform.ringcentral.com';
 // training mode: texts are held (a copy is emailed instead)
 let smsGuard = null;
 export const setSmsGuard = (fn) => { smsGuard = fn; };
+
+// Who is sending: every signed-in request runs inside sender.run({ user }) (index.js), so a text a
+// dispatcher triggers is signed with their name; a text with no person behind it is signed by Jarvis.
+export const sender = new AsyncLocalStorage();
+export const JARVIS_SIGNATURE = 'Jarvis (AI)';
+// "<text> — Ronen Koubi, Florida Beauty Dispatch", placed before a closing "Reply STOP to opt out." Pure.
+export function signText(text, by) {
+  const t = String(text || '').trim(); const who = String(by || JARVIS_SIGNATURE).trim();
+  if (!t || t.includes(`— ${who}`)) return t;
+  const sig = `— ${who}, Florida Beauty Dispatch`;
+  const m = t.match(/^([\s\S]*?)\s*(Reply STOP to opt out\.?)\s*$/i);
+  return m ? `${m[1]} ${sig}. ${m[2]}` : `${t} ${sig}`;
+}
 
 export function initRingCentral(app, { requireAuth, db, pool, env = process.env }) {
   const cfgKey = 'taRingCentral';
@@ -188,7 +202,16 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   });
 
   // ---- send SMS ----
-  async function sendSms(owner, { to, text, from, allowOptedOut = false }) {
+  // the signer's full name (Employees list) — set by index.js once the directory is up
+  let nameFor = async (u) => (u && (u.name || u.email)) || null;
+  async function signerName() {
+    const st = sender.getStore();
+    if (!st || !st.user) return JARVIS_SIGNATURE;
+    try { return (await nameFor(st.user)) || JARVIS_SIGNATURE; } catch { return JARVIS_SIGNATURE; }
+  }
+  // sign: false only for the carrier-registered compliance texts (opt-in / HELP), which must stay word for word
+  async function sendSms(owner, { to, text: raw, from, allowOptedOut = false, sign = true, by = null }) {
+    const text = sign ? signText(raw, by || await signerName()) : raw;
     // Anyone who replied STOP gets nothing from any part of the app until START.
     if (!allowOptedOut && db && db.enabled) {
       const k = String(to || '').replace(/\D+/g, '').slice(-10);
@@ -348,5 +371,5 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   let onCall = null;
   const setOnCall = (fn) => { onCall = fn; };
 
-  return { sendSms, wasCalled, accessToken, ringOut, inboundSince, configFor, setOnCall };
+  return { sendSms, wasCalled, accessToken, ringOut, inboundSince, configFor, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
 }

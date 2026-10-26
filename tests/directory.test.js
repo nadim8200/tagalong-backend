@@ -19,15 +19,17 @@ test('directory: find by name / department / role; mentions; only name + extensi
   assert.ok(!JSON.stringify(v).includes('748'), 'never the cell');
 });
 
-test('dispatchers can\'t open the directory; admins see the system-only cell', async () => {
+test('every dispatch login sees the whole directory (cells too); nobody else does', async () => {
   const routes = {};
   initDirectory({ get: (p, ...h) => { routes[p] = h.at(-1); }, put: () => {}, post: () => {} }, { requireAuth: () => {}, requireAdmin: () => {}, db: memDb() });
   let out; const res = { json: (j) => { out = j; } };
   let code = 200; res.status = (c) => { code = c; return res; };
   await routes['/truckmate/directory']({ user: { role: 'dispatcher' } }, res);
-  assert.equal(code, 403, 'the Employees tab is admin-only');
+  assert.equal(code, 200); assert.equal(out.people.find((p) => p.name === 'Frank Ducassi').phone, '3057485611');
   await routes['/truckmate/directory']({ user: { admin: true } }, res);
   assert.equal(out.people.find((p) => p.name === 'Frank Ducassi').phone, '3057485611');
+  await routes['/truckmate/directory']({ user: { role: 'owner' } }, res);
+  assert.equal(code, 403, 'a TagAlong customer never');
 });
 
 test('reaching an employee: their chosen ways; a call while texting is not live; never shows the number', async () => {

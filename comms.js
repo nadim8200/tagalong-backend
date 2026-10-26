@@ -194,7 +194,7 @@ export function initComms(app, { requireAuth, db, staffAsk = null, missingCases 
       return;
     }
     if (kw === 'help') {
-      try { await ringcentral.sendSms('__shared', { to: r.from, text: HELP_MSG }); await thread(site, r.from, { type: 'text', kind: 'help', to: r.from, text: HELP_MSG, by: 'AI Dispatcher (automatic)' }); } catch (e) { console.warn('[comms] help reply:', e.message); }
+      try { await ringcentral.sendSms('__shared', { to: r.from, text: HELP_MSG, sign: false }); await thread(site, r.from, { type: 'text', kind: 'help', to: r.from, text: HELP_MSG, by: 'AI Dispatcher (automatic)' }); } catch (e) { console.warn('[comms] help reply:', e.message); }
     }
   }
   // Every recorded consent gets the registered opt-in text once — right away
@@ -216,7 +216,7 @@ export function initComms(app, { requireAuth, db, staffAsk = null, missingCases 
     for (const [k, c] of Object.entries(all)) {
       if (c.confirmSentAt || optOut[k] || n >= 20) continue;
       try {
-        await ringcentral.sendSms('__shared', { to: k, text: OPTIN_MSG }); // eslint-disable-line no-await-in-loop
+        await ringcentral.sendSms('__shared', { to: k, text: OPTIN_MSG, sign: false }); // eslint-disable-line no-await-in-loop
         n += 1;
         await db.update(consentKey(site), (cur) => { const a = { ...(cur || {}) }; if (a[k]) a[k] = { ...a[k], confirmSentAt: new Date().toISOString() }; return a; }, {}); // eslint-disable-line no-await-in-loop
         await thread(site, k, { type: 'text', kind: 'opt-in', to: k, text: OPTIN_MSG, by: 'AI Dispatcher (automatic)' }); // eslint-disable-line no-await-in-loop

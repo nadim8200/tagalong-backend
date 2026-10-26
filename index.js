@@ -18,6 +18,7 @@
 import { proxyRule, isAdminUser, allowRoles, relation, deviceView, mergeDeviceUpdate, shareEntry } from './access.js';
 import { initShop } from './shop.js';
 import { companyGate, initCompanies } from './companies.js';
+import { sender as rcSender } from './ringcentral.js';
 import { initSignin } from './signin.js';
 import { initMiles } from './miles.js';
 import { loginGuardMiddleware, sessionTooOld, STAFF_SESSION_DAYS, keepsLongSession } from './loginguard.js';
@@ -153,6 +154,15 @@ app.use(companyGate((req) => {
   if (!token) return null;
   try { return jwt.verify(token, JWT_SECRET); } catch { return null; }
 }));
+
+// who is sending a text: the signed-in person of this request (texts are signed with their name — ringcentral.js)
+app.use((req, res, next) => {
+  let token = req.cookies && req.cookies.ta_session;
+  if (!token) { const h = req.headers.authorization || ''; if (h.startsWith('Bearer ')) token = h.slice(7); }
+  let u = null;
+  if (token) { try { u = jwt.verify(token, JWT_SECRET); } catch { u = null; } }
+  return u ? rcSender.run({ user: u }, next) : next();
+});
 
 const COOKIE = 'ta_session';
 const cookieOpts = {
@@ -912,6 +922,13 @@ const directory = initDirectory(app, { requireAuth: requireDispatch, requireAdmi
   email: (to, subject, text) => sendMail({ to: [to], subject, html: `<div style="font-family:Arial,sans-serif;font-size:15px">${String(text).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>`, text }, { env: process.env }),
   call: (o) => voice.callStaff(o),
 } });
+// texts are signed with the sender's full name from the Employees list (else their login name)
+rc.setNameResolver(async (u) => {
+  const em = String((u && u.email) || '').toLowerCase();
+  const p = em ? ((await directory.load()).people || []).find((x) => String(x.email || '').toLowerCase() === em) : null;
+  const n = (p && p.name) || (u && u.name) || '';
+  return n ? n.replace(/\b\w/g, (c) => c.toUpperCase()) : null;
+});
 // training mode: outside emails go to the test addresses; texts / calls / app messages are held (copy emailed)
 const training = initTraining(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, sendDirect: (m) => sendMail(m, { env: process.env, direct: true }) });
 setMailGuard((m) => training.mailGuard(m));

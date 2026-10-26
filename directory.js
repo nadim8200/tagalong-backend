@@ -123,13 +123,15 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
   }
   // the platform admin, or a company admin (Florida Beauty: Nadim, Ronen)
   const isAdmin = (u) => !!(u && (u.admin || u.role === 'admin' || u.companyAdmin));
+  // every console login (dispatchers too) sees the whole directory — cells, emails — and every thread; only admins edit
+  const isStaff = (u) => !!(u && (isAdmin(u) || u.role === 'dispatcher'));
 
   // the Employees tab is for admins only (Jarvis itself uses the directory for everyone)
   app.get('/truckmate/directory', requireAuth, async (req, res) => {
-    if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admins only.' });
+    if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });
     const d = await load();
     // dispatchers see what Jarvis may share; admins also see the system-only cell / email
-    res.json({ main: d.main, unclear: isAdmin(req.user) ? UNCLEAR : [], groups: d.groups || [], departments: d.departments || [], people: d.people.map((p) => (isAdmin(req.user) ? p : { id: p.id, ...publicView(p, d.main), active: p.active })) });
+    res.json({ main: d.main, unclear: isAdmin(req.user) ? UNCLEAR : [], groups: d.groups || [], departments: d.departments || [], people: d.people });
   });
   app.put('/admin/directory', requireAdmin, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
@@ -163,8 +165,21 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
   });
 
   // anyone signed in can have Jarvis reach a staff member (they never see the number)
+  // every text / email / call to an employee, kept so anyone can back-track what was sent, by whom, when
+  async function logContact({ personId = null, phone = null, to = null, by, message, result, source }) {
+    let id = personId; let name = to;
+    if (!id && phone) { const d = await load(); const p = d.people.find((x) => x.phone && last10(x.phone) === last10(phone)); if (p) { id = p.id; name = name || p.name; } }
+    if (!id && !name) return;
+    await db.update('taStaffMessages', (cur) => [{ at: new Date().toISOString(), personId: id, to: name, by: by || 'Jarvis (AI)', message: String(message || '').slice(0, 600), result: result || {}, source: source || null }, ...(Array.isArray(cur) ? cur : [])].slice(0, 2000), []);
+  }
+  app.get('/truckmate/directory/:id/contacts', requireAuth, async (req, res) => {
+    if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });
+    const d = await load(); const p = d.people.find((x) => x.id === req.params.id);
+    const all = (await db.get('taStaffMessages', [])) || [];
+    res.json({ history: all.filter((m) => m.personId === req.params.id || (!m.personId && p && m.to === p.name)).slice(0, 100) });
+  });
   app.post('/truckmate/directory/:id/contact', requireAuth, async (req, res) => {
-    if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admins only.' });
+    if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });
     const d = await load();
     const p = d.people.find((x) => x.id === req.params.id && x.active !== false);
     if (!p) return res.status(404).json({ error: 'Not in the directory.' });
@@ -177,17 +192,18 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
     const want = Array.isArray(b.via) && b.via.length ? new Set(b.via) : null;
     const plan = reachPlan(p, { textingLive });
     const out = {};
-    const body = `Florida Beauty dispatch (Jarvis) for ${p.name.split(' ')[0]}: ${message} — sent by ${by}`;
-    if (plan.email && (!want || want.has('email'))) { try { await contact.email(p.email, `Message from ${by} (via Jarvis)`, body); out.email = 'sent'; } catch (e) { out.email = `failed: ${e.message}`; } }
+    const body = `Florida Beauty dispatch (Jarvis) for ${p.name.split(' ')[0]}: ${message}`;   // texts are signed with the sender's name (ringcentral.js)
+    if (plan.email && (!want || want.has('email'))) { try { await contact.email(p.email, `Message from ${by} (via Jarvis)`, `${body} — sent by ${by}`); out.email = 'sent'; } catch (e) { out.email = `failed: ${e.message}`; } }
     if (plan.text && (!want || want.has('text'))) { try { const r = await contact.text(p.phone, body); out.text = r && r.training ? 'held (training mode)' : 'sent'; } catch (e) { out.text = `failed: ${e.message}`; } }
-    if (plan.call && (!want || want.has('call') || (want.has('text') && !textingLive))) { try { const r = await contact.call({ to: p.phone, name: p.name, message: `${message} — from ${by}` }); out.call = r && r.called ? 'calling' : (r && r.skipped) || 'not called'; } catch (e) { out.call = `failed: ${e.message}`; } }
+    if (plan.call && (!want || want.has('call') || (want.has('text') && !textingLive))) { try { const r = await contact.call({ to: p.phone, name: p.name, message: `${message} — from ${by}`, by, logged: true }); out.call = r && r.called ? 'calling' : (r && r.skipped) || 'not called'; } catch (e) { out.call = `failed: ${e.message}`; } }
     if (!Object.keys(out).length) return res.status(409).json({ error: p.phone || p.email ? 'None of the chosen ways are available for this person.' : 'No cell or email on file for this person yet — an admin can add one.' });
-    await db.update('taStaffMessages', (cur) => [{ at: new Date().toISOString(), to: p.name, by, message, result: out }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
+    await logContact({ personId: p.id, to: p.name, by, message, result: out, source: 'Employees' });
     res.json({ ok: true, to: p.name, result: out });
   });
 
   return {
     load,
+    logContact,
     find: async (q) => { const d = await load(); return findStaff(d.people, q).map((p) => publicView(p, d.main)); },
     mentioned: async (text) => mentionedStaff((await load()).people, text),   // internal: includes phone / email
     soundsLike: async (said) => soundsLikeStaff((await load()).people, said),   // internal: a name heard on the phone

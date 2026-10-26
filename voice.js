@@ -1746,7 +1746,7 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
     }
   }
   if (enabled && env.NODE_ENV !== 'test') { const cbt = setInterval(() => { placeDueCallbacks().catch((e) => console.warn('[voice] callbacks:', e.message)); }, 30000); if (cbt.unref) cbt.unref(); }
-  async function callStaff({ to, name, message, trip = null, by = 'Jarvis (callback request)' }) {
+  async function callStaff({ to, name, message, trip = null, by = 'Jarvis (callback request)', logged = false }) {
     if (!key() || !env.RETELL_FROM_NUMBER) return { skipped: 'Jarvis calls are not set up (Retell)' };
     const cfg = await db.get(cfgKey, {});
     if (!cfg.agentId) return { skipped: 'Jarvis agent not set up' };
@@ -1763,6 +1763,8 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
       retell_llm_dynamic_variables: { greeting: `Hi${first ? ` ${first}` : ''}, this is Jarvis from Florida Beauty Flora dispatch with a callback request: ${String(message).replace(/\s+/g, ' ').slice(0, 280)}. This call may be recorded.`, call_context: context },
     } });
     await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: num, trip, purpose: 'staff-alert', by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
+    // the employee's contact history (the Employees page logs its own sends)
+    if (!logged && directory && directory.logContact) await directory.logContact({ phone: num, to: name, by, message, result: { call: 'calling' }, source: trip ? `Jarvis — trip ${trip}` : 'Jarvis' }).catch(() => {});
     return { called: true, callId: call.call_id };
   }
   return { findLoad, live, placeCall, callsFor, callStaff, placeDueCallbacks, useOutreach: (fn) => { outreach = fn; } };

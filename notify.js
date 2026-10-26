@@ -1,3 +1,4 @@
+import { sender, signText, JARVIS_SIGNATURE } from './ringcentral.js';
 // ---------------------------------------------------------------
 // Outbound customer contact — the call-ahead, placed by the system.
 //
@@ -168,7 +169,7 @@ export function initNotify(app, { requireAuth, db, pool, env = process.env, ring
     const r = await fetch(url, {
       method: 'POST',
       headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ To: to, From: twilio.from, Body: body }),
+      body: new URLSearchParams({ To: to, From: twilio.from, Body: signText(body, ((sender.getStore() || {}).user || {}).name || JARVIS_SIGNATURE) }),   // signed like every text
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) return { ok: false, reason: j.message || `Twilio ${r.status}` };
