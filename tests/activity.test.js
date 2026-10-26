@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initActivity, whoIs, dayOf } from '../activity.js';
+import { initActivity, whoIs, dayOf, staffOf } from '../activity.js';
 
 function memDb(seed = {}) { const m = new Map(Object.entries(seed)); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } }; }
 const PROFILES = { p1: { type: 'customer', name: 'BOKHARY FARMS', contacts: [{ name: 'Sam', phone: '7815550123' }] }, p2: { type: 'broker', name: 'RXO Capacity Solutions', office: { city: 'Charlotte', state: 'NC' }, contacts: [{ name: 'Kim', phone: '3125550101' }] } };
@@ -95,4 +95,11 @@ test('profile history: calls (with recording) and texts on the customer\'s numbe
   ];
   const got = entriesFor(list, { phones: ['6175551212'], name: 'CHELSEA MARKET - DIRECT FLOWERS OF BOSTON INC' });
   assert.deepEqual(got.map((e) => e.id), ['t1', 'call:a', 'call:b']);
+});
+
+test('activity: an employee\'s number is our team, even when the call said a customer name', () => {
+  const people = [{ name: 'Ronen Koubi', phone: '305-206-3095', department: 'Operations' }];
+  assert.deepEqual(staffOf('+13052063095', people), { role: 'team', name: 'Ronen Koubi', detail: 'Operations' });
+  assert.equal(staffOf('+13055550000', people), null);
+  assert.equal(staffOf('', people), null);
 });

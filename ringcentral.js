@@ -311,6 +311,21 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
     } catch { return null; }
   }
 
+  // every desk call with one number (in or out), last `days` days — for an employee's Recents
+  async function callLogWith(owner, phone, days = 30) {
+    const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+    if (digits.length < 10) return [];
+    const dateFrom = new Date(Date.now() - days * 86400000).toISOString();
+    const j = await rcFetch(owner, `/restapi/v1.0/account/~/call-log?dateFrom=${encodeURIComponent(dateFrom)}&phoneNumber=${encodeURIComponent(`+1${digits}`)}&perPage=100&view=Simple`);
+    return (j.records || []).map((c) => ({
+      id: c.id, at: c.startTime, direction: c.direction, durationSec: c.duration || 0, result: c.result || null,
+      answered: /connected|accepted/i.test(c.result || ''),
+      fromNumber: (c.from && c.from.phoneNumber) || null, toNumber: (c.to && c.to.phoneNumber) || null,
+      ourName: c.direction === 'Inbound' ? ((c.to && c.to.name) || null) : ((c.from && c.from.name) || null),
+      extension: (c.from && c.from.extensionNumber) || (c.to && c.to.extensionNumber) || null,
+    }));
+  }
+
   app.get('/ringcentral/was-called', requireAuth, async (req, res) => {
     const { phone, hours } = req.query;
     if (!phone) return res.status(400).json({ error: 'phone required.' });
@@ -371,5 +386,5 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   let onCall = null;
   const setOnCall = (fn) => { onCall = fn; };
 
-  return { sendSms, wasCalled, accessToken, ringOut, inboundSince, configFor, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
+  return { sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
 }

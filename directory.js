@@ -109,6 +109,40 @@ export const cleanDepartments = (list) => {
   return out.slice(0, 80);
 };
 
+// An employee's Recents, like an iPhone: Jarvis calls (in / out, with recording + transcript), RingCentral
+// desk / phone calls and calls a dispatcher asked Jarvis to place from Employees — one list, newest first. A call a
+// dispatcher sent shows who sent it and what Jarvis was to say. Missed = not answered (theirs or ours). Pure.
+const NOT_ANSWERED = /no_answer|busy|dial_failed|voicemail|invalid_destination|unreachable/i;
+export function employeeCalls({ jarvis = [], desk = [], staff = [] } = {}) {
+  const out = jarvis.map((e) => {
+    const outb = e.direction === 'outbound';
+    const missed = outb && NOT_ANSWERED.test(String(e.ended || ''));
+    return {
+      id: e.id, at: e.at, direction: outb ? 'out' : 'in', line: 'Jarvis', missed,
+      status: missed ? (/voicemail/i.test(e.ended) ? 'Voicemail' : 'Not answered') : null,
+      minutes: e.minutes != null ? e.minutes : null, summary: e.summary || null, recording: e.recording || null,
+      hasTranscript: !!e.hasTranscript, trip: e.trip || null, by: e.by || null,
+    };
+  });
+  for (const c of desk) {
+    out.push({
+      id: `rc:${c.id}`, at: c.at, direction: c.direction === 'Outbound' ? 'out' : 'in', line: 'RingCentral', ext: c.extension || null,
+      missed: !c.answered, status: c.answered ? null : (c.result || 'Missed'), minutes: c.durationSec ? Math.round(c.durationSec / 6) / 10 : null,
+      by: c.ourName || null, summary: null, recording: null, hasTranscript: false,
+    });
+  }
+  // a call sent from Employees → the Jarvis call placed right after it (within 5 min) gets who sent it + the message
+  for (const h of staff) {
+    if (!h || !h.result || !h.result.call) continue;
+    const t = Date.parse(h.at);
+    const hit = out.find((x) => x.line === 'Jarvis' && x.direction === 'out' && !x.sentBy && Math.abs(Date.parse(x.at) - t) < 5 * 60000);
+    if (hit) { hit.sentBy = h.by; hit.message = h.message; continue; }
+    const placed = /^calling$/i.test(String(h.result.call));
+    out.push({ id: `sent:${h.at}`, at: h.at, direction: 'out', line: 'Jarvis', missed: !placed, status: placed ? null : String(h.result.call), sentBy: h.by, message: h.message, minutes: null, summary: null, recording: null, hasTranscript: false });
+  }
+  return out.sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 150);
+}
+
 export function initDirectory(app, { requireAuth, requireAdmin, db, contact = null }) {
   const enabled = !!(db && db.enabled);
   let cache = { at: 0, d: null };
@@ -178,6 +212,16 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
     const all = (await db.get('taStaffMessages', [])) || [];
     res.json({ history: all.filter((m) => m.personId === req.params.id || (!m.personId && p && m.to === p.name)).slice(0, 100) });
   });
+  // their Recents (Jarvis + desk calls, missed included). The call sources are wired after start-up (setCallLog).
+  let callLog = null;
+  app.get('/truckmate/directory/:id/calls', requireAuth, async (req, res) => {
+    if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });
+    const d = await load(); const p = d.people.find((x) => x.id === req.params.id);
+    if (!p) return res.status(404).json({ error: 'Not in the directory.' });
+    const staff = ((await db.get('taStaffMessages', [])) || []).filter((m) => m.personId === p.id || (!m.personId && m.to === p.name));
+    const src = p.phone && callLog ? await callLog(p.phone).catch(() => ({})) : {};
+    res.json({ calls: employeeCalls({ jarvis: src.jarvis || [], desk: src.desk || [], staff }), desk: src.deskError ? 'unavailable' : 'ok', hasPhone: !!p.phone });
+  });
   app.post('/truckmate/directory/:id/contact', requireAuth, async (req, res) => {
     if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });
     const d = await load();
@@ -204,6 +248,7 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
   return {
     load,
     logContact,
+    setCallLog: (fn) => { callLog = fn; },
     find: async (q) => { const d = await load(); return findStaff(d.people, q).map((p) => publicView(p, d.main)); },
     mentioned: async (text) => mentionedStaff((await load()).people, text),   // internal: includes phone / email
     soundsLike: async (said) => soundsLikeStaff((await load()).people, said),   // internal: a name heard on the phone

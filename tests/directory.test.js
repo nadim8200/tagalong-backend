@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { seedPeople, findStaff, mentionedStaff, publicView, initDirectory } from '../directory.js';
+import { seedPeople, findStaff, mentionedStaff, publicView, initDirectory, employeeCalls } from '../directory.js';
 
 function memDb() { const m = new Map(); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, JSON.parse(JSON.stringify(v))) }; }
 const P = seedPeople();
@@ -93,4 +93,26 @@ test('departments: admins add one before anyone is in it; its line is written on
   await gets['/truckmate/directory']({ user: { admin: true } }, res);
   assert.equal(out.departments.length, 2);
   assert.equal(out.people.find((p) => p.name === 'Frank Ducassi').department, 'Quality Control');
+});
+
+test('directory: an employee\'s Recents — Jarvis + desk calls, missed, and who sent a call from Employees', () => {
+  const calls = employeeCalls({
+    jarvis: [
+      { id: 'call:a', at: '2026-10-25T12:29:00Z', direction: 'inbound', minutes: 2, summary: 'Asked about 2604', recording: 'https://r/a.wav', hasTranscript: true },
+      { id: 'call:b', at: '2026-10-23T21:50:30Z', direction: 'outbound', minutes: 0.3, ended: 'dial_no_answer' },
+      { id: 'call:c', at: '2026-10-23T21:52:00Z', direction: 'outbound', minutes: 0.4, ended: 'voicemail_reached' },
+    ],
+    desk: [{ id: 9, at: '2026-10-24T15:00:00Z', direction: 'Inbound', durationSec: 0, result: 'Missed', answered: false, extension: '201' }],
+    staff: [
+      { at: '2026-10-23T21:50:00Z', by: 'Nadim Tellez', message: 'Call me about 2604', result: { call: 'calling' } },
+      { at: '2026-10-20T10:00:00Z', by: 'Ana', message: 'hi', result: { call: 'held (training mode)' } },
+      { at: '2026-10-21T10:00:00Z', by: 'Ana', message: 'text only', result: { text: 'sent' } },
+    ],
+  });
+  assert.deepEqual(calls.map((c) => c.id), ['call:a', 'rc:9', 'call:c', 'call:b', 'sent:2026-10-20T10:00:00Z']);
+  assert.equal(calls[0].direction, 'in'); assert.equal(calls[0].missed, false); assert.equal(calls[0].recording, 'https://r/a.wav');
+  assert.equal(calls[1].missed, true); assert.equal(calls[1].line, 'RingCentral'); assert.equal(calls[1].ext, '201');
+  assert.equal(calls[2].status, 'Voicemail');
+  assert.equal(calls[3].status, 'Not answered'); assert.equal(calls[3].sentBy, 'Nadim Tellez'); assert.equal(calls[3].message, 'Call me about 2604');
+  assert.equal(calls[4].missed, true); assert.equal(calls[4].status, 'held (training mode)');
 });

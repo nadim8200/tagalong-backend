@@ -55,6 +55,15 @@ export function callbackOf(callId, requests = []) {
 // A customer's / broker's calls and texts: entries with one of its phone numbers (either side), or a
 // call where the caller gave its name. Newest first. Pure.
 const normCo = (s) => String(s || '').toUpperCase().replace(/\b(LLC|INC|CORP|CO|LTD)\b\.?/g, ' ').replace(/[^A-Z0-9& ]+/g, ' ').replace(/\s+/g, ' ').trim();
+// An employee on the Employees list (by cell) → our own team, whatever the call said ("Ronen from Direct
+// Flowers" is still staff). Pure.
+export function staffOf(phone, people = []) {
+  const P = last10(phone); if (!P) return null;
+  const p = (people || []).find((x) => x && x.phone && last10(x.phone) === P);
+  return p ? { role: 'team', name: p.name || null, detail: p.department || null } : null;
+}
+const otherOf = (e) => (e.kind === 'call' ? (e.direction === 'outbound' ? e.to : e.from) : (e.dir === 'in' ? e.from : e.to));
+
 export function entriesFor(list = [], { phones = [], name = '' } = {}) {
   const P = new Set(phones.map(last10).filter(Boolean));
   const N = normCo(name);
@@ -68,7 +77,8 @@ export function entriesFor(list = [], { phones = [], name = '' } = {}) {
 }
 const fmt = (p) => { const d = last10(p); return d ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || 'unknown number'); };
 
-export function initActivity(app, { requireAuth, db, clients = null, getBoard = null, push = null, pushRules = null }) {
+export function initActivity(app, { requireAuth, db, clients = null, getBoard = null, push = null, pushRules = null, staff = null }) {
+  const people = async () => { try { return (staff && (await staff())) || []; } catch { return []; } };
   const enabled = !!(db && db.enabled);
   const key = (day) => `taActivity:${SITE}:${day}`;
   const daysKey = `taActivityDays:${SITE}`;
@@ -77,7 +87,8 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
   async function record(e) {
     if (!enabled || !e) return null;
     const at = e.at || new Date().toISOString();
-    const entry = { id: e.id || randomBytes(6).toString('hex'), ...e, at };
+    const mine = staffOf(otherOf(e), await people());
+    const entry = { id: e.id || randomBytes(6).toString('hex'), ...e, ...(mine ? { role: 'team', name: e.name && e.role === 'team' ? e.name : mine.name, detail: mine.detail } : {}), at };
     const day = dayOf(at);
     let note = null;
     const list = await db.update(key(day), (cur) => {
@@ -122,14 +133,16 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
     const day = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || '')) ? req.query.date : dayOf();
     const list = (await db.get(key(day), [])) || [];
     const ctx = await context();
+    const team = await people();
     const requests = (await db.get(`taHelpRequests:${SITE}`, [])) || [];
     const type = String(req.query.type || 'all');
     const q = String(req.query.q || '').toLowerCase();
     const out = list.map((e) => {
       const other = e.kind === 'call' ? (e.direction === 'outbound' ? e.to : e.from) : (e.dir === 'in' ? e.from : e.to);
-      const w = e.role && e.role !== 'unknown' ? { role: e.role, name: e.name || null, detail: e.detail || null } : whoIs(other, ctx);
+      const w = staffOf(other, team) || (e.role && e.role !== 'unknown' ? { role: e.role, name: e.name || null, detail: e.detail || null } : whoIs(other, ctx));
       const callback = e.kind === 'call' ? callbackOf(String(e.id || '').replace(/^call:/, ''), requests) : null;
-      return { ...e, otherPhone: other || null, role: w.role, name: e.name || w.name || null, detail: e.detail || w.detail || null, callback };
+      const staffHit = w.role === 'team' && e.role !== 'team';
+      return { ...e, otherPhone: other || null, role: w.role, name: staffHit ? w.name : (e.name || w.name || null), detail: staffHit ? w.detail : (e.detail || w.detail || null), callback };
     }).filter((e) => (type === 'all' || e.role === type || (type === 'callback' && e.callback && e.callback.status === 'open')) && (!q || JSON.stringify([e.name, e.detail, e.otherPhone, e.trip, e.summary, e.text, e.transcript]).toLowerCase().includes(q)));
     res.json({ day, entries: out.sort((a, b) => String(b.at).localeCompare(String(a.at))) });
   });
@@ -139,11 +152,12 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
     const p = ((await db.get(`taProfiles:${SITE}`, {})) || {})[String(req.params.id)];
     if (!p) return res.status(404).json({ error: 'Not found.' });
     const phones = (p.contacts || []).map((c) => c.phone).filter(Boolean);
+    const team = await people();   // our own employees' calls never land on a customer's history
     const days = Object.keys((await db.get(daysKey, {})) || {}).sort().reverse().slice(0, Math.min(365, Number(req.query.days) || 120));
     const out = [];
     for (const d of days) {
       const list = (await db.get(key(d), [])) || []; // eslint-disable-line no-await-in-loop
-      out.push(...entriesFor(list, { phones, name: p.name }).map(({ transcript, ...e }) => ({ ...e, transcript: transcript ? 1 : null })));
+      out.push(...entriesFor(list, { phones, name: p.name }).filter((e) => !staffOf(otherOf(e), team)).map(({ transcript, ...e }) => ({ ...e, transcript: transcript ? 1 : null })));
       if (out.length >= 200) break;
     }
     // transcripts stay out of the list (they're up to 60 KB each) — the page loads one when it's opened
@@ -162,5 +176,25 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
     res.status(404).json({ error: 'That call is not in the log (calls are logged from Oct 8 on).' });
   });
 
-  return { record };
+  // an employee's calls with Jarvis (either way), last `days` days — any role (staff included), newest first
+  async function callsWith(phones = [], { days = 45 } = {}) {
+    if (!enabled) return [];
+    const P = new Set(phones.map(last10).filter(Boolean));
+    if (!P.size) return [];
+    const list = Object.keys((await db.get(daysKey, {})) || {}).sort().reverse().slice(0, days);
+    const out = [];
+    for (const d of list) {
+      for (const e of (await db.get(key(d), [])) || []) { // eslint-disable-line no-await-in-loop
+        if (!e || e.kind !== 'call') continue;
+        const other = e.direction === 'outbound' ? e.to : e.from;
+        if (!P.has(last10(other))) continue;
+        const { transcript, ...rest } = e;
+        out.push({ ...rest, hasTranscript: !!transcript });
+      }
+      if (out.length >= 150) break;
+    }
+    return out;
+  }
+
+  return { record, callsWith };
 }

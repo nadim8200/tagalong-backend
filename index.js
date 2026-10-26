@@ -948,7 +948,15 @@ let truckmate;
 // Calls & texts log by day (who called / was texted, both numbers, what was said)
 // the client list (flowers + produce customers): who's calling / emailing, real business names, their loads
 const clients = initClients({ db, score: nameScore });
-const activity = initActivity(app, { clients, requireAuth: requireDispatch, db, push, pushRules, getBoard: (site) => truckmate.buildBoard(site) });
+const activity = initActivity(app, { clients, requireAuth: requireDispatch, db, push, pushRules, getBoard: (site) => truckmate.buildBoard(site), staff: async () => (await directory.load()).people || [] });
+// an employee's Recents on Employees: their Jarvis calls + desk-line calls (RingCentral call log)
+directory.setCallLog(async (phone) => {
+  const [jarvis, desk] = await Promise.all([
+    activity.callsWith([phone]).catch(() => []),
+    rc.callLogWith('__shared', phone).then((l) => ({ l })).catch((e) => ({ err: e.message })),
+  ]);
+  return { jarvis, desk: desk.l || [], deskError: desk.err || null };
+});
 // "someone needs us to reach out" (calls, emails, texts, driver app) → email + text the right people
 let helpdesk = null;
 const help = { raise: (r) => (helpdesk ? helpdesk.raise(r) : Promise.resolve(null)) };
