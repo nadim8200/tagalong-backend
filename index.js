@@ -49,6 +49,7 @@ import { initDriverLinks } from './driverlink.js';
 import { initComms } from './comms.js';
 import { initRundowns } from './rundown.js';
 import { initOutbound } from './outbound.js';
+import { initJourney } from './journey.js';
 import { initFlowerReport } from './flowerreport.js';
 import { initPickupFollow } from './pickupfollow.js';
 import { initTempPhotos } from './tempphotos.js';
@@ -1057,6 +1058,8 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 const miles = initMiles({ db, env: process.env });
 const voice = initVoice(app, { miles, artis, artisWeb, docs, stopTimes: etaReport, pastLoads, missingBoxes, missingCases, roadCalls, clients, training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+// a truck's whole trip on the Fleet map: GPS trail, 15+ min stops (what happened), texts + Jarvis calls along the way
+initJourney(app, { requireAuth: requireDispatch, db, activity, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 pickupFollow = initPickupFollow(app, { groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, db, replyInThread: (...a) => inbox.replyInThread(...a), ringcentral: rc, comms, voice, docs, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // paperwork after delivery: POD / BOL from the driver → broker + Billing; Billing's document requests
 const paperwork = initPaperwork(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), groupEmail: (n) => directory.groupEmail(n), replyWithDocs: (id, o) => inbox.replyWithDocs(id, o), env: process.env });

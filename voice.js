@@ -1337,7 +1337,7 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
       };
       await db.update(callsKey, (cur) => [rec, ...(Array.isArray(cur) ? cur : []).filter((c) => c.callId !== rec.callId)].slice(0, 300), []);
       if (event === 'call_analyzed' || !done.some((c) => c.callId === rec.callId)) {
-        const entry = { type: 'call', ai: true, at: rec.at, label: consoleCall(call) ? `Jarvis (AI) voice chat with ${rec.by || 'a dispatcher'} (console)` : `Jarvis (AI) ${rec.direction === 'outbound' ? 'called' : 'answered'} ${phone || 'caller'}`, to: rec.direction === 'outbound' ? phone : undefined, from: rec.direction === 'outbound' ? undefined : phone, text: rec.summary || rec.transcript.slice(0, 400), by: rec.by || 'Jarvis (AI)' };
+        const entry = { type: 'call', ai: true, callId: call.call_id || null, at: rec.at, label: consoleCall(call) ? `Jarvis (AI) voice chat with ${rec.by || 'a dispatcher'} (console)` : `Jarvis (AI) ${rec.direction === 'outbound' ? 'called' : 'answered'} ${phone || 'caller'}`, to: rec.direction === 'outbound' ? phone : undefined, from: rec.direction === 'outbound' ? undefined : phone, text: rec.summary || rec.transcript.slice(0, 400), by: rec.by || 'Jarvis (AI)' };
         if (trip && comms && comms.log) await comms.log(site, trip, entry);
         else if (comms && comms.log && phone) await comms.log(site, null, entry);
       }
