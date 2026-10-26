@@ -9,6 +9,7 @@
 // (the account is checked, not just the token). Dispatcher logins last 30 days.
 // ---------------------------------------------------------------
 import { randomBytes, createHash } from 'crypto';
+import { DEFAULT_COMPANY } from './companies.js';
 
 const KEY = 'taDispatchers';
 const norm = (e) => String(e || '').toLowerCase().trim();
@@ -41,11 +42,16 @@ const ADMIN_ONLY = [
   /^\/truckmate\/caller-numbers(\/|$)/,                   // which customer a caller's phone number is saved for
   /^\/truckmate\/consent\/settings/,
 ];
-export function dispatcherMayUse(method, path) {
+// A company admin (Florida Beauty: Nadim, Ronen) also changes their company's settings and manages their
+// company's logins (/admin/dispatchers — only their own company's, see below).
+const COMPANY_ADMIN = /^\/admin\/(dispatchers|directory|push-rules|training)(\/|$)/;
+export function dispatcherMayUse(method, path, user = null) {
   // Express matches routes regardless of case — check the lower-cased path so /Truckmate/Profiles can't slip past
   const p = String(path || '').split('?')[0].toLowerCase();
+  const cAdmin = !!(user && user.companyAdmin);
+  if (cAdmin && COMPANY_ADMIN.test(p)) return null;
   if (!CONSOLE.test(p)) return 'outside';
-  if (String(method).toUpperCase() !== 'GET' && String(method).toUpperCase() !== 'HEAD' && ADMIN_ONLY.some((re) => re.test(p))) return 'settings';
+  if (!cAdmin && String(method).toUpperCase() !== 'GET' && String(method).toUpperCase() !== 'HEAD' && ADMIN_ONLY.some((re) => re.test(p))) return 'settings';
   return null;
 }
 
@@ -70,6 +76,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
         try {
           const d = (await list()).find((x) => x.id === req.user.id);
           if (d && d.active !== false && d.mustChange) return res.status(403).json({ error: 'Set your own password first.', mustChange: true });
+          if (d && d.active !== false && String(d.company || DEFAULT_COMPANY) !== String(req.user.company || DEFAULT_COMPANY)) return res.status(401).json({ error: 'Your account was moved — sign in again.' });
           if (d && d.active !== false) return next();
           return res.status(401).json({ error: 'This dispatcher account was turned off. Ask an admin.' });
         } catch { return res.status(503).json({ error: 'Could not check your account.' }); }
@@ -78,13 +85,26 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     });
   }
   const requireAdmin = (req, res, next) => requireAuth(req, res, () => (isAdmin(req.user) ? next() : res.status(403).json({ error: 'Admins only.' })));
+  // the logins page: the platform admin (every company) or a company admin (their own company only, checked
+  // against their account, not just the token)
+  const requireUserAdmin = (req, res, next) => requireAuth(req, res, async () => {
+    if (isAdmin(req.user)) return next();
+    if (req.user && req.user.role === 'dispatcher' && req.user.companyAdmin) {
+      const d = (await list()).find((x) => x.id === req.user.id);
+      if (d && d.active !== false && d.companyAdmin && !d.mustChange) return next();
+    }
+    return res.status(403).json({ error: 'Admins only.' });
+  });
+  // which company a logins-page request is about, and whether a record is in it
+  const adminCompany = (req) => (isAdmin(req.user) ? null : String(req.user.company || DEFAULT_COMPANY));
+  const inMine = (req) => (x) => { const c = adminCompany(req); return !c || String(x.company || DEFAULT_COMPANY) === c; };
 
   // check a dispatcher's email + password (and record the sign-in) → { user, token, mustChange } | { error, status } | null
   async function signIn(e, pw, req) {
     const d = (await list(true)).find((x) => x.email === e);
     if (!d || !verifyPassword(pw, d.pass)) return null;
     if (d.active === false) return { error: 'This dispatcher account is turned off. Ask an admin.', status: 401 };
-    const user = { id: d.id, email: d.email, name: d.name, role: 'dispatcher' };
+    const user = { id: d.id, email: d.email, name: d.name, role: 'dispatcher', company: d.company || DEFAULT_COMPANY, ...(d.companyAdmin ? { companyAdmin: true } : {}) };
     const token = sign(user, '7d');
     const at = new Date().toISOString();
     const seen = { at, ip: String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim() || null, device: String(req.headers['user-agent'] || '').slice(0, 160) || null };
@@ -156,9 +176,9 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
   });
 
   // admin: reset a dispatcher's password — a temporary one to give them (they must change it), or an email link
-  app.post('/admin/dispatchers/:id/reset', requireAdmin, async (req, res) => {
+  app.post('/admin/dispatchers/:id/reset', requireUserAdmin, async (req, res) => {
     try {
-      const d = (await list(true)).find((x) => x.id === req.params.id);
+      const d = (await list(true)).find((x) => x.id === req.params.id && inMine(req)(x));
       if (!d) return res.status(404).json({ error: 'Not found.' });
       if ((req.body || {}).how === 'email') {
         if (!mailReady()) return res.status(503).json({ error: 'Email reset links work once the Jarvis mailbox (Outlook) is connected.' });
@@ -172,10 +192,10 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  app.get('/admin/dispatchers', requireAdmin, async (req, res) => {
-    try { res.json((await list(true)).map(view)); } catch (e) { res.status(500).json({ error: e.message }); }
+  app.get('/admin/dispatchers', requireUserAdmin, async (req, res) => {
+    try { res.json((await list(true)).filter(inMine(req)).map((d) => ({ ...view(d), company: d.company || DEFAULT_COMPANY }))); } catch (e) { res.status(500).json({ error: e.message }); }
   });
-  app.post('/admin/dispatchers', requireAdmin, async (req, res) => {
+  app.post('/admin/dispatchers', requireUserAdmin, async (req, res) => {
     const b = req.body || {};
     const e = norm(b.email); const name = String(b.name || '').trim().slice(0, 80);
     const pw = String(b.password || '');
@@ -184,28 +204,39 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     try {
       if ((await list(true)).some((x) => x.email === e)) return res.status(409).json({ error: 'A dispatcher with that email already exists.' });
       const at = new Date().toISOString();
-      const d = { id: `D${Date.now()}${randomBytes(2).toString('hex')}`, email: e, name, pass: hashPassword(pw), active: true, mustChange: true, createdAt: at, createdBy: who(req), passwordLog: [{ at, by: who(req), how: 'first password set by admin' }] };
+      // a company admin adds logins to their own company; the platform admin picks the company
+      const company = adminCompany(req) || String(b.company || DEFAULT_COMPANY);
+      const d = { id: `D${Date.now()}${randomBytes(2).toString('hex')}`, email: e, name, pass: hashPassword(pw), active: true, mustChange: true, company, ...(b.companyAdmin ? { companyAdmin: true } : {}), createdAt: at, createdBy: who(req), passwordLog: [{ at, by: who(req), how: 'first password set by admin' }] };
       await save((l) => [...l, d]);
       res.json(view(d));
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
-  app.put('/admin/dispatchers/:id', requireAdmin, async (req, res) => {
+  app.put('/admin/dispatchers/:id', requireUserAdmin, async (req, res) => {
     const b = req.body || {};
     if (b.password != null && String(b.password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
     try {
       let out = null;
       await save((l) => l.map((x) => {
-        if (x.id !== req.params.id) return x;
-        out = { ...x, ...(b.name ? { name: String(b.name).slice(0, 80) } : {}), ...(b.active != null ? { active: !!b.active } : {}), ...(b.password ? { pass: hashPassword(String(b.password)), mustChange: true, reset: null, passwordChangedAt: new Date().toISOString(), passwordLog: [{ at: new Date().toISOString(), by: who(req), how: 'password set by admin' }, ...(x.passwordLog || [])].slice(0, 30) } : {}), updatedAt: new Date().toISOString(), updatedBy: who(req) };
+        if (x.id !== req.params.id || !inMine(req)(x)) return x;
+        out = { ...x, ...(b.name ? { name: String(b.name).slice(0, 80) } : {}), ...(b.active != null ? { active: !!b.active } : {}), ...(b.companyAdmin != null ? { companyAdmin: !!b.companyAdmin } : {}), ...(b.company && isAdmin(req.user) ? { company: String(b.company) } : {}), ...(b.password ? { pass: hashPassword(String(b.password)), mustChange: true, reset: null, passwordChangedAt: new Date().toISOString(), passwordLog: [{ at: new Date().toISOString(), by: who(req), how: 'password set by admin' }, ...(x.passwordLog || [])].slice(0, 30) } : {}), updatedAt: new Date().toISOString(), updatedBy: who(req) };
         return out;
       }));
       if (!out) return res.status(404).json({ error: 'Not found.' });
       res.json(view(out));
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
-  app.delete('/admin/dispatchers/:id', requireAdmin, async (req, res) => {
-    try { await save((l) => l.filter((x) => x.id !== req.params.id)); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
+  app.delete('/admin/dispatchers/:id', requireUserAdmin, async (req, res) => {
+    try { await save((l) => l.filter((x) => !(x.id === req.params.id && inMine(req)(x)))); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  return { requireDispatch, requireAdmin, signIn: (e, pw, req) => (enabled ? signIn(e, pw, req) : null) };
+  // a new company's first admin (Companies page): a login with a temporary password they change on first sign-in
+  async function createLogin({ email, name, company, companyAdmin = false, by = 'admin' }) {
+    const e = norm(email);
+    if ((await list(true)).some((x) => x.email === e)) throw Object.assign(new Error('A login with that email already exists.'), { status: 409 });
+    const temp = tempPassword(); const at = new Date().toISOString();
+    const d = { id: `D${Date.now()}${randomBytes(2).toString('hex')}`, email: e, name, pass: hashPassword(temp), active: true, mustChange: true, company, ...(companyAdmin ? { companyAdmin: true } : {}), createdAt: at, createdBy: by, passwordLog: [{ at, by, how: 'temporary password when the company was created' }] };
+    await save((l) => [...l, d]);
+    return { record: view(d), tempPassword: temp };
+  }
+  return { requireDispatch, requireAdmin, requireCompanyAdmin: requireUserAdmin, createLogin, signIn: (e, pw, req) => (enabled ? signIn(e, pw, req) : null) };
 }

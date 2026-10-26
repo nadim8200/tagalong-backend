@@ -17,6 +17,7 @@
 // ---------------------------------------------------------------
 import { proxyRule, isAdminUser, allowRoles, relation, deviceView, mergeDeviceUpdate, shareEntry } from './access.js';
 import { initShop } from './shop.js';
+import { companyGate, initCompanies } from './companies.js';
 import { initSignin } from './signin.js';
 import { initMiles } from './miles.js';
 import { loginGuardMiddleware, sessionTooOld, STAFF_SESSION_DAYS, keepsLongSession } from './loginguard.js';
@@ -139,11 +140,19 @@ app.use((req, res, next) => {
   let u = null;
   try { u = jwt.verify(token, JWT_SECRET); } catch { return next(); }
   if (!u || u.role !== 'dispatcher') return next();
-  const why = dispatcherMayUse(req.method, req.path);
+  const why = dispatcherMayUse(req.method, req.path, u);
   if (why === 'outside') return res.status(403).json({ error: 'Dispatcher logins can only use the AI dispatcher console.' });
   if (why === 'settings') return res.status(403).json({ error: 'Only an admin can change settings. Ask an admin.' });
   return next();
 });
+
+// Companies: every dispatch login answers only from its own company's data (companies.js)
+app.use(companyGate((req) => {
+  let token = req.cookies && req.cookies.ta_session;
+  if (!token) { const h = req.headers.authorization || ''; if (h.startsWith('Bearer ')) token = h.slice(7); }
+  if (!token) return null;
+  try { return jwt.verify(token, JWT_SECRET); } catch { return null; }
+}));
 
 const COOKIE = 'ta_session';
 const cookieOpts = {
@@ -882,7 +891,8 @@ const rc = initRingCentral(app, { requireAuth: chain(requireAuth, allowRoles('di
 // Original uploaded documents (rate cons, trip sheets) kept privately in Postgres.
 // Dispatch side (console, Jarvis, loads, emails, calls): admins and active dispatcher accounts only —
 // a TagAlong customer login can't reach it.
-const { requireDispatch, requireAdmin, signIn: dispatcherSignIn } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true }) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
+const { requireDispatch, requireAdmin, requireCompanyAdmin, createLogin, signIn: dispatcherSignIn } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true }) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
+initCompanies(app, { db, requireAdmin, createLogin });
 // one sign-in for every kind of account → lands on that person's service (signin.js)
 initSignin(app, {
   db, requireAdmin,
@@ -894,16 +904,16 @@ initSignin(app, {
   },
 });
 // who gets which push notifications — one admin screen for all of them
-const pushRules = initPushRules(app, { requireAdmin, db, push, listDispatchers: async () => (((await db.get('taDispatchers', { list: [] })) || {}).list || []).map(({ pass, reset, ...d }) => d) });
+const pushRules = initPushRules(app, { requireAdmin: requireCompanyAdmin, db, push, listDispatchers: async () => (((await db.get('taDispatchers', { list: [] })) || {}).list || []).map(({ pass, reset, ...d }) => d) });
 // company directory: staff names + extensions (shareable); cells / emails are system-only
-const directory = initDirectory(app, { requireAuth: requireDispatch, requireAdmin, db, contact: {
+const directory = initDirectory(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, contact: {
   textingLive: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } },
   text: (to, text) => rc.sendSms('__shared', { to, text }),
   email: (to, subject, text) => sendMail({ to: [to], subject, html: `<div style="font-family:Arial,sans-serif;font-size:15px">${String(text).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>`, text }, { env: process.env }),
   call: (o) => voice.callStaff(o),
 } });
 // training mode: outside emails go to the test addresses; texts / calls / app messages are held (copy emailed)
-const training = initTraining(app, { requireAuth: requireDispatch, requireAdmin, db, sendDirect: (m) => sendMail(m, { env: process.env, direct: true }) });
+const training = initTraining(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, sendDirect: (m) => sendMail(m, { env: process.env, direct: true }) });
 setMailGuard((m) => training.mailGuard(m));
 setSmsGuard((m) => training.hold('text', m));
 const docs = initDocuments(app, { requireAuth: requireDispatch, db });
@@ -960,7 +970,7 @@ const meetWatch = initMeetWatch({ db, getBoard: (site) => truckmate.buildBoard(s
 // next loads: rate cons Gus (dispatch GM) sends for trucks still on a run → on the truck's card
 const nextLoads = initNextLoads({ db, env: process.env });
 // Gus's planning sheet (Google Sheets, read-only via the service account)
-const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), nextLoads, env: process.env });
+const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, getBoard: (site) => truckmate.buildBoard(site), nextLoads, env: process.env });
 // stop instructions from staff email chains (e.g. deliver to Biloxi instead of Pensacola): driver has it, GPS + driver confirm, reply on the chain
 const stopTasks = initStopTasks({ db, env: process.env, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice: { placeCall: (...a) => voice.placeCall(...a), callsFor: (...a) => voice.callsFor(...a) }, replyInThread: (...a) => inbox.replyInThread(...a) });
 const inbox = initInbox(app, { stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
@@ -982,30 +992,30 @@ let tempPhotos = null;    // reefer temp photos for trailers we can't read live 
 let pickupFollow = null;   // set below (needs Jarvis voice); its overlay is read late
 let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers overlay)
 // who gets each alert email (Employees → Alert emails in the console)
-const alertRecipients = initAlertRecipients(app, { requireAuth: requireDispatch, requireAdmin, db, directory });
+const alertRecipients = initAlertRecipients(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, directory });
 // 📅 committed delivery times per stop → late alerts (email + text, internal)
 const etaReport = initEtaReport({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('eta_report') });
 const pastLoads = initPastLoads({ db, etaReport });
 const commitments = initCommitments(app, { requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), emails: () => alertRecipients.resolve('late_commitment'), phones: () => alertRecipients.phones('late_commitment'), sendSms: (to, text) => rc.sendSms('__shared', { to, text }) });
-const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: (k) => alertRecipients.resolve(k), env: process.env });
+const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: (k) => alertRecipients.resolve(k), env: process.env });
 // Missing boxes a customer asked about → email the "Customer asked about a load with missing boxes" list
 // ARTIS Trip Status (ETA twice a day) + Trip Manifest PDFs, same read-only web login as the Truck Builder
-const artisWeb = initArtisWeb(app, { requireAuth: requireDispatch, requireAdmin, db, docs, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const artisWeb = initArtisWeb(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, docs, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // the rest of ARTIS: door temps (reefer alert), tractor / trailer positions, approaching yard; reports for Jarvis
 const artisReports = initArtisReports({ db, artisWeb, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), tempTeam: () => alertRecipients.resolve('reefer_temp'), env: process.env });
 // ARTIS Synergize documents (POD / BOL / invoice…) by bill — any bill type; TIFF scans → PDF, kept on the trip
-const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmin, db, docs, artisWeb, getBoard: (site) => truckmate.buildBoard(site), onRateCon: (trip, file) => ratecon.attachIfMissing('florida-beauty', trip, file), nameFits: (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75 });
+const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, docs, artisWeb, getBoard: (site) => truckmate.buildBoard(site), onRateCon: (trip, file) => ratecon.attachIfMissing('florida-beauty', trip, file), nameFits: (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75 });
 // ARTIS customers → profiles (ID, address, phone, fax, delivery days…), the client list, and customer geofences
-artisClients = initArtisClients(app, { requireAuth: requireDispatch, requireAdmin, db, artisWeb, clients, profiles });
-app.post('/truckmate/artis/reports/run', requireAdmin, async (req, res) => { try { res.json(await artisReports.refresh()); } catch (e) { res.status(502).json({ error: e.message }); } });
-const truckBuilder = initTruckBuilder(app, { requireAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('tripsheet_check'), env: process.env });
+artisClients = initArtisClients(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, artisWeb, clients, profiles });
+app.post('/truckmate/artis/reports/run', requireCompanyAdmin, async (req, res) => { try { res.json(await artisReports.refresh()); } catch (e) { res.status(502).json({ error: e.message }); } });
+const truckBuilder = initTruckBuilder(app, { requireAdmin: requireCompanyAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('tripsheet_check'), env: process.env });
 // road calls (breakdowns / tires) → Michelin ONCall when its API is set up; else the packet for 1-800-TIRE911
 roadCalls = initRoadCalls(app, { requireAuth: requireDispatch, db, docs, help,
   textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by),
   callDriver: (trip, rc) => voice.placeCall(String(trip), { purpose: 'roadcall-check', by: `Jarvis (road call ${rc.id})` }),
   photoLink: (site, trip, by) => driverLinks.ensureDocsLink(site, trip, by), sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('road_call'), getBoard: (site) => truckmate.buildBoard(site), env: process.env });
 // MacroPoint (OC tracking the office already uses) → OC locations on our trips
-const macroPoint = initMacroPoint(app, { requireAdmin, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const macroPoint = initMacroPoint(app, { requireAdmin: requireCompanyAdmin, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 missingCases = initMissingCases({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('missing_boxes_case'), getBoard: (site) => truckmate.buildBoard(site) });
 const missingBoxes = initMissingBoxes({ db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('artis_missing_call') });
 truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => commitments.overlay(...a), (...a) => truckBuilder.overlay(...a), (...a) => artisWeb.overlay(...a), (...a) => artisReports.overlay(...a), (...a) => synergize.overlay(...a), (...a) => artis.overlay(...a), (...a) => stopTasks.overlay(...a), (...a) => macroPoint.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => { etaReport.onFinished(site, rec, reason).catch((e) => console.warn('[eta-report]', e.message)); return rundowns.onFinished(site, rec, reason); } });
@@ -1026,7 +1036,7 @@ pickupFollow = initPickupFollow(app, { groupEmail: (n) => directory.groupEmail(n
 // paperwork after delivery: POD / BOL from the driver → broker + Billing; Billing's document requests
 const paperwork = initPaperwork(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), groupEmail: (n) => directory.groupEmail(n), replyWithDocs: (id, o) => inbox.replyWithDocs(id, o), env: process.env });
 // reefer temp photos (8 AM / 3 PM / 9:30 PM, hourly reminders) + an email to dispatch on every driver contact
-tempPhotos = initTempPhotos(app, { team: () => alertRecipients.resolve('reefer_temp'), groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, requireAdmin, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, ringcentral: rc, voice, comms, isInternal, env: process.env });
+tempPhotos = initTempPhotos(app, { team: () => alertRecipients.resolve('reefer_temp'), groupEmail: (n) => directory.groupEmail(n), requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, getBoard: (site) => truckmate.buildBoard(site), docs, driverLinks, ringcentral: rc, voice, comms, isInternal, env: process.env });
 driverLinks.usePhotos((site, trip, info) => { if (roadCalls) roadCalls.photos(site, trip, info).catch(() => {}); return tempPhotos.received(site, trip, info); });
 driverLinks.useRoadPhotos((site, trip, info) => (roadCalls ? roadCalls.photos(site, trip, info) : null));
 const outreach = initOutreach({ groupEmail: (n) => directory.groupEmail(n), db, getBoard: (site) => truckmate.buildBoard(site), isInternal, env: process.env });
