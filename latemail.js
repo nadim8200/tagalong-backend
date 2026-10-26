@@ -131,5 +131,5 @@ ${section(`<div style="font-family:${FONT};font-size:13px;line-height:1.5;color:
 
 // The compact training notice for this email (training.js puts it in TRAINING_SLOT). Pure.
 export function trainingRow(recipients) {
-  return `<tr><td style="padding:14px 24px 0;background:${C.white};"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#FFF9D6" style="background:#FFF9D6;border:1px solid #E9D98A;border-radius:6px;padding:8px 12px;font-family:${FONT};font-size:12px;line-height:1.5;color:#3B3000;"><b style="font-size:11px;letter-spacing:0.06em;">TRAINING PREVIEW</b> — Not sent to customer. It would have gone to: <b>${esc(recipients || '(nobody)')}</b></td></tr></table></td></tr>`;
+  return `<tr><td style="padding:14px 24px 0;background:${C.white};"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#FFF9D6" style="background:#FFF9D6;border:1px solid #E9D98A;border-radius:6px;padding:8px 12px;font-family:${FONT};font-size:12px;line-height:1.5;color:#3B3000;word-break:break-word;overflow-wrap:anywhere;"><b style="font-size:11px;letter-spacing:0.06em;">TRAINING PREVIEW</b> — Not sent to customer. It would have gone to: <b>${esc(recipients || '(nobody)')}</b></td></tr></table></td></tr>`;
 }

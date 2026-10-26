@@ -6,6 +6,8 @@
 //    mismatched arrivals, delivery performance, Synergize documents (PODs) on a trip.
 // Driver names / phones and staff e-mails from ARTIS are never kept.
 // ---------------------------------------------------------------
+import { renderDoorTempEmail } from './reefermail.js';
+
 const SITE = 'florida-beauty';
 const KEY = `taArtisReports:${SITE}`;
 const SENT = `taArtisDoorTempSent:${SITE}`;
@@ -86,7 +88,6 @@ export function initArtisReports({ db, artisWeb, getBoard = null, sendMail = nul
       const it = items.find((i) => unit(tripOf(i).trailer) === x.trailer);
       const t = it ? tripOf(it) : null;
       const what = `Trailer ${x.trailer} was loaded at ${x.actual}°F — set ${x.set}°F (${x.actual > x.set ? '+' : ''}${x.actual - x.set}°F)`;
-      const lines = [what, `${x.warehouse || 'Warehouse'} door ${x.door || '—'} · ${x.atText || ''}${x.by ? ` · checked by ${x.by}` : ''}${x.photos ? ` · ${x.photos} photo${x.photos === 1 ? '' : 's'} in ARTIS` : ''}`, t ? `Trip ${tripNo(it)} · truck ${t.powerUnit || '—'} → ${t.destZoneDesc || ''}` : 'No active trip on this trailer yet.', 'Check the reefer before it rolls (or with the driver if it already left). Source: ARTIS Trailer Temp Verifications.'];
       if (to.length) {
         // the dock's photos (thermometer / reefer display) — shown inside the email body
         const pics = [];
@@ -97,9 +98,9 @@ export function initArtisReports({ db, artisWeb, getBoard = null, sendMail = nul
             if (p.buf.length > 100) pics.push({ name: `trailer-${x.trailer}-photo-${pics.length + 1}.${jpg ? 'jpg' : 'png'}`, contentType: jpg ? 'image/jpeg' : 'image/png', bytes: p.buf, cid: `door${id}` });
           } catch (e) { console.warn('[artis-door-temp] photo', id, e.message); }
         }
-        const esc = (l) => String(l).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-        const imgs = pics.map((p) => `<img src="cid:${p.cid}" alt="Door temperature photo" style="display:block;width:420px;max-width:100%;border-radius:6px;margin:8px 0">`).join('');
-        try { await sendMail({ to, subject: `Reefer: ${what}${t ? ` — trip ${tripNo(it)}` : ''}`, html: `<div style="font-family:Arial,sans-serif;font-size:14px">${lines.map((l) => `<div>${esc(l)}</div>`).join('')}${imgs}<p>— Jarvis</p></div>`, attachments: pics }); } catch (e) { console.warn('[artis-door-temp]', e.message); } // eslint-disable-line no-await-in-loop
+        // the body (layout only — subject, recipients, photos attached / inline are as before)
+        const body = renderDoorTempEmail(x, { trip: t ? { number: tripNo(it), truck: t.powerUnit || null, destination: t.destZoneDesc || null } : null, photos: pics.map((p) => ({ cid: p.cid, bytes: p.bytes })) });
+        try { await sendMail({ to, subject: `Reefer: ${what}${t ? ` — trip ${tripNo(it)}` : ''}`, html: body.html, text: body.text, attachments: pics }); } catch (e) { console.warn('[artis-door-temp]', e.message); } // eslint-disable-line no-await-in-loop
       }
       sent[x.id] = new Date(now()).toISOString();
     }
