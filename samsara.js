@@ -79,6 +79,14 @@ export async function vehicleGpsHistory(token, vehicleId, startIso, endIso) {
   return pts;
 }
 
+// Fuel level over [startIso, endIso] → [{ t, pct }] sorted (Samsara fuelPercents history).
+export async function vehicleFuelHistory(token, vehicleId, startIso, endIso) {
+  const data = await sGet(token, `/fleet/vehicles/stats/history?types=fuelPercents&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&vehicleIds=${encodeURIComponent(vehicleId)}`, { maxPages: 20 });
+  const out = [];
+  for (const v of arr(data)) for (const f of arr(v.fuelPercents)) if (f && f.value != null && f.time) out.push({ t: Date.parse(f.time), pct: Math.round(f.value) });
+  return out.filter((x) => Number.isFinite(x.t)).sort((a, b) => a.t - b.t);
+}
+
 // Drivers' duty-status logs (off duty / sleeper / driving / on duty / yard move / personal
 // conveyance) over [startIso, endIso] → [{ driverId, status, from, to }] (times in ms).
 export async function driverHosLogs(token, driverIds, startIso, endIso) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findStops, classifyStop, wheelChanges, pointAt, tripStart, thin } from '../journey.js';
+import { findStops, classifyStop, wheelChanges, pointAt, tripStart, thin, fuelAround } from '../journey.js';
 
 const T0 = Date.parse('2026-10-24T12:00:00Z');
 const at = (min) => new Date(T0 + min * 60000).toISOString();
@@ -56,4 +56,18 @@ test('journey: wheel changes, pinning a moment on the trail, trip start, thinnin
   assert.equal(tripStart({ _times: { dispatchedAt: '2026-10-24T04:53:45Z' } }, Date.parse('2026-10-26T05:00:00Z')), Date.parse('2026-10-24T03:53:45Z'));
   assert.equal(tripStart({}, Date.parse('2026-10-26T05:00:00Z')), Date.parse('2026-10-23T05:00:00Z'));
   assert.ok(thin(Array.from({ length: 5000 }, (_, i) => ({ t: i })), 1000).length <= 1001);
+});
+
+test('journey: fuel — a 10+ point rise during a stop is a fill-up', () => {
+  const s = { fromMs: T0, toMs: T0 + 40 * 60000, minutes: 40 };
+  const fuel = [{ t: T0 - 30 * 60000, pct: 30 }, { t: T0 + 10 * 60000, pct: 31 }, { t: T0 + 30 * 60000, pct: 96 }, { t: T0 + 50 * 60000, pct: 95 }];
+  assert.deepEqual(fuelAround(s, fuel), { from: 30, to: 96, filled: true });
+  const c = classifyStop(s, { logs: [{ driverId: 'a', status: 'onDuty', from: s.fromMs, to: s.toMs }], names: { a: 'Anibal' }, fuel });
+  assert.equal(c.label, 'Fuel stop'); assert.ok(c.notes.includes('Fueled: 30% → 96%'));
+  assert.equal(fuelAround(s, [{ t: T0 - 60000, pct: 50 }, { t: T0 + 60000, pct: 49 }]).filled, false);
+  assert.equal(fuelAround(s, []), null);
+  // a 10-hour reset where they also fueled stays a reset (fuel noted)
+  const long = { fromMs: T0, toMs: T0 + 620 * 60000, minutes: 620 };
+  const r = classifyStop(long, { logs: [{ driverId: 'a', status: 'sleeperBerth', from: long.fromMs, to: long.toMs }], fuel: [{ t: T0 - 60000, pct: 20 }, { t: T0 + 600 * 60000, pct: 90 }] });
+  assert.equal(r.label, '10-hour reset'); assert.ok(r.notes.includes('Fueled: 20% → 90%'));
 });

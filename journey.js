@@ -5,7 +5,7 @@
 // wheel when, TruckMate's status changes, and every text and Jarvis call with the drivers —
 // each pinned to where the truck was at that moment.
 // ---------------------------------------------------------------
-import { samsaraTokenFrom, getLiveIndex, vehicleForUnit, vehicleGpsHistory, driverHosLogs } from './samsara.js';
+import { samsaraTokenFrom, getLiveIndex, vehicleForUnit, vehicleGpsHistory, driverHosLogs, vehicleFuelHistory } from './samsara.js';
 import { haversineMi } from './watchtower.js';
 
 const SITE = 'florida-beauty';
@@ -46,12 +46,24 @@ export function wheelChanges(logs = [], names = {}) {
   return out;
 }
 
+// The tank before and after a stop (last reading before it, the highest reading during / right after it);
+// a rise of 10+ points is a fill-up. Pure. fuel: [{ t, pct }] sorted.
+export function fuelAround(s, fuel = []) {
+  if (!fuel.length) return null;
+  const before = fuel.filter((f) => f.t <= s.fromMs + 2 * MIN).pop();
+  const after = fuel.filter((f) => f.t >= s.fromMs && f.t <= s.toMs + 20 * MIN);
+  if (!before && !after.length) return null;
+  const from = before ? before.pct : after[0].pct;
+  const to = after.length ? Math.max(...after.map((f) => f.pct)) : from;
+  return { from, to, filled: to - from >= 10 };
+}
+
 const STATUS_WORD = { offDuty: 'off duty', sleeperBerth: 'sleeper', driving: 'driving', onDuty: 'on duty', yardMove: 'yard move', personalConveyance: 'personal conveyance' };
 const dur = (m) => (m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m` : `${m} min`);
 
 // What happened at one stop — from the duty logs, the customer geofences, TruckMate's arrive/depart
 // times and road calls. Pure.
-export function classifyStop(s, { logs = [], names = {}, visits = [], statuses = [], roadCalls = [] } = {}) {
+export function classifyStop(s, { logs = [], names = {}, visits = [], statuses = [], roadCalls = [], fuel = [] } = {}) {
   const span = Math.max(1, s.toMs - s.fromMs);
   const overlaps = (a, b) => Math.min(s.toMs, b) - Math.max(s.fromMs, a);
   // per driver: share of the stop in each status
@@ -86,11 +98,13 @@ export function classifyStop(s, { logs = [], names = {}, visits = [], statuses =
     kind = 'rest';
     label = s.minutes >= 34 * 60 ? '34-hour restart' : s.minutes >= 10 * 60 ? '10-hour reset' : s.minutes >= 30 ? (drivers.some((d) => d.offDuty) ? 'Break (off duty)' : 'Rest (sleeper)') : 'Short break';
   } else if (drivers.some((d) => d.pc)) { kind = 'pc'; label = 'Personal conveyance'; }
-  else if (drivers.length) { kind = 'work'; label = s.minutes <= 75 ? 'Fuel / work (on duty)' : 'On duty — stopped'; }
+  else if (drivers.length) { kind = 'work'; label = s.minutes > 75 ? 'On duty — stopped' : fuel.length ? 'On duty — no fuel added' : 'Fuel / work (on duty)'; }
   else { kind = 'stop'; label = 'Stopped (no duty status)'; }
+  const tank = fuelAround(s, fuel);
+  if (tank && tank.filled) { notes.push(`Fueled: ${tank.from}% → ${tank.to}%`); if (['work', 'stop', 'swap', 'rest'].includes(kind) && !(kind === 'rest' && s.minutes >= 8 * 60)) { kind = 'fuel'; label = 'Fuel stop'; } }
   if (swap) { notes.push(`Driver change: ${swap.from} → ${swap.to}`); if (kind === 'work' || kind === 'stop') { kind = 'swap'; label = 'Driver change'; } }
   for (const x of tm) notes.push(`TruckMate: ${x.desc || x.status}`);
-  return { ...s, kind, label, duration: dur(s.minutes), drivers: drivers.map(({ id, name, status }) => ({ id, name, status })), swap, notes };
+  return { ...s, kind, label, duration: dur(s.minutes), drivers: drivers.map(({ id, name, status }) => ({ id, name, status })), swap, notes, fuel: tank };
 }
 
 // the trail point nearest a moment (for pinning a text / call / status change on the map). Pure.
@@ -135,12 +149,15 @@ export function initJourney(app, { requireAuth, db, getBoard, activity = null, e
     const fromIso = new Date(startMs).toISOString(); const toIso = new Date(now()).toISOString();
     const out = { trip: String(trip), truck: unit || null, from: fromIso, to: toIso, points: [], stops: [], events: [], source: null, note: null };
     if (!token) out.note = 'No Samsara connection — the trail is not available.';
-    let idx = null; let pts = []; let logs = []; const names = {};
+    let idx = null; let pts = []; let logs = []; let fuel = []; const names = {};
     if (token && unit) {
       try {
         idx = await getLiveIndex(token);
         const veh = vehicleForUnit(idx, unit);
-        if (veh && veh.id != null) { pts = await vehicleGpsHistory(token, veh.id, fromIso, toIso); out.source = 'Samsara'; }
+        if (veh && veh.id != null) {
+          [pts, fuel] = await Promise.all([vehicleGpsHistory(token, veh.id, fromIso, toIso), vehicleFuelHistory(token, veh.id, fromIso, toIso).catch(() => [])]);
+          out.source = 'Samsara';
+        }
         else out.note = `Truck ${unit} is not in Samsara.`;
       } catch (e) { out.note = `GPS history unavailable (${e.message}).`; }
       try {
@@ -155,7 +172,9 @@ export function initJourney(app, { requireAuth, db, getBoard, activity = null, e
     const statuses = ((item._times && item._times.statusHistory) || []).filter((x) => ms(x.at) >= startMs);
     const roadCalls = enabled ? ((await db.get(`taRoadCalls:${SITE}`, [])) || []).filter((r) => String(r.trip || '') === String(trip)) : [];
 
-    const stops = findStops(pts).map((s) => classifyStop(s, { logs, names, visits, statuses, roadCalls }));
+    const stops = findStops(pts).map((s) => classifyStop(s, { logs, names, visits, statuses, roadCalls, fuel }));
+    out.fuelNow = fuel.length ? fuel[fuel.length - 1].pct : (item._samsara && item._samsara.fuelPct != null ? item._samsara.fuelPct : null);
+    out.fueled = stops.filter((s) => s.fuel && s.fuel.filled).length;
     out.stops = stops.map((s, i) => ({ n: i + 1, ...s, from: new Date(s.fromMs).toISOString(), to: new Date(s.toMs).toISOString() }));
     const keep = new Set(stops.map((s) => s.fromMs));
     out.points = thin(pts, 1500, keep).map((p) => [Math.round(p.lat * 1e5) / 1e5, Math.round(p.lng * 1e5) / 1e5, ms(p.t), p.mph]);

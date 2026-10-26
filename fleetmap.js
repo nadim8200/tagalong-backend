@@ -49,6 +49,7 @@ export function buildFleet({ trips = [], idx = null, traccar = null, trailerLoc 
       speedMph: g.speedMilesPerHour != null ? Math.round(g.speedMilesPerHour) : null,
       gpsAt: g.time || null, location: (g.reverseGeo && g.reverseGeo.formattedLocation) || null,
       engine, source: 'Samsara',
+      fuelPct: st.fuelPercent && st.fuelPercent.value != null ? Math.round(st.fuelPercent.value) : null, fuelAt: (st.fuelPercent && st.fuelPercent.time) || null,
       assignedDriver: veh.staticAssignedDriver ? veh.staticAssignedDriver.name : null,
     });
   }
@@ -59,7 +60,7 @@ export function buildFleet({ trips = [], idx = null, traccar = null, trailerLoc 
     if (!known) continue;
     const cur = trucks.get(u);
     if (cur && cur.gpsAt && live.gpsAt && Date.parse(cur.gpsAt) >= Date.parse(live.gpsAt)) continue;
-    put(u, { id: (cur && cur.id) || `trc-${u}`, unit: (cur && cur.unit) || (tripByUnit.get(u) || {}).unit || u, lat: live.lat, lng: live.lng, course: live.course, speedMph: live.speedMph, gpsAt: live.gpsAt, location: live.location || (cur && cur.location) || null, engine: live.engine, source: 'FMC00A' });
+    put(u, { id: (cur && cur.id) || `trc-${u}`, unit: (cur && cur.unit) || (tripByUnit.get(u) || {}).unit || u, lat: live.lat, lng: live.lng, course: live.course, speedMph: live.speedMph, gpsAt: live.gpsAt, location: live.location || (cur && cur.location) || null, engine: live.engine, source: 'FMC00A', fuelPct: live.fuelPct != null ? live.fuelPct : (cur ? cur.fuelPct : null) });
   }
   // 3) outside carriers tracked by the driver's phone
   for (const [u, info] of tripByUnit) {
