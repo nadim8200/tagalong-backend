@@ -1055,8 +1055,8 @@ const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmi
     const rc = (((await db.get('taTruckMateRateCon:florida-beauty', {})) || {})[String(trip)]) || null;
     let room = 3 * 1024 * 1024;   // keep the email under the mail size limit; the rest stay on the trip
     const docsOut = found.map((d) => { const fits = d.bytes && d.bytes.length <= room; if (fits) room -= d.bytes.length; return { ...d, attached: !!fits }; });
-    const { subject, html } = billingEmail({ trip, docs: docsOut, item, rc, note: billing ? null : 'Accounting has no group email yet (Employees → Email groups) — sent to Dispatch for now.' });
-    await sendMail({ to: [to], subject, html, attachments: docsOut.filter((d) => d.attached).map((d) => ({ name: d.name || `${d.type}-${d.bill}.pdf`, contentType: 'application/pdf', bytes: d.bytes })) }, { env: process.env });
+    const { subject, html, text } = billingEmail({ trip, docs: docsOut, item, rc, fallback: !billing });
+    await sendMail({ to: [to], subject, html, text, attachments: docsOut.filter((d) => d.attached).map((d) => ({ name: d.name || `${d.type}-${d.bill}.pdf`, contentType: 'application/pdf', bytes: d.bytes })) }, { env: process.env });
   }, nameFits: (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75 });
 // ARTIS customers → profiles (ID, address, phone, fax, delivery days…), the client list, and customer geofences
 artisClients = initArtisClients(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, artisWeb, clients, profiles, getBoard: (site) => truckmate.buildBoard(site) });

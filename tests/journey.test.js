@@ -121,11 +121,31 @@ test('synergize → billing: one email per load with the POD / BOL found (bills,
   const { billingEmail, BILLING_TYPES } = await import('../synergize.js');
   assert.ok(BILLING_TYPES.test('POD')); assert.ok(BILLING_TYPES.test('BOL')); assert.ok(!BILLING_TYPES.test('Rate Confirmation')); assert.ok(!BILLING_TYPES.test('Invoice'));
   const item = { trip: { tripNumber: 625502, powerUnit: '2219', trailer: '18077' }, freightBills: [{ billNumber: 'B180600', billToName: 'OTR TRANSPORTATION LLC *', actualDelivery: '2026-10-23T14:05:00' }] };
-  const { subject, html } = billingEmail({ trip: '625502', item, rc: { broker: 'OTR TRANSPORTATION LLC', loadNumber: '467818', rateText: '$3,200', accessorials: ['Lumper $150'] },
-    docs: [{ type: 'POD', bill: 'B180600', created: '2026-10-24T09:12', name: 'POD-B180600.pdf' }, { type: 'BOL', bill: 'B180600', name: 'BOL-B180600.pdf', attached: false }] });
+  const { subject, html, text } = billingEmail({ trip: '625502', item, rc: { broker: 'OTR TRANSPORTATION LLC', loadNumber: '467818', rateText: '$3,200', accessorials: ['Lumper $150'] },
+    docs: [{ type: 'POD', bill: 'B180600', created: '2026-10-24T09:12', name: 'POD-B180600.pdf', bytes: Buffer.alloc(132096) }, { type: 'BOL', bill: 'B180600', name: 'BOL-B180600.pdf', attached: false }] });
   assert.equal(subject, 'POD + BOL for billing — Trip 625502 · B180600 · OTR TRANSPORTATION LLC');
-  assert.match(html, /2026-10-23 14:05/); assert.match(html, /\$3,200/); assert.match(html, /Lumper \$150/); assert.match(html, /too large to attach/);
-  const off = billingEmail({ trip: '625380', docs: [{ type: 'POD', bill: 'B180573', billTo: 'X-PRESS LOGISTICS' }], note: 'Accounting has no group email yet' });
+  for (const x of ['Delivery paperwork received', 'OTR TRANSPORTATION LLC', 'Trip 625502 · Bill B180600', 'Oct 23, 2026 · 2:05 PM', '$3,200', 'Lumper $150', 'OTR TRANSPORTATION LLC · load 467818', 'Attached documents · 2', 'POD-B180600.pdf', 'PDF · 129 KB', 'Scanned Oct 24, 2026 · 9:12 AM', 'Too large to attach', 'The POD is attached for billing review.', 'The BOL was too large to attach', 'Review the attached POD for billing.', 'Document source: Synergize', '<!--jarvis:training-slot-->']) assert.ok(html.includes(x), x);
+  assert.doesNotMatch(html, /Routing notice/, 'Accounting configured → no routing notice');
+  assert.match(text, /Delivered: Oct 23, 2026 · 2:05 PM/);
+  const off = billingEmail({ trip: '625380', docs: [{ type: 'POD', bill: 'B180573', billTo: 'X-PRESS LOGISTICS', bytes: Buffer.alloc(2000) }], fallback: true });
   assert.equal(off.subject, 'POD for billing — Trip 625380 · B180573 · X-PRESS LOGISTICS');
-  assert.match(off.html, /Accounting has no group email yet/);
+  assert.ok(off.html.includes('Proof of delivery received')); assert.ok(off.html.includes('Routing notice')); assert.ok(off.html.includes('Dispatch is the designated fallback recipient'));
+  assert.doesNotMatch(off.html, />Delivered</, 'off the board, no delivery time → no Delivered row (never assumed from the POD)');
+  const onBoard = billingEmail({ trip: '1', item: { trip: {}, freightBills: [{ billNumber: 'B1' }] }, docs: [{ type: 'BOL', bill: 'B1', bytes: Buffer.alloc(10) }] });
+  assert.ok(onBoard.html.includes('Bill of lading received')); assert.ok(onBoard.html.includes('Not marked delivered in TruckMate'));
+  // BOL only: its own wording; the three delivery states; next step mentions the status only when it isn't marked
+  assert.ok(onBoard.html.includes('A bill of lading was received through Synergize. The document is attached for billing review.'));
+  assert.ok(onBoard.html.includes('>Delivery status<')); assert.match(onBoard.html, /background:#FFF7E7[^>]*>Not marked delivered in TruckMate</);
+  assert.ok(onBoard.html.includes('Review the attached BOL. Delivery is not yet marked in TruckMate.'));
+  const bolDone = billingEmail({ trip: '3', item: { trip: {}, freightBills: [{ billNumber: 'B3', actualDelivery: '2026-10-22T09:40:00' }] }, docs: [{ type: 'BOL', bill: 'B3', bytes: Buffer.alloc(10) }] });
+  assert.ok(bolDone.html.includes('Delivered · Oct 22, 2026 · 9:40 AM')); assert.ok(bolDone.html.includes('Review the attached BOL.</div>'));
+  const bolGone = billingEmail({ trip: '4', docs: [{ type: 'BOL', bill: 'B4', bytes: Buffer.alloc(10) }, { type: 'BOL', bill: 'B5', attached: false }] });
+  assert.ok(bolGone.html.includes('Unavailable — the load is no longer on the board'));
+  assert.ok(bolGone.html.includes('Bills of lading were received through Synergize. 1 is attached for billing review; 1 was too large to attach'));
+  assert.ok(bolGone.html.includes('Attached documents · 2'));
+  assert.match(bolGone.text, /Delivery status: Unavailable/);
+  // a POD keeps its own wording (unchanged by the BOL design)
+  assert.ok(off.html.includes('The POD is attached for billing review.')); assert.doesNotMatch(off.html, /Delivery status/);
+  const esc = billingEmail({ trip: '2', docs: [{ type: 'POD', bill: 'B2', billTo: 'A & <B> Co', name: '"x".pdf', bytes: Buffer.alloc(10) }] });
+  assert.ok(esc.html.includes('A &amp; &lt;B&gt; Co')); assert.ok(esc.html.includes('&quot;x&quot;.pdf'));
 });

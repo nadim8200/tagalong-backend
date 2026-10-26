@@ -14,6 +14,7 @@ import jpeg from 'jpeg-js';
 import { PDFDocument } from 'pdf-lib';
 import { pageVar } from './artisreports.js';
 import { brokerLoad } from './watchtower.js';
+import { TRAINING_SLOT } from './latemail.js';
 
 const { PNG } = pngjs;
 const SITE = 'florida-beauty';
@@ -96,30 +97,115 @@ export function brokerDue(items = [], checked = {}, now = Date.now(), every = 2 
 // Pure — returns { subject, html }. docs: [{ type, bill, created, name }]; rc: the load's rate con (optional).
 export const BILLING_TYPES = /^(POD|BOL|Bill of Lading|Proof of Delivery)/i;
 const escB = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-export function billingEmail({ trip, docs = [], item = null, rc = null, note = null }) {
+export function billingEmail({ trip, docs = [], item = null, rc = null, note = null, fallback = null }) {
+  const C = { text: '#172538', muted: '#596A7F', line: '#E2E8F0', blue: '#1D4ED8', blueBg: '#EFF6FF', blueLine: '#BFDBFE', amber: '#B7791F', amberText: '#754C12', amberBg: '#FFF7E7', amberLine: '#F3D9A4', white: '#FFFFFF', page: '#F4F6F9', red: '#DC2626' };
+  const FONT = 'Arial, Helvetica, sans-serif';
   const t = tripOf(item);
   const bills = [...new Set(docs.map((d) => d.bill).filter(Boolean))];
   const billTo = [...new Set([...docs.map((d) => d.billTo), ...billsOf(item).filter((b) => bills.includes(String(b.billNumber))).map((b) => b.billToName)].filter(Boolean).map((x) => String(x).replace(/\s*[*>]+\s*$/, '').trim()))];
-  const kinds = [...new Set(docs.map((d) => (/^POD|Proof/i.test(d.type) ? 'POD' : 'BOL')))].join(' + ');
+  const kindOf = (d) => (/^POD|Proof/i.test(d.type) ? 'POD' : 'BOL');
+  const kindList = [...new Set(docs.map(kindOf))];
+  const kinds = kindList.join(' + ');
   const delivered = billsOf(item).filter((b) => bills.includes(String(b.billNumber)) && b.actualDelivery).map((b) => b.actualDelivery).sort().pop() || null;
-  const row = (k, v) => (v ? `<tr><td style="color:#596A7F;padding:2px 12px 2px 0">${k}</td><td><b>${escB(v)}</b></td></tr>` : '');
+  // TruckMate / Synergize times as written (no timezone given) → "Oct 24, 2026 · 8:07 PM". Pure.
+  const when = (v) => {
+    const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/);
+    if (!m) return v ? String(v) : null;
+    const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m[2]) - 1];
+    const day = `${mon} ${Number(m[3])}, ${m[1]}`;
+    if (m[4] == null) return day;
+    const h = Number(m[4]);
+    return `${day} · ${h % 12 || 12}:${m[5]} ${h < 12 ? 'AM' : 'PM'}`;
+  };
+  const size = (n) => (n == null ? null : n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
   const subject = `${kinds} for billing — Trip ${trip}${bills.length ? ` · ${bills.join(', ')}` : ''}${billTo.length ? ` · ${billTo[0]}` : ''}`;
-  const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#172B4D">
-${note ? `<p style="background:#FFF7E6;border:1px solid #F5C26B;padding:8px 10px;border-radius:6px">${escB(note)}</p>` : ''}
-<p>New paperwork for <b>trip ${escB(trip)}</b> came in on Synergize — attached for billing.</p>
-<table style="border-collapse:collapse;font-size:14px">
-${row('Bill' + (bills.length === 1 ? '' : 's'), bills.join(', '))}
-${row('Bill to', billTo.join(', '))}
-${row('Truck / trailer', [t.powerUnit, t.trailer].filter(Boolean).join(' / '))}
-${row('Delivered', delivered ? String(delivered).replace('T', ' ').slice(0, 16) : (item ? 'not marked delivered in TruckMate yet' : null))}
-${rc ? row('Broker', [rc.broker, rc.loadNumber && `load ${rc.loadNumber}`].filter(Boolean).join(' · ')) : ''}
-${rc ? row('Rate (rate con)', rc.rateText || (rc.rate != null ? `$${rc.rate}` : null)) : ''}
-${rc && (rc.accessorials || []).length ? row('Extras on the rate con', rc.accessorials.join('; ')) : ''}
+  const attached = docs.filter((d) => d.attached !== false);
+  const missing = docs.filter((d) => d.attached === false);
+  const label = kindList.length === 1 ? (kindList[0] === 'POD' ? 'Proof of delivery received' : 'Bill of lading received') : 'Delivery paperwork received';
+  const what = (list) => { const k = [...new Set(list.map(kindOf))]; return `${k.join(' and ')}${list.length > 1 && k.length === 1 ? 's' : ''}`; };
+  const bolOnly = kindList.length === 1 && kindList[0] === 'BOL';
+  const notMarked = !delivered && !!item;   // on the board, TruckMate hasn't marked it delivered (≠ not delivered)
+  const bolIntro = () => {
+    const many = docs.length > 1;
+    const head = many ? 'Bills of lading were received through Synergize.' : 'A bill of lading was received through Synergize.';
+    if (!missing.length) return `${head} ${many ? 'The documents are' : 'The document is'} attached for billing review.`;
+    if (!attached.length) return `${head} ${many ? 'They were' : 'It was'} too large to attach — open ${many ? 'them' : 'it'} on the trip in the console.`;
+    return `${head} ${attached.length} ${attached.length > 1 ? 'are' : 'is'} attached for billing review; ${missing.length} ${missing.length > 1 ? 'were' : 'was'} too large to attach — open ${missing.length > 1 ? 'them' : 'it'} on the trip in the console.`;
+  };
+  const intro = `New delivery paperwork was received through Synergize.${attached.length ? ` The ${what(attached)} ${attached.length > 1 ? 'are' : 'is'} attached for billing review.` : ''}${missing.length ? ` The ${what(missing)} ${missing.length > 1 ? 'were' : 'was'} too large to attach — open ${missing.length > 1 ? 'them' : 'it'} on the trip in the console.` : ''}`;
+  const next = bolOnly
+    ? `${attached.length ? `Review the attached ${what(attached)}.` : `Review the ${what(docs)} on the trip in the console.`}${notMarked ? ' Delivery is not yet marked in TruckMate.' : ''}`
+    : attached.length ? `Review the attached ${what(attached)} for billing.` : `Review the ${what(docs)} on the trip in the console for billing.`;
+  const deliveredText = delivered ? when(delivered) : (item ? 'Not marked delivered in TruckMate yet' : null);
+  const rows = [
+    ['Trip', String(trip)],
+    [bills.length > 1 ? 'Bills' : 'Bill', bills.join(', ') || null],
+    ['Bill to', billTo.join(', ') || null],
+    ['Truck', t.powerUnit || null],
+    ['Trailer', t.trailer || null],
+    bolOnly ? ['Delivery status', delivered ? `Delivered · ${when(delivered)}` : item ? 'Not marked delivered in TruckMate' : 'Unavailable — the load is no longer on the board', !delivered, notMarked ? 'amber' : null] : ['Delivered', deliveredText, !delivered],
+    rc ? ['Broker', [rc.broker, rc.loadNumber && `load ${rc.loadNumber}`].filter(Boolean).join(' · ') || null] : null,
+    rc ? ['Rate (rate con)', rc.rateText || (rc.rate != null ? `$${rc.rate}` : null)] : null,
+    rc && (rc.accessorials || []).length ? ['Extras on the rate con', rc.accessorials.join('; ')] : null,
+  ].filter((r) => r && r[1]);
+  const showFallback = fallback != null ? fallback : !!note;
+
+  // ---- plain text (same order) ----
+  const text = [
+    'FLORIDA BEAUTY FLORA — Dispatch notifications', '',
+    label.toUpperCase(),
+    billTo.join(', ') || null,
+    `Trip ${trip}${bills.length ? ` · ${bills.length > 1 ? 'Bills' : 'Bill'} ${bills.join(', ')}` : ''}`, '',
+    bolOnly ? bolIntro() : intro, '',
+    'SHIPMENT DETAILS', ...rows.map(([k, v]) => `${k}: ${v}`), '',
+    docs.length > 1 ? `ATTACHED DOCUMENTS · ${docs.length}` : 'ATTACHED DOCUMENT',
+    ...docs.map((d) => [`${d.type} · Bill ${d.bill || '—'}`, d.name || null, ['PDF', d.attached === false ? null : size(d.bytes && d.bytes.length)].filter(Boolean).join(' · '), d.created ? `Scanned ${when(d.created)}` : null, d.attached === false ? 'Too large to attach — open it on the trip in the console' : null].filter(Boolean).join('\n  ')), '',
+    'NEXT STEP', next, '',
+    showFallback ? 'ROUTING NOTICE\nThe Accounting email group is not configured. Dispatch is the designated fallback recipient.\n(Add Accounting\'s email under Employees → Email groups.)\n' : null,
+    'Jarvis', 'AI Dispatcher · Florida Beauty Flora', 'Document source: Synergize',
+  ].filter((l) => l != null).join('\n');
+
+  // ---- HTML ----
+  const lbl = (x, color = C.muted) => `<div style="font-family:${FONT};font-size:11px;line-height:1.5;font-weight:bold;letter-spacing:0.08em;text-transform:uppercase;color:${color};">${x}</div>`;
+  const section = (inner, pad = '16px 24px') => `<tr><td style="padding:${pad};background:${C.white};">${inner}</td></tr>`;
+  const divider = `<tr><td style="padding:0 24px;background:${C.white};"><div style="border-top:1px solid ${C.line};font-size:0;line-height:0;height:1px;">&nbsp;</div></td></tr>`;
+  const h2 = (x) => `<div style="font-family:${FONT};font-size:17px;line-height:1.4;font-weight:bold;color:${C.text};margin-bottom:8px;">${x}</div>`;
+  const rowsHtml = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ${C.line};border-radius:6px;">${rows.map(([k, v, muted, tone], i) => `<tr><td class="bm-k" valign="top" width="150" style="font-family:${FONT};font-size:15px;line-height:1.5;color:${C.muted};padding:8px 12px;${i ? `border-top:1px solid ${C.line};` : ''}">${escB(k)}</td><td valign="top" style="font-family:${FONT};font-size:15px;line-height:1.5;color:${muted ? C.muted : C.text};padding:8px 12px;${i ? `border-top:1px solid ${C.line};` : ''}word-break:break-word;overflow-wrap:anywhere;">${tone === 'amber' ? `<span style="display:inline-block;background:${C.amberBg};border:1px solid ${C.amberLine};border-radius:4px;padding:1px 8px;color:${C.amberText};font-size:14px;">${escB(v)}</span>` : escB(v)}</td></tr>`).join('')}</table>`;
+  const card = (d) => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ${C.line};border-radius:6px;margin-bottom:8px;"><tr>
+<td valign="top" width="52" style="padding:12px 0 12px 12px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" valign="middle" width="38" height="44" bgcolor="${C.red}" style="background:${C.red};border-radius:4px;font-family:${FONT};font-size:11px;font-weight:bold;color:#FFFFFF;">PDF</td></tr></table></td>
+<td valign="top" style="padding:12px 12px 12px 10px;font-family:${FONT};word-break:break-word;overflow-wrap:anywhere;">
+<div style="font-size:15px;line-height:1.4;font-weight:bold;color:${C.text};">${escB(d.type)} · Bill ${escB(d.bill || '—')}</div>
+${d.name ? `<div style="font-size:13px;line-height:1.5;color:${C.text};">${escB(d.name)}</div>` : ''}
+<div style="font-size:13px;line-height:1.5;color:${C.muted};">${escB(['PDF', d.attached === false ? null : size(d.bytes && d.bytes.length)].filter(Boolean).join(' · '))}</div>
+${d.created ? `<div style="font-size:13px;line-height:1.5;color:${C.muted};">Scanned ${escB(when(d.created))}</div>` : ''}
+${d.attached === false ? `<div style="font-size:13px;line-height:1.5;color:${C.amberText};font-weight:bold;">Too large to attach — open it on the trip in the console</div>` : ''}
+</td></tr></table>`;
+  const html = `<style>@media only screen and (max-width:620px){.bm-wrap{padding:10px !important;}.bm-k{width:92px !important;padding-right:6px !important;}}</style>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${C.page}" style="background:${C.page};">
+<tr><td class="bm-wrap" align="center" style="padding:20px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${C.white}" style="max-width:600px;width:100%;background:${C.white};border:1px solid ${C.line};border-radius:8px;">
+${section(`<div style="font-family:${FONT};font-size:15px;line-height:1.3;font-weight:bold;letter-spacing:0.12em;color:${C.text};">FLORIDA BEAUTY FLORA</div><div style="font-family:${FONT};font-size:12px;line-height:1.4;color:${C.muted};">Dispatch notifications</div>`, '18px 24px 6px')}
+${TRAINING_SLOT}
+${section(`<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td valign="top" style="padding:2px 10px 0 0;"><div style="width:22px;height:26px;border:2px solid ${C.blue};border-radius:3px;font-family:${FONT};font-size:10px;line-height:26px;text-align:center;color:${C.blue};font-weight:bold;">&#8801;</div></td><td valign="top">
+${lbl(escB(label), C.blue)}
+${billTo.length ? `<div style="font-family:${FONT};font-size:24px;line-height:1.25;font-weight:bold;color:${C.text};margin:4px 0;word-break:break-word;overflow-wrap:anywhere;">${escB(billTo.join(', '))}</div>` : ''}
+<div style="font-family:${FONT};font-size:16px;line-height:1.5;color:${C.text};">Trip ${escB(trip)}${bills.length ? ` · ${bills.length > 1 ? 'Bills' : 'Bill'} ${escB(bills.join(', '))}` : ''}</div>
+</td></tr></table>
+<div style="font-family:${FONT};font-size:15px;line-height:1.5;color:${C.text};margin-top:12px;">${escB(bolOnly ? bolIntro() : intro)}</div>`, '16px 24px 14px')}
+${section(`${h2('Shipment details')}${rowsHtml}`)}
+${section(`${h2(docs.length > 1 ? `Attached documents · ${docs.length}` : 'Attached document')}${docs.map(card).join('')}`, '6px 24px 10px')}
+${section(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="${C.blueBg}" style="background:${C.blueBg};border:1px solid ${C.blueLine};border-left:4px solid ${C.blue};border-radius:6px;padding:12px 16px;">
+${lbl('Next step', C.blue)}<div style="font-family:${FONT};font-size:15px;line-height:1.5;color:${C.text};">${escB(next)}</div></td></tr></table>`, '6px 24px 14px')}
+${showFallback ? section(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="${C.amberBg}" style="background:${C.amberBg};border:1px solid ${C.amberLine};border-left:4px solid ${C.amber};border-radius:6px;padding:12px 16px;">
+${lbl('Routing notice', C.amberText)}<div style="font-family:${FONT};font-size:14px;line-height:1.5;color:${C.amberText};">The Accounting email group is not configured. Dispatch is the designated fallback recipient.</div>
+<div style="font-family:${FONT};font-size:12px;line-height:1.5;color:${C.amberText};margin-top:4px;">Add Accounting's email under Employees → Email groups.</div></td></tr></table>`, '0 24px 14px') : ''}
+${divider}
+${section(`<div style="font-family:${FONT};font-size:17px;line-height:1.4;font-weight:bold;color:${C.text};">Jarvis</div>
+<div style="font-family:${FONT};font-size:13px;line-height:1.5;color:${C.muted};">AI Dispatcher · Florida Beauty Flora</div>
+<div style="font-family:${FONT};font-size:12px;line-height:1.5;color:${C.muted};">Document source: Synergize</div>`, '14px 24px 22px')}
 </table>
-<p style="margin-top:12px"><b>Documents:</b></p>
-<ul>${docs.map((d) => `<li>${escB(d.type)} · bill ${escB(d.bill)}${d.created ? ` · scanned ${escB(String(d.created).slice(0, 16))}` : ''}${d.attached === false ? ' — <i>too large to attach, open it on the trip in the console</i>' : ''}</li>`).join('')}</ul>
-<p style="color:#596A7F;font-size:12px">Jarvis — AI Dispatcher · Florida Beauty Flora · from Synergize</p></div>`;
-  return { subject, html };
+</td></tr></table>`;
+  return { subject, html, text };
 }
 
 export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs, artisWeb, getBoard = null, nameFits = null, onRateCon = null, onBillingDocs = null, now = () => Date.now() }) {
