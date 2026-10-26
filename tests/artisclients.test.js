@@ -130,6 +130,11 @@ test('loads headed to a customer: truck still at our Miami / Ventura hub and not
   const atYard = { _samsara: { lat: 25.801931, lng: -80.309705 }, _times: { statusHistory: [{ status: 'LOADINGMAN', at: 'x' }, { status: 'LOADEDTOGO', at: 'y' }] } };
   const h = headingTo(fences, [{ trip: { tripNumber: 625901, powerUnit: '2090', status: 'LOADEDTOGO' }, freightBills: [bill], ...atYard }], etas).df[0];
   assert.equal(h.etaMs, null); assert.equal(h.atHub, 'Miami'); assert.equal(h.departed, false);
+  assert.deepEqual(h.drivers, []);
+  const withCrew = headingTo(fences, [{ trip: { tripNumber: 625901, powerUnit: '2090', status: 'LOADEDTOGO', driver: '2000', driver2: '3730' }, freightBills: [bill], _samsara: { ...atYard._samsara, driver1: 'Jaime Rivera' }, _times: atYard._times }], etas).df[0];
+  assert.deepEqual(withCrew.drivers, ['Jaime Rivera', 'driver 3730']);
+  const hrs = headingTo(fences, [{ trip: { tripNumber: 625901, powerUnit: '2090', status: 'LOADEDTOGO', driver: '2000', driver2: '3730' }, freightBills: [bill], _samsara: { ...atYard._samsara, driver1: 'Jaime Rivera', driver2: 'Jose Lanuza', hos: { status: 'sleeperBed', driveLeftMin: 660, shiftLeftMin: 840 }, hos2: { status: 'offDuty', driveLeftMin: 300, shiftLeftMin: 400 } }, _times: atYard._times }], etas).df[0];
+  assert.deepEqual(hrs.driverHours, [{ status: 'sleeperBed', driveLeftMin: 660, shiftLeftMin: 840 }, { status: 'offDuty', driveLeftMin: 300, shiftLeftMin: 400 }]);
   const gone = headingTo(fences, [{ trip: { tripNumber: 625901, powerUnit: '2090', status: 'DEPSHIP' }, freightBills: [bill], _samsara: { lat: 25.80, lng: -80.31 }, _times: { statusHistory: [{ status: 'DEPSHIP', at: 'z' }] } }], etas).df[0];
   assert.equal(gone.etaMs, 1793187000000, 'departed (still near the yard) → the ETA shows');
   const away = headingTo(fences, [{ trip: { tripNumber: 625901, powerUnit: '2090', status: 'LOADEDTOGO' }, freightBills: [bill], _samsara: { lat: 30.4, lng: -84.2 } }], etas).df[0];

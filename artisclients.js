@@ -131,6 +131,16 @@ export function headingTo(fences = [], items = [], etas = {}) {
       (out[f.id] = out[f.id] || []).push({
         trip: n, truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null, stop, etaMs: e && !holdEta ? e.etaMs : null,
         atHub: holdEta ? hub : null, departed,
+        // who's on it: Samsara's names for the trip's driver codes (else TruckMate's codes); OC loads → the trip sheet's
+        drivers: (() => {
+          if (it._oc && (it._oc.driverName || it._oc.driver2Name)) return [it._oc.driverName, it._oc.driver2Name].filter(Boolean);
+          const sm = it._samsara || {};
+          const names = [sm.driver1 || (t.driver ? `driver ${t.driver}` : null), sm.driver2 || (t.driver2 ? `driver ${t.driver2}` : null)].filter(Boolean);
+          return names;
+        })(),
+        // each driver's hours (Samsara clocks), same order as drivers — OC loads have none
+        driverHours: it._oc ? [] : [(it._samsara || {}).hos, (it._samsara || {}).hos2].filter((h, i) => h && [(it._samsara || {}).driver1 || t.driver, (it._samsara || {}).driver2 || t.driver2][i])
+          .map((h) => ({ status: h.status || null, driveLeftMin: h.driveLeftMin != null ? h.driveLeftMin : null, shiftLeftMin: h.shiftLeftMin != null ? h.shiftLeftMin : null })),
         status: t.statusDesc || t.status || null, statusCode: t.status || null,
         statusAt: (() => { const h = ((it._times && it._times.statusHistory) || []); return h.length ? h[h.length - 1].at : null; })(),
         stopsLeft: new Set(bills.map((x) => String(x.endZone || x.endZoneDescription || ''))).size,
