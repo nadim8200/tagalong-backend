@@ -15,7 +15,8 @@
 // Broker/family accounts are stored server-side inside Traccar (a host device's
 // attributes) — no separate database needed. Passwords are salted+hashed.
 // ---------------------------------------------------------------
-import { proxyRule, holdsDevice, isAdminUser, allowRoles } from './access.js';
+import { proxyRule, isAdminUser, allowRoles, relation, deviceView, mergeDeviceUpdate, shareEntry } from './access.js';
+import { initShop } from './shop.js';
 import { initSignin } from './signin.js';
 import { initMiles } from './miles.js';
 import { loginGuardMiddleware, sessionTooOld, STAFF_SESSION_DAYS, keepsLongSession } from './loginguard.js';
@@ -446,6 +447,13 @@ app.get('/stripe/verify', requireAuth, async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message || 'Could not verify payment.' }); }
 });
 
+// the Shop (catalog + orders) — on the server, not on a car's record (shop.js)
+initShop(app, {
+  requireAuth, db,
+  legacy: async () => { const all = await allDevicesCached(); const h = all.reduce((m, d) => (!m || d.id < m.id ? d : m), null); return h && h.attributes && h.attributes.taShop; },
+  verifyPaid: stripe ? async (sid) => { const ss = await stripe.checkout.sessions.retrieve(sid); return { paid: ss.payment_status === 'paid', amount: (ss.amount_total || 0) / 100, orderId: (ss.metadata || {}).orderId || '' }; } : null,
+});
+
 // ---- customer self sign-up (token stays on the server) ----
 app.post('/auth/register', async (req, res) => {
   const { name, email, password, phone } = req.body || {};
@@ -499,21 +507,60 @@ app.post('/auth/password-reset', async (req, res) => {
 });
 
 // ---- authenticated transparent proxy to Traccar (token added here) ----
-// does this signed-in account hold this car (owner / approved family / approved broker / its fleet)?
+// every car (cached 10 s — each customer request needs it to filter)
+let _allDevs = { at: 0, list: [] };
+async function allDevicesCached() {
+  if (Date.now() - _allDevs.at < 10000) return _allDevs.list;
+  const r = await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders });
+  if (!r.ok) throw new Error('devices fetch failed');
+  _allDevs = { at: Date.now(), list: await r.json() };
+  return _allDevs.list;
+}
+// how this account relates to each car: Map id → 'owner' | 'shared' | 'pending' (access.js relation)
+async function relationsFor(user) {
+  const all = await allDevicesCached();
+  let s = null; let mine = null;
+  if (user.role === 'owner') {
+    s = await ownerScope(user.id);
+    // also the cars Traccar itself gives this user (older cars linked only by a user-device permission)
+    try { const r = await fetch(`${TRACCAR_URL}/api/devices?userId=${encodeURIComponent(user.id)}`, { headers: traccarHeaders }); if (r.ok) mine = new Set((await r.json()).map((x) => x.id)); } catch { mine = null; }
+  }
+  const rel = new Map();
+  for (const d of all) {
+    const a = d.attributes || {};
+    const trueOwner = !!s && ((a.ownerUserId != null && String(a.ownerUserId) === s.uid) || (s.account && String(a.account || '') === s.account) || (s.customerId && String(a.customerId || '') === s.customerId) || (mine && mine.has(d.id)));
+    const r = relation(user, d, { trueOwner });
+    if (r) rel.set(d.id, r);
+  }
+  return { all, rel };
+}
+const ownerKeyOf = (u) => `${u.role}:${u.id}`;
+const deviceIdsInQuery = (req) => [].concat(req.query.deviceId || [], req.query.id && /^positions/.test(req.params[0] || '') ? req.query.id : []).map(Number).filter(Boolean);
 async function userHoldsDevice(user, deviceId) {
   if (isAdminUser(user)) return true;
-  const id = Number(deviceId); if (!id) return false;
-  try {
-    const all = await (await fetch(`${TRACCAR_URL}/api/devices`, { headers: traccarHeaders })).json();
-    const d = (all || []).find((x) => x.id === id);
-    if (!d) return false;
-    if (user.role !== 'owner') return holdsDevice(user, d);
-    const s = await ownerScope(user.id);
-    // also the cars Traccar itself gives this user (older cars linked only by a user-device permission)
-    let mine = null;
-    try { const r = await fetch(`${TRACCAR_URL}/api/devices?userId=${encodeURIComponent(user.id)}`, { headers: traccarHeaders }); if (r.ok) mine = new Set((await r.json()).map((x) => x.id)); } catch { mine = null; }
-    return holdsDevice(user, d, { ownerOwns: (dev) => ownerOwns(dev, s), ownerIds: mine });
-  } catch { return false; }
+  const r = (await relationsFor(user)).rel.get(Number(deviceId));
+  return r === 'owner' || r === 'shared';
+}
+// a customer's reply: only their cars, positions, reports, geofences (access.js deviceView)
+function scopeForAccount(user, path, payload, { all, rel }) {
+  const seg = String(path).split('/')[0]; const id = String(path).split('/')[1];
+  const held = (devId) => { const r = rel.get(Number(devId)); return r === 'owner' || r === 'shared'; };
+  if (seg === 'devices') {
+    const view = (d) => (d ? deviceView(user, d, rel.get(d.id)) : null);
+    if (Array.isArray(payload)) return payload.map(view).filter(Boolean);
+    return id ? view(payload) : payload;
+  }
+  if (seg === 'positions' || seg === 'reports') {
+    if (Array.isArray(payload)) return payload.filter((row) => row && row.deviceId != null && held(row.deviceId));
+    return payload && payload.deviceId != null && !held(payload.deviceId) ? null : payload;
+  }
+  if (seg === 'geofences') {
+    const mine = (g) => g && String((g.attributes || {}).taOwnerKey || '') === ownerKeyOf(user);
+    if (Array.isArray(payload)) return payload.filter(mine);
+    return payload;
+  }
+  if (seg === 'drivers') return Array.isArray(payload) ? [] : null;
+  return Array.isArray(payload) ? [] : payload;
 }
 
 app.all('/api/traccar/*', requireAuth, async (req, res) => {
@@ -522,8 +569,30 @@ app.all('/api/traccar/*', requireAuth, async (req, res) => {
   // only what this kind of account's own app uses (access.js) — the proxy speaks to Traccar as admin
   const rule = proxyRule(req.user, req.method, path, req.body);
   if (rule.deny) return res.status(403).json({ error: 'Your account does not include this.', why: rule.deny });
-  if (rule.device != null && !(await userHoldsDevice(req.user, rule.device))) return res.status(403).json({ error: 'That vehicle is not on your account.' });
   let sendBody = rule.body || req.body;
+  let rels = null;
+  if (!isAdminUser(req.user)) {
+    try { rels = await relationsFor(req.user); } catch { return res.status(502).json({ error: 'Upstream tracking server error.' }); }
+    const held = (id) => { const r = rels.rel.get(Number(id)); return r === 'owner' || r === 'shared'; };
+    if (rule.device != null && !held(rule.device)) return res.status(403).json({ error: 'That vehicle is not on your account.' });
+    // reports / positions / geofences for a car: every car asked about must be theirs
+    if (deviceIdsInQuery(req).some((id) => !held(id))) return res.status(403).json({ error: 'That vehicle is not on your account.' });
+    const [seg, segId] = String(path).split('/');
+    if (req.method === 'PUT' && seg === 'devices') {
+      const cur = rels.all.find((d) => String(d.id) === String(segId));
+      const m = mergeDeviceUpdate(req.user, cur, req.body, cur ? rels.rel.get(cur.id) : null);
+      if (m.deny) return res.status(403).json({ error: 'That vehicle is not on your account.' });
+      sendBody = m.device; _allDevs.at = 0;
+    }
+    if (req.method === 'POST' && seg === 'geofences') sendBody = { ...(req.body || {}), attributes: { ...((req.body || {}).attributes || {}), taOwnerKey: ownerKeyOf(req.user) } };
+    if (req.method === 'DELETE' && seg === 'geofences') {
+      try {
+        const gs = await (await fetch(`${TRACCAR_URL}/api/geofences`, { headers: traccarHeaders })).json();
+        const g = (gs || []).find((x) => String(x.id) === String(segId));
+        if (!g || String((g.attributes || {}).taOwnerKey || '') !== ownerKeyOf(req.user)) return res.status(403).json({ error: 'That place is not on your account.' });
+      } catch { return res.status(502).json({ error: 'Upstream tracking server error.' }); }
+    }
+  }
   // own profile: the locked fields (admin flag, limits, account / customer ids) keep their current values
   if (rule.keepFields) {
     try {
@@ -550,7 +619,7 @@ app.all('/api/traccar/*', requireAuth, async (req, res) => {
     if (!isAdminUser(req.user) && ct && !ct.includes('application/json') && !ct.startsWith('text/plain')) return res.status(403).json({ error: 'Not available on your account.' });
     if (ct.includes('application/json')) {
       let payload = await r.json().catch(() => ({}));
-      payload = await scopeResponse(req.user, path, payload);
+      if (rels) { payload = scopeForAccount(req.user, path, payload, rels); if (payload == null) return res.status(404).json({ error: 'Not found.' }); }
       return res.json(payload);
     }
     res.send(await r.text());
@@ -653,19 +722,6 @@ async function scopeForOwner(user, path, payload) {
   return payload; // non-device endpoints (session, server attrs, geofences…) pass through
 }
 
-// Dispatch: admins see everything; fleet is always scoped; owner scoping is
-// gated behind SCOPE_OWNERS because it matches on device attributes
-// (ownerUserId/account) that older cars aren't stamped with — turning it on
-// before those are assigned would blank out a real account. Assign each
-// customer's devices in the admin Customers page (that stamps ownership), then
-// set SCOPE_OWNERS=1 on the server to enforce per-customer isolation.
-async function scopeResponse(user, path, payload) {
-  if (!user || user.admin || user.role === 'admin') return payload;
-  if (user.role === 'fleet') return scopeForFleet(user, path, payload);
-  if (user.role === 'owner' && process.env.SCOPE_OWNERS === '1') return scopeForOwner(user, path, payload);
-  return payload;
-}
-
 // ---- claiming a vehicle into a fleet ----
 // The owner (or admin) gives the company a per-vehicle claim code; the company
 // enters it once and the vehicle joins their fleet. Same shape as the broker
@@ -685,6 +741,47 @@ function deviceShareCode(d) {
 }
 const normCode = (c) => String(c || '').trim().toUpperCase().replace(/\s+/g, '');
 
+// ---- sharing a car by its code (family, broker, fleet) — done HERE so nobody's app needs every car ----
+// The requester never sees the car until its owner approves (the owner's app shows the request).
+async function putDevice(dev) {
+  const r = await fetch(`${TRACCAR_URL}/api/devices/${dev.id}`, { method: 'PUT', headers: { ...traccarHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify(dev) });
+  _allDevs.at = 0;
+  if (!r.ok) throw new Error(`save failed ${r.status}`);
+  return r.json().catch(() => dev);
+}
+const deviceBody = (dev, attributes) => ({ id: dev.id, name: dev.name, uniqueId: dev.uniqueId, groupId: dev.groupId || 0, phone: dev.phone || '', model: dev.model || '', contact: dev.contact || '', category: dev.category || null, disabled: !!dev.disabled, attributes });
+async function addShareRequest(user, dev) {
+  const sh = shareEntry(user); if (!sh) throw new Error('not allowed');
+  const a = dev.attributes || {};
+  const list = (a[sh.list] || []).filter((x) => x && String(x[sh.key]) !== String(sh.entry[sh.key]));
+  const prev = (a[sh.list] || []).find((x) => x && String(x[sh.key]) === String(sh.entry[sh.key]));
+  if (prev && prev.status === 'approved') return 'approved';
+  if (prev && prev.status === 'pending') return 'pending';
+  await putDevice(deviceBody(dev, { ...a, [sh.list]: [...list, sh.entry] }));
+  return 'requested';
+}
+app.post('/share/request', requireAuth, allowRoles('owner', 'member', 'broker'), async (req, res) => {
+  const code = normCode((req.body || {}).code);
+  if (!code) return res.status(400).json({ error: 'Enter the car code.' });
+  try {
+    const dev = (await allDevicesCached()).find((d) => normCode(deviceShareCode(d)) === code);
+    if (!dev) return res.status(404).json({ error: 'No car found with that code. Double-check it with the owner.' });
+    const status = await addShareRequest(req.user, dev);
+    res.json({ ok: true, status, id: dev.id, name: (dev.attributes || {}).displayName || dev.name });
+  } catch (e) { console.error('[share] request:', e.message); res.status(502).json({ error: 'Could not send the request.' }); }
+});
+// the requester takes their own request / access off a car
+app.post('/share/leave', requireAuth, allowRoles('owner', 'member', 'broker'), async (req, res) => {
+  try {
+    const dev = (await allDevicesCached()).find((d) => String(d.id) === String((req.body || {}).deviceId));
+    const sh = shareEntry(req.user);
+    if (!dev || !sh) return res.status(404).json({ error: 'Not found.' });
+    const a = dev.attributes || {};
+    await putDevice(deviceBody(dev, { ...a, [sh.list]: (a[sh.list] || []).filter((x) => x && String(x[sh.key]) !== String(sh.entry[sh.key])) }));
+    res.json({ ok: true });
+  } catch (e) { res.status(502).json({ error: 'Could not update.' }); }
+});
+
 app.post('/fleet/claim', requireAuth, requireFleet, async (req, res) => {
   const code = normCode((req.body || {}).code);
   if (!code) return res.status(400).json({ error: 'Enter the vehicle code.' });
@@ -698,6 +795,13 @@ app.post('/fleet/claim', requireAuth, requireFleet, async (req, res) => {
     const owner = String(((dev.attributes || {}).taFleetId) || '');
     if (owner && owner !== String(req.user.id)) {
       return res.status(409).json({ error: 'That vehicle already belongs to another fleet.' });
+    }
+    // a car that belongs to a customer → the owner has to approve it (it shows with their share requests)
+    const da = dev.attributes || {};
+    const owned = da.ownerUserId != null || da.account || da.customerId || (Array.isArray(da.owners) && da.owners.length) || (da.memberLinks || []).some((x) => x && x.status === 'approved');
+    if (owned && owner !== String(req.user.id)) {
+      const status = await addShareRequest(req.user, dev);
+      return res.json({ ok: true, pending: status !== 'approved', status, id: dev.id, name: da.displayName || dev.name });
     }
 
     const attributes = { ...(dev.attributes || {}), taFleetId: String(req.user.id) };

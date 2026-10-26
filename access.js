@@ -70,3 +70,74 @@ export function holdsDevice(user, d, { ownerOwns = () => false, ownerIds = null 
   if (user.role === 'fleet') return String(a.taFleetId || '') === String(user.id);
   return false;
 }
+
+// ---- per-car views (who sees what of a car) ------------------------------------------------------
+// A car's protected fields — only an admin (or the server itself) sets these.
+export const DEVICE_LOCKED_ATTRS = ['ownerUserId', 'customerId', 'account', 'owners', 'membership', 'product', 'taFleetId', 'shareCode', 'accountDeleted', 'claimed', 'taShop'];
+const LINKS = { broker: ['brokerLinks', 'brokerId'], member: ['memberLinks', 'memberId'] };
+const linkOf = (d, kind, id) => (((d && d.attributes) || {})[LINKS[kind][0]] || []).find((x) => x && String(x[LINKS[kind][1]]) === String(id)) || null;
+
+// how this account relates to the car: 'owner' | 'shared' (approved family / broker / fleet) | 'pending'
+// (asked, not approved yet) | null. trueOwner = the server's owner check (not counting family links). Pure.
+export function relation(user, d, { trueOwner = false } = {}) {
+  if (!user || !d) return null;
+  if (isAdminUser(user)) return 'owner';
+  const a = d.attributes || {};
+  if (user.role === 'fleet') return String(a.taFleetId || '') === String(user.id) ? 'shared' : null;
+  if (user.role === 'owner' && trueOwner) return 'owner';
+  const kind = user.role === 'broker' ? 'broker' : 'member';
+  const myId = user.role === 'owner' ? `u${user.id}` : user.id;
+  const l = linkOf(d, kind, myId);
+  if (!l) return null;
+  return l.status === 'approved' ? 'shared' : 'pending';
+}
+// the car as this account may see it: everything for its owner; for family / broker / fleet the car with only
+// THEIR own share entry (never the other people's names / emails); a pending request = just id + name. Pure.
+export function deviceView(user, d, rel) {
+  if (!rel) return null;
+  if (rel === 'owner') return d;
+  const a = d.attributes || {};
+  const kind = user.role === 'broker' ? 'broker' : 'member';
+  const myId = user.role === 'owner' ? `u${user.id}` : user.id;
+  const own = user.role === 'fleet' ? null : linkOf(d, kind, myId);
+  const attrs = { ...a }; delete attrs.brokerLinks; delete attrs.memberLinks; delete attrs.owners; delete attrs.taShop;
+  if (own) attrs[LINKS[kind][0]] = [own];
+  if (rel === 'pending') return { id: d.id, name: d.name, status: d.status, attributes: { displayName: a.displayName, ...(a.shareCode ? { shareCode: a.shareCode } : {}), [LINKS[kind][0]]: [own] } };
+  return { ...d, attributes: attrs };
+}
+// a car update from a non-admin → the full device to save (built on the CURRENT device), or { deny }. Pure.
+//   owner: anything but the protected fields; approving / declining requests; approving a fleet request moves
+//   the car into that fleet. family (approved): car settings, not the share list. broker (approved): only
+//   the assigned driver. Nobody else.
+export function mergeDeviceUpdate(user, cur, body, rel) {
+  if (!cur || !body) return { deny: 'not found' };
+  const ca = cur.attributes || {}; const ba = (body.attributes && typeof body.attributes === 'object') ? body.attributes : {};
+  const base = { id: cur.id, name: cur.name, uniqueId: cur.uniqueId, groupId: cur.groupId || 0, phone: cur.phone || '', model: cur.model || '', contact: cur.contact || '', category: cur.category || null, disabled: !!cur.disabled };
+  if (rel === 'owner' || (rel === 'shared' && (user.role === 'member' || user.role === 'owner'))) {
+    const attrs = { ...ba };
+    DEVICE_LOCKED_ATTRS.forEach((k) => { if (k in ca) attrs[k] = ca[k]; else delete attrs[k]; });
+    if (rel !== 'owner') { attrs.brokerLinks = ca.brokerLinks; attrs.memberLinks = ca.memberLinks; }   // family can't approve anyone
+    else {
+      // a fleet request (kept with the broker requests so the owner sees it in the same place) approved → in that fleet
+      const fl = (attrs.brokerLinks || []).find((x) => x && x.kind === 'fleet' && x.status === 'approved');
+      const had = (ca.brokerLinks || []).find((x) => x && x.kind === 'fleet');
+      if (fl) attrs.taFleetId = String(fl.fleetId);
+      else if (had && String(ca.taFleetId || '') === String(had.fleetId)) delete attrs.taFleetId;   // owner removed / declined it
+    }
+    Object.keys(attrs).forEach((k) => attrs[k] === undefined && delete attrs[k]);
+    return { device: { ...base, name: body.name || cur.name, attributes: attrs } };
+  }
+  if (rel === 'shared' && user.role === 'broker') {
+    const attrs = { ...ca };
+    ['assignedDriver', 'assignedDriverLicense'].forEach((k) => { if (k in ba) attrs[k] = ba[k]; });
+    return { device: { ...base, attributes: attrs } };
+  }
+  return { deny: 'not your car' };
+}
+// a share request by code: the entry to add to the car for this account. Pure.
+export function shareEntry(user, now = new Date().toISOString()) {
+  if (user.role === 'broker') return { list: 'brokerLinks', key: 'brokerId', entry: { brokerId: user.id, brokerName: user.name || user.email, brokerCompany: user.company || '', brokerEmail: user.email || '', at: now, status: 'pending' } };
+  if (user.role === 'fleet') return { list: 'brokerLinks', key: 'brokerId', entry: { brokerId: `fleet:${user.id}`, kind: 'fleet', fleetId: String(user.id), brokerName: user.company || user.name || user.email, brokerCompany: user.company || '', brokerEmail: user.email || '', at: now, status: 'pending' } };
+  if (user.role === 'member' || user.role === 'owner') return { list: 'memberLinks', key: 'memberId', entry: { memberId: user.role === 'owner' ? `u${user.id}` : user.id, memberName: user.name || user.email, memberEmail: user.email || '', at: now, status: 'pending' } };
+  return null;
+}

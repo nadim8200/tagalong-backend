@@ -50,3 +50,49 @@ test('dispatcher logins: upper-case paths do not slip past the settings lock', (
   assert.equal(dispatcherMayUse('POST', '/VOICE/setup'), 'settings');
   assert.equal(dispatcherMayUse('GET', '/truckmate/active'), null);
 });
+
+import { relation, deviceView, mergeDeviceUpdate, shareEntry } from '../access.js';
+
+const car = { id: 7, name: 'Camry', uniqueId: '863', attributes: { ownerUserId: 12, displayName: 'Mom', shareCode: 'TA-1', account: 'A1',
+  memberLinks: [{ memberId: 'M1', memberEmail: 'm1@x.com', status: 'approved' }, { memberId: 'M2', memberEmail: 'm2@x.com', status: 'pending' }],
+  brokerLinks: [{ brokerId: 'B1', brokerEmail: 'b@x.com', status: 'pending' }] } };
+
+test('each account sees only its own cars — and only its own share entry on a shared car', () => {
+  assert.equal(relation(owner, car, { trueOwner: true }), 'owner');
+  assert.equal(relation({ id: 13, role: 'owner' }, car, { trueOwner: false }), null, 'another customer: nothing');
+  assert.equal(relation(member, car), 'shared');
+  assert.equal(relation({ id: 'M2', role: 'member' }, car), 'pending');
+  assert.equal(relation(broker, car), 'pending');
+  assert.equal(relation(fleet, car), null);
+  const m = deviceView(member, car, 'shared');
+  assert.deepEqual(m.attributes.memberLinks, [car.attributes.memberLinks[0]], 'not the other family members');
+  assert.equal(m.attributes.brokerLinks, undefined);
+  const p = deviceView({ id: 'M2', role: 'member' }, car, 'pending');
+  assert.deepEqual(Object.keys(p.attributes).sort(), ['displayName', 'memberLinks', 'shareCode'], 'pending: name + the code they typed only');
+  assert.equal(deviceView(owner, car, 'owner'), car);
+});
+
+test('car updates: owner approves; family / broker cannot approve themselves; protected fields stay', () => {
+  const approveSelf = { ...car, attributes: { ...car.attributes, brokerLinks: [{ brokerId: 'B1', status: 'approved' }] } };
+  assert.ok(mergeDeviceUpdate(broker, car, approveSelf, 'pending').deny, 'broker self-approve → refused');
+  const fam = mergeDeviceUpdate(member, car, { ...car, attributes: { ...car.attributes, memberLinks: [{ memberId: 'M2', status: 'approved' }], displayName: 'Car' } }, 'shared');
+  assert.deepEqual(fam.device.attributes.memberLinks, car.attributes.memberLinks, 'family cannot approve others');
+  assert.equal(fam.device.attributes.displayName, 'Car');
+  const own = mergeDeviceUpdate(owner, car, { ...approveSelf, attributes: { ...approveSelf.attributes, ownerUserId: 99, account: 'X' } }, 'owner');
+  assert.equal(own.device.attributes.brokerLinks[0].status, 'approved');
+  assert.equal(own.device.attributes.ownerUserId, 12); assert.equal(own.device.attributes.account, 'A1');
+  const brk = mergeDeviceUpdate(broker, car, { ...car, attributes: { assignedDriver: 'Joe', ownerUserId: 1 } }, 'shared');
+  assert.equal(brk.device.attributes.assignedDriver, 'Joe'); assert.equal(brk.device.attributes.ownerUserId, 12);
+});
+
+test('fleet claim on a customer car = a request the owner approves; approving moves it into the fleet', () => {
+  const sh = shareEntry(fleet);
+  assert.equal(sh.entry.kind, 'fleet'); assert.equal(sh.entry.status, 'pending');
+  const withReq = { ...car, attributes: { ...car.attributes, brokerLinks: [sh.entry] } };
+  const ok = mergeDeviceUpdate(owner, withReq, { ...withReq, attributes: { ...withReq.attributes, brokerLinks: [{ ...sh.entry, status: 'approved' }] } }, 'owner');
+  assert.equal(ok.device.attributes.taFleetId, 'F1');
+  const inFleet = { ...withReq, attributes: { ...ok.device.attributes } };
+  const off = mergeDeviceUpdate(owner, inFleet, { ...inFleet, attributes: { ...inFleet.attributes, brokerLinks: [] } }, 'owner');
+  assert.equal(off.device.attributes.taFleetId, undefined, 'owner removes it → out of the fleet');
+  assert.equal(shareEntry(owner).entry.memberId, 'u12');
+});
