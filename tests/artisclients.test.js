@@ -80,7 +80,21 @@ test('fleet map: which trips are headed to each customer geofence (zip + custome
     { billToName: 'KELLEY WHOLESALE FLORIST', endZoneDescription: 'CHELSEA, MA, 02150' },
   ] } }];
   const h = headingTo(fences, items, { 625717: { stops: [{ label: 'DERRY, NH, 03038', etaMs: 1000 }] } });
-  assert.deepEqual(h['1'], [{ trip: '625717', truck: '2609', trailer: '7331', stop: 'DERRY, NH, 03038', etaMs: 1000 }]);
+  assert.deepEqual(h['1'].map(({ trip, truck, trailer, stop, etaMs }) => ({ trip, truck, trailer, stop, etaMs })), [{ trip: '625717', truck: '2609', trailer: '7331', stop: 'DERRY, NH, 03038', etaMs: 1000 }]);
   assert.equal(h['2'][0].trip, '625717'); assert.equal(h['2'][0].etaMs, null);
   assert.equal(h['3'], undefined, 'already delivered → not headed there');
+});
+
+test('loads headed to a customer: with no ETA the card gets TruckMate status, pickup, due time and where the truck is', () => {
+  const fences = [{ id: 'ht', name: 'HARRIS TEETER DISTRIBUTION CENTER', zip: '28079' }];
+  const items = [{ trip: { tripNumber: 625712, powerUnit: '2010', trailer: '18103', status: 'ASSGN', statusDesc: 'ASSIGNED', origZoneDesc: 'BRADENTON, FL, 34208' },
+    freightBills: [{ billToName: 'HARRIS TEETER LLC >>>>>>>', endZoneDescription: 'INDIAN TRAIL, NC, 28079', pickUpBy: '2026-10-26T00:00:00', deliverBy: '2026-10-28T07:00:00' }],
+    _samsara: { lat: 26.7, lng: -81.9, location: 'I 75, Slater, FL', gpsAt: '2026-10-26T21:00:09Z', speedMph: 75 } }];
+  const [h] = headingTo(fences, items, {}).ht;
+  assert.equal(h.etaMs, null);
+  assert.equal(h.status, 'ASSIGNED');
+  assert.equal(h.pickup, 'BRADENTON, FL, 34208');
+  assert.equal(h.pickupBy, '2026-10-26T00:00:00');
+  assert.equal(h.deliverBy, '2026-10-28T07:00:00');
+  assert.deepEqual(h.truckNow, { location: 'I 75, Slater, FL', at: '2026-10-26T21:00:09Z', mph: 75 });
 });

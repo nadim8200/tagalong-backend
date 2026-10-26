@@ -119,7 +119,14 @@ export function headingTo(fences = [], items = [], etas = {}) {
       if (!f || done.has(f.id)) continue;
       done.add(f.id);
       const e = ((etas[n] && etas[n].stops) || []).find((s) => String(s.label || '').toUpperCase() === stop.toUpperCase() || String(s.zip || '') === z);
-      (out[f.id] = out[f.id] || []).push({ trip: n, truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null, stop, etaMs: e ? e.etaMs : null });
+      // with no ETA (not picked up yet, no GPS…) the card says why: TruckMate's status, the pickup, the due time, where the truck is
+      const live = it._samsara || it.live || {};
+      (out[f.id] = out[f.id] || []).push({
+        trip: n, truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null, stop, etaMs: e ? e.etaMs : null,
+        status: t.statusDesc || t.status || null, statusCode: t.status || null,
+        pickup: t.origZoneDesc || b.startZoneDescription || null, pickupBy: b.pickUpBy || null, deliverBy: b.deliverBy || b.deliverByEnd || null,
+        truckNow: live.lat != null ? { location: live.location || null, at: live.gpsAt || null, mph: live.speedMph != null ? live.speedMph : null } : null,
+      });
     }
   }
   return out;
