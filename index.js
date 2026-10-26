@@ -1006,7 +1006,7 @@ const artisReports = initArtisReports({ db, artisWeb, getBoard: (site) => truckm
 // ARTIS Synergize documents (POD / BOL / invoice…) by bill — any bill type; TIFF scans → PDF, kept on the trip
 const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, docs, artisWeb, getBoard: (site) => truckmate.buildBoard(site), onRateCon: (trip, file) => ratecon.attachIfMissing('florida-beauty', trip, file), nameFits: (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75 });
 // ARTIS customers → profiles (ID, address, phone, fax, delivery days…), the client list, and customer geofences
-artisClients = initArtisClients(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, artisWeb, clients, profiles });
+artisClients = initArtisClients(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, artisWeb, clients, profiles, getBoard: (site) => truckmate.buildBoard(site) });
 app.post('/truckmate/artis/reports/run', requireCompanyAdmin, async (req, res) => { try { res.json(await artisReports.refresh()); } catch (e) { res.status(502).json({ error: e.message }); } });
 const truckBuilder = initTruckBuilder(app, { requireAdmin: requireCompanyAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('tripsheet_check'), env: process.env });
 // road calls (breakdowns / tires) → Michelin ONCall when its API is set up; else the packet for 1-800-TIRE911

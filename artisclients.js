@@ -91,7 +91,41 @@ export function syncDue(state = {}, now = Date.now()) {
   return Number(p.hour) >= 5 && state.day !== day ? day : null;
 }
 
-export function initArtisClients(app, { requireAuth, requireAdmin = null, db, artisWeb, clients = null, profiles = null, now = () => Date.now() }) {
+// same customer? ARTIS and TruckMate spell names differently ("CARBONE -DERRY BILLING" / "CARBONE R.J. CO. DERRY"):
+// the words they share, ignoring INC / LLC / CO / BILLING and punctuation. Pure.
+const NAME_NOISE = new Set(['INC', 'LLC', 'CO', 'CORP', 'THE', 'OF', 'AND', 'BILLING', 'LTD', 'DBA', 'WHOLESALE', 'FLORIST', 'FLORAL', 'FLOWERS', 'FLOWER']);
+const nameWords = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 1 && !NAME_NOISE.has(w));
+export function sameCustomer(a, b) {
+  const A = nameWords(a); const B = new Set(nameWords(b));
+  if (!A.length || !B.size) return false;
+  const shared = A.filter((w) => B.has(w)).length;
+  return shared >= Math.min(2, Math.min(A.length, B.size)) || shared / Math.min(A.length, B.size) >= 0.6;
+}
+// which trips are headed to each customer geofence: an undelivered bill whose stop zip is the geofence's zip and
+// whose customer is the geofence's customer → { fenceId: [{ trip, truck, trailer, stop, etaMs }] }. Pure.
+export function headingTo(fences = [], items = [], etas = {}) {
+  const byZip = new Map();
+  for (const f of fences) { const z = String(f.zip || '').slice(0, 5); if (!z) continue; if (!byZip.has(z)) byZip.set(z, []); byZip.get(z).push(f); }
+  const out = {};
+  for (const it of items) {
+    const t = (it && it.trip) || it || {};
+    const n = String(t.tripNumber || (it && it._id) || ''); if (!n) continue;
+    const bills = (it.freightBills || it.orders || t.freightBills || []).filter((b) => !b.actualDelivery);
+    const done = new Set();
+    for (const b of bills) {
+      const stop = String(b.endZoneDescription || '');
+      const z = (stop.match(/\b(\d{5})\b/) || [])[1];
+      const f = z && (byZip.get(z) || []).find((x) => sameCustomer(b.billToName, x.name));
+      if (!f || done.has(f.id)) continue;
+      done.add(f.id);
+      const e = ((etas[n] && etas[n].stops) || []).find((s) => String(s.label || '').toUpperCase() === stop.toUpperCase() || String(s.zip || '') === z);
+      (out[f.id] = out[f.id] || []).push({ trip: n, truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null, stop, etaMs: e ? e.etaMs : null });
+    }
+  }
+  return out;
+}
+
+export function initArtisClients(app, { requireAuth, requireAdmin = null, db, artisWeb, clients = null, profiles = null, getBoard = null, now = () => Date.now() }) {
   const enabled = () => !!(db && db.enabled && artisWeb && artisWeb.ready && artisWeb.ready());
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   let fenceCache = null;
@@ -127,6 +161,18 @@ export function initArtisClients(app, { requireAuth, requireAdmin = null, db, ar
   }
 
   // the Geofences tab
+  // the fleet map's Customers layer: every active geofence (small) + the trips headed to each, with the ETA
+  app.get('/truckmate/geofences/map', requireAuth, async (req, res) => {
+    const all = Object.values(await fences()).filter((f) => f.active !== false && f.lat != null && f.lng != null);
+    let heading = {};
+    try {
+      const site = String(req.query.site || 'florida-beauty');
+      const items = getBoard ? (((await getBoard(site)) || {}).trips || []) : [];
+      const etas = ((await db.get(`taWatch:${site}`, {})) || {}).etas || {};
+      heading = headingTo(all, items, etas);
+    } catch { heading = {}; }
+    res.json({ fences: all.map((f) => ({ id: f.id, name: f.name, lat: f.lat, lng: f.lng, radiusM: f.radiusM, address: f.address, city: f.city, state: f.state, zip: f.zip })), heading });
+  });
   app.get('/truckmate/geofences', requireAuth, async (req, res) => {
     const all = Object.values(await fences());
     const q = String(req.query.q || '').toUpperCase().trim();

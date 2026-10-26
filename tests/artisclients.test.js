@@ -67,3 +67,20 @@ test('daily sync: profiles, client list and geofences; the Geofences tab searche
   assert.equal((await call('PUT /truckmate/geofences/:id', { params: { id: '02281' }, body: { radiusM: 9000 } })).code, 400);
   assert.deepEqual(await c.asAddresses(), [], 'turned off → not used for stop tracking');
 });
+
+import { sameCustomer, headingTo } from '../artisclients.js';
+test('fleet map: which trips are headed to each customer geofence (zip + customer name), with the ETA', () => {
+  assert.equal(sameCustomer('CARBONE -DERRY BILLING', 'CARBONE R.J. CO. DERRY'), true);
+  assert.equal(sameCustomer('DIRECT FLOWERS OF BOSTON INC', 'DIRECT FLOWERS OF BOSTON'), true);
+  assert.equal(sameCustomer('RICCARDI WHOLESALE', 'KELLEY WHOLESALE FLORIST'), false);
+  const fences = [{ id: '1', name: 'CARBONE R.J. CO. DERRY', zip: '03038' }, { id: '2', name: 'KELLEY WHOLESALE FLORIST', zip: '02150' }, { id: '3', name: 'RICCARDI WHOLESALE', zip: '02150' }];
+  const items = [{ trip: { tripNumber: 625717, powerUnit: '2609', trailer: '7331', freightBills: [
+    { billToName: 'CARBONE -DERRY BILLING', endZoneDescription: 'DERRY, NH, 03038' },
+    { billToName: 'RICCARDI WHOLESALE', endZoneDescription: 'CHELSEA, MA, 02150', actualDelivery: '2026-10-25T00:30:01' },
+    { billToName: 'KELLEY WHOLESALE FLORIST', endZoneDescription: 'CHELSEA, MA, 02150' },
+  ] } }];
+  const h = headingTo(fences, items, { 625717: { stops: [{ label: 'DERRY, NH, 03038', etaMs: 1000 }] } });
+  assert.deepEqual(h['1'], [{ trip: '625717', truck: '2609', trailer: '7331', stop: 'DERRY, NH, 03038', etaMs: 1000 }]);
+  assert.equal(h['2'][0].trip, '625717'); assert.equal(h['2'][0].etaMs, null);
+  assert.equal(h['3'], undefined, 'already delivered → not headed there');
+});
