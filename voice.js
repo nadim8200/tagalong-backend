@@ -87,6 +87,7 @@ How to help:
 - Florida Beauty staff (caller_is staff) can ask about ARTIS — boxes received / scanned / missing per customer and ship date, and days of service: use boxes_check.
 - Many callers are flower customers (florists, wholesalers, supermarkets) asking about THEIR delivery by business name. When a caller says a business name, immediately call lookup_load with customer_name = that name — do not ask for a trip, bill or load number first. Example: "This is Springfield Florist, where are my boxes?" → lookup_load(customer_name: "Springfield Florist"). If nothing is found and the caller is NOT staff, ask which city the delivery goes to and ask them to spell the business name, then call lookup_load again with customer_name (as spelled) and customer_city. If it returns did_you_mean, ask "Is that <name>?" and, if yes, look it up with that exact name. Names on the phone are often misheard — never tell the caller their name is wrong.
 - To answer anything about a load, call lookup_load first. Flower customers (florists, wholesalers, receivers) usually call by their business name — pass it as customer_name and answer only about THEIR stop: delivered or not, ETA to their stop, how many boxes and cubes they are getting, their appointment. It also searches by trip number, bill number (like B180354), the broker's own load number (brokers almost always call with it — it is on their rate confirmation), PO / BOL, truck number or trailer number — use whichever the caller gives (numbers may be read digit by digit; letters like B or OC are part of the number); if they give nothing, call it with no numbers and it will try the caller's phone number. Ask for a trip or bill number if it can't find one.
+- LISTEN when the caller narrows it down. A customer often has several loads coming; if they say which one — "just the California one", "only the truck from Miami", "just truck 2404", "the trip 625778 one", "only Friday's outbound" — call lookup_load with customer_name PLUS that detail (from_hub, truck_number, trip_number, trailer_number or outbound_day) and answer ONLY that load. Never read the other loads after they narrowed it. If they narrow it AFTER you already listed several, give just that one again — short. If they did NOT say which and lookup_load returns several loads (several_loads), do not read them yet: say how many and where they come from, then ASK — e.g. "Riccardi Wholesale has three loads coming: one from our Ventura, California hub and two from Miami. Do you want all of them, or just the California or the Miami one?" Then give exactly what they choose (all → each one briefly; one → only that one).
 - Loads leave from our Miami, Florida hub or our Ventura, California hub (and some brokers' pickups elsewhere). For every load you describe — customers and staff — say which hub it left from using left_from (e.g. "it left our Ventura, California hub"); never assume Miami.
 - When the caller says WHO should handle a message ("have Valeria call me", "Valeria or Sarai") — even after you saved it — call take_message (again) with for_person set to exactly the names they said, so it reaches those people. Never promise a person without doing that.
 - A load that already delivered / finished (lookup_load can't find it on the board, or they ask "when did it deliver", "the one that left Tuesday"): use past_loads — by customer, truck, trip, outbound_day or delivered_day. Never say a load doesn't exist before checking past_loads.
@@ -138,6 +139,8 @@ function tools(base, transferNumber) {
       customer_name: { type: 'string', description: 'A flower customer / receiver by business name, e.g. "Springfield Florist", "Johnson\'s Wholesale Florist". If they spelled it, pass the spelled name. ALWAYS pass it together with a trip / bill / truck number when the caller says both ("ETA for Zoom Bloom, trip 625490") — the answer is then for THAT customer\'s stop.' },
       customer_city: { type: 'string', description: 'The city / town the caller says their delivery goes to, e.g. "Waltham"' },
       outbound_day: { type: 'string', description: 'When they ask by outbound day: "Friday", "Monday", "yesterday", "10/23" — the day the truck left (or leaves) our hub' },
+      all_loads: { type: 'boolean', description: 'true when the caller said they want ALL of the customer\'s loads (after you asked which one)' },
+      from_hub: { type: 'string', description: 'When they want only the load(s) from one hub: "California" / "Ventura" / "the West Coast" or "Miami" / "Florida" — e.g. "just the California truck", "only the one from Miami"' },
       caller_confirmed: { type: 'boolean', description: 'true ONLY when you asked "Is that <name from did_you_mean>?" and the caller clearly said yes' },
     }),
     fn('boxes_check', 'STAFF ONLY (caller_is Florida Beauty staff): ARTIS boxes received / scanned / missing per customer for a ship date. Never use for customers.', {
@@ -707,6 +710,41 @@ export function outboundDays(said, now = Date.now()) {
   if (M && D) return [`${today.slice(0, 4)}-${String(M).padStart(2, '0')}-${String(D).padStart(2, '0')}`];
   return [];
 }
+// "just the California one" / "only the Miami truck" / "just truck 2404": keep only the caller's stops on the loads they
+// mean. Returns { stops, none } — none = nothing matched (keep all and say so). Pure.
+export function narrowStops(stops, all, { fromHub = null, truck = null, trailer = null, trip = null } = {}) {
+  if (!fromHub && !truck && !trailer && !trip) return { stops, none: false };
+  const item = (n) => all.find((i) => tripNo(i) === n) || null;
+  const hubWant = !fromHub ? null : /calif|ventura|oxnard|west/i.test(fromHub) ? 'ventura' : /miami|florida|\bfl\b|east/i.test(fromHub) ? 'miami' : String(fromHub).toLowerCase();
+  const fromThere = (it) => {
+    if (!hubWant) return true;
+    const said = String(hubSaid(it) || '').toLowerCase();
+    if (hubWant === 'ventura') return /ventura|california/.test(said) || /,\s*CA\b/i.test(String(tripOf(it).origZoneDesc || ''));
+    if (hubWant === 'miami') return /miami|florida/.test(said) || /,\s*FL\b/i.test(String(tripOf(it).origZoneDesc || ''));
+    return said.includes(hubWant) || String(tripOf(it).origZoneDesc || '').toLowerCase().includes(hubWant);
+  };
+  const digits = (v) => String(v || '').replace(/^0+/, '').toUpperCase();
+  const keep = stops.filter((x) => {
+    const it = item(x.trip); if (!it) return false;
+    const t = tripOf(it);
+    if (truck && digits(t.powerUnit) !== digits(truck) && digits(t.tmPowerUnit) !== digits(truck)) return false;
+    if (trailer && digits(t.trailer) !== digits(trailer)) return false;
+    if (trip && String(x.trip) !== String(trip).replace(/\D/g, '')) return false;
+    return fromThere(it);
+  });
+  return keep.length ? { stops: keep, none: false } : { stops, none: true };
+}
+// "3 loads: 1 from our Ventura, California hub and 2 from our Miami, Florida hub" — for asking which one they want. Pure.
+export function loadsSummary(trips, all) {
+  const hubs = new Map();
+  for (const n of trips) {
+    const it = all.find((i) => tripNo(i) === n) || null;
+    const h = (it && hubSaid(it)) || 'another pickup';
+    hubs.set(h, (hubs.get(h) || 0) + 1);
+  }
+  const parts = [...hubs.entries()].map(([h, c]) => `${c} from ${h}`);
+  return `${trips.length} loads: ${parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0]}`;
+}
 // Which of our hubs the load left from ("our Miami, Florida hub") — ARTIS's Truck Builder warehouse first, then the
 // trip sheet / TruckMate terminal; broker loads say where they were picked up. Pure.
 export function hubSaid(item) {
@@ -941,6 +979,11 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
           }
           stops = onDay;
         }
+        // the caller narrowed it ("just the California truck", "only truck 2404") → only those loads
+        const narrowed = narrowStops(stops, all, { fromHub: a.from_hub || null });
+        const narrowNote = narrowed.none ? `None of their loads match "${a.from_hub}" — say so, then tell them which hubs their loads are from. ` : '';
+        const narrowedBy = !!(a.from_hub && !narrowed.none) || !!a.outbound_day;
+        stops = narrowed.stops;
         const biz = spokenName(stops[0].customer);                        // the real name, not what was misheard
         if (call.call_id && said) callName.set(call.call_id, stops[0].customer);   // a phone guess isn't the caller's name until they say it
         // this number is saved for ANOTHER customer (it called for them before, or it's on their client record) → no details
@@ -964,6 +1007,8 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
         const trips = allTrips.filter((n) => !oc.has(n));
         const ocTrips = allTrips.filter((n) => oc.has(n));
         const full = trips.map((n) => customerView(all.find((it) => tripNo(it) === n), etas[n], stops.filter((x) => x.trip === n)));
+        // several loads and the caller didn't say which → say how many and from where, and ASK before reading them
+        const several = trips.length > 1 && !narrowedBy && !a.all_loads ? { several_loads: loadsSummary(trips, all), ask_first: `Before giving details, say: "${spokenName(stops[0].customer)} has ${loadsSummary(trips, all)}. Do you want all of them, or just one?" (name the hubs). Then answer only what they choose — call lookup_load again with from_hub / truck_number / trip_number for one, or all_loads true for all.` } : {};
         const loads = staffPhone ? full : full.map(customerLean);
         if (ocTrips.length && !staffPhone && help && help.raise) {
           help.raise({ source: 'call', ref: `${call.call_id || Date.now()}:oc-update`, role: 'customer', from: { name: biz, phone: callerPhone(call) || null }, trip: ocTrips[0],
@@ -976,9 +1021,9 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
           // outside-carrier loads: staff still hear them — trip, carrier / unit, status, where and how many boxes
           const ocLoads = ocTrips.map((n) => { const it = all.find((i) => tripNo(i) === n) || {}; const t = tripOf(it); return { trip: n, carrier: (it._oc && (it._oc.carrierName || it._oc.name)) || null, unit: String(t.tmPowerUnit || t.powerUnit || '').trim() || 'no truck yet', status: String(t.statusDesc || t.status || '').toLowerCase() || null, deliveries: stops.filter((x) => x.trip === n).map((x) => ({ customer: x.customer, city: x.city, boxes: x.boxes_loaded || x.boxes || null, delivered: !!x.delivered })) }; });
           if (!trips.length && ocTrips.length) return reply({ found: true, matched_by: heard ? 'closest name on the board' : 'customer name', caller_is: STAFF_IS, outside_carrier_loads: ocLoads, say: `${heard ? `Closest match to "${name}" — say the business name you found. ` : ''}${spokenName(stops[0].customer)} HAS ${ocTrips.length} active load${ocTrips.length > 1 ? 's' : ''}, all with outside carriers (no live tracking yet). Never say they have no loads. For each: the trip number, the carrier or unit, the status, the delivery city and boxes. Then say Frank Ducassi follows the outside-carrier loads.` });
-          return reply({ found: true, matched_by: heard ? 'closest name on the board' : 'customer name', caller_is: STAFF_IS, loads, ...(ocLoads.length ? { outside_carrier_loads: ocLoads } : {}), say: `${heard ? `Closest match to "${name}": say the business name you found (e.g. "I have ${spokenName(stops[0].customer)}") and give its ETA — if it's not the one, they'll tell you. ` : ''}${STAFF_RULE}${ocTrips.length ? ` After the loads, add ONE short line: "Plus ${ocTrips.length} outside-carrier load${ocTrips.length > 1 ? 's' : ''} (trip ${ocTrips.join(', ')}) — no tracking yet; Frank Ducassi has ${ocTrips.length > 1 ? 'those' : 'that one'}." Don't count them as loads above.` : ''}` });
+          return reply({ found: true, matched_by: heard ? 'closest name on the board' : 'customer name', caller_is: STAFF_IS, loads, ...several, ...(ocLoads.length ? { outside_carrier_loads: ocLoads } : {}), say: `${narrowNote}${several.ask_first ? `${several.ask_first} ` : ''}${heard ? `Closest match to "${name}": say the business name you found (e.g. "I have ${spokenName(stops[0].customer)}") and give its ETA — if it's not the one, they'll tell you. ` : ''}${STAFF_RULE}${ocTrips.length ? ` After the loads, add ONE short line: "Plus ${ocTrips.length} outside-carrier load${ocTrips.length > 1 ? 's' : ''} (trip ${ocTrips.join(', ')}) — no tracking yet; Frank Ducassi has ${ocTrips.length > 1 ? 'those' : 'that one'}." Don't count them as loads above.` : ''}` });
         }
-        return reply({ found: true, matched_by: known && !said ? 'caller phone (called before as this business)' : 'customer name', speaking_with: biz, ...(known && !said ? { confirm: `Confirm first: "Is this ${biz}?"` } : {}), loads, say: `${trips.length > 1 ? 'They have deliveries on more than one truck — ask which city or trailer number before giving an ETA. ' : ''}${CUSTOMER_RULE}${ocTrips.length ? ` ${OC_CUSTOMER}` : ''}` });
+        return reply({ found: true, matched_by: known && !said ? 'caller phone (called before as this business)' : 'customer name', speaking_with: biz, ...(known && !said ? { confirm: `Confirm first: "Is this ${biz}?"` } : {}), loads, ...several, say: `${narrowNote}${several.ask_first ? `${several.ask_first} ` : ''}${trips.length > 1 ? 'They have deliveries on more than one truck — ask which city or trailer number before giving an ETA. ' : ''}${CUSTOMER_RULE}${ocTrips.length ? ` ${OC_CUSTOMER}` : ''}` });
       }
       const hit = findLoad(await items(), { trip: a.trip_number || meta.trip, bill: a.bill_number || a.broker_load_number, loadNumber: a.broker_load_number, truck: a.truck_number, trailer: a.trailer_number, phone: callerPhone(call) });
       if (!hit) {

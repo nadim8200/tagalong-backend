@@ -80,3 +80,30 @@ test('samsara: when the current rest began (back-to-back off duty / sleeper join
   assert.equal(restStart(logs, 'f'), null);
   assert.equal(restStart([], 'j'), null);
 });
+
+test('voice: "just the California one" / "only truck 2404" keeps only those loads', async () => {
+  const { narrowStops } = await import('../voice.js');
+  const all = [
+    { trip: { tripNumber: 625778, powerUnit: '2404', origZoneDesc: 'VENTURA, CA, 93003' }, _tb: { hub: 'Ventura' } },
+    { trip: { tripNumber: 625790, powerUnit: '2604', origZoneDesc: 'MIAMI, FL, 33178' }, _tb: { hub: 'Miami' } },
+    { trip: { tripNumber: 625801, powerUnit: '1911', origZoneDesc: 'MIAMI, FL, 33178' } },
+  ];
+  const stops = [{ trip: '625778' }, { trip: '625790' }, { trip: '625801' }];
+  assert.deepEqual(narrowStops(stops, all, { fromHub: 'California' }).stops.map((x) => x.trip), ['625778']);
+  assert.deepEqual(narrowStops(stops, all, { fromHub: 'the Miami one' }).stops.map((x) => x.trip), ['625790', '625801']);
+  assert.deepEqual(narrowStops(stops, all, { truck: '2604' }).stops.map((x) => x.trip), ['625790']);
+  const none = narrowStops(stops, all, { fromHub: 'Texas' });
+  assert.equal(none.none, true); assert.equal(none.stops.length, 3);
+  assert.equal(narrowStops(stops, all, {}).stops.length, 3);
+});
+
+test('voice: several loads → how many and from where, to ask which one', async () => {
+  const { loadsSummary } = await import('../voice.js');
+  const all = [
+    { trip: { tripNumber: 1, origZoneDesc: 'VENTURA, CA' }, _tb: { hub: 'Ventura' } },
+    { trip: { tripNumber: 2, origZoneDesc: 'MIAMI, FL' }, _tb: { hub: 'Miami' } },
+    { trip: { tripNumber: 3, origZoneDesc: 'MIAMI, FL' }, _tb: { hub: 'Miami' } },
+  ];
+  assert.equal(loadsSummary(['1', '2', '3'], all), '3 loads: 1 from our Ventura, California hub and 2 from our Miami, Florida hub');
+  assert.equal(loadsSummary(['2', '3'], all), '2 loads: 2 from our Miami, Florida hub');
+});
