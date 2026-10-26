@@ -10,7 +10,17 @@
 // Pure — the route in truckmate.js feeds it.
 // ---------------------------------------------------------------
 
+import { MIAMI_YARDS, haversineMi } from './watchtower.js';
+
 const norm = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/^0+(?=\d)/, '');
+// our hubs: a truck parked there is in service / waiting for a load, however long it's been quiet
+const VENTURA_HUB = { lat: 34.2746, lng: -119.229 };
+export function hubAt(p) {
+  if (!p || p.lat == null || p.lng == null) return null;
+  if (MIAMI_YARDS.some((y) => haversineMi(p.lat, p.lng, y.lat, y.lng) <= 1)) return 'Miami';
+  if (haversineMi(p.lat, p.lng, VENTURA_HUB.lat, VENTURA_HUB.lng) <= 1.5) return 'Ventura';
+  return null;
+}
 const MIN = 60000;
 const fresh = (at, now, mins) => !!at && now - Date.parse(at) < mins * MIN;
 
@@ -75,7 +85,7 @@ export function buildFleet({ trips = [], idx = null, traccar = null, trailerLoc 
     const stale = !fresh(tr.gpsAt, now, 30);
     const engineOn = tr.engine ? /^(on|idle)$/i.test(String(tr.engine)) : null;
     return {
-      ...tr, kind: 'truck',
+      ...tr, kind: 'truck', atHub: hubAt(tr),
       state: stale ? 'stale' : moving ? 'moving' : engineOn ? 'idling' : 'parked',
       trip: job ? job.trip : null, tripStatus: job ? job.status : null, destination: job ? job.destination : null, origin: job ? job.origin : null,
       driver: job ? [job.driver, job.driver2].filter(Boolean).join(' & ') || tr.assignedDriver || null : tr.assignedDriver || null,

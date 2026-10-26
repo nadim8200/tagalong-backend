@@ -107,3 +107,12 @@ test('voice: several loads → how many and from where, to ask which one', async
   assert.equal(loadsSummary(['1', '2', '3'], all), '3 loads: 1 from our Ventura, California hub and 2 from our Miami, Florida hub');
   assert.equal(loadsSummary(['2', '3'], all), '2 loads: 2 from our Miami, Florida hub');
 });
+
+test('fleet map: trucks at our Miami yard lots or the Ventura hub are marked atHub', async () => {
+  const { hubAt } = await import('../fleetmap.js');
+  assert.equal(hubAt({ lat: 25.8026, lng: -80.3102 }), 'Miami');     // 3315 NW 70th Ave
+  assert.equal(hubAt({ lat: 34.272, lng: -119.232 }), 'Ventura');
+  assert.equal(hubAt({ lat: 25.86, lng: -80.29 }), null);            // Hialeah — Miami area, not the yard
+  assert.equal(hubAt({ lat: 37.08, lng: -94.32 }), null);
+  assert.equal(hubAt({}), null);
+});
