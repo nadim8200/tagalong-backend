@@ -74,3 +74,21 @@ test('a staff name heard on the phone matches the one employee it sounds like', 
   assert.deepEqual(soundsLikeStaff(people, 'Frank Ducasse').map((p) => p.name), ['Frank Ducassi']);
   assert.deepEqual(soundsLikeStaff(people, 'Maria'), []);
 });
+
+test('departments: admins add one before anyone is in it; its line is written on its people; edits keep the list', async () => {
+  const puts = {}; const gets = {};
+  initDirectory({ get: (p, ...h) => { gets[p] = h.at(-1); }, put: (p, ...h) => { puts[p] = h.at(-1); }, post: () => {} }, { requireAuth: () => {}, requireAdmin: () => {}, db: memDb() });
+  let out; const res = { json: (j) => { out = j; }, status() { return res; } };
+  await gets['/truckmate/directory']({ user: { admin: true } }, res);
+  const people = out.people;
+  await puts['/admin/directory/departments']({ body: { departments: [{ name: 'Billing', line: '271' }, { name: 'Quality Control', line: '700' }, { name: 'billing', line: 'dup' }] } }, res);
+  assert.deepEqual(out.departments, [{ name: 'Billing', line: '271' }, { name: 'Quality Control', line: '700' }]);
+  await gets['/truckmate/directory']({ user: { admin: true } }, res);
+  assert.deepEqual(out.departments.map((x) => x.name), ['Billing', 'Quality Control'], 'an empty department is kept');
+  assert.ok(out.people.filter((p) => p.department === 'Billing').every((p) => p.departmentExt === '271'), 'the line reaches its people');
+  // saving one employee (no departments in the body) keeps the department list
+  await puts['/admin/directory']({ body: { main: '305-503-1200', people: people.map((p) => (p.name === 'Frank Ducassi' ? { ...p, department: 'Quality Control' } : p)) } }, res);
+  await gets['/truckmate/directory']({ user: { admin: true } }, res);
+  assert.equal(out.departments.length, 2);
+  assert.equal(out.people.find((p) => p.name === 'Frank Ducassi').department, 'Quality Control');
+});

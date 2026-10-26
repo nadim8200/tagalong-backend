@@ -98,6 +98,17 @@ export const cleanGroups = (list) => (Array.isArray(list) ? list : []).filter((g
   active: g.active !== false,
 }));
 
+// the department list admins keep (a department can exist before anyone is in it): { name, line }, one per name. Pure.
+export const cleanDepartments = (list) => {
+  const seen = new Set(); const out = [];
+  for (const x of (Array.isArray(list) ? list : [])) {
+    const name = String((x && x.name) || '').trim().slice(0, 60); const k = name.toLowerCase();
+    if (!name || seen.has(k)) continue;
+    seen.add(k); out.push({ name, line: x.line ? String(x.line).slice(0, 30) : null });
+  }
+  return out.slice(0, 80);
+};
+
 export function initDirectory(app, { requireAuth, requireAdmin, db, contact = null }) {
   const enabled = !!(db && db.enabled);
   let cache = { at: 0, d: null };
@@ -118,18 +129,30 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
     if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admins only.' });
     const d = await load();
     // dispatchers see what Jarvis may share; admins also see the system-only cell / email
-    res.json({ main: d.main, unclear: isAdmin(req.user) ? UNCLEAR : [], groups: d.groups || [], people: d.people.map((p) => (isAdmin(req.user) ? p : { id: p.id, ...publicView(p, d.main), active: p.active })) });
+    res.json({ main: d.main, unclear: isAdmin(req.user) ? UNCLEAR : [], groups: d.groups || [], departments: d.departments || [], people: d.people.map((p) => (isAdmin(req.user) ? p : { id: p.id, ...publicView(p, d.main), active: p.active })) });
   });
   app.put('/admin/directory', requireAdmin, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const b = req.body || {};
     const people = (Array.isArray(b.people) ? b.people : []).filter((p) => p && p.name).slice(0, 400).map((p, i) => ({ id: p.id || `s${Date.now().toString(36)}${i}`, name: String(p.name).slice(0, 80), department: String(p.department || 'Other').slice(0, 60), departmentExt: p.departmentExt ? String(p.departmentExt).slice(0, 30) : null, ext: p.ext ? String(p.ext).replace(/[^\d/ ]/g, '').slice(0, 12) || null : null, phone: last10(p.phone), note: p.note ? String(p.note).slice(0, 60) : null, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(p.email || '')) ? String(p.email).toLowerCase() : null, channels: { text: !p.channels || p.channels.text !== false, email: !p.channels || p.channels.email !== false, call: !!(p.channels && p.channels.call) }, active: p.active !== false, ...(p.team ? { team: true } : {}) }));
     const cur = await load();
-    const d = { main: String(b.main || MAIN_NUMBER).slice(0, 20), people, groups: Array.isArray(b.groups) ? cleanGroups(b.groups) : (cur.groups || SEED_GROUPS), updatedAt: new Date().toISOString() };
+    const d = { main: String(b.main || MAIN_NUMBER).slice(0, 20), people, groups: Array.isArray(b.groups) ? cleanGroups(b.groups) : (cur.groups || SEED_GROUPS), departments: Array.isArray(b.departments) ? cleanDepartments(b.departments) : (cur.departments || []), updatedAt: new Date().toISOString() };
     await db.set(KEY, d); cache = { at: Date.now(), d };
     res.json({ ok: true, count: people.length });
   });
 
+  // admins: the department list (add one before anyone is in it, set its phone line). A department's line is
+  // also written on its people (that's where Jarvis reads it when it tells a caller the department line).
+  app.put('/admin/directory/departments', requireAdmin, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const departments = cleanDepartments((req.body || {}).departments);
+    const cur = await load();
+    const lineOf = new Map(departments.map((x) => [x.name.toLowerCase(), x.line]));
+    const people = (cur.people || []).map((p) => { const k = String(p.department || '').toLowerCase(); return lineOf.has(k) ? { ...p, departmentExt: lineOf.get(k) || null } : p; });
+    const d = { ...cur, departments, people, updatedAt: new Date().toISOString() };
+    await db.set(KEY, d); cache = { at: Date.now(), d };
+    res.json({ ok: true, departments });
+  });
   app.put('/admin/directory/groups', requireAdmin, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const groups = cleanGroups((req.body || {}).groups);
