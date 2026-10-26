@@ -137,7 +137,7 @@ ${hist || art ? `<tr><td colspan="6" style="padding:0 8px 8px;font-size:12px;col
 <tr style="background:#F4F6F9"><th align="left" style="padding:6px 8px;font-size:12px">Customer · stop</th><th align="left" style="padding:6px 8px;font-size:12px">First ETA</th><th align="left" style="padding:6px 8px;font-size:12px">Last ETA</th><th align="left" style="padding:6px 8px;font-size:12px">Actual</th><th align="left" style="padding:6px 8px;font-size:12px">Off by</th><th align="left" style="padding:6px 8px;font-size:12px">Time at stop</th></tr>
 ${body || `<tr><td colspan="6" style="${cell}">No stops on this trip.</td></tr>`}
 </table>
-<p style="color:#596A7F;font-size:12px">Times in ET (stop's local time in parentheses when it isn't Eastern). Our ETA = 55 mph, driving hours and 1 h per stop. Actual = the truck entering the customer's geofence, else the delivered time in TruckMate / ARTIS. Time at stop = from entering to leaving the customer's geofence.</p>
+<p style="color:#596A7F;font-size:12px">Times in ET (stop's local time in parentheses when it isn't Eastern). Our ETA = 60 mph, driving hours and 1 h per stop. Actual = the truck entering the customer's geofence, else the delivered time in TruckMate / ARTIS. Time at stop = from entering to leaving the customer's geofence.</p>
 <p style="font-size:13px">— Jarvis, AI Dispatcher</p></div>`;
   return { subject, html };
 }

@@ -126,7 +126,7 @@ export function buildFlowerReport(rows, now = Date.now()) {
     ${pill('Late', n.late + n.bd, COLOR.LATE)}${pill('At risk', n.risk, COLOR['AT RISK'])}${pill('On time', n.ok, COLOR['ON TIME'])}${n.notleft ? pill('Not left', n.notleft, COLOR['NOT LEFT']) : ''}${n.nogps ? pill('No GPS', n.nogps, COLOR['NO GPS']) : ''}
   </tr></table>
   ${GROUPS.map(section).join('\n')}
-  <div style="margin-top:16px;font-size:12px;color:#6b7280;line-height:1.4">ETAs and appointments are in each delivery's local time. They are estimates (55 mph, drivers' hours, time at each stop) and may change with traffic, weather or road conditions.</div>
+  <div style="margin-top:16px;font-size:12px;color:#6b7280;line-height:1.4">ETAs and appointments are in each delivery's local time. They are estimates (60 mph, drivers' hours, time at each stop) and may change with traffic, weather or road conditions.</div>
   <div style="margin-top:10px;font-size:13px;color:#374151">Jarvis — AI Dispatcher · Florida Beauty Flora</div>
 </td></tr></table></div>`;
   return { subject, html, rows: sorted, counts: n, at: now };

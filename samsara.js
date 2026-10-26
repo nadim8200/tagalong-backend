@@ -533,6 +533,40 @@ export async function getLiveIndex(token, ttlMs = 60000) {
   const now = Date.now();
   if (_idxCache.idx && _idxCache.token === token && (now - _idxCache.at) < ttlMs) return _idxCache.idx;
   const idx = indexSnapshot(await snapshot(token));
+  await addRestSince(token, idx).catch((e) => console.warn('[samsara] rest since:', e.message));
   _idxCache = { at: now, token, idx };
   return idx;
+}
+
+// When a driver's current rest began: walk back from their latest duty log while it's off duty / sleeper
+// (back-to-back rest logs join into one rest). Not resting now → null. Pure. logs: driverHosLogs output.
+const RESTING = /^(offDuty|sleeperBerth|sleeperBed)$/;
+export function restStart(logs = [], driverId) {
+  const mine = logs.filter((l) => String(l.driverId) === String(driverId)).sort((a, b) => a.from - b.from);
+  if (!mine.length || !RESTING.test(mine[mine.length - 1].status)) return null;
+  let start = mine[mine.length - 1].from;
+  for (let i = mine.length - 2; i >= 0; i--) {
+    if (!RESTING.test(mine[i].status) || mine[i].to < start - 60000) break;
+    start = mine[i].from;
+  }
+  return start;
+}
+// Drivers resting right now get `restSinceMs` on their clocks, so an ETA counts the rest they've already had
+// (a co-driver 9 hours into a 10-hour rest is about to drive — not 10 hours away). Logs re-read every 5 min.
+let _restCache = { at: 0, byId: {} };
+async function addRestSince(token, idx) {
+  const resting = Object.values(idx.hosById || {}).filter((h) => RESTING.test(String(h.status || '')));
+  if (!resting.length) return;
+  const now = Date.now();
+  if (now - _restCache.at > 5 * 60000) {
+    const ids = resting.map((h) => h.driverId);
+    const byId = {};
+    for (let i = 0; i < ids.length; i += 50) {
+      const part = ids.slice(i, i + 50);
+      const logs = await driverHosLogs(token, part, new Date(now - 40 * 3600000).toISOString(), new Date(now).toISOString()); // eslint-disable-line no-await-in-loop
+      for (const id of part) { const st = restStart(logs, id); if (st != null) byId[id] = st; }
+    }
+    _restCache = { at: now, byId };
+  }
+  for (const h of resting) if (_restCache.byId[h.driverId] != null) h.restSinceMs = _restCache.byId[h.driverId];
 }

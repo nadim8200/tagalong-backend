@@ -59,7 +59,7 @@ export function renderLateEmail(d) {
   const apptLabel = d.fcfs ? 'Receiving closes' : 'Appointment';
   const apptNote = d.fcfs ? `First come, first served${d.hours ? ` · receiving ${d.hours}` : ''}` : null;
   const source = d.by || 'Dispatch';   // who / what set the committed time (as the old email said it)
-  const assumptions = 'The estimated arrival assumes an average travel speed of 55 mph (an assumption — not the truck\'s measured speed), the drivers\' remaining driving hours, and about 1 hour at each stop. Traffic, weather and dock time can change it.';
+  const assumptions = 'The estimated arrival assumes an average travel speed of 60 mph (an assumption — not the truck\'s measured speed), the drivers\' remaining driving hours, and about 1 hour at each stop. Traffic, weather and dock time can change it.';
   const action = 'Assign someone to notify the customer and confirm whether the revised arrival time is acceptable.';
   const notified = 'Customer notification: Not sent by Jarvis';
 

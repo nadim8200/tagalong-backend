@@ -24,7 +24,7 @@
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 
 const MIN = 60000;
-const CRUISE_MPH = 55;   // dispatch's rule: 55 mph for the whole run
+const CRUISE_MPH = 60;   // dispatch's rule: 60 mph for the whole run
 const SEV = { critical: 3, warning: 2, info: 1 };
 
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
@@ -83,7 +83,7 @@ export function haversineMi(aLat, aLng, bLat, bLng) {
   return 2 * R * Math.asin(Math.sqrt(s));
 }
 
-// Same HOS-aware estimate the console uses (55 mph bent to the DOT clock:
+// Same HOS-aware estimate the console uses (60 mph bent to the DOT clock:
 // 11h drive / 14h shift / 30-min break after 8h driving / 10h reset / 70h cycle → 34h restart).
 // One leg; planArrivals does a whole run (several stops, unloading time counted on the driver's clock).
 export function estimateArrival(miles, opts = {}) {
@@ -99,17 +99,20 @@ export const TEAM_SWAP_MIN = 15;   // pulling over to change drivers
 //   driveLeftMin / shiftLeftMin / cycleLeftMin / breakInMin — the driver's live clocks (Samsara); partner — the
 //   co-driver's; restDoneMin — how long the truck has already been parked (counts toward a rest needed right now).
 // Returns the arrival time (ms) at the end of each leg. Pure.
-export function planArrivals(legs, { team, driveLeftMin, shiftLeftMin, cycleLeftMin = null, breakInMin = null, restDoneMin = 0, partner = null, now = Date.now() } = {}) {
+export function planArrivals(legs, { team, driveLeftMin, shiftLeftMin, cycleLeftMin = null, breakInMin = null, restDoneMin = 0, partner = null, status = null, restSinceMs = null, now = Date.now() } = {}) {
   const H = 3600000; const SWAP = TEAM_SWAP_MIN / 60;
   const hrs = (m, d) => Math.max(0, m != null ? m / 60 : d);
   const clocks = (c, fresh) => {
     const drive = hrs(c && c.driveLeftMin, 11); const shift = hrs(c && c.shiftLeftMin, 14); const cycle = hrs(c && c.cycleLeftMin, 70);
     // driving since the last break: from Samsara's "break due in"; unknown → assume they just had one
     const since = c && c.breakInMin != null ? Math.max(0, 8 - c.breakInMin / 60) : 0;
-    return { drive, shift, cycle, since, rest: fresh ? 10 : 0 };
+    // resting right now (off duty / sleeper): the rest they've already had counts (from the duty logs)
+    const restingNow = c && /^(offDuty|sleeper)/.test(String(c.status || ''));
+    const had = restingNow && c.restSinceMs ? Math.max(0, (now - c.restSinceMs) / H) : 0;
+    return { drive, shift, cycle, since: had >= 0.5 ? 0 : since, rest: fresh ? 10 : had, resting: !!restingNow, status: c ? c.status : null };
   };
-  const me = clocks({ driveLeftMin, shiftLeftMin, cycleLeftMin, breakInMin }, false);
-  let credit = Math.max(0, restDoneMin / 60);                  // parked already → counts toward a rest needed now
+  let me = clocks({ driveLeftMin, shiftLeftMin, cycleLeftMin, breakInMin, status, restSinceMs }, false);
+  let credit = Math.max(0, restDoneMin / 60, me.resting ? me.rest : 0);   // parked / resting already → counts toward a rest needed now
   // a team covers the 30-minute break with the swap (the other driver is resting in the sleeper) — no forced
   // 8-hour stop, they change over when one runs out of hours
   const canDrive = (d) => Math.min(d.drive, d.shift, d.cycle, team ? Infinity : 8 - d.since);
@@ -139,9 +142,13 @@ export function planArrivals(legs, { team, driveLeftMin, shiftLeftMin, cycleLeft
     }
     return out;
   }
-  let cur = me;
   let oth = partner ? clocks(partner, false) : clocks(null, true);
   if (!partner) oth.rest = 10;                                  // no clocks for the co-driver: assume rested
+  // the one at the wheel drives first: driver 1 in the sleeper while driver 2 drives → driver 2 is "current"
+  if (partner && me.resting && !oth.resting) [me, oth] = [oth, me];
+  // a driver's known rest is already on their clock — the parked-time credit is only for when we don't know it
+  credit = (me.resting && me.rest > 0) || (partner && oth.resting && oth.rest > 0) ? 0 : Math.max(0, restDoneMin / 60);
+  let cur = me;
   for (const leg of legs) {
     let need = Math.max(0, (Number(leg.miles) || 0) / CRUISE_MPH); let guard = 0;
     while (need > 0.01 && guard++ < 400) {
@@ -415,7 +422,7 @@ function routeEtas(f, ctx) {
     legs.push({ miles: leg, dwellMin: stopDwellMin(st) });          // unloading here uses the driver's shift too
     at = g;
   }
-  const times = planArrivals(legs, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, breakInMin: hos.breakInMin, partner: f.live.hos2 || null, restDoneMin, now: start });
+  const times = planArrivals(legs, { team: f.team, driveLeftMin: hos.driveLeftMin, shiftLeftMin: hos.shiftLeftMin, cycleLeftMin: hos.cycleLeftMin, breakInMin: hos.breakInMin, status: hos.status || null, restSinceMs: hos.restSinceMs || null, partner: f.live.hos2 || null, restDoneMin, now: start });
   const out = [];
   ordered.forEach((st, i) => {
     miles += legs[i].miles;

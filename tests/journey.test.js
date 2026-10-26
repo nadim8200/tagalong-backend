@@ -72,3 +72,11 @@ test('journey: fuel — a 10+ point rise during a stop is a fill-up', () => {
   const r = classifyStop(long, { logs: [{ driverId: 'a', status: 'sleeperBerth', from: long.fromMs, to: long.toMs }], fuel: [{ t: T0 - 60000, pct: 20 }, { t: T0 + 600 * 60000, pct: 90 }] });
   assert.equal(r.label, '10-hour reset'); assert.ok(r.notes.includes('Fueled: 20% → 90%'));
 });
+
+test('samsara: when the current rest began (back-to-back off duty / sleeper join)', async () => {
+  const { restStart } = await import('../samsara.js');
+  const logs = [{ driverId: 'j', status: 'driving', from: 0, to: 100 }, { driverId: 'j', status: 'offDuty', from: 100, to: 200 }, { driverId: 'j', status: 'sleeperBed', from: 200, to: 900 }, { driverId: 'f', status: 'driving', from: 0, to: 900 }];
+  assert.equal(restStart(logs, 'j'), 100);
+  assert.equal(restStart(logs, 'f'), null);
+  assert.equal(restStart([], 'j'), null);
+});

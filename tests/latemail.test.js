@@ -22,7 +22,7 @@ test('the late email: sections in order, real values, escaped, plain-text twin i
   assert.match(r.text, /Trip: 625479\nTruck: 2608 · Trailer: 7370\nDistance remaining: Approximately 4 miles/);
   assert.match(r.text, /GPS updated Fri, Oct 23, 2026 at 10:54 AM ET\./);
   assert.match(r.text, /Appointment source: TruckMate \(delivery appointment\)\./);
-  assert.match(r.text, /55 mph \(an assumption — not the truck's measured speed\)/);
+  assert.match(r.text, /60 mph \(an assumption — not the truck's measured speed\)/);
   assert.match(r.html, /A&amp;B &lt;Wholesale&gt;/); assert.ok(!r.html.includes('<Wholesale>'));
   assert.ok(r.html.includes(TRAINING_SLOT));
   assert.ok(!/<script|<form|<button/i.test(r.html));
