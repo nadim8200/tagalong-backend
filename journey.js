@@ -63,7 +63,10 @@ export function classifyStop(s, { logs = [], names = {}, visits = [], statuses =
   }
   const drivers = Object.entries(per).map(([id, d]) => {
     const top = Object.entries(d).sort((a, b) => b[1] - a[1])[0];
-    return { id, name: names[id] || null, status: top ? (STATUS_WORD[top[0]] || top[0]) : null, resting: ((d.offDuty || 0) + (d.sleeperBerth || 0)) / span >= 0.5, offDuty: (d.offDuty || 0) / span >= 0.5, pc: (d.personalConveyance || 0) / span >= 0.3 };
+    const rest = (d.offDuty || 0) + (d.sleeperBerth || 0);
+    // resting = what they did MOST of the stop was off duty / sleeper (a few on-duty minutes at the start don't count)
+    const resting = (top && (top[0] === 'offDuty' || top[0] === 'sleeperBerth')) || rest / span >= 0.5;
+    return { id, name: names[id] || null, status: top ? (STATUS_WORD[top[0]] || top[0]) : null, resting, offDuty: !!top && top[0] === 'offDuty', pc: (d.personalConveyance || 0) / span >= 0.3 };
   });
   // who drove right before and right after
   const driving = logs.filter((l) => l.status === 'driving');

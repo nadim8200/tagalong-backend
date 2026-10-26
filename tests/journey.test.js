@@ -37,6 +37,13 @@ test('journey: what happened at each stop — reset, restart, driver change, fue
   const rc = classifyStop(s2, { roadCalls: [{ at: new Date(s2.fromMs + 5 * 60000).toISOString(), type: 'tire', details: 'drive axle left outside flat' }] });
   assert.equal(rc.kind, 'breakdown'); assert.equal(rc.notes[0], 'drive axle left outside flat');
   assert.equal(classifyStop(s2, {}).label, 'Stopped (no duty status)');
+  // a long stop where the driver who drove in did a few on-duty minutes first, then slept → a reset, with the swap noted
+  const long = { fromMs: T0, toMs: T0 + 646 * 60000, minutes: 646 };
+  const lg = [{ driverId: 'a', status: 'driving', from: T0 - 3600000, to: T0 }, { driverId: 'a', status: 'onDuty', from: T0, to: T0 + 20 * 60000 }, { driverId: 'a', status: 'sleeperBerth', from: T0 + 20 * 60000, to: long.toMs }, { driverId: 'm', status: 'sleeperBerth', from: T0 - 3600000, to: long.toMs }, { driverId: 'm', status: 'driving', from: long.toMs, to: long.toMs + 3600000 }];
+  const r = classifyStop(long, { logs: lg, names });
+  assert.equal(r.label, '10-hour reset'); assert.ok(r.notes.includes('Driver change: Anibal Reyes → Michel Gonzalez'));
+  // 52 min: one off duty, the other in the sleeper → a break, not fuel / work
+  assert.equal(classifyStop(s2, { logs: [{ driverId: 'a', status: 'offDuty', from: s2.fromMs, to: s2.toMs }, { driverId: 'm', status: 'sleeperBerth', from: s2.fromMs, to: s2.toMs }], names }).label, 'Short break');
 });
 
 test('journey: wheel changes, pinning a moment on the trail, trip start, thinning', () => {
