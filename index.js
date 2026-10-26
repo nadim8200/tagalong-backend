@@ -1030,7 +1030,20 @@ const artisWeb = initArtisWeb(app, { requireAuth: requireDispatch, requireAdmin:
 // the rest of ARTIS: door temps (reefer alert), tractor / trailer positions, approaching yard; reports for Jarvis
 const artisReports = initArtisReports({ db, artisWeb, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), tempTeam: () => alertRecipients.resolve('reefer_temp'), env: process.env });
 // ARTIS Synergize documents (POD / BOL / invoice…) by bill — any bill type; TIFF scans → PDF, kept on the trip
-const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, docs, artisWeb, getBoard: (site) => truckmate.buildBoard(site), onRateCon: (trip, file) => ratecon.attachIfMissing('florida-beauty', trip, file), nameFits: (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75 });
+const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, docs, artisWeb, getBoard: (site) => truckmate.buildBoard(site), onRateCon: (trip, file) => ratecon.attachIfMissing('florida-beauty', trip, file),
+  // new POD / BOL from Synergize → Billing (Accounting's group email; Dispatch until Accounting has one)
+  onBillingDocs: async (trip, found) => {
+    const { billingEmail } = await import('./synergize.js');
+    const billing = await directory.groupEmail('billing').catch(() => null);
+    const to = billing || (await directory.groupEmail('dispatch').catch(() => null));
+    if (!to) return;
+    const item = ((await truckmate.buildBoard('florida-beauty').catch(() => ({}))).trips || []).find((it) => String(((it && it.trip) || it || {}).tripNumber || '') === String(trip)) || null;
+    const rc = (((await db.get('taTruckMateRateCon:florida-beauty', {})) || {})[String(trip)]) || null;
+    let room = 3 * 1024 * 1024;   // keep the email under the mail size limit; the rest stay on the trip
+    const docsOut = found.map((d) => { const fits = d.bytes && d.bytes.length <= room; if (fits) room -= d.bytes.length; return { ...d, attached: !!fits }; });
+    const { subject, html } = billingEmail({ trip, docs: docsOut, item, rc, note: billing ? null : 'Accounting has no group email yet (Employees → Email groups) — sent to Dispatch for now.' });
+    await sendMail({ to: [to], subject, html, attachments: docsOut.filter((d) => d.attached).map((d) => ({ name: d.name || `${d.type}-${d.bill}.pdf`, contentType: 'application/pdf', bytes: d.bytes })) }, { env: process.env });
+  }, nameFits: (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75 });
 // ARTIS customers → profiles (ID, address, phone, fax, delivery days…), the client list, and customer geofences
 artisClients = initArtisClients(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, artisWeb, clients, profiles, getBoard: (site) => truckmate.buildBoard(site) });
 app.post('/truckmate/artis/reports/run', requireCompanyAdmin, async (req, res) => { try { res.json(await artisReports.refresh()); } catch (e) { res.status(502).json({ error: e.message }); } });

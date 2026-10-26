@@ -747,7 +747,7 @@ const RULES = [
     return {
       code: 'ratecon-missing', severity: 'warning',
       title: `Rate con not on file${f.billNo ? ` (${f.billNo})` : ''}`,
-      detail: 'Broker load — dispatch, please upload the rate confirmation on the card (or email it to Jarvis). Jarvis also checks ARTIS (Synergize) for it every 2 hours and attaches it when it shows up.',
+      detail: 'Broker load — dispatch, please upload the rate confirmation on the card (or email it to Jarvis). Jarvis also checks Synergize for it every 2 hours and attaches it when it shows up.',
     };
   },
   function handlingPending(f) {

@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initFollowThrough, offersFromRateCon, extrasFor, readDecision, brokerEmails } from '../followthrough.js';
+import { initFollowThrough, offersFromRateCon, extrasFor, readDecision, brokerEmails, rateConEmailWanted } from '../followthrough.js';
 
 function memDb(seed = {}) { const m = new Map(Object.entries(seed)); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, JSON.parse(JSON.stringify(v))), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; }, raw: m }; }
-const RC = { broker: 'RXO', loadNumber: 'RXO 24261611', rate: 2500, rateText: '$2,500', brokerEmail: 'kim@rxo.com', contacts: [{ role: 'tracking', email: 'track@rxo.com' }, { role: 'billing', email: 'pod@rxo.com' }], specialInstructions: ['Check calls every 2 hours via email', 'Driver must call receiver 1 hour before arrival', 'POD within 24 hours'], detention: '$50/hr after 2 hrs', lumper: 'Reimbursed with receipt', accessorials: [] };
+const RC = { source: 'email', broker: 'RXO', loadNumber: 'RXO 24261611', rate: 2500, rateText: '$2,500', brokerEmail: 'kim@rxo.com', contacts: [{ role: 'tracking', email: 'track@rxo.com' }, { role: 'billing', email: 'pod@rxo.com' }], specialInstructions: ['Check calls every 2 hours via email', 'Driver must call receiver 1 hour before arrival', 'POD within 24 hours'], detention: '$50/hr after 2 hrs', lumper: 'Reimbursed with receipt', accessorials: [] };
 
 test('rate con → what Jarvis can do, numbered; extras after delivery; YES / NO replies', () => {
   assert.deepEqual(brokerEmails(RC), { tracking: ['track@rxo.com', 'kim@rxo.com'], billing: ['pod@rxo.com', 'kim@rxo.com'], rep: ['kim@rxo.com'] });
@@ -25,7 +25,7 @@ test('follow-through: instructions email with offers → YES does them → deliv
   const sent = []; const watches = []; const texts = [];
   const app = { get: () => {}, put: () => {}, post: () => {} };
   let t = Date.parse('2026-10-09T15:00:00Z');
-  const f = initFollowThrough(app, { requireAuth: () => {}, db, sendMail: async (m) => { sent.push(m); }, etaWatch: { add: async (w) => { watches.push(w); return { ok: true }; } }, driver: { text: async (s, trip, msg) => { texts.push(msg); return { sent: true }; } }, docs: { listDocs: async () => [{ id: 9, docType: 'lumper_receipt', filename: 'lumper.jpg' }], readDocs: async () => [] }, now: () => t });
+  const f = initFollowThrough(app, { requireAuth: () => {}, db, sendMail: async (m) => { sent.push(m); }, etaWatch: { add: async (w) => { watches.push(w); return { ok: true }; } }, driver: { text: async (s, trip, msg) => { texts.push(msg); return { sent: true }; } }, docs: { listDocs: async () => [{ id: 9, docType: 'lumper_receipt', filename: 'lumper.jpg' }], readDocs: async () => [] }, getBoard: async () => ({ trips: [{ trip: { tripNumber: 624102, status: 'DISP' }, freightBills: [{ billNumber: 'B1' }] }] }), now: () => t });
   await db.set('taTruckMateRateCon:florida-beauty', { 624102: RC });
   await f.onRateCon('florida-beauty', '624102', RC, null);
   assert.equal(sent.length, 1);
@@ -60,4 +60,15 @@ test('follow-through: instructions email with offers → YES does them → deliv
   t = Date.parse('2026-10-10T12:05:00Z');   // 8:05 AM Eastern
   await f.run('florida-beauty', [delivered]);
   assert.ok(sent.some((m) => /^Follow-through — 2026-10-10/.test(m.subject)));
+});
+
+test('rate con email: only one emailed to Jarvis, on a load still set for pickup — never from ARTIS Synergize', () => {
+  const ready = { trip: { tripNumber: 625712, status: 'ASSGN' }, freightBills: [{ billNumber: 'B180637' }] };
+  assert.equal(rateConEmailWanted({ source: 'email' }, ready), true);
+  assert.equal(rateConEmailWanted({ source: 'packet' }, ready), true);
+  assert.equal(rateConEmailWanted({ source: 'ARTIS (Synergize)' }, ready), false);
+  assert.equal(rateConEmailWanted({}, ready), false, 'a dispatcher upload');
+  assert.equal(rateConEmailWanted({ source: 'email' }, null), false, 'off the board = finished');
+  assert.equal(rateConEmailWanted({ source: 'email' }, { trip: { status: 'DEPSHIP' }, freightBills: [] }), false);
+  assert.equal(rateConEmailWanted({ source: 'email' }, { trip: { status: 'DISP' }, freightBills: [{ actualPickup: '2026-10-21T10:00:00' }] }), false);
 });

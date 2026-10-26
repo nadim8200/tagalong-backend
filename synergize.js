@@ -92,7 +92,37 @@ export function brokerDue(items = [], checked = {}, now = Date.now(), every = 2 
   return items.filter((it) => brokerLoad(it) && !it._oc && now - (checked[tripNo(it)] || 0) >= every);
 }
 
-export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs, artisWeb, getBoard = null, nameFits = null, onRateCon = null, now = () => Date.now() }) {
+// Billing gets the paperwork: one email per load with the POD / BOL Jarvis just found in Synergize (attached).
+// Pure — returns { subject, html }. docs: [{ type, bill, created, name }]; rc: the load's rate con (optional).
+export const BILLING_TYPES = /^(POD|BOL|Bill of Lading|Proof of Delivery)/i;
+const escB = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+export function billingEmail({ trip, docs = [], item = null, rc = null, note = null }) {
+  const t = tripOf(item);
+  const bills = [...new Set(docs.map((d) => d.bill).filter(Boolean))];
+  const billTo = [...new Set([...docs.map((d) => d.billTo), ...billsOf(item).filter((b) => bills.includes(String(b.billNumber))).map((b) => b.billToName)].filter(Boolean).map((x) => String(x).replace(/\s*[*>]+\s*$/, '').trim()))];
+  const kinds = [...new Set(docs.map((d) => (/^POD|Proof/i.test(d.type) ? 'POD' : 'BOL')))].join(' + ');
+  const delivered = billsOf(item).filter((b) => bills.includes(String(b.billNumber)) && b.actualDelivery).map((b) => b.actualDelivery).sort().pop() || null;
+  const row = (k, v) => (v ? `<tr><td style="color:#596A7F;padding:2px 12px 2px 0">${k}</td><td><b>${escB(v)}</b></td></tr>` : '');
+  const subject = `${kinds} for billing — Trip ${trip}${bills.length ? ` · ${bills.join(', ')}` : ''}${billTo.length ? ` · ${billTo[0]}` : ''}`;
+  const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#172B4D">
+${note ? `<p style="background:#FFF7E6;border:1px solid #F5C26B;padding:8px 10px;border-radius:6px">${escB(note)}</p>` : ''}
+<p>New paperwork for <b>trip ${escB(trip)}</b> came in on Synergize — attached for billing.</p>
+<table style="border-collapse:collapse;font-size:14px">
+${row('Bill' + (bills.length === 1 ? '' : 's'), bills.join(', '))}
+${row('Bill to', billTo.join(', '))}
+${row('Truck / trailer', [t.powerUnit, t.trailer].filter(Boolean).join(' / '))}
+${row('Delivered', delivered ? String(delivered).replace('T', ' ').slice(0, 16) : (item ? 'not marked delivered in TruckMate yet' : null))}
+${rc ? row('Broker', [rc.broker, rc.loadNumber && `load ${rc.loadNumber}`].filter(Boolean).join(' · ')) : ''}
+${rc ? row('Rate (rate con)', rc.rateText || (rc.rate != null ? `$${rc.rate}` : null)) : ''}
+${rc && (rc.accessorials || []).length ? row('Extras on the rate con', rc.accessorials.join('; ')) : ''}
+</table>
+<p style="margin-top:12px"><b>Documents:</b></p>
+<ul>${docs.map((d) => `<li>${escB(d.type)} · bill ${escB(d.bill)}${d.created ? ` · scanned ${escB(String(d.created).slice(0, 16))}` : ''}${d.attached === false ? ' — <i>too large to attach, open it on the trip in the console</i>' : ''}</li>`).join('')}</ul>
+<p style="color:#596A7F;font-size:12px">Jarvis — AI Dispatcher · Florida Beauty Flora · from Synergize</p></div>`;
+  return { subject, html };
+}
+
+export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs, artisWeb, getBoard = null, nameFits = null, onRateCon = null, onBillingDocs = null, now = () => Date.now() }) {
   const enabled = () => !!(db && db.enabled && artisWeb && artisWeb.ready && artisWeb.ready() && docs && docs.storeDocs);
   const st = async () => (await db.get(KEY, null)) || { trips: {}, docs: {}, watch: {}, done: {} };
 
@@ -102,10 +132,11 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
     return list;
   }
   // check these bills of a trip; store any document not stored yet → the trip's ARTIS documents
-  async function checkBills(trip, bills, by = 'Jarvis (ARTIS)') {
+  async function checkBills(trip, bills, by = 'Jarvis (Synergize)') {
     const s = await st();
     const known = s.docs || {};
     const found = [];
+    const forBilling = [];   // new POD / BOL found this time → billing
     for (const bill of [...new Set(bills.map(String).filter(Boolean))]) {
       let list = [];
       try { list = await listDocs(bill); } catch (e) { if (/session|sign-in/i.test(e.message)) throw e; continue; } // eslint-disable-line no-await-in-loop
@@ -119,15 +150,17 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
           const q = new URLSearchParams(Object.fromEntries(Object.entries(d).filter(([, v]) => v != null)));
           const raw = await artisWeb.fetchBuffer(`/shipDocs/getDoc?${q}`); // eslint-disable-line no-await-in-loop
           const pdf = await toPdf(raw.buf, raw.type); // eslint-disable-line no-await-in-loop
-          if (!pdf) { known[id] = { ...meta, docId: null, note: `${String(d.In_DocName || '').split('.').pop() || 'file'} — open it in ARTIS` }; found.push(known[id]); continue; }
+          if (!pdf) { known[id] = { ...meta, docId: null, note: `${String(d.In_DocName || '').split('.').pop() || 'file'} — open it in Synergize` }; found.push(known[id]); continue; }
           const [stored] = await docs.storeDocs({ site: SITE, kind: 'artisdoc', trip, files: [{ filename: docFileName(d), mediaType: 'application/pdf', dataBase64: pdf.toString('base64') }], by }); // eslint-disable-line no-await-in-loop
           known[id] = { ...meta, docId: String(stored.id), name: docFileName(d) };
           found.push(known[id]);
+          if (BILLING_TYPES.test(meta.type)) forBilling.push({ ...known[id], bytes: pdf });
           // a rate con in ARTIS → on the load when dispatch hasn't put one there
           if (onRateCon && /rate/i.test(meta.type)) await onRateCon(trip, { filename: docFileName(d), dataBase64: pdf.toString('base64') }).catch((e) => console.warn('[synergize] rate con:', e.message)); // eslint-disable-line no-await-in-loop
         } catch (e) { console.warn('[synergize]', bill, e.message); }
       }
     }
+    if (forBilling.length && onBillingDocs) await onBillingDocs(trip, forBilling).catch((e) => console.warn('[synergize] billing email:', e.message));
     await db.update(KEY, (cur) => {
       const c = cur || { trips: {}, docs: {}, watch: {}, done: {} };
       const mine = new Map(((c.trips || {})[trip] || []).map((x) => [x.artisId, x]));

@@ -116,3 +116,16 @@ test('fleet map: trucks at our Miami yard lots or the Ventura hub are marked atH
   assert.equal(hubAt({ lat: 37.08, lng: -94.32 }), null);
   assert.equal(hubAt({}), null);
 });
+
+test('synergize → billing: one email per load with the POD / BOL found (bills, bill-to, delivered, broker + rate)', async () => {
+  const { billingEmail, BILLING_TYPES } = await import('../synergize.js');
+  assert.ok(BILLING_TYPES.test('POD')); assert.ok(BILLING_TYPES.test('BOL')); assert.ok(!BILLING_TYPES.test('Rate Confirmation')); assert.ok(!BILLING_TYPES.test('Invoice'));
+  const item = { trip: { tripNumber: 625502, powerUnit: '2219', trailer: '18077' }, freightBills: [{ billNumber: 'B180600', billToName: 'OTR TRANSPORTATION LLC *', actualDelivery: '2026-10-23T14:05:00' }] };
+  const { subject, html } = billingEmail({ trip: '625502', item, rc: { broker: 'OTR TRANSPORTATION LLC', loadNumber: '467818', rateText: '$3,200', accessorials: ['Lumper $150'] },
+    docs: [{ type: 'POD', bill: 'B180600', created: '2026-10-24T09:12', name: 'POD-B180600.pdf' }, { type: 'BOL', bill: 'B180600', name: 'BOL-B180600.pdf', attached: false }] });
+  assert.equal(subject, 'POD + BOL for billing — Trip 625502 · B180600 · OTR TRANSPORTATION LLC');
+  assert.match(html, /2026-10-23 14:05/); assert.match(html, /\$3,200/); assert.match(html, /Lumper \$150/); assert.match(html, /too large to attach/);
+  const off = billingEmail({ trip: '625380', docs: [{ type: 'POD', bill: 'B180573', billTo: 'X-PRESS LOGISTICS' }], note: 'Accounting has no group email yet' });
+  assert.equal(off.subject, 'POD for billing — Trip 625380 · B180573 · X-PRESS LOGISTICS');
+  assert.match(off.html, /Accounting has no group email yet/);
+});

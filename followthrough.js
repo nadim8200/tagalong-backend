@@ -83,6 +83,19 @@ export function readDecision(text, count) {
   return nums.length ? nums : Array.from({ length: count }, (_, i) => i + 1);
 }
 
+// The "special instructions" email goes out only for a rate con that came to Jarvis BY EMAIL (an email or a
+// trip-sheet packet) on a load that is still set for pickup — never for one Jarvis found in ARTIS Synergize, an
+// upload, or a load already picked up / finished. Pure.
+const PICKED_UP = /^(DEPSHIP|ARRCONS|DEPCONS|INTRAN|ENROUTE|DELVD|DELIV|DEL$|CMPLT|COMPLETE|CANC|VOID)/i;
+export function rateConEmailWanted(rc, item) {
+  if (!/^(email|packet)$/i.test(String((rc && rc.source) || ''))) return false;
+  if (!item) return false;                                   // not on the board → already finished
+  const t = tripOf(item);
+  const bills = (item.freightBills || item.orders || t.freightBills || []);
+  if (bills.some((b) => b && (b.actualPickup || b.actualDelivery))) return false;
+  return !PICKED_UP.test(String(t.status || ''));
+}
+
 export function initFollowThrough(app, { requireAuth, db, groupEmail = null, sendMail, playbook = null, etaWatch = null, driver = null, docs = null, getBoard = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const cfgKey = 'taFollowCfg';
@@ -118,6 +131,10 @@ export function initFollowThrough(app, { requireAuth, db, groupEmail = null, sen
     }
     const sig = `${rc.loadNumber || ''}|${(rc.specialInstructions || []).join('|')}`;
     if (!cfg.instructions || !cfg.to.length || f.rcSentFor === sig) return;
+    // only rate cons emailed to Jarvis, on loads still set for pickup (ARTIS Synergize ones are filed quietly)
+    let item = null;
+    try { item = getBoard ? (((await getBoard(site)) || {}).trips || []).find((it) => tripNo(it) === String(trip)) || null : null; } catch { item = null; }
+    if (!rateConEmailWanted(rc, item)) return;
     const instr = rc.specialInstructions || [];
     const items = offersFromRateCon(trip, rc);
     const token = items.length ? await newOffer(trip, 'ratecon', items) : null;
