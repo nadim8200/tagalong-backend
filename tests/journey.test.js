@@ -25,6 +25,7 @@ test('journey: what happened at each stop — reset, restart, driver change, fue
   const stop = { fromMs: T0 + 60 * 60000, toMs: T0 + 665 * 60000, minutes: 605 };
   const sleep = [{ driverId: 'a', status: 'sleeperBerth', from: stop.fromMs, to: stop.toMs }, { driverId: 'm', status: 'sleeperBerth', from: stop.fromMs, to: stop.toMs }];
   assert.equal(classifyStop(stop, { logs: sleep, names }).label, '10-hour reset');
+  assert.equal(classifyStop(stop, { logs: sleep.map((l) => ({ ...l, status: 'sleeperBed' })), names }).label, '10-hour reset');   // Samsara's spelling
   assert.equal(classifyStop({ ...stop, toMs: stop.fromMs + 35 * 3600000, minutes: 35 * 60 }, { logs: sleep.map((l) => ({ ...l, to: l.from + 35 * 3600000 })), names }).label, '34-hour restart');
   // a 20-min stop where Anibal drove in and Michel drove out → driver change
   const s2 = { fromMs: T0 + 720 * 60000, toMs: T0 + 740 * 60000, minutes: 20 };

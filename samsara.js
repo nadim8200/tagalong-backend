@@ -99,7 +99,9 @@ export async function driverHosLogs(token, driverIds, startIso, endIso) {
     for (const l of arr(d.hosLogs || d.logs)) {
       const from = Date.parse(l.logStartTime || l.startTime || '');
       const to = l.logEndTime || l.endTime ? Date.parse(l.logEndTime || l.endTime) : Date.parse(endIso);
-      if (!Number.isNaN(from)) out.push({ driverId, status: String(l.hosStatusType || l.status || ''), from, to: Number.isNaN(to) ? Date.parse(endIso) : to });
+      // Samsara says "sleeperBed"; one name for it everywhere downstream
+      const status = String(l.hosStatusType || l.status || '').replace(/^sleeperBed$/, 'sleeperBerth');
+      if (!Number.isNaN(from)) out.push({ driverId, status, from, to: Number.isNaN(to) ? Date.parse(endIso) : to });
     }
   }
   return out;

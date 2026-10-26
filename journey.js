@@ -71,7 +71,8 @@ export function classifyStop(s, { logs = [], names = {}, visits = [], statuses =
   for (const l of logs) {
     const o = overlaps(l.from, l.to); if (o <= 0) continue;
     const d = (per[l.driverId || 'driver'] = per[l.driverId || 'driver'] || {});
-    d[l.status] = (d[l.status] || 0) + o;
+    const st = l.status === 'sleeperBed' ? 'sleeperBerth' : l.status;   // Samsara's name for it
+    d[st] = (d[st] || 0) + o;
   }
   const drivers = Object.entries(per).map(([id, d]) => {
     const top = Object.entries(d).sort((a, b) => b[1] - a[1])[0];

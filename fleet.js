@@ -1013,7 +1013,7 @@ export function initFleet(app, { requireAuth, db, env = process.env }) {
           dutyStatus: status,
           driving: status === 'driving',
           // Sleeper berth is the tell for the resting half of a team.
-          resting: status === 'sleeperBerth' || status === 'offDuty',
+          resting: status === 'sleeperBerth' || status === 'sleeperBed' || status === 'offDuty',
         };
         hosByDriver.set(id, entry);
         if (vehicleId) {

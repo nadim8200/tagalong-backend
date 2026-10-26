@@ -643,7 +643,7 @@ const RULES = [
     const o = ctx.origin;
     if (l.lat != null && haversineMi(l.lat, l.lng, o.lat, o.lng) < 30) return null;
     const codes = (l.dtcCodes || []).length;
-    const dutyLabel = { onDuty: 'on duty', driving: 'driving status', yardMove: 'yard move', offDuty: 'off duty', sleeperBerth: 'sleeper berth' }[duty] || (duty || 'duty status unknown');
+    const dutyLabel = { onDuty: 'on duty', driving: 'driving status', yardMove: 'yard move', offDuty: 'off duty', sleeperBerth: 'sleeper berth', sleeperBed: 'sleeper berth' }[duty] || (duty || 'duty status unknown');
     if (resting) {
       return {
         code: 'stopped', severity: 'warning',
@@ -670,7 +670,7 @@ const RULES = [
     const nearStop = f.stops.some((s2) => { if (s2.delivered || !s2.zip) return false; const g = ctx.geo(s2.zip); return g && haversineMi(l.lat, l.lng, g.lat, g.lng) < 5; });
     if (nearStop) return null;
     const mins = f.stoppedMin;
-    const duty = { onDuty: 'on duty', driving: 'driving status', yardMove: 'yard move', offDuty: 'off duty', sleeperBerth: 'sleeper berth', personalConveyance: 'personal conveyance' }[String((l.hos && l.hos.status) || '')] || 'duty unknown';
+    const duty = { onDuty: 'on duty', driving: 'driving status', yardMove: 'yard move', offDuty: 'off duty', sleeperBerth: 'sleeper berth', sleeperBed: 'sleeper berth', personalConveyance: 'personal conveyance' }[String((l.hos && l.hos.status) || '')] || 'duty unknown';
     const codes = (l.dtcCodes || []).length;
     return {
       code: 'unscheduled-stop', severity: mins >= 60 ? 'critical' : 'warning',
