@@ -986,7 +986,7 @@ test('outbound days: "Friday", "yesterday", "10/23" → dates; a load\'s outboun
   assert.equal(outboundLabel('2026-10-22'), 'Thursday, Oct 22 outbound');
 });
 
-test('a customer asks for "my Friday outbound" (known by their phone): that load — truck, trailer, ETA, where, when it left; manifest only to profile contacts', async () => {
+test('a customer asks for "my Friday outbound" (known by their phone): that load — truck, trailer, ETA, where, its outbound day (never the departure time); manifest only to profile contacts', async () => {
   const sent = [];
   const mk = (n, left, unit) => ({ trip: { tripNumber: n, status: 'DEPSHIP', powerUnit: unit, trailer: `T${unit}`, origZoneDesc: 'MIAMI TERMINAL' }, _times: { statusHistory: [{ status: 'DEPSHIP', at: left }] }, _tb: { hub: 'Miami', stops: [{ consigneeId: '42996', consignee: 'DIRECT FLOWERS OF BOSTON INC' }] }, freightBills: [{ billNumber: `M${n}`, billToName: 'DIRECT FLOWERS OF BOSTON INC', endZoneDescription: 'CHELSEA, MA, 02150', pieces: 10 }] });
   const board = [mk('625642', '2026-10-21T00:30:00Z', '734'), mk('625700', '2026-10-24T00:40:00Z', '2609')];   // Tue night, Fri night
@@ -1000,7 +1000,8 @@ test('a customer asks for "my Friday outbound" (known by their phone): that load
   const call = { call_id: 'c7', call_type: 'phone_call', direction: 'inbound', from_number: '+16175550100' };
   const r = await v.hit('POST /retell/fn/lookup_load', { call, args: { customer_name: 'Direct Flowers of Boston', outbound_day: '10/23' } });
   assert.equal(r.out.found, true); assert.equal(r.out.loads.length, 1);
-  assert.match(r.out.loads[0].outbound, /^Friday, Oct 23 outbound/); assert.ok(r.out.loads[0].left_at);
+  assert.match(r.out.loads[0].outbound, /^Friday, Oct 23 outbound/);
+  assert.equal(r.out.loads[0].left_at, undefined); assert.equal(r.out.loads[0].departed_at, undefined, 'customers never hear when it departed');
   const none = await v.hit('POST /retell/fn/lookup_load', { call: { ...call, call_id: 'c8' }, args: { customer_name: 'Direct Flowers of Boston', outbound_day: '10/19' } });
   assert.equal(none.out.no_load_that_day, true);
   const m = await v.hit('POST /retell/fn/email_manifest', { call, args: { customer_name: 'Direct Flowers of Boston', trip_number: '625700' } });

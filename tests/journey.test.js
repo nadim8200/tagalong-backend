@@ -149,3 +149,17 @@ test('synergize → billing: one email per load with the POD / BOL found (bills,
   const esc = billingEmail({ trip: '2', docs: [{ type: 'POD', bill: 'B2', billTo: 'A & <B> Co', name: '"x".pdf', bytes: Buffer.alloc(10) }] });
   assert.ok(esc.html.includes('A &amp; &lt;B&gt; Co')); assert.ok(esc.html.includes('&quot;x&quot;.pdf'));
 });
+
+test('outbound day = the day the trip was built (boxes in Monday, rolled out Tuesday 1 AM → Monday), not when it left', async () => {
+  const { outboundDate, outboundLabel } = await import('../voice.js');
+  // ARTIS ship date wins
+  assert.equal(outboundDate({ _tb: { date: '2026-10-23' }, _times: { statusHistory: [{ status: 'DEPSHIP', at: '2026-10-24T14:19:48Z' }] } }), '2026-10-23');
+  // then the trip sheet's load date
+  assert.equal(outboundDate({ _manifest: { dateLoaded: '2026-10-26' }, _times: { statusHistory: [{ status: 'DEPSHIP', at: '2026-10-27T05:00:00Z' }] } }), '2026-10-26');
+  // else when TruckMate created the trip — after midnight but before 6 AM ET counts as the night before
+  assert.equal(outboundDate({ _times: { statusHistory: [{ status: 'LOADINGMAN', at: '2026-10-26T22:12:03Z' }, { status: 'DEPSHIP', at: '2026-10-27T05:00:00Z' }] } }), '2026-10-26', 'built Monday 6 PM, left Tuesday 1 AM → Monday');
+  assert.equal(outboundDate({ _times: { addedAt: '2026-10-27T05:30:00Z' } }), '2026-10-26', 'created Tuesday 1:30 AM → Monday');
+  assert.equal(outboundDate({ _times: { addedAt: '2026-10-27T13:00:00Z' } }), '2026-10-27');
+  assert.equal(outboundDate({}), null);
+  assert.equal(outboundLabel('2026-10-26'), 'Monday, Oct 26 outbound');
+});

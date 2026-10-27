@@ -121,6 +121,7 @@ test('loads headed to a customer: when the stop was added, and when the truck le
   assert.equal(before.addedAt, '2026-10-24T10:15:16'); assert.equal(before.leftAt, null);
   const after = headingTo(fences, [{ trip: { tripNumber: 625890, powerUnit: '1910', status: 'DEPSHIP' }, freightBills: [{ ...bill, actualPickup: '2026-10-26T19:30:00' }], _times: { statusHistory: [{ status: 'LOADINGMAN', at: '2026-10-26T21:56:02Z' }, { status: 'DEPSHIP', at: '2026-10-26T23:40:00Z' }] } }], {}).pw[0];
   assert.equal(after.leftAt, '2026-10-26T23:40:00Z'); assert.equal(after.pickedUpAt, '2026-10-26T19:30:00');
+  assert.equal(after.outboundDay, '2026-10-26', 'built Monday 5:56 PM → Monday outbound');
 });
 
 test('loads headed to a customer: truck still at our Miami / Ventura hub and not departed → no ETA, says where it is', () => {

@@ -36,7 +36,7 @@ export function pastView(rec, { customer = null } = {}) {
   const left = leftAtMs(it); const od = outboundDate(it);
   return {
     trip: tripNo(it), truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null,
-    left_from: hubSaid(it) || null, left_at: left ? fmtLocalShort(left, 'FL') : null, outbound: outboundLabel(od),
+    left_from: hubSaid(it) || null, departed_at: left ? fmtLocalShort(left, 'FL') : null, outbound: outboundLabel(od),
     finished: rec.finishedAt ? fmtLocalShort(Date.parse(rec.finishedAt), 'FL') : null,
     stops: [...groups.values()].map((g) => ({ customer: g.customer, city: g.city, boxes: g.boxes || null, delivered_at: g.delivered.length ? deliveredWhen(g.delivered) : null })),
     _outbound: od, _deliveredDays: [...groups.values()].flatMap((g) => g.delivered.map((x) => String(x).slice(0, 10))),

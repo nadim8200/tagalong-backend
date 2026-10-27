@@ -11,10 +11,13 @@ const store = {
 const now = Date.parse('2026-10-24T01:00:00Z');   // Friday night
 
 test('"the Direct Flowers truck that left Miami Tuesday": when it left, truck, trailer, when it delivered', () => {
-  const r = searchPast(store, { customer: 'Direct Flowers of Boston', outboundDay: 'Tuesday', now });
-  assert.equal(r.length, 1);
+  // the outbound day is the night it was built: 2601 rolled out Tue 8:30 PM, 736 at 5:55 AM Wednesday → both Tuesday's outbound
+  const r = searchPast(store, { customer: 'Direct Flowers of Boston', outboundDay: 'Tuesday', now }).sort((a, b) => a.trip.localeCompare(b.trip)).reverse();
+  assert.equal(r.length, 2);
   assert.equal(r[0].truck, '2601'); assert.equal(r[0].trailer, '2048'); assert.equal(r[0].left_from, 'our Miami, Florida hub');
-  assert.match(r[0].left_at, /Oct 20, 8:30 PM ET/); assert.match(r[0].outbound, /^Tuesday, Oct 20 outbound/);
+  assert.match(r[0].departed_at, /Oct 20, 8:30 PM ET/); assert.match(r[0].outbound, /^Tuesday, Oct 20 outbound/);
+  assert.equal(r[0].left_at, undefined, 'the departure time is departed_at (staff, when asked)');
+  assert.match(r[1].outbound, /^Tuesday, Oct 20 outbound/); assert.match(r[1].departed_at, /Oct 21, 5:55 AM ET/);
   assert.deepEqual(r[0].stops.map((s) => s.customer), ['DIRECT FLOWERS OF BOSTON INC'], 'only their stop');
   assert.ok(r[0].stops[0].delivered_at);
 });

@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------
 import { pageVar } from './artisreports.js';
 import { hubAt } from './fleetmap.js';
+import { outboundDate } from './voice.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taArtisClients:${SITE}`;
@@ -157,6 +158,7 @@ export function headingTo(fences = [], items = [], etas = {}) {
         addedAt: b.createdTime || null,
         leftAt: (() => { const h = ((it._times && it._times.statusHistory) || []).find((x) => /^(DEPSHIP|INTRAN|ENROUTE)/i.test(String(x.status || '')) && x.at); return h ? h.at : null; })(),
         pickedUpAt: b.actualPickup || null,
+        outboundDay: outboundDate(it) || null,   // the day the trip was built (YYYY-MM-DD) — what we call its outbound
         oc: !!(it._oc || /^OC\d/i.test(String(t.powerUnit || ''))),
         // outside carrier: what Jarvis read on the trip sheet (carrier, their truck #, driver, crew)
         ocInfo: it._oc ? { carrier: it._oc.carrierName || it._oc.carrier || null, truck: it._oc.truck || null, trailer: it._oc.trailer || null, driver: it._oc.driverName || null, driverPhone: it._oc.driverPhone || null, driver2: it._oc.driver2Name || null, driver2Phone: it._oc.driver2Phone || null, crew: it._oc.crew || null, dispatchPhone: it._oc.dispatchPhone || null, from: it._oc.source || null } : null,

@@ -548,7 +548,7 @@ export function spokenName(raw) {
 // words every call uses — so speech-to-text hears "load", not "loan"
 // Florida Beauty's own staff (a phone saved on an employee in Employees) can get any load's ETA.
 const STAFF_IS = 'Florida Beauty staff (phone on the Employees list)';
-const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). ALWAYS start each load with where the truck is right now (truck_now, "as of" as_of, moving or stopped) and which hub it left from and WHEN (left_from + left_at, the date and time it left) — before the ETA, without being asked. If a load has not_left_yet, say it has NOT left — it is still at the hub, no truck or ETA yet — and say trailer_still_at (e.g. "trailer 7 3 3 1 is still in Miami"); never say it left. Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — what the TruckMate bills add up to; never any other count), and only if present: the different trip sheet count (boxes_on_trip_sheet). If split_between_trailers is there, say the order is split and how many boxes are on each truck.';
+const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). ALWAYS start each load with where the truck is right now (truck_now, "as of" as_of, moving or stopped) and which hub it left from and its outbound day (left_from + outbound — the day the trip was built, not when it rolled out) — before the ETA, without being asked. Give the day and time it actually departed (departed_at) ONLY if they ask when it left / departed. If a load has not_left_yet, say it has NOT left — it is still at the hub, no truck or ETA yet — and say trailer_still_at (e.g. "trailer 7 3 3 1 is still in Miami"); never say it left. Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — what the TruckMate bills add up to; never any other count), and only if present: the different trip sheet count (boxes_on_trip_sheet). If split_between_trailers is there, say the order is split and how many boxes are on each truck.';
 export const BASE_WORDS = ['Florida Beauty Flora', 'Jarvis', 'ETA', 'load', 'trip number', 'bill number', 'trailer', 'POD', 'BOL', 'rate confirmation'];
 export function customerKeywords(items, max = 100) {
   const n = new Map();
@@ -630,7 +630,7 @@ export const notLeftYet = (item) => /^(LOADINGMAN|LOADEDTOGO|AVAIL|AVBL|NEW|ASSG
 // How Jarvis wraps up with a customer, by their business name.
 export const CLOSING_RULE = 'Use speaking_with (their business name) naturally while you help them, e.g. "Thanks, Bokhary Farms." Once you have answered, ask: "Is there anything else I can help you with, <speaking_with>?" If they say no, close warmly: "Thank you for calling Florida Beauty Flora, <speaking_with>. If there is nothing else, feel free to hang up whenever you are ready. Have a great day." Then end the call with end_call.';
 export const CUSTOMER_RULE = `After you give an ETA, add once, in the caller's language: "${ETA_DISCLAIMER}" ${CLOSING_RULE} `
-  + 'ALWAYS start with where the truck is right now (truck_now, "as of" as_of) — before the ETA, without being asked — unless the load is delivered. Give a customer ONLY: where the truck is now (truck_now, as of), which hub it left and when (left_from + left_at — e.g. "it left our Miami hub Thursday night, Oct 22 around 8:35 PM"), the truck number, the trailer number, and the ETA — nothing else unless they ask (no boxes, cubes or trip numbers). If it has not left yet (not_left_yet), say so and which day it goes out (outbound). Customers ask by outbound day ("my Friday outbound", "the Monday outbound") — pass outbound_day to lookup_load, or match the load whose outbound is that day. If a delivery has say_exactly, it is delivered: say only that sentence ("Your shipment has been delivered.") — no time, boxes or location. Answer only with what is here. Never mention other stops, other customers or other cities on the route, and never say where the truck stops before or after them. If asked about the route, just say the truck is on its way to them and give the ETA — do not say you are hiding anything. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.';
+  + 'ALWAYS start with where the truck is right now (truck_now, "as of" as_of) — before the ETA, without being asked — unless the load is delivered. Give a customer ONLY: where the truck is now (truck_now, as of), which hub it came from and its outbound day (left_from + outbound — e.g. "it\'s your Thursday outbound from our Miami hub") — the outbound day is the day the trip was built; never give the time or day the truck physically departed, the truck number, the trailer number, and the ETA — nothing else unless they ask (no boxes, cubes or trip numbers). If it has not left yet (not_left_yet), say so and which day it goes out (outbound). Customers ask by outbound day ("my Friday outbound", "the Monday outbound") — pass outbound_day to lookup_load, or match the load whose outbound is that day. If a delivery has say_exactly, it is delivered: say only that sentence ("Your shipment has been delivered.") — no time, boxes or location. Answer only with what is here. Never mention other stops, other customers or other cities on the route, and never say where the truck stops before or after them. If asked about the route, just say the truck is on its way to them and give the ETA — do not say you are hiding anything. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.';
 // What a CUSTOMER hears: where the truck is now and where it came from, truck, trailer, trip, their total boxes and the ETA — nothing else.
 // Delivered → only "Your shipment has been delivered." (staff get the full view). Pure.
 export const DELIVERED_SAY = 'Your shipment has been delivered.';
@@ -642,7 +642,7 @@ export function customerLean(v) {
       estimated_arrival: d.estimated_arrival, eta_note: d.eta_note, truck_already_passed: d.truck_already_passed, arrived_at_receiver: d.arrived_at_receiver, note: d.note, truck_leaves_terminal_at: d.truck_leaves_terminal_at });
   const ds = v.deliveries ? v.deliveries.map(one) : v.your_delivery ? [one(v.your_delivery)] : null;
   if (ds && ds.every((d) => d.delivered)) return { trip: v.trip, deliveries: ds };
-  return { trip: v.trip, truck: v.truck, trailer: v.trailer, status: v.status, truck_now: v.truck_now, as_of: v.as_of, coming_from: v.coming_from, left_from: v.left_from, left_at: v.left_at, outbound: v.outbound, not_left_yet: v.not_left_yet, breakdown: v.breakdown,
+  return { trip: v.trip, truck: v.truck, trailer: v.trailer, status: v.status, truck_now: v.truck_now, as_of: v.as_of, coming_from: v.coming_from, left_from: v.left_from, outbound: v.outbound, not_left_yet: v.not_left_yet, breakdown: v.breakdown,
     departure_delayed: v.departure_delayed, delay_note: v.delay_note, ...(ds ? { deliveries: ds } : {}), ...(v.ask ? { ask: v.ask } : {}) };
 }
 export function customerView(item, eta, deliveries = null) {
@@ -654,7 +654,7 @@ export function customerView(item, eta, deliveries = null) {
     ...held,
     trip: f.trip, status: `${CUSTOMER_STATUS[String(t.status || '').toUpperCase()] || 'on the way'}${/^ARRSHIP$/i.test(String(t.status || '')) && from ? ` in ${from}` : ''}`,
     truck: f.truck, trailer: f.trailer, breakdown: f.breakdown || undefined,
-    truck_now: f.current_location, as_of: f.location_time, moving: f.moving, coming_from: from || undefined, outbound: outboundLabel(outboundDate(item)) || undefined, ...(leftAtMs(item) && !notLeftYet(item) ? { left_at: fmtLocalShort(leftAtMs(item), 'FL') } : {}), ...(notLeftYet(item) ? { not_left_yet: `still at ${hubSaid(item) || 'the terminal'} — it has not left; no truck / ETA until it is dispatched`, ...trailerStill(item) } : { left_from: hubSaid(item) || undefined }),
+    truck_now: f.current_location, as_of: f.location_time, moving: f.moving, coming_from: from || undefined, outbound: outboundLabel(outboundDate(item)) || undefined, ...(leftAtMs(item) && !notLeftYet(item) ? { departed_at: fmtLocalShort(leftAtMs(item), 'FL') } : {}), ...(notLeftYet(item) ? { not_left_yet: `still at ${hubSaid(item) || 'the terminal'} — it has not left; no truck / ETA until it is dispatched`, ...trailerStill(item) } : { left_from: hubSaid(item) || undefined }),
   };
   if (deliveries && deliveries.length) return { ...base, deliveries: deliveries.map(({ trip, truck, status, ...d }) => d) };
   if (f.total_stops === 1) {
@@ -677,13 +677,20 @@ export function leftAtMs(item) {
   return x ? Date.parse(x.at) : null;
 }
 const nyDate = (ms) => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+const nyHour = (ms) => Number(new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false })) % 24;
 // A load's OUTBOUND day (Miami date, YYYY-MM-DD): the day it left; not left yet → ARTIS ship date / trip-sheet load
 // date / dispatch day. Customers ask by it: "my Friday outbound". Pure.
 export function outboundDate(item) {
-  const l = leftAtMs(item); if (l) return nyDate(l);
+  // the day the trip was built / loaded (we received the boxes Monday, it rolled out Tuesday 1 AM → Monday outbound):
+  // ARTIS's ship date, else the trip sheet's load date, else the day TruckMate created the trip (a trip created after
+  // midnight but before 6 AM belongs to the night before), else the dispatch day; the departure only as a last resort
   const tb = item && item._tb && item._tb.date; if (/^\d{4}-\d{2}-\d{2}$/.test(String(tb || ''))) return tb;
   const m = item && item._manifest && item._manifest.dateLoaded; if (/^\d{4}-\d{2}-\d{2}$/.test(String(m || ''))) return m;
-  const d = item && item._times && item._times.dispatchedAt; return d ? nyDate(Date.parse(d)) : null;
+  const tms = (item && item._times) || {};
+  const first = (tms.statusHistory || []).map((x) => Date.parse(x.at)).filter(Number.isFinite).sort((a, b) => a - b)[0];
+  const created = [Date.parse(tms.addedAt || ''), first, Date.parse(tms.dispatchedAt || '')].filter(Number.isFinite).sort((a, b) => a - b)[0];
+  if (created) return nyDate(nyHour(created) < 6 ? created - 6 * 3600000 : created);
+  const l = leftAtMs(item); return l ? nyDate(l) : null;
 }
 export const outboundLabel = (ymd) => (ymd ? `${new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'long', month: 'short', day: 'numeric' })} outbound` : null);
 // "friday", "monday's", "today", "yesterday", "10/23", "Oct 23" → the dates it can mean (the latest such day in the
@@ -955,7 +962,7 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
           const past = await pastLoads.search({ customer: name, outboundDay: a.outbound_day || null }).catch(() => []);
           if (past.length) {
             if (call.call_id && said) callName.set(call.call_id, past[0].stops[0] ? past[0].stops[0].customer : name);
-            return reply({ found: true, already_finished: true, speaking_with: spokenName((past[0].stops[0] || {}).customer || name), past_loads: staffPhone ? past : past.map(({ trip: tn, finished, ...v }) => v), say: `Nothing for them on the board right now — these loads already finished. Give: which hub it left and when (left_from + left_at), the truck and trailer, and when it was delivered (delivered_at).${staffPhone ? ' Staff may also hear the trip number and boxes.' : ''} If several, ask which one.` });
+            return reply({ found: true, already_finished: true, speaking_with: spokenName((past[0].stops[0] || {}).customer || name), past_loads: staffPhone ? past : past.map(({ trip: tn, finished, departed_at: dep, ...v }) => v), say: `Nothing for them on the board right now — these loads already finished. Give: which hub it came from and its outbound day (left_from + outbound — never the time it departed; staff may get departed_at only if they ask when it left), the truck and trailer, and when it was delivered (delivered_at).${staffPhone ? ' Staff may also hear the trip number and boxes.' : ''} If several, ask which one.` });
           }
         }
         if (!stops.length) {
@@ -973,7 +980,7 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
           if (!onDay.length) {
             // not on the board any more (delivered / closed) → the finished trips
             const past = pastLoads ? await pastLoads.search({ customer: stops[0].customer, outboundDay: a.outbound_day }).catch(() => []) : [];
-            if (past.length) return reply({ found: true, already_finished: true, speaking_with: spokenName(stops[0].customer), past_loads: staffPhone ? past : past.map(({ trip: tn, finished, ...v }) => v), say: `That load is already finished (off the board). Give: which hub it left and when (left_from + left_at), the truck and trailer, and when it was delivered to them (delivered_at, the stop's local time).${staffPhone ? ' Staff may also hear the trip number and boxes.' : ''}` });
+            if (past.length) return reply({ found: true, already_finished: true, speaking_with: spokenName(stops[0].customer), past_loads: staffPhone ? past : past.map(({ trip: tn, finished, departed_at: dep, ...v }) => v), say: `That load is already finished (off the board). Give: which hub it came from and its outbound day (left_from + outbound — never the time it departed; staff may get departed_at only if they ask when it left), the truck and trailer, and when it was delivered to them (delivered_at, the stop's local time).${staffPhone ? ' Staff may also hear the trip number and boxes.' : ''}` });
             const list = [...new Set(stops.map((x) => outboundLabel(outboundDate(all.find((i) => tripNo(i) === x.trip)))).filter(Boolean))];
             return reply({ found: true, no_load_that_day: true, speaking_with: spokenName(stops[0].customer), their_outbounds: list, say: `${spokenName(stops[0].customer)} has no load going out ${a.outbound_day} on the board. Their loads on the board: ${list.join(', ') || 'none with a known day'}. Say that and ask which one they mean.` });
           }
@@ -1129,10 +1136,10 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
       // nothing left on the day they named → say so, then the nearest loads (never pass one off as "the one that left Tuesday")
       if (!found.length && a.outbound_day) {
         found = await pastLoads.search({ ...q, outboundDay: null });
-        if (found.length) return res.json(note(spokenNumbers({ ok: true, no_load_left_that_day: true, asked_day: a.outbound_day, past_loads: staff ? found.slice(0, 4) : found.slice(0, 4).map(({ trip, finished, ...v }) => v), say: `FIRST say plainly that no finished load${customer ? ` for ${customer}` : ''} left our hub on ${a.outbound_day}. Then offer the nearest ones by the day each LEFT (outbound / left_at) — e.g. "one left Monday the 19th and delivered Tuesday". Never call a load "the one that left ${a.outbound_day}" unless its left_at is that day.` })));
+        if (found.length) return res.json(note(spokenNumbers({ ok: true, no_load_left_that_day: true, asked_day: a.outbound_day, past_loads: staff ? found.slice(0, 4) : found.slice(0, 4).map(({ trip, finished, departed_at: dep, ...v }) => v), say: `FIRST say plainly that no finished load${customer ? ` for ${customer}` : ''} left our hub on ${a.outbound_day}. Then offer the nearest ones by their outbound day (outbound — the day the trip was built) — e.g. "one left Monday the 19th and delivered Tuesday". Never call a load "the one that left ${a.outbound_day}" unless its outbound is that day.` })));
       }
       if (!found.length) return res.json(note({ ok: false, say: 'No finished load matches that in the last 60 days. Say so and ask for the trip, bill or truck number.' }));
-      return res.json(note(spokenNumbers({ ok: true, past_loads: staff ? found : found.map(({ trip, finished, ...v }) => v), say: `Give for each: which hub it left and when (left_from + left_at), the truck and trailer, and when it was delivered${customer ? ` to ${spokenName(customer)}` : ''} (delivered_at — the stop's local time).${staff ? ' Staff may hear the trip number and boxes too.' : ''} If several match, ask which one.` })));
+      return res.json(note(spokenNumbers({ ok: true, past_loads: staff ? found : found.map(({ trip, finished, departed_at: dep, ...v }) => v), say: `Give for each: which hub it came from and its outbound day (left_from + outbound — never the time it departed; staff may get departed_at only if they ask when it left), the truck and trailer, and when it was delivered${customer ? ` to ${spokenName(customer)}` : ''} (delivered_at — the stop's local time).${staff ? ' Staff may hear the trip number and boxes too.' : ''} If several match, ask which one.` })));
     } catch (e) { return res.json({ ok: false, say: 'Could not look up past loads right now.' }); }
   });
 
