@@ -1537,7 +1537,8 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
     {
       const cfg = await db.get(cfgKey, {});
       const llmBody = {
-        model: env.RETELL_MODEL || 'claude-4.5-haiku', model_temperature: 0.2,
+        // Retell's model_config (the separate model / model_temperature fields are retired Jan 31, 2027)
+        model_config: { type: 'cascading', primary: { model: env.RETELL_MODEL || 'claude-4.5-haiku' }, temperature: 0.2 },
         general_prompt: PROMPT, begin_message: '{{greeting}}', start_speaker: 'agent',
         default_dynamic_variables: { greeting: GREETING, call_context: 'This is an incoming call. Find out who is calling and what load they mean.' },
         general_tools: tools(base, env.RETELL_TRANSFER_NUMBER ? e164(env.RETELL_TRANSFER_NUMBER) : null),
@@ -1733,7 +1734,7 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
     return {
       setup: true, ourSetup: cfg,
       agent: { version: agent.version ?? null, published: agent.is_published ?? null, language: agent.language, voice: agent.voice_id, llmVersion: re.version ?? null },
-      llm: { version: llm.version ?? null, model: llm.model, greeting: (llm.default_dynamic_variables || {}).greeting || llm.begin_message, tools: (llm.general_tools || []).map((t) => t.name), lookupParams: Object.keys((((llm.general_tools || []).find((t) => t.name === 'lookup_load') || {}).parameters || {}).properties || {}) },
+      llm: { version: llm.version ?? null, model: (llm.model_config && llm.model_config.primary && llm.model_config.primary.model) || llm.model, greeting: (llm.default_dynamic_variables || {}).greeting || llm.begin_message, tools: (llm.general_tools || []).map((t) => t.name), lookupParams: Object.keys((((llm.general_tools || []).find((t) => t.name === 'lookup_load') || {}).parameters || {}).properties || {}) },
       number,
     };
   }

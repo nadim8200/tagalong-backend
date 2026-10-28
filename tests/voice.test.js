@@ -103,7 +103,8 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   const r = await v.hit('POST /voice/setup', {});
   assert.deepEqual(r.out && { llm: r.out.llmId, agent: r.out.agentId }, { llm: 'llm_1', agent: 'agent_1' });
   const llm = v.retellCalls.find((c) => c.url.endsWith('/create-retell-llm')).body;
-  assert.match(llm.model, /^claude/);
+  assert.equal(llm.model, undefined, 'no retired top-level model field'); assert.equal(llm.model_temperature, undefined);
+  assert.equal(llm.model_config.type, 'cascading'); assert.match(llm.model_config.primary.model, /^claude/); assert.equal(llm.model_config.temperature, 0.2);
   assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'report_missing_boxes', 'take_message', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
   assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
