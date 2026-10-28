@@ -28,7 +28,7 @@ function setup(extraEnv = {}, opts = {}) {
       : /\/update-agent\//.test(url) ? { agent_id: 'agent_1', version: drafted ? 5 : 4 }
       : url.includes('/create-agent') ? { agent_id: 'agent_1', version: 0 }
       : url.includes('create-phone-call') ? { call_id: 'call_9', call_status: 'registered' }
-      : url.includes('create-web-call') ? { call_id: 'web_1', call_status: 'registered', access_token: 'tok_1' } : {};
+      : url.includes('create-web-call') ? { call_id: 'web_1', call_status: 'registered', access_token: 'tok_1', transport: 'livekit', ice_servers: [{ urls: 'stun:x' }] } : {};
     return { ok: true, status: 201, json: async () => body };
   };
   const api = initVoice(app, { ...(opts.help ? { help: opts.help } : {}), ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: opts.board || board }), ...(opts.extra || {}), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
@@ -765,8 +765,9 @@ test('📞 Call Jarvis from the console: a live web call as staff; only our serv
     assert.equal((await v.hit('POST /voice/web-call', {}, { user: { name: 'Rosa Diaz' } })).code, 503);
     await v.db.set('taRetellCfg', { agentId: 'agent_1' });
     const r = await v.hit('POST /voice/web-call', {}, { user: { name: 'Rosa Diaz' } });
-    assert.deepEqual(r.out, { ok: true, callId: 'web_1', accessToken: 'tok_1' });
-    const sent = v.retellCalls.find((c) => c.url.endsWith('/v2/create-web-call'));
+    assert.deepEqual(r.out, { ok: true, callId: 'web_1', accessToken: 'tok_1', transport: 'livekit', iceServers: [{ urls: 'stun:x' }], url: null });
+    assert.equal(v.retellCalls.some((c) => c.url.endsWith('/v2/create-web-call')), false, 'never the deprecated v2');
+    const sent = v.retellCalls.find((c) => c.url.endsWith('/v3/create-web-call'));
     assert.equal(sent.body.agent_id, 'agent_1');
     assert.deepEqual(sent.body.metadata, { purpose: 'console', staff: true, by: 'Rosa Diaz', email: null });
     assert.match(sent.body.retell_llm_dynamic_variables.greeting, /, Rosa! This is Jarvis/);

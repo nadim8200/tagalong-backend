@@ -1750,13 +1750,14 @@ export function initVoice(app, { requireAuth, db, miles = null, artisWeb = null,
       const by = who(req);
       if (Date.now() - (webCallAt.get(by) || 0) < 10000) return res.status(429).json({ error: 'One moment — a call is already starting.' });
       webCallAt.set(by, Date.now());
-      const call = await retell('/v2/create-web-call', { body: {
+      // v3 (v2 is deprecated since Oct 18, 2026): same body; the answer also says how to connect (transport / ICE servers)
+      const call = await retell('/v3/create-web-call', { body: {
         agent_id: cfg.agentId,
         metadata: { purpose: 'console', staff: true, by, email: (req.user && req.user.email) || null },
         retell_llm_dynamic_variables: { greeting: staffGreeting(by.includes('@') ? '' : by), call_context: `This is a live voice chat from the dispatch console with ${by}, Florida Beauty staff (signed in to the console). Treat them exactly like staff calling from an Employees-list phone: help with any load — they may get any ETA and any detail. Keep answers short and conversational; they can interrupt you.` },
       } });
       await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'web', phone: null, trip: null, purpose: 'console', by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
-      return res.json({ ok: true, callId: call.call_id, accessToken: call.access_token });
+      return res.json({ ok: true, callId: call.call_id, accessToken: call.access_token, transport: call.transport || null, iceServers: call.ice_servers || null, url: call.url || null });
     } catch (e) { return res.status(502).json({ error: e.message }); }
   });
   app.get('/voice/live', requireAuth, async (req, res) => { try { res.json(await live()); } catch (e) { res.status(502).json({ error: e.message }); } });
