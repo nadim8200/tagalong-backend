@@ -1048,7 +1048,8 @@ const synergize = initSynergize(app, { requireAuth: requireDispatch, requireAdmi
   // new POD / BOL from Synergize → Billing (Accounting's group email; Dispatch until Accounting has one)
   onBillingDocs: async (trip, found) => {
     const { billingEmail } = await import('./synergize.js');
-    const billing = await directory.groupEmail('billing').catch(() => null);
+    // POD / BOL paperwork → the POD Accounting group (pod_accounting@), else Accounting's address, else Dispatch
+    const billing = (await directory.groupEmail('pod accounting').catch(() => null)) || (await directory.groupEmail('billing').catch(() => null));
     const to = billing || (await directory.groupEmail('dispatch').catch(() => null));
     if (!to) return;
     const item = ((await truckmate.buildBoard('florida-beauty').catch(() => ({}))).trips || []).find((it) => String(((it && it.trip) || it || {}).tripNumber || '') === String(trip)) || null;

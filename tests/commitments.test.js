@@ -11,6 +11,7 @@ function memDb() {
 function setup(nowMs) {
   const routes = {}; const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, post: () => {} };
   const db = memDb(); const mails = []; const texts = []; let now = nowMs;
+  db.m.set('taLateAlertsCfg', { on: true });   // these tests exercise the alert itself (it is paused in production)
   const c = initCommitments(app, { requireAuth: (q, r, n) => n(), db, sendMail: async (m) => mails.push(m), emails: async () => ['dispatch@floridabeauty.us'], phones: async () => ['+13055550100'], sendSms: async (to, text) => texts.push({ to, text }), now: () => now });
   const hit = async (route, body = {}, params = {}) => {
     let code = 200; let out;
@@ -215,4 +216,14 @@ test('625479: a TruckMate appointment that already passed is never committed aft
   assert.equal((await v.c.process('florida-beauty', { trips: [it] })).sent, 0);
   const rolling = { ...it, trip: { ...it.trip, status: 'DEPSHIP' } };
   assert.equal((await v.c.process('florida-beauty', { trips: [rolling] })).sent, 1, 'still alerts while it is on the way');
+});
+
+test('late-for-a-committed-time alerts are paused unless switched on', async () => {
+  const { initCommitments } = await import('../commitments.js');
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
+  m.set('taCommit:florida-beauty', { 1: { 'X|FL': { atMs: 1, local: '2026-10-29T15:00', state: 'FL' } } });
+  const mails = [];
+  const c = initCommitments({ get: () => {}, put: () => {}, post: () => {} }, { requireAuth: () => {}, db, sendMail: async (x) => mails.push(x), emails: async () => ['a@b.c'] });
+  assert.deepEqual(await c.process('florida-beauty', { trips: [] }), { sent: 0, paused: true });
+  assert.equal(mails.length, 0);
 });

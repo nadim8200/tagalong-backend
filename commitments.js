@@ -306,6 +306,8 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
   // after each board refresh: the truck left? projected late for a commitment? → email + text, once per stop + time
   async function process(s, board) {
     if (!enabled) return { sent: 0 };
+    // paused (Oct 28, 2026) until the customer arrival-time list replaces them — off unless switched on
+    if (((await db.get('taLateAlertsCfg', {})) || {}).on !== true) return { sent: 0, paused: true };
     const c = await all();
     const trips = Object.keys(c);
     if (!trips.length) return { sent: 0 };
