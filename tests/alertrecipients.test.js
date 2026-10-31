@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveEntries, cleanRecipients, initAlertRecipients } from '../alertrecipients.js';
+import { ALERTS, resolveEntries, cleanRecipients, initAlertRecipients } from '../alertrecipients.js';
 
 const people = [{ name: 'Frank Ducassi', email: 'fducassi@floridabeauty.us' }, { name: 'Sebastian Manotas', email: 'smanotas@floridabeauty.us' }, { name: 'Ronen Koul', email: '' }];
 const groupEmail = (n) => (/^dispatch$/i.test(n) ? 'dispatches@floridabeauty.us' : null);
@@ -22,5 +22,11 @@ test('admins change the lists in the console; the alert uses the saved list', as
   await routes['PUT /truckmate/alert-recipients'].at(-1)({ body: { alerts: { artis_left_short: ['Dispatch', 'Frank Ducassi'] } } }, { json: () => {}, status: () => ({ json: () => {} }) });
   assert.deepEqual(await ar.resolve('artis_left_short'), ['dispatches@floridabeauty.us', 'fducassi@floridabeauty.us']);
   let out; await routes['GET /truckmate/alert-recipients'].at(-1)({}, { json: (j) => { out = j; } });
-  assert.equal(out.alerts.length, 9); assert.deepEqual(out.groups, ['Dispatch']);
+  assert.equal(out.alerts.length, 10); assert.deepEqual(out.groups, ['Dispatch']);
+});
+
+test('loading-temperature emails have their own list: warehouse + outbound, separate from the reefer list', () => {
+  const door = ALERTS.find((a) => a.key === 'door_temp');
+  assert.deepEqual(door.defaults, ['warehouse@floridabeauty.us', 'outbound@floridabeauty.us']);
+  assert.ok(ALERTS.find((a) => a.key === 'reefer_temp').defaults.includes('Dispatch'));
 });

@@ -1028,7 +1028,7 @@ const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin: requi
 // ARTIS Trip Status (ETA twice a day) + Trip Manifest PDFs, same read-only web login as the Truck Builder
 const artisWeb = initArtisWeb(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, docs, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // the rest of ARTIS: door temps (reefer alert), tractor / trailer positions, approaching yard; reports for Jarvis
-const artisReports = initArtisReports({ db, artisWeb, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), tempTeam: () => alertRecipients.resolve('reefer_temp'), env: process.env });
+const artisReports = initArtisReports({ db, artisWeb, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), tempTeam: () => alertRecipients.resolve('door_temp'), env: process.env });
 // resend one reefer door-temp alert (to see the email) — only while training mode is on, so it can't reach the real list
 // an example of the Synergize POD / BOL billing email (training mode only — it would go to Billing / Dispatch)
 app.post('/admin/billing-email/example', requireCompanyAdmin, async (req, res) => {
