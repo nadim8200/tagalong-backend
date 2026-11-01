@@ -343,5 +343,12 @@ export function initCommitments(app, { requireAuth, db, getBoard = null, sendMai
     }
     return { sent: n };
   }
-  return { overlay, process, all };
+  // a time a person confirmed by email, chat or phone (Jarvis's broker follow-up)
+  async function commit(trip, { city, state, customer = null, local, by }) {
+    const k = stopKey(city, state); const atMs = commitMs(local, state);
+    if (!k || !atMs) return null;
+    await db.update(KEY(site), (cur) => { const c = { ...(cur || {}) }; c[trip] = { ...(c[trip] || {}), [k]: { local, state, atMs, customer, place: `${city}, ${state}`, by, setAt: new Date(now()).toISOString() } }; return c; }, {});
+    return { key: k, atMs };
+  }
+  return { overlay, process, all, commit };
 }

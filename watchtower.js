@@ -331,6 +331,7 @@ function tripFacts(item, now) {
     instrPending: instr.filter((s) => !(checks[s] && checks[s].done)).length,
     // a broker load (B bills, not an ARTIS run) has to have its rate con on file
     broker: brokerLoad(item),
+    brokerFollow: (item && item._brokerFollow) || null,
     hasRateCon: !!(item && item._ratecon),
     billNo: String((billsRaw[0] && billsRaw[0].billNumber) || '').trim(),
     tasks: (item && item._tasks) || [],
@@ -482,6 +483,8 @@ const RULES = [
   },
   function lateRisk(f, ctx) {
     if (notStarted(f.status, f, ctx.now)) return null;          // hasn't left yet — the ETA card still shows it
+    // a broker load only counts once staff asked Jarvis to follow up and a person confirmed the delivery time
+    if (f.broker && !(f.brokerFollow && f.brokerFollow.confirmed)) return null;
     const route = routeEtas(f, ctx);
     if (!route) return null;
     const hos = (f.live && f.live.hos) || {};
@@ -489,6 +492,7 @@ const RULES = [
     let worst = null;
     for (const r of route) {
       if (r.stop.apptMs == null || r.miles < 5 || r.stop.key === atStop) continue;
+      if (f.broker && r.stop.apptFrom !== 'committed') continue;
       if (r.stop.apptMs < ctx.now - 30 * MIN) continue;             // already passed — see apptPassed
       const lateMin = (r.etaMs - r.stop.apptMs) / MIN;
       if (lateMin > 0 && (!worst || lateMin > worst.lateMin)) worst = { ...r, lateMin };

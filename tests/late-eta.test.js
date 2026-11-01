@@ -41,7 +41,7 @@ test('appointment already passed → one "passed, not delivered" alert, not "wil
 });
 
 test('TruckMate due time alone is a warning ("may miss"), a confirmed appointment is critical', () => {
-  const late = (src) => trip('624326', 'DEPSHIP', { billNumber: 'B1', endZoneDescription: 'LOMBARD, IL, 60148', pieces: 1, deliverBy: '2026-10-07T04:00:00', deliverByEnd: '2026-10-07T04:00:00', ...(src === 'appt' ? { deliveryApptReq: 'True' } : {}) }, { lat: 34.77, lng: -84.97, hos: { driveLeftMin: 0, shiftLeftMin: 0, cycleLeftMin: 3000, status: 'sleeperBed' } });
+  const late = (src) => trip('624326', 'DEPSHIP', { billNumber: 'M1', endZoneDescription: 'LOMBARD, IL, 60148', pieces: 1, deliverBy: '2026-10-07T04:00:00', deliverByEnd: '2026-10-07T04:00:00', ...(src === 'appt' ? { deliveryApptReq: 'True' } : {}) }, { lat: 34.77, lng: -84.97, hos: { driveLeftMin: 0, shiftLeftMin: 0, cycleLeftMin: 3000, status: 'sleeperBed' } });
   const due = codes(late('due'));
   assert.equal(due[0].severity, 'warning'); assert.match(due[0].title, /^May miss LOMBARD, IL due time/);
   const appt = codes(late('appt'));
@@ -49,7 +49,7 @@ test('TruckMate due time alone is a warning ("may miss"), a confirmed appointmen
 });
 
 test('real road miles are used when known', () => {
-  const b = trip('624304', 'DEPSHIP', { billNumber: 'B2', endZoneDescription: 'MIAMI, FL, 33178', pieces: 1, deliverBy: '2026-10-06T21:00:00', deliverByEnd: '2026-10-06T21:00:00', deliveryApptReq: 'True' }, { lat: 26.7, lng: -80.1, hos: { driveLeftMin: 600, shiftLeftMin: 700 } });
+  const b = trip('624304', 'DEPSHIP', { billNumber: 'M2', endZoneDescription: 'MIAMI, FL, 33178', pieces: 1, deliverBy: '2026-10-06T21:00:00', deliverByEnd: '2026-10-06T21:00:00', deliveryApptReq: 'True' }, { lat: 26.7, lng: -80.1, hos: { driveLeftMin: 600, shiftLeftMin: 700 } });
   const asked = [];
   const slow = ctx({ roadMiles: (a, g) => { asked.push(g); return 440; } });   // pretend a 440-mile detour
   const a = codes(b, slow);

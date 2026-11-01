@@ -72,6 +72,7 @@ import { initSynergize } from './synergize.js';
 import { initArtisClients } from './artisclients.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initDispatchLog } from './dispatchlog.js';
+import { initBrokerFollow } from './brokerfollow.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
 import { initVoice } from './voice.js';
@@ -1001,8 +1002,9 @@ const nextLoads = initNextLoads({ db, env: process.env });
 const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, getBoard: (site) => truckmate.buildBoard(site), nextLoads, env: process.env });
 // stop instructions from staff email chains (e.g. deliver to Biloxi instead of Pensacola): driver has it, GPS + driver confirm, reply on the chain
 const stopTasks = initStopTasks({ db, env: process.env, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice: { placeCall: (...a) => voice.placeCall(...a), callsFor: (...a) => voice.callsFor(...a) }, replyInThread: (...a) => inbox.replyInThread(...a) });
+const followProxy = { start: (...a) => brokerFollow.start(...a), overlay: (...a) => brokerFollow.overlay(...a), process: (...a) => brokerFollow.process(...a) };
 const dispatchLog = initDispatchLog(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, env: process.env });
-const inbox = initInbox(app, { dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
+const inbox = initInbox(app, { brokerFollow: followProxy, dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
@@ -1025,6 +1027,7 @@ const alertRecipients = initAlertRecipients(app, { requireAuth: requireDispatch,
 // 📅 committed delivery times per stop → late alerts (email + text, internal)
 const etaReport = initEtaReport({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('eta_report') });
 const pastLoads = initPastLoads({ db, etaReport });
+let brokerFollow = null;
 const commitments = initCommitments(app, { requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), emails: () => alertRecipients.resolve('late_commitment'), phones: () => alertRecipients.phones('late_commitment'), sendSms: (to, text) => rc.sendSms('__shared', { to, text }) });
 const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: (k) => alertRecipients.resolve(k), env: process.env });
 // Missing boxes a customer asked about → email the "Customer asked about a load with missing boxes" list
@@ -1075,7 +1078,8 @@ roadCalls = initRoadCalls(app, { requireAuth: requireDispatch, db, docs, help,
 const macroPoint = initMacroPoint(app, { requireAdmin: requireCompanyAdmin, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 missingCases = initMissingCases({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('missing_boxes_case'), getBoard: (site) => truckmate.buildBoard(site) });
 const missingBoxes = initMissingBoxes({ db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('artis_missing_call') });
-truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => commitments.overlay(...a), (...a) => truckBuilder.overlay(...a), (...a) => artisWeb.overlay(...a), (...a) => artisReports.overlay(...a), (...a) => synergize.overlay(...a), (...a) => artis.overlay(...a), (...a) => stopTasks.overlay(...a), (...a) => macroPoint.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => { etaReport.onFinished(site, rec, reason).catch((e) => console.warn('[eta-report]', e.message)); return rundowns.onFinished(site, rec, reason); } });
+brokerFollow = initBrokerFollow(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), commitments, sendMail: (m, o = {}) => sendMail(m, { env: process.env, ...o }), listEmails: () => alertRecipients.resolve('broker_late') });
+truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => commitments.overlay(...a), (...a) => followProxy.overlay(...a), (...a) => truckBuilder.overlay(...a), (...a) => artisWeb.overlay(...a), (...a) => artisReports.overlay(...a), (...a) => synergize.overlay(...a), (...a) => artis.overlay(...a), (...a) => stopTasks.overlay(...a), (...a) => macroPoint.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => { etaReport.onFinished(site, rec, reason).catch((e) => console.warn('[eta-report]', e.message)); return rundowns.onFinished(site, rec, reason); } });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
@@ -1087,7 +1091,7 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
 const miles = initMiles({ db, env: process.env });
-const voice = initVoice(app, { dispatchLog, miles, artis, artisWeb, docs, stopTimes: etaReport, pastLoads, missingBoxes, missingCases, roadCalls, clients, training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const voice = initVoice(app, { brokerFollow: followProxy, dispatchLog, miles, artis, artisWeb, docs, stopTimes: etaReport, pastLoads, missingBoxes, missingCases, roadCalls, clients, training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // a truck's whole trip on the Fleet map: GPS trail, 15+ min stops (what happened), texts + Jarvis calls along the way
 initJourney(app, { requireAuth: requireDispatch, db, activity, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
@@ -1104,7 +1108,7 @@ voice.useOutreach((ev) => outreach.notify(ev));
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { photos: () => (tempPhotos ? tempPhotos.latestPhotos() : []), requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport, stopTimes: etaReport });
-jarvisChat = initJarvisChat(app, { dispatchLog, miles, artis, artisWeb, artisReports, synergize, stopTimes: etaReport, pastLoads, clients, geofences: artisClients, planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
+jarvisChat = initJarvisChat(app, { brokerFollow: followProxy, dispatchLog, miles, artis, artisWeb, artisReports, synergize, stopTimes: etaReport, pastLoads, clients, geofences: artisClients, planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });
@@ -1112,7 +1116,7 @@ jarvisChat = initJarvisChat(app, { dispatchLog, miles, artis, artisWeb, artisRep
 const transferWatch = initTransferWatch({ db, env: process.env, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('transfer'),
   textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice });
 initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules,
-  onTeamStop: async (a) => { const to = await alertRecipients.resolve('team_stopped'); if (to.length) await sendMail({ to, ...renderTeamStopEmail(a) }, { env: process.env }); }, afterBoard: async (site, board, ctx) => { await transferWatch.process(site, board).catch((e) => console.warn('[transfer]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
+  onTeamStop: async (a) => { const to = await alertRecipients.resolve('team_stopped'); if (to.length) await sendMail({ to, ...renderTeamStopEmail(a) }, { env: process.env }); }, afterBoard: async (site, board, ctx) => { await followProxy.process(site, board).catch((e) => console.warn('[broker-follow]', e.message)); await transferWatch.process(site, board).catch((e) => console.warn('[transfer]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
