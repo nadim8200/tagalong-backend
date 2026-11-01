@@ -493,7 +493,7 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
   return { subject, html, text };
 }
 
-export function initStatusMail(app, { requireAuth, db, docs = null, comms = null, ringcentral = null, track = null, chainReply = null, tempTeam = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initStatusMail(app, { requireAuth, db, onBreakdownOff = null, docs = null, comms = null, ringcentral = null, track = null, chainReply = null, tempTeam = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const cfgKey = 'taStatusMailCfg';
   const key = (site) => `taStatusMail:${site}`;      // { adopted, trips: { trip: { sent, log } } }
@@ -769,6 +769,7 @@ export function initStatusMail(app, { requireAuth, db, docs = null, comms = null
     const item = itemFor(site, trip);
     if (!item) return res.status(404).json({ error: 'That load is not on the live board.' });
     const on = !!b.on;
+    if (!on && onBreakdownOff) await Promise.resolve(onBreakdownOff(trip)).catch((e) => console.warn('[status-mail] breakdown off:', e.message));
     const at = new Date().toISOString();
     const note = b.note ? String(b.note).replace(/\s+/g, ' ').trim().slice(0, 300) : null;
     const result = { emailed: [], texted: [], emailStatus: 'not sent', textStatus: 'not sent', errors: [] };

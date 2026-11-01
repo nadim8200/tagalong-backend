@@ -24,20 +24,19 @@ test('the link only works for that stop, untouched and in time', () => {
   assert.equal(readToken(t, 's', NOW + 8 * 86400000), null, 'expired');
 });
 
-function rig() {
-  const db = mem(); const sent = []; const calls = [];
-  const r = initBreakdownReport(null, { db, secret: 's', now: () => NOW, getBoard: async () => ({ trips: [flowers] }), roadCalls: { open: async (x) => { calls.push(x); return { id: 'R12' }; } }, send: async (rep) => sent.push(rep) });
-  return { r, sent, calls, db };
+function rig(at = NOW) {
+  const db = mem(); const sent = []; let t = at;
+  const r = initBreakdownReport(null, { db, secret: 's', now: () => t, getBoard: async () => ({ trips: [flowers] }), send: async (rep) => sent.push(rep) });
+  return { r, sent, db, later: (ms) => { t += ms; } };
 }
 const p = { a: 'stopped:625878', t: '625878', u: '2602' };
 
-test('submitting starts one road call and one email; a second press does nothing', async () => {
+test('submitting sends one email and opens no road call; a second press does nothing', async () => {
   const v = rig();
   assert.equal((await v.r.submit(p, { reason: 'Truck air leak', name: 'Ana' })).ok, true);
-  assert.equal(v.calls.length, 1); assert.equal(v.calls[0].details, 'Truck air leak'); assert.equal(v.calls[0].by, 'Ana');
-  assert.equal(v.sent[0].roadCall, 'R12');
+  assert.equal(v.sent.length, 1); assert.equal(v.sent[0].by, 'Ana'); assert.equal('roadCall' in v.sent[0], false);
   assert.equal((await v.r.submit(p, { reason: 'Again', name: 'Bob' })).code, 409);
-  assert.equal(v.calls.length, 1); assert.equal(v.sent.length, 1);
+  assert.equal(v.sent.length, 1);
   assert.equal((await v.r.forTrip('625878')).subject, 'FLOWERS BREAKDOWN TRUCK AIR LEAK - TK# 2602 TL# 7323 - TRIP# 625878');
 });
 
@@ -45,21 +44,26 @@ test('a reason and a name are required', async () => {
   const v = rig();
   assert.equal((await v.r.submit(p, { reason: '  ', name: 'Ana' })).code, 400);
   assert.equal((await v.r.submit(p, { reason: 'Air leak', name: '' })).code, 400);
-  assert.equal(v.calls.length, 0);
+  assert.equal(v.sent.length, 0);
 });
 
-test('if the road call cannot start, the email still goes and says so', async () => {
-  const db = mem(); const sent = [];
-  const r = initBreakdownReport(null, { db, secret: 's', now: () => NOW, getBoard: async () => ({ trips: [flowers] }), roadCalls: { open: async () => { throw new Error('down'); } }, send: async (x) => sent.push(x) });
-  await r.submit(p, { reason: 'Air leak', name: 'Ana' });
-  assert.equal(sent[0].roadCall, null);
-  assert.match(renderBreakdownEmail({ item: flowers, report: sent[0], now: NOW }).html, /could not be opened/);
+test('a report holds the rolling email until Breakdown is off or 5 days pass', async () => {
+  const v = rig();
+  assert.deepEqual(await v.r.held(), []);
+  await v.r.submit(p, { reason: 'Air leak', name: 'Ana' });
+  assert.deepEqual(await v.r.held(), ['625878', '2602']);
+  await v.r.clear('625878');
+  assert.deepEqual(await v.r.held(), []);
+  const w = rig();
+  await w.r.submit(p, { reason: 'Air leak', name: 'Ana' });
+  w.later(6 * 86400000);
+  assert.deepEqual(await w.r.held(), []);
 });
 
 test('the breakdown email: what, who, next step, nobody is told customers were contacted', () => {
-  const m = renderBreakdownEmail({ item: flowers, report: { atMs: NOW, by: 'Ana <x>', reason: 'Air <leak>', trip: '625878', unit: '2602', roadCall: 'R12' }, now: NOW, sheetNote: 'Trip sheet attached', sheetAttached: true });
+  const m = renderBreakdownEmail({ item: flowers, report: { atMs: NOW, by: 'Ana <x>', reason: 'Air <leak>', trip: '625878', unit: '2602' }, now: NOW, sheetNote: 'Trip sheet attached', sheetAttached: true });
   assert.equal(m.subject, 'FLOWERS BREAKDOWN AIR <LEAK> - TK# 2602 TL# 7323 - TRIP# 625878');
-  assert.match(m.html, /BREAKDOWN REPORTED · FLOWERS LOAD/); assert.match(m.html, /Air &lt;leak&gt;/); assert.match(m.html, /Ana &lt;x&gt;/); assert.match(m.html, /Road call R12/); assert.match(m.html, /approval/); assert.match(m.html, /Trip sheet attached/);
+  assert.match(m.html, /BREAKDOWN REPORTED[^]*FLOWERS LOAD/); assert.match(m.html, /Air &lt;leak&gt;/); assert.match(m.html, /Ana &lt;x&gt;/); assert.match(m.html, /Road service has NOT been called/); assert.doesNotMatch(m.html, /provider|road call/i); assert.match(m.html, /Trip sheet attached/);
   assert.match(m.html, /jarvis:training-slot/);
 });
 
@@ -68,7 +72,7 @@ test('the stopped email carries the button only when there is a link; the page e
   assert.match(renderTeamStopEmail(teamStopFacts(a, flowers, { now: NOW, reportUrl: 'https://x/br/abc' })).html, /Report breakdown/);
   assert.doesNotMatch(renderTeamStopEmail(teamStopFacts(a, flowers, { now: NOW })).html, /Report breakdown/);
   assert.match(reportPage({ a: 'x', t: '1', u: '<b>' }, 't'), /&lt;b&gt;/);
-  assert.match(reportPage({ a: 'x', t: '1', u: '2' }, 't'), /customers are not contacted/);
+  assert.match(reportPage({ a: 'x', t: '1', u: '2' }, 't'), /does not call road service or contact customers/);
   assert.match(reportPage(null, 't'), /expired/);
   assert.match(reportPage({ a: 'x', t: '1', u: '2' }, 't', { by: 'Ana', reason: 'Leak' }), /Already reported/);
 });

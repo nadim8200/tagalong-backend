@@ -985,7 +985,7 @@ helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.en
   sms: { live: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } }, send: (to, text) => rc.sendSms('__shared', { to, text }) } });
 // live tracking link for the rate con contact (one load only; stops once delivered)
 const brokerTrack = initBrokerTrack(app, { db, getBoard: (site) => truckmate.buildBoard(site), env: process.env });
-const statusMail = initStatusMail(app, { tempTeam: () => alertRecipients.resolve('reefer_temp'),  requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env,
+const statusMail = initStatusMail(app, { onBreakdownOff: (trip) => breakdownReport.clear(trip), tempTeam: () => alertRecipients.resolve('reefer_temp'),  requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env,
   track: (site, trip) => brokerTrack.linkFor(site, trip),
   chainReply: (site, trip, m) => (inbox ? inbox.replyOnLoadChain(site, trip, m) : { sent: false }) });
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
@@ -1144,7 +1144,7 @@ const sendBreakdown = async (report, item, to) => {
   await sendMail({ to, ...m, attachments: [...attachments, ...sheet.attachments] }, { env: process.env });
   return m.subject;
 };
-const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), roadCalls: { open: (...a) => roadCalls.open(...a) }, send: async (report, item) => { const to = await alertRecipients.resolve('breakdown_report'); if (to.length) await sendBreakdown(report, item, to); } });
+const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), send: async (report, item) => { const to = await alertRecipients.resolve('breakdown_report'); if (to.length) await sendBreakdown(report, item, to); } });
 // one example of the breakdown email, to Nadim only: no road call, nothing saved, nobody else
 app.post('/admin/breakdown-report/example', requireCompanyAdmin, async (req, res) => {
   try {
@@ -1152,13 +1152,13 @@ app.post('/admin/breakdown-report/example', requireCompanyAdmin, async (req, res
     const item = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((it) => String(((it && it.trip) || {}).tripNumber) === trip);
     if (!item) return res.status(404).json({ error: 'That trip is not on the board.' });
     const t = item.trip || {};
-    const subject = await sendBreakdown({ atMs: Date.now(), by: 'Example (not a real report)', reason: String((req.body || {}).reason || 'Truck air leak').slice(0, 200), trip, unit: t.powerUnit, roadCall: 'EXAMPLE' }, item, ['ntellez@floridabeauty.us']);
+    const subject = await sendBreakdown({ atMs: Date.now(), by: 'Example (not a real report)', reason: String((req.body || {}).reason || 'Truck air leak').slice(0, 200), trip, unit: t.powerUnit }, item, ['ntellez@floridabeauty.us']);
     res.json({ ok: true, subject });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules,
-  // trucks and trips with a road call still open in the last 5 days: a wrecker moves them, they aren't rolling
-  openRoadCalls: async () => ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000).flatMap((rc) => [rc.trip, String(rc.truck || '').trim().toLowerCase().replace(/^0+(?=\d)/, '')].filter(Boolean).map(String)),
+  // trucks and trips reported down, or with a road call still open in the last 5 days: a wrecker moves them, they aren't rolling
+  openRoadCalls: async () => [...await breakdownReport.held(), ...((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000).flatMap((rc) => [rc.trip, String(rc.truck || '').trim().toLowerCase().replace(/^0+(?=\d)/, '')].filter(Boolean).map(String))],
   onRolling: async (ep, { item, etas }) => {
     const to = await alertRecipients.resolve('team_stopped');
     if (!to.length) return;

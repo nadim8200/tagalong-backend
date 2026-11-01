@@ -1,17 +1,17 @@
 // ---------------------------------------------------------------
 // "Report breakdown" from the team-truck-stopped email: anyone who got the email opens a private link, types the
-// reason, and that (1) starts a road call, which still waits for a person's approval, (2) sends the breakdown email in
-// the subject format dispatch already uses, so the chain carries on with Jarvis on it. It never turns on the load's
-// Breakdown switch or contacts customers: a dispatcher does that. What people type is data, never instructions.
+// reason, and that (1) holds the "rolling again" email for that truck, (2) sends the breakdown email in
+// the subject format dispatch already uses, so the chain carries on with Jarvis on it. It opens no road call (Michelin
+// isn't live), never turns on the load's Breakdown switch and never contacts customers. What people type is data, never instructions.
 // ---------------------------------------------------------------
 import crypto from 'node:crypto';
 import { brokerLoad } from './watchtower.js';
 import { teamStopFacts, emailParts } from './teamstopmail.js';
-import { roadCallType } from './roadcall.js';
 
-const KEY = (site) => `taBreakdownReports:${site}`;    // alert id → { at, by, reason, subject, trip, roadCall }
+const KEY = (site) => `taBreakdownReports:${site}`;    // alert id → { atMs, by, reason, subject, trip, unit, clearedAt }
 const DAY = 86400000;
 const LINK_DAYS = 7;
+const HOLD_DAYS = 5;
 const MAX_REASON = 500;
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const b64 = (x) => Buffer.from(x).toString('base64url');
@@ -48,20 +48,20 @@ export function renderBreakdownEmail({ item, report, etas = null, now = Date.now
   const label = loadLabel(item) === 'BROKER' ? 'BROKER LOAD' : 'FLOWERS LOAD';
   const many = f.drivers.length > 1;
   const reported = `${report.by} · ${et(report.atMs) || ''}`;
-  const rc = report.roadCall ? `Road call ${report.roadCall} opened. It needs a person's approval before it goes to the provider.` : 'A road call could not be opened. Open one from the load in the console.';
-  const next = 'Review the road call, then start Breakdown on the load if customers need to be told. Starting it shows you who gets notified before anything goes out.';
+  const rc = 'Road service has NOT been called. Call Michelin or the shop the usual way.';
+  const next = 'Start Breakdown on the load if customers need to be told. Starting it shows you who gets notified before anything goes out.';
   const mapUrl = f.lat != null ? `https://www.google.com/maps?q=${encodeURIComponent(`${f.lat},${f.lng}`)}` : null;
   const subject = breakdownSubject(item, report.reason, { unit: report.unit, trip: report.trip });
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"></head><body style="margin:0;padding:0;background:#F1F5F9;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F1F5F9"><tr><td align="center" style="padding:12px 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="max-width:640px;background:#FFFFFF;border-radius:8px;">
 <tr><td style="padding:20px 24px 2px;font-family:${FONT};font-size:20px;font-weight:bold;color:${NAVY};">Florida Beauty</td></tr>
 <tr><td style="padding:0 24px 12px;border-bottom:1px solid ${LINE};font-family:${FONT};font-size:14px;color:${MUTED};">Dispatch notifications</td></tr>
 ${TRAINING_SLOT}
-<tr><td style="padding:18px 24px 0;font-family:${FONT};font-size:13px;font-weight:bold;letter-spacing:.5px;color:${RED};">BREAKDOWN REPORTED · ${label}</td></tr>
-<tr><td style="padding:2px 24px 0;font-family:${FONT};font-size:30px;font-weight:bold;color:${NAVY};">Truck ${esc(f.unit || 'not recorded')}</td></tr>
+<tr><td bgcolor="${RED}" style="padding:20px 24px;background:${RED};font-family:${FONT};font-size:30px;line-height:1.15;font-weight:bold;color:#FFFFFF;">BREAKDOWN REPORTED<div style="padding-top:4px;font-size:16px;letter-spacing:.5px;color:#FFFFFF;">${label}</div></td></tr>
+<tr><td style="padding:16px 24px 0;font-family:${FONT};font-size:30px;font-weight:bold;color:${NAVY};">Truck ${esc(f.unit || 'not recorded')}</td></tr>
 <tr><td style="padding:0 24px 14px;font-family:${FONT};font-size:15px;color:${MUTED};">Trip ${esc(f.trip || 'not recorded')}${f.trailer ? ` · Trailer ${esc(f.trailer)}` : ''}</td></tr>
 ${sheetAttached ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NAVY}" style="background:${NAVY};border-radius:8px;"><tr><td style="padding:12px 16px;font-family:${FONT};font-size:17px;font-weight:bold;color:#FFFFFF;">&#128206; ${esc(sheetNote)}</td></tr></table></td></tr>` : ''}
-<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b><div style="font-size:18px;font-weight:bold;padding:2px 0 6px;word-break:break-word;">${esc(report.reason)}</div>Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
-<tr><td style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Next step for dispatch</b><br>${esc(rc)}<br>${esc(next)}<div>${button(consoleUrl, 'Start Breakdown / review road call')}</div></td></tr></table></td></tr>
+<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b><div style="font-size:24px;line-height:1.25;font-weight:bold;padding:4px 0 8px;word-break:break-word;">${esc(report.reason)}</div>Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
+<tr><td style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Next step for dispatch</b><br>${esc(rc)}<br>${esc(next)}<div>${button(consoleUrl, 'Start Breakdown')}</div></td></tr></table></td></tr>
 ${heading('Last reported location')}
 ${f.mapCid ? `<tr><td style="padding:0 24px 10px;"><a href="${esc(mapUrl)}"><img src="cid:${esc(f.mapCid)}" width="592" alt="Map of the truck's last reported location" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></a></td></tr>` : ''}
 <tr><td style="padding:0 24px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};word-break:break-word;"><b>${esc(f.location || 'Location not reported')}</b>${mapUrl ? `<div>${button(mapUrl, 'Open map')}</div>` : ''}</td></tr>
@@ -81,10 +81,10 @@ const page = (title, body) => `<!doctype html><html lang="en"><head><meta charse
 export function reportPage(p, token, earlier = null) {
   if (!p) return page('Link not valid', '<h1>This link has expired</h1><p class="s">Report the breakdown from the load in the console, or reply to the email.</p>');
   if (earlier) return page('Already reported', `<h1>Already reported</h1><p class="s">Truck ${esc(p.u)} · Trip ${esc(p.t)}</p><p><b>${esc(earlier.by)}</b> reported: ${esc(earlier.reason)}</p>`);
-  return page(`Report breakdown, truck ${p.u}`, `<h1>Report breakdown</h1><p class="s">Truck ${esc(p.u)} · Trip ${esc(p.t)}</p><form id="f"><label for="r">What happened?</label><textarea id="r" maxlength="${MAX_REASON}" required placeholder="For example: truck air leak, shop is 5 miles away"></textarea><label for="n">Your name</label><input id="n" maxlength="80" required autocomplete="name"><button id="b" type="submit">Report breakdown and start road call</button><div class="e" id="e" role="alert"></div></form><p class="n">This starts a road call and emails the team. A person still approves the road call, and customers are not contacted.</p><script>document.getElementById('f').addEventListener('submit',async function(ev){ev.preventDefault();var b=document.getElementById('b'),e=document.getElementById('e');b.disabled=true;e.textContent='';try{var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:document.getElementById('r').value,name:document.getElementById('n').value})});var j=await r.json();if(!r.ok)throw new Error(j.error||'Could not send.');document.querySelector('.c').innerHTML='<h1>Reported</h1><p class="s">The road call is started and the team has the email. You can close this page.</p>';}catch(x){e.textContent=x.message;b.disabled=false;}});</script>`);
+  return page(`Report breakdown, truck ${p.u}`, `<h1>Report breakdown</h1><p class="s">Truck ${esc(p.u)} · Trip ${esc(p.t)}</p><form id="f"><label for="r">What happened?</label><textarea id="r" maxlength="${MAX_REASON}" required placeholder="For example: truck air leak, shop is 5 miles away"></textarea><label for="n">Your name</label><input id="n" maxlength="80" required autocomplete="name"><button id="b" type="submit">Report breakdown</button><div class="e" id="e" role="alert"></div></form><p class="n">This emails the team. It does not call road service or contact customers.</p><script>document.getElementById('f').addEventListener('submit',async function(ev){ev.preventDefault();var b=document.getElementById('b'),e=document.getElementById('e');b.disabled=true;e.textContent='';try{var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:document.getElementById('r').value,name:document.getElementById('n').value})});var j=await r.json();if(!r.ok)throw new Error(j.error||'Could not send.');document.querySelector('.c').innerHTML='<h1>Reported</h1><p class="s">The team has the email. Road service has not been called. You can close this page.</p>';}catch(x){e.textContent=x.message;b.disabled=false;}});</script>`);
 }
 
-export function initBreakdownReport(app, { db, secret, getBoard, roadCalls, send, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
+export function initBreakdownReport(app, { db, secret, getBoard, send, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
   const site = 'florida-beauty';
   const all = async () => (await db.get(KEY(site), {})) || {};
   const link = (a) => `${baseUrl}/br/${makeToken({ a: a.id, t: a.trip, u: a.unit }, secret, now())}`;
@@ -99,13 +99,15 @@ export function initBreakdownReport(app, { db, secret, getBoard, roadCalls, send
     await db.update(KEY(site), (cur) => { const c = { ...(cur || {}) }; if (!c[p.a]) { first = true; c[p.a] = { atMs: at, by, reason: clean, trip: p.t, unit: p.u }; } return c; }, {});
     if (!first) return { code: 409, error: 'This stop was already reported.' };
     const item = ((await getBoard(site).catch(() => ({ trips: [] }))).trips || []).find((it) => String(((it && it.trip) || {}).tripNumber) === String(p.t)) || null;
-    let rc = null;
-    try { rc = await roadCalls.open({ trip: p.t, truck: p.u, source: 'breakdown link', by, type: roadCallType(clean) || 'mechanical', details: clean }); } catch (e) { console.warn('[breakdown-report] road call:', e.message); }
-    const report = { atMs: at, by, reason: clean, trip: p.t, unit: p.u, roadCall: rc ? rc.id : null };
+    const report = { atMs: at, by, reason: clean, trip: p.t, unit: p.u };
     await db.update(KEY(site), (cur) => ({ ...(cur || {}), [p.a]: { ...report, subject: breakdownSubject(item, clean, { unit: p.u, trip: p.t }) } }), {});
     await send(report, item);
     return { code: 200, ok: true };
   }
+
+  // Trucks and trips reported down: the rolling email waits. Ends when Breakdown is turned off on the load, or after 5 days.
+  const held = async () => Object.values(await all()).filter((r) => !r.clearedAt && now() - r.atMs < HOLD_DAYS * DAY).flatMap((r) => [String(r.trip), String(r.unit || '').trim().toLowerCase().replace(/^0+(?=\d)/, '')]).filter(Boolean);
+  const clear = (trip) => db.update(KEY(site), (cur) => Object.fromEntries(Object.entries(cur || {}).map(([k, r]) => [k, String(r.trip) === String(trip) && !r.clearedAt ? { ...r, clearedAt: now() } : r])), {});
 
   if (app) {
     app.get('/br/:token', async (req, res) => {
@@ -118,5 +120,5 @@ export function initBreakdownReport(app, { db, secret, getBoard, roadCalls, send
       try { const r = await submit(p, req.body || {}); return res.status(r.code).json(r); } catch (e) { console.warn('[breakdown-report]', e.message); return res.status(500).json({ error: 'Could not send. Call dispatch.' }); }
     });
   }
-  return { link, forTrip, submit };
+  return { link, forTrip, submit, held, clear };
 }
