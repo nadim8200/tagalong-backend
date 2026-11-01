@@ -159,12 +159,12 @@ export function initComms(app, { requireAuth, db, staffAsk = null, missingCases 
 
   // Jarvis texting a driver on its own (asked by our staff in an email): driver 1, recorded
   // consent only, never after STOP (sendSms checks), only when company texting is live.
-  async function textDriverAuto(site, trip, body, by = 'Jarvis') {
+  async function textDriverAuto(site, trip, body, by = 'Jarvis', which = 1) {
     if (!enabled || !ringcentral) return { skipped: 'texting not connected' };
     const cfg = await shared();
     if (!cfg || !cfg.fromNumber) return { skipped: 'texting not live yet (RingCentral approval)' };
     const item = (await board(site)).find((it) => String(tripOf(it).tripNumber) === String(trip));
-    const rcpt = recipientFor(item, 1, await db.get(consentKey(site), {}));
+    const rcpt = recipientFor(item, which, await db.get(consentKey(site), {}));
     if (!rcpt || !rcpt.phone) return { skipped: 'no phone number for the driver' };
     if (!rcpt.consent) return { skipped: 'driver has not agreed to texts' };
     const text = messageFor('custom', { text: body });

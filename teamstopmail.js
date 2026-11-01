@@ -40,7 +40,7 @@ export function tripSheetFiles(files, ids, trip) {
 }
 
 // Everything the email shows, from the alert, the load and the ETA board. Nothing is filled in that isn't there. Pure.
-export function teamStopFacts(a, item, { etas = null, now = Date.now(), showPhones = true, mapCid = null, sheet = null, reportUrl = null } = {}) {
+export function teamStopFacts(a, item, { etas = null, now = Date.now(), showPhones = true, mapCid = null, sheet = null, reportUrl = null, driverCheck = null } = {}) {
   const t = (item && item.trip) || {};
   const l = (item && item._samsara) || {};
   const driver = (name, code, h, info) => {
@@ -64,7 +64,7 @@ export function teamStopFacts(a, item, { etas = null, now = Date.now(), showPhon
     next: leg ? [((item && (item.freightBills || item.orders)) || []).filter((b) => b && b.endZoneDescription === leg.label).map((b) => b.billToName).find(Boolean), leg.label].filter(Boolean).join(' — ') : null, appt: leg && leg.apptMs ? fmtLocalShort(leg.apptMs, leg.label) : null, apptFrom: leg ? APPT[leg.apptFrom] || null : null,
     eta: leg && leg.etaMs ? fmtLocalShort(leg.etaMs, leg.label) : null, miles: leg && leg.miles != null ? Math.round(leg.miles) : null,
     risk: lateMin == null ? null : lateMin > 0 ? `About ${fmtMin(lateMin)} past the appointment (estimated)` : 'None projected (estimated)',
-    owner: a.ack && a.ack.by ? a.ack.by : 'Unassigned', reportUrl, sheetNote: (sheet && sheet.note) || 'No trip sheet on file', sheetAttached: !!(sheet && sheet.status === 'attached'),
+    driverCheck, owner: a.ack && a.ack.by ? a.ack.by : 'Unassigned', reportUrl, sheetNote: (sheet && sheet.note) || 'No trip sheet on file', sheetAttached: !!(sheet && sheet.status === 'attached'),
   };
 }
 
@@ -97,6 +97,11 @@ export function renderTeamStopEmail(f) {
   const action = 'Contact the drivers to confirm the stop reason and expected departure. Review reported faults and record the outcome.';
   const health = f.codes.length ? `${f.codes.length} reported engine code${f.codes.length === 1 ? '' : 's'}` : 'No engine codes reported';
   const clock = `<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td width="44" height="44" align="center" valign="middle" style="width:44px;height:44px;border:3px solid ${RED};border-radius:24px;font-family:${FONT};font-size:26px;line-height:26px;font-weight:bold;color:${RED};">&#9719;</td></tr></table>`;
+  const dc = f.driverCheck;
+  const check = !dc ? null : dc.state === 'replied' ? { bg: '#F0FDF4', head: `Driver replied: ${dc.reason}`, lines: [`"${dc.text}"`, `Received ${et(dc.atMs)}. This is what the driver said, not verified.`] }
+    : dc.state === 'waiting' ? { bg: '#FFF7E7', head: 'No reply from the drivers yet', lines: [`Jarvis texted them ${et(dc.askedMs)}${dc.minutes >= 5 ? `, ${fmtMin(dc.minutes)} ago` : ''}.`] }
+      : { bg: '#F5F7FA', head: 'Drivers not texted', lines: [dc.why] };
+  const reasonLine = dc && dc.state === 'replied' ? `Reason from the driver: ${dc.reason}.` : 'Stop reason has not been confirmed.';
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><style>@media (max-width:480px){.ts-pad{padding-left:16px!important;padding-right:16px!important}.ts-big{font-size:34px!important}}</style></head>
 <body style="margin:0;padding:0;background:#F1F5F9;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F1F5F9"><tr><td align="center" style="padding:12px 8px;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="max-width:640px;background:#FFFFFF;border-radius:8px;">
@@ -121,8 +126,10 @@ ${f.mapCid ? `<tr><td class="ts-pad" style="padding:0 24px 10px;"><a href="${esc
 ${heading(many ? 'Driver team' : 'Driver')}
 <tr><td class="ts-pad" style="padding:0 24px;">${f.drivers.length ? f.drivers.map((d, i) => driverCard(d, i, many)).join('') : `<div style="font-family:${FONT};font-size:15px;color:${TEXT};">No driver reported.</div>`}</td></tr>
 <tr><td class="ts-pad" style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Action requested</b><br>${esc(action)}<div style="padding-top:6px;font-size:14px;color:${MUTED};">Owner: ${esc(f.owner)}</div>${f.reportUrl ? `<div style="padding-top:10px;font-size:14px;color:${TEXT};">Is it broken down?</div><a href="${esc(f.reportUrl)}" style="display:block;margin-top:6px;padding:16px 18px;border-radius:6px;background:${RED};font-family:${FONT};font-size:20px;font-weight:bold;text-align:center;color:#FFFFFF;text-decoration:none;">Report breakdown</a>` : ''}</td></tr></table></td></tr>
+${check ? `${heading('Driver check')}
+<tr><td class="ts-pad" style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${check.bg}" style="background:${check.bg};border-radius:8px;"><tr><td style="padding:12px 14px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};word-break:break-word;"><b style="color:${NAVY};">${esc(check.head)}</b>${check.lines.map((l) => `<div>${esc(l)}</div>`).join('')}</td></tr></table></td></tr>` : ''}
 ${heading('Truck health')}
-<tr><td class="ts-pad" style="padding:0 24px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${f.codes.length ? '#FFF7E7' : '#F5F7FA'}" style="background:${f.codes.length ? '#FFF7E7' : '#F5F7FA'};border-radius:8px;"><tr><td style="padding:12px 14px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${f.codes.length ? '#92400E' : NAVY};">${esc(health)}</b>${f.codes.slice(0, 4).map((c) => `<div style="font-size:13px;word-break:break-word;">${esc(c)}</div>`).join('')}<div style="padding-top:4px;font-size:14px;">Stop reason has not been confirmed.</div></td></tr></table></td></tr>
+<tr><td class="ts-pad" style="padding:0 24px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${f.codes.length ? '#FFF7E7' : '#F5F7FA'}" style="background:${f.codes.length ? '#FFF7E7' : '#F5F7FA'};border-radius:8px;"><tr><td style="padding:12px 14px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${f.codes.length ? '#92400E' : NAVY};">${esc(health)}</b>${f.codes.slice(0, 4).map((c) => `<div style="font-size:13px;word-break:break-word;">${esc(c)}</div>`).join('')}<div style="padding-top:4px;font-size:14px;">${esc(reasonLine)}</div></td></tr></table></td></tr>
 ${heading('Delivery impact')}
 <tr><td class="ts-pad" style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${kv('Next stop', f.next)}${kv('Appointment', f.appt ? `${f.appt}${f.apptFrom ? ` (${f.apptFrom})` : ''}` : null)}${kv('Estimated arrival', f.eta)}${kv('Distance remaining', f.miles != null ? `${f.miles.toLocaleString('en-US')} mi` : null)}${kv('Projected delay', f.risk)}</table></td></tr>
 <tr><td class="ts-pad" style="padding:20px 24px;font-family:${FONT};font-size:13px;line-height:1.5;color:${MUTED};"><b style="color:${NAVY};">Jarvis · AI Dispatcher</b><br>Florida Beauty<br>Stop time from Jarvis's truck tracking · hours from Samsara ELD · ETA is an estimate.</td></tr>
@@ -131,7 +138,7 @@ ${heading('Delivery impact')}
     `${durationText} STOPPED AT ALERT TIME`, `Stopped since: ${since}`, `Alert generated: ${f.alertAt || NA}`, 'Snapshot at email generation—not a live timer.', '',
     'LAST REPORTED LOCATION', f.location || 'Location not reported', gpsLine, ...(f.gpsStale ? ['This GPS location may be out of date.'] : []), ...(mapUrl ? [`Open map: ${mapUrl}`] : []), `View live trip: ${liveUrl(f.trip)}`, '',
     many ? 'DRIVER TEAM' : 'DRIVER', ...(f.drivers.length ? f.drivers.flatMap((d, i) => [`${many ? `Driver ${i + 1}: ` : ''}${d.name}${d.atWheel ? ' (at the wheel)' : ''}`, `  Duty status: ${d.duty || 'Not reported'}`, `  Drive left: ${d.driveLeft || 'Not reported'}  Shift left: ${d.shiftLeft || 'Not reported'}  Cycle left: ${d.cycleLeft || 'Not reported'}`, `  ${d.phone ? phoneText(d.phone) : 'Phone not available'}`]) : ['No driver reported.']), '',
-    'ACTION REQUESTED', action, `Owner: ${f.owner}`, ...(f.reportUrl ? [`Report breakdown: ${f.reportUrl}`] : []), '', 'TRUCK HEALTH', health, ...f.codes.slice(0, 4), 'Stop reason has not been confirmed.', '',
+    'ACTION REQUESTED', action, `Owner: ${f.owner}`, ...(f.reportUrl ? [`Report breakdown: ${f.reportUrl}`] : []), '', ...(check ? ['DRIVER CHECK', check.head, ...check.lines, ''] : []), 'TRUCK HEALTH', health, ...f.codes.slice(0, 4), reasonLine, '',
     'DELIVERY IMPACT', `Next stop: ${f.next || NA}`, `Appointment: ${f.appt ? `${f.appt}${f.apptFrom ? ` (${f.apptFrom})` : ''}` : NA}`, `Estimated arrival: ${f.eta || NA}`, `Distance remaining: ${f.miles != null ? `${f.miles} mi` : NA}`, `Projected delay: ${f.risk || NA}`, '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n');
   return { subject, html, text };
 }

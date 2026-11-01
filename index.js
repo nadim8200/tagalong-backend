@@ -90,6 +90,7 @@ import { initArtis, initMissingBoxes } from './artis.js';
 import { initAlertRecipients } from './alertrecipients.js';
 import { initTransferWatch, transferEmail, transferStatus } from './transferwatch.js';
 import { initTransferDone, answerConfirms } from './transferdone.js';
+import { initStopCheck } from './stopcheck.js';
 import { renderFixedRollingEmail, renderTransferCompletedEmail, renderTransferReversedEmail, renderFixedReportedEmail, handoffFacts, snapshotLoad, crewOf } from './handoffmail.js';
 import { initTruckBuilder } from './truckbuilder.js';
 import { initMissingCases } from './missingcase.js';
@@ -1153,6 +1154,27 @@ const sendBreakdown = async (report, item, to) => {
   await sendMail({ to, ...m, attachments: [...attachments, ...sheet.attachments] }, { env: process.env, direct: staffOnly(to) });
   return m.subject;
 };
+const sendStopEmail = async (a, { item, etas, driverCheck = null, subject = null }) => {
+  const to = await alertRecipients.resolve('team_stopped');
+  if (!to.length) return;
+  const attachments = await truckMap((item && item._samsara) || {}, 'red', stopBadge(a));
+  const mapCid = attachments.length ? 'truckmap' : null;
+  const sheet = await sheetFor(item, a.trip);
+  const showPhones = to.every((e) => /@floridabeauty\.us$/i.test(e));
+  const body = (extra) => { const m = renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, driverCheck, reportUrl: breakdownReport.link(a), ...extra })); return subject ? { ...m, subject: `Re: ${m.subject}` } : m; };
+  try {
+    await sendMail({ to, ...body({ mapCid, sheet }), attachments: [...attachments, ...sheet.attachments] }, { env: process.env });
+  } catch (e) {
+    console.warn('[team-stop] sent without files:', e.message);
+    const noFiles = tripSheetIds(item).length ? { status: 'unavailable', note: 'Trip sheet could not be attached. Open it on the load in the console.' } : null;
+    await sendMail({ to, ...body({ sheet: noFiles }) }, { env: process.env });
+  }
+};
+// Extended stops: ask the drivers, and put what they say on the stop email. Silent until company texting is live (comms says so).
+const stopCheck = initStopCheck({ db, textDriver: (site, trip, text, by, which) => comms.textDriverAuto(site, trip, text, by, which),
+  getReplies: async (trip, since) => (((await db.get('taTripComms:florida-beauty', {})) || {})[trip] || []).filter((e) => e.type === 'reply' && Date.parse(e.at) >= since),
+  sendUpdate: async (a, item, driverCheck) => sendStopEmail(a, { item, etas: item ? (await allEtas())[a.trip] || null : null, driverCheck, subject: 'thread' }),
+  startBreakdown: (x) => breakdownReport.fromEmail({ ...x, to: [] }) });
 const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), etasFor: async (trip) => (await allEtas())[trip] || null, otherHolds: async (r) => { const it = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((x) => String(((x && x.trip) || {}).tripNumber) === String(r.trip)); const calls = ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000 && (String(rc.trip) === String(r.trip) || String(rc.truck) === String(r.unit))); return !!(it && ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown'))) || calls.length > 0; }, fixedDetails: async (r, item) => {
     const to = await alertRecipients.resolve('breakdown_report');
     const live = (item && item._samsara) || await liveForUnit(r.unit).catch(() => null);
@@ -1283,20 +1305,9 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
     await sendMail({ to, ...m, ...(chain && chain.subject ? { subject: `Re: ${chain.subject}` } : {}), attachments }, { env: process.env, direct: !!chain && staffOnly(to) });
   },
   onTeamStop: async (a, { item, etas }) => {
-    const to = await alertRecipients.resolve('team_stopped');
-    if (!to.length) return;
-    const attachments = await truckMap((item && item._samsara) || {}, 'red', stopBadge(a));
-    const mapCid = attachments.length ? 'truckmap' : null;
-    const sheet = await sheetFor(item, a.trip);
-    const showPhones = to.every((e) => /@floridabeauty\.us$/i.test(e));
-    try {
-      await sendMail({ to, ...renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, mapCid, sheet, reportUrl: breakdownReport.link(a) })), attachments: [...attachments, ...sheet.attachments] }, { env: process.env });
-    } catch (e) {
-      console.warn('[team-stop] sent without files:', e.message);
-      const noFiles = sheetIds.length ? { status: 'unavailable', note: 'Trip sheet could not be attached. Open it on the load in the console.' } : null;
-      await sendMail({ to, ...renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, sheet: noFiles, reportUrl: breakdownReport.link(a) })) }, { env: process.env });
-    }
-  }, afterBoard: async (site, board, ctx) => { await transferDone.observe(board).catch((e) => console.warn('[transfer-done]', e.message)); await breakdownReport.process(site, board).catch((e) => console.warn('[breakdown-report]', e.message)); await followProxy.process(site, board).catch((e) => console.warn('[broker-follow]', e.message)); await transferWatch.process(site, board, ctx).catch((e) => console.warn('[transfer]', e.message)); await transferDone.process(board).catch((e) => console.warn('[transfer-done]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
+    const driverCheck = await stopCheck.forStop(a, item).catch((e) => { console.warn('[stop-check]', e.message); return null; });
+    await sendStopEmail(a, { item, etas, driverCheck });
+  }, afterBoard: async (site, board, ctx) => { await transferDone.observe(board).catch((e) => console.warn('[transfer-done]', e.message)); await breakdownReport.process(site, board).catch((e) => console.warn('[breakdown-report]', e.message)); await followProxy.process(site, board).catch((e) => console.warn('[broker-follow]', e.message)); await transferWatch.process(site, board, ctx).catch((e) => console.warn('[transfer]', e.message)); await transferDone.process(board).catch((e) => console.warn('[transfer-done]', e.message)); await stopCheck.process(board).catch((e) => console.warn('[stop-check]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
