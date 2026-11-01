@@ -52,13 +52,14 @@ export function breakdownSubject(item, reason, { unit = null, trip = null } = {}
 }
 
 // The email that opens the chain. Pure.
-export function renderBreakdownEmail({ item, report, etas = null, now = Date.now(), showPhones = true, mapCid = null, sheetNote = null, sheetAttached = false, consoleUrl = 'https://mytagalong.app/truckmate?tab=active' }) {
+export function renderBreakdownEmail({ item, report, etas = null, now = Date.now(), showPhones = true, mapCid = null, sheetNote = null, sheetAttached = false }) {
   const a = { unit: report.unit, trip: report.trip, ack: null };
   const f = teamStopFacts(a, item, { etas, now, showPhones, mapCid });
-  const { heading, button, kv, driverCard, FONT, NAVY, TEXT, MUTED, LINE, RED, et, TRAINING_SLOT } = emailParts;
+  const { liveUrl, heading, button, kv, driverCard, FONT, NAVY, TEXT, MUTED, LINE, RED, et, TRAINING_SLOT } = emailParts;
   const kind = loadLabel(item);
   const title = kind === 'FLOWERS' ? 'FLOWER BREAKDOWN' : kind ? `${kind} BREAKDOWN` : 'BREAKDOWN REPORTED';
   const label = kind ? 'Breakdown reported' : 'Load type not confirmed. Check the load.';
+  const consoleUrl = liveUrl(report.trip);
   const many = f.drivers.length > 1;
   const reported = `${report.by} · ${et(report.atMs) || ''}`;
   const rc = 'Road service has NOT been called. Call Michelin or the shop the usual way.';

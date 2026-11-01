@@ -3,7 +3,8 @@ import { TRAINING_SLOT } from './latemail.js';
 import { fmtLocalShort } from './localtime.js';
 
 const NAVY = '#13325B'; const TEXT = '#1F2937'; const MUTED = '#5B6778'; const LINE = '#E2E8F0'; const RED = '#C62828'; const FONT = 'Arial,Helvetica,sans-serif';
-const LIVE_URL = 'https://mytagalong.app/truckmate?tab=active';
+// ?admin = the dispatch sign-in, not the TagAlong customer one; ?trip opens on that load
+export const liveUrl = (trip) => `https://mytagalong.app/truckmate?admin&tab=active${trip ? `&trip=${encodeURIComponent(trip)}` : ''}`;
 const NA = 'Not available';
 const GPS_STALE_MIN = 30;
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -113,7 +114,7 @@ ${f.mapCid ? '' : `<tr><td class="ts-pad" style="padding:0 24px;"><table role="p
 <div style="padding-top:4px;font-size:13px;color:${MUTED};">Snapshot at email generation—not a live timer.</div></td></tr></table></td></tr>`}
 ${heading('Last reported location')}
 ${f.mapCid ? `<tr><td class="ts-pad" style="padding:0 24px 10px;"><a href="${esc(mapUrl)}"><img src="cid:${esc(f.mapCid)}" width="592" alt="Map of the truck's last reported location near ${esc(f.location || 'the reported position')}" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></a></td></tr>` : ''}
-<tr><td class="ts-pad" style="padding:0 24px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};word-break:break-word;"><b>${esc(f.location || 'Location not reported')}</b><div style="font-size:13px;color:${MUTED};">${esc(gpsLine)}</div>${f.mapCid ? `<div style="font-size:13px;color:${MUTED};">Alert generated: ${esc(f.alertAt || NA)}</div>` : ''}${f.gpsStale ? `<div style="padding-top:4px;font-size:14px;font-weight:bold;color:#92400E;">This GPS location may be out of date.</div>` : ''}<div>${mapUrl ? button(mapUrl, 'Open map') : ''}${button(LIVE_URL, 'View live trip')}</div></td></tr>
+<tr><td class="ts-pad" style="padding:0 24px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};word-break:break-word;"><b>${esc(f.location || 'Location not reported')}</b><div style="font-size:13px;color:${MUTED};">${esc(gpsLine)}</div>${f.mapCid ? `<div style="font-size:13px;color:${MUTED};">Alert generated: ${esc(f.alertAt || NA)}</div>` : ''}${f.gpsStale ? `<div style="padding-top:4px;font-size:14px;font-weight:bold;color:#92400E;">This GPS location may be out of date.</div>` : ''}<div>${mapUrl ? button(mapUrl, 'Open map') : ''}${button(liveUrl(f.trip), 'View live trip')}</div></td></tr>
 ${heading(many ? 'Driver team' : 'Driver')}
 <tr><td class="ts-pad" style="padding:0 24px;">${f.drivers.length ? f.drivers.map((d, i) => driverCard(d, i, many)).join('') : `<div style="font-family:${FONT};font-size:15px;color:${TEXT};">No driver reported.</div>`}</td></tr>
 <tr><td class="ts-pad" style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Action requested</b><br>${esc(action)}<div style="padding-top:6px;font-size:14px;color:${MUTED};">Owner: ${esc(f.owner)}</div>${f.reportUrl ? `<div style="padding-top:10px;font-size:14px;color:${TEXT};">Is it broken down?</div><a href="${esc(f.reportUrl)}" style="display:block;margin-top:6px;padding:16px 18px;border-radius:6px;background:${RED};font-family:${FONT};font-size:20px;font-weight:bold;text-align:center;color:#FFFFFF;text-decoration:none;">Report breakdown</a>` : ''}</td></tr></table></td></tr>
@@ -125,7 +126,7 @@ ${heading('Delivery impact')}
 </table></td></tr></table></body></html>`;
   const text = ['FLORIDA BEAUTY — Dispatch notifications', '', 'EXTENDED STOP · TEAM TRUCK', `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, f.sheetNote, '',
     `${durationText} STOPPED AT ALERT TIME`, `Stopped since: ${since}`, `Alert generated: ${f.alertAt || NA}`, 'Snapshot at email generation—not a live timer.', '',
-    'LAST REPORTED LOCATION', f.location || 'Location not reported', gpsLine, ...(f.gpsStale ? ['This GPS location may be out of date.'] : []), ...(mapUrl ? [`Open map: ${mapUrl}`] : []), `View live trip: ${LIVE_URL}`, '',
+    'LAST REPORTED LOCATION', f.location || 'Location not reported', gpsLine, ...(f.gpsStale ? ['This GPS location may be out of date.'] : []), ...(mapUrl ? [`Open map: ${mapUrl}`] : []), `View live trip: ${liveUrl(f.trip)}`, '',
     many ? 'DRIVER TEAM' : 'DRIVER', ...(f.drivers.length ? f.drivers.flatMap((d, i) => [`${many ? `Driver ${i + 1}: ` : ''}${d.name}${d.atWheel ? ' (at the wheel)' : ''}`, `  Duty status: ${d.duty || 'Not reported'}`, `  Drive left: ${d.driveLeft || 'Not reported'}  Shift left: ${d.shiftLeft || 'Not reported'}  Cycle left: ${d.cycleLeft || 'Not reported'}`, `  ${d.phone ? phoneText(d.phone) : 'Phone not available'}`]) : ['No driver reported.']), '',
     'ACTION REQUESTED', action, `Owner: ${f.owner}`, ...(f.reportUrl ? [`Report breakdown: ${f.reportUrl}`] : []), '', 'TRUCK HEALTH', health, ...f.codes.slice(0, 4), 'Stop reason has not been confirmed.', '',
     'DELIVERY IMPACT', `Next stop: ${f.next || NA}`, `Appointment: ${f.appt ? `${f.appt}${f.apptFrom ? ` (${f.apptFrom})` : ''}` : NA}`, `Estimated arrival: ${f.eta || NA}`, `Distance remaining: ${f.miles != null ? `${f.miles} mi` : NA}`, `Projected delay: ${f.risk || NA}`, '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n');
@@ -166,7 +167,7 @@ ${f.mapCid ? '' : `<tr><td class="ts-pad" style="padding:0 24px;"><table role="p
 <tr><td class="ts-pad" style="padding:10px 24px 0;font-family:${FONT};"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F1F5F9" style="background:#F1F5F9;border-radius:6px;"><tr><td style="padding:9px 14px;font-size:15px;color:${TEXT};">Previous stop: <b>${esc(prev)}</b></td></tr></table></td></tr>
 ${heading('Updated location')}
 ${f.mapCid ? `<tr><td class="ts-pad" style="padding:0 24px 10px;"><a href="${esc(mapUrl)}"><img src="cid:${esc(f.mapCid)}" width="592" alt="Map of the truck's latest reported location near ${esc(f.location || 'the reported position')}" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></a></td></tr>` : ''}
-<tr><td class="ts-pad" style="padding:0 24px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};word-break:break-word;"><b>${esc(f.location || 'Location not reported')}</b><div style="font-size:13px;color:${MUTED};">${esc(gpsLine)}</div><div>${mapUrl ? button(mapUrl, 'Open map') : ''}${button(LIVE_URL, 'View live trip')}</div></td></tr>
+<tr><td class="ts-pad" style="padding:0 24px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};word-break:break-word;"><b>${esc(f.location || 'Location not reported')}</b><div style="font-size:13px;color:${MUTED};">${esc(gpsLine)}</div><div>${mapUrl ? button(mapUrl, 'Open map') : ''}${button(liveUrl(f.trip), 'View live trip')}</div></td></tr>
 ${heading('Updated driver status')}
 <tr><td class="ts-pad" style="padding:0 24px;">${f.drivers.length ? f.drivers.map((d, i) => driverCard(d, i, many)).join('') : `<div style="font-family:${FONT};font-size:15px;color:${TEXT};">No driver reported.</div>`}</td></tr>
 <tr><td class="ts-pad" style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F0FDF4" style="background:#F0FDF4;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${GREEN};">Movement resumed</b><br>${esc(confirm)}</td></tr></table></td></tr>
@@ -177,11 +178,11 @@ ${heading('Delivery update')}
 </table></td></tr></table></body></html>`;
   const text = ['FLORIDA BEAUTY — Dispatch notifications', '', 'MOVEMENT RESUMED', `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, '',
     `${rolling} ROLLING`, `Latest reported speed: ${speed}`, `Moving since: ${movedAt}`, `Updated: ${f.gpsAt || NA}`, 'Snapshot at email generation—not a live timer.', `Previous stop: ${prev}`, '',
-    'UPDATED LOCATION', f.location || 'Location not reported', gpsLine, ...(mapUrl ? [`Open map: ${mapUrl}`] : []), `View live trip: ${LIVE_URL}`, '',
+    'UPDATED LOCATION', f.location || 'Location not reported', gpsLine, ...(mapUrl ? [`Open map: ${mapUrl}`] : []), `View live trip: ${liveUrl(f.trip)}`, '',
     'UPDATED DRIVER STATUS', ...(f.drivers.length ? f.drivers.flatMap((d, i) => [`${many ? `Driver ${i + 1}: ` : ''}${d.name}${d.atWheel ? ' (at the wheel)' : ''}`, `  Duty status: ${d.duty || 'Not reported'}`, `  Drive left: ${d.driveLeft || 'Not reported'}  Shift left: ${d.shiftLeft || 'Not reported'}  Cycle left: ${d.cycleLeft || 'Not reported'}`, `  ${d.phone ? phoneText(d.phone) : 'Phone not available'}`]) : ['No driver reported.']), '',
     'MOVEMENT RESUMED', confirm, '', 'DELIVERY UPDATE', `Next stop: ${f.next || NA}`, `Appointment: ${appt || NA}`, `Updated ETA (estimated): ${f.eta || NA}`, `Distance remaining: ${f.miles != null ? `${f.miles} mi` : NA}`, `Projected delay: ${f.risk || NA}`, caveat, '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n');
   return { subject, html, text };
 }
 
 // shared with the breakdown email
-export const emailParts = { heading, button, kv, driverCard, FONT, NAVY, TEXT, MUTED, LINE, RED, et, TRAINING_SLOT };
+export const emailParts = { liveUrl, heading, button, kv, driverCard, FONT, NAVY, TEXT, MUTED, LINE, RED, et, TRAINING_SLOT };

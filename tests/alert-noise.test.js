@@ -89,6 +89,11 @@ test('team stop email: the map carries the timer; the red box only shows when th
   assert.match(renderTeamStopEmail(teamStopFacts(alert, fullItem, { now: NOW2 })).html, /STOPPED AT ALERT TIME/);
 });
 
+test('email links open the dispatch console on that load, not the TagAlong sign-in', () => {
+  const m = renderTeamStopEmail(teamStopFacts(alert, fullItem, { now: NOW2 }));
+  assert.match(m.html, /truckmate\?admin&amp;tab=active&amp;trip=626258/); assert.match(m.text, /truckmate\?admin&tab=active&trip=626258/);
+});
+
 test('team stop email: missing data says so and never invents anything', () => {
   const m = renderTeamStopEmail(teamStopFacts({ ...alert, stopStartUnknown: true }, { trip: { tripNumber: '626258' }, _samsara: { gpsAt: '2026-11-01T01:00:00Z', location: 'I-95', lat: null } }, { now: NOW2 }));
   assert.match(m.html, /At least 3h 28m/); assert.match(m.html, /Not confirmed/);

@@ -93,6 +93,7 @@ test('the breakdown email: what, who, next step, nobody is told customers were c
   assert.equal(m.subject, 'FLOWERS BREAKDOWN AIR <LEAK> - TK# 2602 TL# 7323 - TRIP# 625878');
   assert.match(m.html, /FLOWER BREAKDOWN/); assert.match(renderBreakdownEmail({ item: broker, report: { atMs: NOW, by: 'A', reason: 'x y', trip: '1', unit: '2' }, now: NOW }).html, /BROKER BREAKDOWN/); assert.match(m.html, /Air &lt;leak&gt;/); assert.match(m.html, /Ana &lt;x&gt;/); assert.match(m.html, /Road service has NOT been called/); assert.doesNotMatch(m.html, /provider|road call/i); assert.match(m.html, /Trip sheet attached/);
   assert.match(m.html, /jarvis:training-slot/);
+  assert.match(m.html, /truckmate\?admin&amp;tab=active&amp;trip=625878/);
 });
 
 test('the stopped email carries the button only when there is a link; the page escapes and says what happens', () => {
