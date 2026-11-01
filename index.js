@@ -1120,13 +1120,13 @@ const transferWatch = initTransferWatch({ db, env: process.env, sendMail: (m, { 
 // the still map in the truck emails: real map, truck marker, the status on top. No picture → the address and link still work
 const truckMap = async (l, tone, badge = {}) => {
   const png = await renderTruckMap({ lat: l.lat, lng: l.lng, tone, ...badge });
-  return png ? [{ name: 'truck-location.png', contentType: 'image/png', bytes: png, cid: 'truckmap' }] : [];
+  return png ? [{ name: 'truck-location.jpg', contentType: 'image/jpeg', bytes: png, cid: 'truckmap' }] : [];
 };
 const hhmm = (ms) => { const v = Math.max(0, Math.round(ms / 60000)); return v >= 60 ? `${Math.floor(v / 60)}h ${v % 60}m` : `${v}m`; };
 const etText = (ms) => `${new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} ET`;
-const stopBadge = (a) => ({ big: a.stoppedSinceMs ? hhmm(Date.now() - a.stoppedSinceMs) : null, label: 'STOPPED', lines: [a.stopStartUnknown ? 'Start of the stop not confirmed' : `Stopped since ${etText(a.stoppedSinceMs)}`, 'Snapshot, not a live timer'] });
+const stopBadge = (a) => ({ close: true, big: a.stoppedSinceMs ? hhmm(Date.now() - a.stoppedSinceMs) : null, label: 'STOPPED', lines: [a.stopStartUnknown ? 'Start of the stop not confirmed' : `Stopped since ${etText(a.stoppedSinceMs)}`, 'Snapshot, not a live timer'] });
 const rollBadge = (ep, now) => ({ big: hhmm(now - ep.movingSince), label: 'ROLLING', lines: [ep.speedMph != null ? `Speed ${Math.round(ep.speedMph)} mph` : null, `Moving since ${etText(ep.movingSince)}`, 'Snapshot, not a live timer'] });
-const reportBadge = (r) => ({ big: 'BREAKDOWN', lines: [`Reported ${etText(r.atMs)}`] });
+const reportBadge = (r) => ({ close: true, big: 'BREAKDOWN', lines: [`Reported ${etText(r.atMs)}`] });
 // the trip sheet goes with an email whenever we have it: one more try if the read fails
 const sheetFor = async (item, trip) => {
   const ids = tripSheetIds(item);
