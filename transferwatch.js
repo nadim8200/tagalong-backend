@@ -26,7 +26,7 @@ const DONE = /^(delvd|deliv|del$|cmplt|complete|canc|void)/i;
 export function transferPlan(it) {
   if (DONE.test(String(tripOf(it).status || ''))) return null;
   const r = it && it._rescue;   // a rescue plan from a breakdown
-  if (r && r.to && unitKey(r.to) !== unitKey(r.from)) return { trip: tripNo(it), from: String(r.from), to: String(r.to), trailer: String(tripOf(it).trailer || '') || null, rescue: { subject: r.subject } };
+  if (r && r.to && unitKey(r.to) !== unitKey(r.from)) return { trip: tripNo(it), from: String(r.from), to: String(r.to), trailer: String(tripOf(it).trailer || '') || null, rescue: { subject: r.subject, recorded: !!r.recorded } };
   const m = (it && it._manifest) || null;
   if (!m || !m.truck) return null;
   if (DONE.test(String(tripOf(it).status || ''))) return null;
@@ -92,7 +92,8 @@ export function transferEmail(kind, plan, a, b, s, { outcome = null, now = Date.
     start: `Transfer planned — trip ${plan.trip}: truck ${plan.from} → ${plan.to}`,
     update: `Transfer update — trip ${plan.trip}: trucks ${s.distanceMi != null ? `${s.distanceMi} mi apart` : 'not both on GPS'}`,
     together: `Trucks together — trip ${plan.trip}: ${plan.from} and ${plan.to}`,
-    outcome: `Transfer ${outcome && outcome.status === 'done' ? 'done' : 'not done yet'} — trip ${plan.trip}: ${plan.from} → ${plan.to}`,
+    outcome: `Transfer ${outcome && outcome.status === 'unclear' ? 'not confirmed' : outcome && outcome.status === 'done' ? 'done' : 'not done yet'} — trip ${plan.trip}: ${plan.from} → ${plan.to}`,
+    recorded: `Transfer recorded in TruckMate — trip ${plan.trip}: ${plan.from} → ${plan.to}`,
   }[kind];
   const row = (label, unit, p, r) => `<tr><td><b>${label} ${esc(unit)}</b></td><td>${esc((p && p.location) || '—')}</td><td>${roll(r)}${p && p.speedMph != null ? ` (${p.speedMph} mph)` : ''}</td><td>${p && p.at ? when(Date.parse(p.at)) : '—'}</td></tr>`;
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5">
@@ -106,7 +107,7 @@ ${kind === 'together' ? `<p>If they're still together in ${ASK_AFTER_MIN} minute
   return { subject: head, html, text: `${head}${s.distanceMi != null ? ` · ${s.distanceMi} mi apart` : ''} · ${plan.from}: ${roll(s.aRolling)} · ${plan.to}: ${roll(s.bRolling)}` };
 }
 
-export function initTransferWatch({ db, env = process.env, sendMail, recipients, rescueRecipients = null, textDriver = null, voice = null, comms = null, fetchFn = globalThis.fetch, now = () => Date.now(), livePos = null }) {
+export function initTransferWatch({ db, env = process.env, sendMail, recipients, rescueRecipients = null, textDriver = null, voice = null, comms = null, fetchFn = globalThis.fetch, now = () => Date.now(), livePos = null, onConfirmed = null, isConfirmed = null, confirms = (ans) => ans.status === 'done' }) {
   const enabled = !!(db && db.enabled);
   const key = `taTransferWatch:${SITE}`;
   // live position of any truck by unit number (Samsara)
@@ -151,11 +152,15 @@ export function initTransferWatch({ db, env = process.env, sendMail, recipients,
       if (prev && prev.outcome && prev.outcome.status === 'done') continue;
       const a = pos(plan.from); const b = pos(plan.to);
       const s = transferStatus(a, b);
+      // someone already confirmed it (staff by email): stop asking
+      if (isConfirmed && await isConfirmed(plan)) { all[plan.trip] = { ...(prev || {}), from: plan.from, to: plan.to, outcome: { status: 'done', source: 'confirmed' } }; done.push({ trip: plan.trip, actions: [], distanceMi: s.distanceMi }); continue; } // eslint-disable-line no-await-in-loop
       // TruckMate already shows it done → end the watch (a quiet note if we never reported on it)
-      const tmDone = doneInTruckMate((board.trips || []).find((x) => tripNo(x) === plan.trip), plan);
+      // A rescue keeps going until someone confirms the handoff; so does a watch already waiting on the drivers' answer
+      const asked = prev && prev.askedAt && !prev.outcome;
+      const tmDone = plan.rescue || asked ? null : doneInTruckMate((board.trips || []).find((x) => tripNo(x) === plan.trip), plan);
       if (tmDone) {
         const outcome = { status: 'done', source: 'TruckMate', summary: `TruckMate shows trailer ${plan.trailer || ''} on truck ${plan.to} and rolling since ${new Date(tmDone).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: '2-digit' })} ET.`, at: tmDone };
-        if (prev && prev.startedAt && !plan.rescue) await mail('outcome', plan, a, b, s, { outcome }).catch(() => {}); // eslint-disable-line no-await-in-loop
+        if (prev && prev.startedAt) await mail('recorded', plan, a, b, s, { outcome }).catch(() => {}); // eslint-disable-line no-await-in-loop
         all[plan.trip] = { ...(prev || {}), from: plan.from, to: plan.to, outcome };
         done.push({ trip: plan.trip, actions: prev && prev.startedAt ? ['report_outcome'] : [], distanceMi: s.distanceMi });
         continue;
@@ -164,8 +169,9 @@ export function initTransferWatch({ db, env = process.env, sendMail, recipients,
       state.from = plan.from; state.to = plan.to; state.last = { distanceMi: s.distanceMi, aRolling: s.aRolling, bRolling: s.bRolling, at: new Date(now()).toISOString() };
       for (const act of actions) {
         try {
-          if (act === 'report_start') await mail('start', plan, a, b, s); // eslint-disable-line no-await-in-loop
-          if (act === 'report_update') await mail('update', plan, a, b, s); // eslint-disable-line no-await-in-loop
+          const quiet = plan.rescue && plan.rescue.recorded;   // TruckMate already moved it; the chain knows
+          if (act === 'report_start' && !quiet) await mail('start', plan, a, b, s); // eslint-disable-line no-await-in-loop
+          if (act === 'report_update' && !quiet) await mail('update', plan, a, b, s); // eslint-disable-line no-await-in-loop
           if (act === 'report_together') await mail('together', plan, a, b, s); // eslint-disable-line no-await-in-loop
           if (act === 'text') {
             const msg = `Florida Beauty dispatch: trucks ${plan.from} and ${plan.to}${plan.trailer ? `, trailer ${plan.trailer}` : ''} (trip ${plan.trip}) — is the transfer done? Reply YES when the trailer is hooked to ${plan.to}, or NO.`;
@@ -182,8 +188,11 @@ export function initTransferWatch({ db, env = process.env, sendMail, recipients,
       if (state.askedAt && !state.outcome) {
         const ans = await answer(plan.trip, Date.parse(state.askedAt) - MIN); // eslint-disable-line no-await-in-loop
         if (ans) {
+          if (ans.status === 'done' && !confirms(ans)) ans.status = 'unclear';   // "ya voy" isn't a yes
           state.outcome = ans;
-          await mail('outcome', plan, a, b, s, { outcome: ans }).catch(() => {}); // eslint-disable-line no-await-in-loop
+          // a clear yes becomes the handoff record, and "Transfer completed" goes from there
+          if (ans.status === 'done' && onConfirmed) await onConfirmed(plan, ans, { a, b, s }).catch((e) => console.warn('[transfer]', plan.trip, e.message)); // eslint-disable-line no-await-in-loop
+          else await mail('outcome', plan, a, b, s, { outcome: ans }).catch(() => {}); // eslint-disable-line no-await-in-loop
           if (ans.status !== 'done') { state.outcome = null; state.askedAt = null; state.calledAt = null; state.togetherSince = null; state.notYetAt = ans.at; }
         }
       }

@@ -884,7 +884,7 @@ export function teamStopsDue(found, alerts, down = new Set()) {
     .filter(({ cur, level }) => cur && !cur.ack && level > (cur.mailLevel || 0));
 }
 
-export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null, onTeamStop = null, onRolling = null, openRoadCalls = null }) {
+export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null, onTeamStop = null, onRolling = null, recovering = null, liveFor = null, openRoadCalls = null }) {
   if (!db || !db.enabled) { console.log('[watchtower] off — needs DATABASE_URL'); return; }
   const sites = String(env.WATCH_SITES || 'florida-beauty').split(',').map((s) => s.trim()).filter(Boolean);
   const CFG = 'taWatchCfg';
@@ -1024,10 +1024,28 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     const roadDown = new Set(openRoadCalls ? await openRoadCalls().catch(() => []) : []);
     for (const it of board.trips || []) { if ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown')) { const t = (it && it.trip) || {}; roadDown.add(String(t.tripNumber)); roadDown.add(norm(t.powerUnit)); } }
     let etasNow = {};
+    // reported fixed, not yet seen moving. A truck that lost its load to a transfer isn't on the board, so read its GPS directly
+    const fixedTrucks = recovering ? await recovering().catch(() => []) : [];
+    const offBoard = {};
+    for (const r of fixedTrucks) { const u = norm(r.unit); if (liveFor && !(board.trips || []).some((it) => norm(((it && it.trip) || it || {}).powerUnit) === u)) offBoard[u] = await liveFor(r.unit).catch(() => null); } // eslint-disable-line no-await-in-loop
 
     const archived = [];
     await db.update(stateKey(site), (prev) => {
       const s = { alerts: {}, units: {}, ...(prev || {}) };
+      // an emailed stop: is the truck really moving again? (once per stop; the note is cleared before the email goes)
+      const followStop = (u, us, l, trip) => {
+        const isDown = roadDown.has(u) || roadDown.has(String(trip));
+        const r = trackRolling(us.stopEpisode, l, now, { down: isDown });
+        const others = Object.values(s.alerts).filter((a) => !a.resolvedAt && norm(a.unit) === u && a.code !== 'stopped').map((a) => a.title).filter(Boolean);
+        if (r.confirmed) { toRoll.push({ ...r.ep, confirmedAt: now, speedMph: l.speedMph, live: l, alertsOn: !isDown, openAlerts: others }); delete us.stopEpisode; } else if (!isDown && now - r.ep.at > ROLL.keepHours * 60 * MIN) delete us.stopEpisode; else us.stopEpisode = r.ep;
+      };
+      // a repaired truck gets followed even if no stop email was ever sent for it
+      for (const r of fixedTrucks) {
+        const u = norm(r.unit);
+        if (!s.units[u]) s.units[u] = { stoppedSince: now, stopStartUnknown: true };
+        if (!s.units[u].stopEpisode) s.units[u].stopEpisode = { unit: r.unit, trip: r.trip, stoppedSinceMs: r.atMs, stopStartUnknown: true, lat: null, lng: null, at: now };
+      }
+      for (const [u, l] of Object.entries(offBoard)) if (l && l.speedMph != null && s.units[u] && s.units[u].stopEpisode) followStop(u, s.units[u], l, s.units[u].stopEpisode.trip);
       // track how long each rolling truck has been stationary
       for (const item of board.trips || []) {
         const t = (item && item.trip) || item || {};
@@ -1040,12 +1058,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
           us.stoppedSince = now;
           us.stopStartUnknown = isNew;                  // already parked when we first saw it
         }
-        // an emailed stop: is the truck really moving again? (once per stop; the note is cleared before the email goes)
-        if (us.stopEpisode) {
-          const isDown = roadDown.has(norm(t.powerUnit)) || roadDown.has(String(t.tripNumber));
-          const r = trackRolling(us.stopEpisode, l, now, { down: isDown });
-          if (r.confirmed) { toRoll.push({ ...r.ep, confirmedAt: now, speedMph: l.speedMph }); delete us.stopEpisode; } else if (!isDown && now - r.ep.at > ROLL.keepHours * 60 * MIN) delete us.stopEpisode; else us.stopEpisode = r.ep;
-        }
+        if (us.stopEpisode) followStop(u, us, l, t.tripNumber);
         s.units[u] = us;
       }
       const ctx = { now, geo, roadMiles, unitState: (unit) => s.units[norm(unit)] };
@@ -1101,7 +1114,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     await notify(cfg, toPush);
     await notify(cfg, toEscalate, { escalated: true });
     for (const a of toMail) { try { if (onTeamStop) await onTeamStop(a, { item: (board.trips || []).find((it) => String(((it && it.trip) || it || {}).tripNumber || '') === String(a.trip)) || null, etas: etasNow[a.trip] || null }); } catch (e) { console.warn('[watchtower] team stop email:', e.message); } } // eslint-disable-line no-await-in-loop
-    for (const ep of toRoll) { try { if (onRolling) await onRolling(ep, { item: (board.trips || []).find((it) => String(((it && it.trip) || it || {}).tripNumber || '') === String(ep.trip)) || null, etas: etasNow[ep.trip] || null }); } catch (e) { console.warn('[watchtower] rolling email:', e.message); } } // eslint-disable-line no-await-in-loop
+    for (const ep of toRoll) { try { const cur = (board.trips || []).find((it) => norm(((it && it.trip) || it || {}).powerUnit) === norm(ep.unit)) || null; if (onRolling) await onRolling(ep, { item: cur, etas: (cur && etasNow[((cur && cur.trip) || cur).tripNumber]) || null }); } catch (e) { console.warn('[watchtower] rolling email:', e.message); } } // eslint-disable-line no-await-in-loop
     await drainGeo();
     await drainRoads();
   }

@@ -7,11 +7,14 @@
 import crypto from 'node:crypto';
 import { brokerLoad } from './watchtower.js';
 import { teamStopFacts, emailParts } from './teamstopmail.js';
+import { snapshotLoad, crewOf } from './handoffmail.js';
 
 const KEY = (site) => `taBreakdownReports:${site}`;    // alert id → { atMs, by, reason, subject, trip, unit, clearedAt }
 const DAY = 86400000;
 const LINK_DAYS = 7;
 const MAX_REASON = 500;
+const RECOVERY_DAYS = 3;          // reported fixed and never seen moving: stop waiting for it
+const HANDOFF_WATCH_DAYS = 2;     // TruckMate moved the load: how long the drivers can still be asked about the handoff
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const b64 = (x) => Buffer.from(x).toString('base64url');
 const sign = (body, secret) => crypto.createHmac('sha256', `${secret}:breakdown-report`).update(body).digest('base64url');
@@ -106,7 +109,7 @@ export function reportPage(p, token, earlier = null) {
   return page(`Report breakdown, truck ${p.u}`, `<h1>Report breakdown</h1><p class="s">Truck ${esc(p.u)} · Trip ${esc(p.t)}</p><form id="f"><label for="r">What happened?</label><textarea id="r" maxlength="${MAX_REASON}" required placeholder="For example: truck air leak, shop is 5 miles away"></textarea><label for="n">Your name</label><input id="n" maxlength="80" required autocomplete="name"><button id="b" type="submit">Report breakdown</button><div class="e" id="e" role="alert"></div></form><p class="n">This emails the team. It does not call road service or contact customers.</p><script>document.getElementById('f').addEventListener('submit',async function(ev){ev.preventDefault();var b=document.getElementById('b'),e=document.getElementById('e');b.disabled=true;e.textContent='';try{var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:document.getElementById('r').value,name:document.getElementById('n').value})});var j=await r.json();if(!r.ok)throw new Error(j.error||'Could not send.');document.querySelector('.c').innerHTML='<h1>Reported</h1><p class="s">The team has the email. Road service has not been called. You can close this page.</p>';}catch(x){e.textContent=x.message;b.disabled=false;}});</script>`);
 }
 
-export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain = async () => {}, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
+export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain = async () => {}, etasFor = async () => null, otherHolds = async () => false, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
   const site = 'florida-beauty';
   const all = async () => (await db.get(KEY(site), {})) || {};
   const link = (a) => `${baseUrl}/br/${makeToken({ a: a.id, t: a.trip, u: a.unit }, secret, now())}`;
@@ -122,7 +125,8 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
     if (!first) return { code: 409, error: 'This stop was already reported.' };
     const item = ((await getBoard(site).catch(() => ({ trips: [] }))).trips || []).find((it) => String(((it && it.trip) || {}).tripNumber) === String(p.t)) || null;
     const report = { atMs: at, by, reason: clean, trip: p.t, unit: p.u };
-    await db.update(KEY(site), (cur) => ({ ...(cur || {}), [p.a]: { ...report, subject: breakdownSubject(item, clean, { unit: p.u, trip: p.t }) } }), {});
+    const before = item ? { before: snapshotLoad(item, await etasFor(p.t).catch(() => null), at), crew: crewOf(item, at) } : {};   // what the load looked like, for a later transfer
+    await db.update(KEY(site), (cur) => ({ ...(cur || {}), [p.a]: { ...report, ...before, subject: breakdownSubject(item, clean, { unit: p.u, trip: p.t }) } }), {});
     await send(report, item);
     return { code: 200, ok: true };
   }
@@ -139,7 +143,8 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
     const unit = (item.trip || {}).powerUnit || null;
     const report = { atMs: now(), by: oneLine(by, 80) || 'Dispatch', reason: clean, trip: String(trip), unit };
     const subject = breakdownSubject(item, clean, { unit, trip });
-    await db.update(KEY(site), (cur) => ({ ...(cur || {}), [`email:${emailId}`]: { ...report, subject } }), {});
+    const before = { before: snapshotLoad(item, await etasFor(trip).catch(() => null), report.atMs), crew: crewOf(item, report.atMs) };
+    await db.update(KEY(site), (cur) => ({ ...(cur || {}), [`email:${emailId}`]: { ...report, ...before, subject } }), {});
     await send(report, item, to);
     return { ok: true, subject };
   }
@@ -151,27 +156,44 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
   const held = async () => Object.values(await all()).filter((r) => !r.clearedAt).flatMap((r) => [String(r.trip), String(r.unit || '').trim().toLowerCase().replace(/^0+(?=\d)/, '')]).filter(Boolean);
   const clear = (trip) => db.update(KEY(site), (cur) => Object.fromEntries(Object.entries(cur || {}).map(([k, r]) => [k, String(r.trip) === String(trip) && !r.clearedAt ? { ...r, clearedAt: now() } : r])), {});
 
-  // Staff say it's fixed: emails turn back on, and the chain hears it.
-  async function fixed(trip, by) {
-    const k = await keyFor(trip);
+  // the truck left this load on a transfer but was never reported repaired: it can still be reported fixed
+  const movedKey = async (trip) => { const c = await all(); return Object.keys(c).filter((k) => String(c[k].trip) === String(trip) && c[k].transferredTo && !c[k].fixedAt && now() - c[k].atMs < 7 * DAY).sort((x, y) => c[y].atMs - c[x].atMs)[0] || null; };
+
+  // Staff say it's fixed: the hold lifts and the chain hears it. A repair alone is not movement, so that part waits for the truck.
+  async function fixed(trip, by, { repair = null, provider = null, notes = null, repairTime = null } = {}) {
+    const k = (await keyFor(trip)) || (await movedKey(trip));
     if (!k) return { ok: false, error: `No open breakdown on trip ${trip}.` };
     const r = (await all())[k];
-    await patch(k, { clearedAt: now(), fixedBy: by });
-    if (r.subject) await sendChain(r, chainEmail(r, 'Breakdown fixed', [`Truck ${r.unit}, trip ${r.trip}.`, `Reported fixed by ${by}.`, 'Team truck alerts are back on for this truck.']));
-    return { ok: true };
+    const at = now();
+    await patch(k, { clearedAt: r.clearedAt || at, fixedAt: at, fixedBy: by, repair: repair ? oneLine(repair, 300) : null, provider: provider ? oneLine(provider, 120) : null, repairNotes: notes ? oneLine(notes, 300) : null, repairTime: repairTime ? oneLine(repairTime, 60) : null });
+    const held2 = await otherHolds(r).catch(() => true);
+    if (r.subject) await sendChain(r, chainEmail(r, 'Breakdown reported fixed', [`Truck ${r.unit}, trip ${r.trip}.`, `Reported fixed by ${by}.`, repair ? `Repair: ${oneLine(repair, 300)}` : null, 'Awaiting confirmed movement.', held2 ? 'This truck is still on hold from another open record, so team truck alerts stay off.' : 'Team truck alerts are back on for this truck.']));
+    return { ok: true, held: held2 };
   }
+
+  // Reported fixed and no confirmed movement yet: the watchtower follows these trucks. Old reports never had fixedAt, so nothing past is sent.
+  const fixedWaiting = async () => Object.entries(await all()).filter(([, r]) => r.fixedAt && !r.recoverySentAt && r.unit && now() - r.fixedAt < RECOVERY_DAYS * DAY).map(([key, r]) => ({ key, ...r }));
+  const recoveryFor = async (unit) => (await fixedWaiting()).filter((r) => unitKey(r.unit) === unitKey(unit)).sort((x, y) => y.fixedAt - x.fixedAt)[0] || null;
+  // One per breakdown: claimed before the email goes. A failed send gives the claim back.
+  async function claimRecovery(key) {
+    let won = false;
+    await db.update(KEY(site), (cur) => { const r = (cur || {})[key]; if (!r || r.recoverySentAt) return cur; won = true; return { ...cur, [key]: { ...r, recoverySentAt: now() } }; }, {});
+    return won;
+  }
+  const releaseRecovery = (key) => patch(key, { recoverySentAt: null });
 
   // Staff sent the rescue plan: follow it on the same chain.
   async function rescuePlan(trip, { to, by }) {
     const k = await keyFor(trip);
     if (!k) return { ok: false, error: `No open breakdown on trip ${trip}.` };
     const r = (await all())[k];
+    if (!/\d/.test(String(to || ''))) return { ok: false, error: 'Which truck number is the rescue truck?' };
     if (unitKey(r.rescue && r.rescue.to) === unitKey(to)) return { ok: true, already: true };
     await patch(k, { rescue: { to: String(to), by, at: now() } });
     return { ok: true };
   }
 
-  // after each board refresh: the load on another truck in TruckMate = the transfer is done
+  // after each board refresh: the load on another truck in TruckMate = the assignment changed. That is not the physical handoff.
   async function process(site0, board) {
     const reports = await all();
     for (const [k, r] of Object.entries(reports)) {
@@ -179,16 +201,17 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
       const item = ((board && board.trips) || []).find((it) => String(((it && it.trip) || {}).tripNumber) === String(r.trip));
       const pu = item && item.trip && item.trip.powerUnit;
       if (!pu || unitKey(pu) === unitKey(r.unit)) continue;
-      await patch(k, { clearedAt: now(), transferredTo: String(pu) }); // eslint-disable-line no-await-in-loop
-      if (r.subject) await sendChain(r, chainEmail(r, `Transfer completed: truck ${r.unit} to ${pu}`, [`TruckMate shows trip ${r.trip} on truck ${pu}.`, (item.trip.trailer ? `Trailer ${item.trip.trailer}.` : null)])).catch((e) => console.warn('[breakdown-report] transfer:', e.message)); // eslint-disable-line no-await-in-loop
+      await patch(k, { clearedAt: now(), transferredTo: String(pu), transferRecordedAt: now(), rescue: r.rescue || { to: String(pu), by: 'TruckMate', at: now() } }); // eslint-disable-line no-await-in-loop
+      if (r.subject) await sendChain(r, chainEmail(r, `Transfer recorded in TruckMate: truck ${r.unit} to ${pu}`, [`TruckMate shows trip ${r.trip} on truck ${pu}.`, (item.trip.trailer ? `Trailer ${item.trip.trailer}.` : null), 'The physical handoff is not confirmed yet. Reply here when it is done, with the time and place.'])).catch((e) => console.warn('[breakdown-report] transfer:', e.message)); // eslint-disable-line no-await-in-loop
     }
   }
 
-  // on the board: a rescue plan feeds the transfer watch
+  // on the board: a rescue plan feeds the transfer watch, and keeps feeding it after TruckMate moves the load, until someone confirms the handoff
   async function overlay(site0, trips) {
-    const open = Object.values(await all()).filter((r) => !r.clearedAt && r.rescue);
-    for (const it of trips) { const r = open.find((x) => String(x.trip) === String(((it && it.trip) || {}).tripNumber)); if (r) it._rescue = { from: r.unit, to: r.rescue.to, subject: r.subject }; }
+    const open = Object.values(await all()).filter((r) => r.rescue && (!r.clearedAt || (r.transferRecordedAt && !r.handoffAt && now() - r.transferRecordedAt < HANDOFF_WATCH_DAYS * DAY)));
+    for (const it of trips) { const r = open.find((x) => String(x.trip) === String(((it && it.trip) || {}).tripNumber)); if (r) it._rescue = { from: r.unit, to: r.rescue.to, subject: r.subject, recorded: !!r.transferRecordedAt }; }
   }
+  const handoffDone = (trip) => db.update(KEY(site), (cur) => Object.fromEntries(Object.entries(cur || {}).map(([k, r]) => [k, String(r.trip) === String(trip) && r.rescue ? { ...r, handoffAt: now() } : r])), {});
 
   if (app) {
     app.get('/br/:token', async (req, res) => {
@@ -201,5 +224,5 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
       try { const r = await submit(p, req.body || {}); return res.status(r.code).json(r); } catch (e) { console.warn('[breakdown-report]', e.message); return res.status(500).json({ error: 'Could not send. Call dispatch.' }); }
     });
   }
-  return { link, forTrip, submit, fromEmail, held, clear, fixed, rescuePlan, process, overlay };
+  return { link, forTrip, submit, fromEmail, held, clear, fixed, rescuePlan, process, overlay, handoffDone, fixedWaiting, recoveryFor, claimRecovery, releaseRecovery };
 }

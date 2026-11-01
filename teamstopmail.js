@@ -72,6 +72,9 @@ const heading = (s) => `<tr><td class="ts-pad" style="padding:22px 24px 8px;font
 const button = (href, label) => `<a href="${esc(href)}" style="display:inline-block;margin:6px 8px 0 0;padding:11px 16px;border:1px solid #0B5CC8;border-radius:6px;font-family:${FONT};font-size:15px;font-weight:bold;color:#0B5CC8;text-decoration:none;">${esc(label)}</a>`;
 const kv = (k, v) => `<tr><td width="42%" style="padding:8px 8px 8px 0;border-top:1px solid ${LINE};font-family:${FONT};font-size:14px;color:${MUTED};vertical-align:top;">${esc(k)}</td><td style="padding:8px 0;border-top:1px solid ${LINE};font-family:${FONT};font-size:15px;color:${TEXT};vertical-align:top;word-break:break-word;">${esc(v || NA)}</td></tr>`;
 
+// Red or green across the top, so the email reads good or bad at a glance. Same banner as the breakdown email.
+const statusBanner = (color, title, sub) => `<tr><td class="ts-pad" bgcolor="${color}" style="padding:20px 24px;background:${color};font-family:${FONT};font-size:32px;line-height:1.15;font-weight:bold;color:#FFFFFF;">${esc(title)}<div style="padding-top:4px;font-size:16px;font-weight:normal;color:#FFFFFF;">${esc(sub)}</div></td></tr>`;
+
 function driverCard(d, i, many) {
   const call = d.phone ? `<a href="tel:+1${digits(d.phone)}" style="color:#0B5CC8;font-weight:bold;">${esc(phoneText(d.phone))}</a>` : 'Phone not available';
   const line = (k, v) => `<div style="padding:2px 0;">${esc(k)}: <b style="color:${TEXT};">${esc(v || 'Not reported')}</b></div>`;
@@ -100,8 +103,8 @@ export function renderTeamStopEmail(f) {
 <tr><td class="ts-pad" style="padding:20px 24px 2px;font-family:${FONT};font-size:20px;font-weight:bold;color:${NAVY};">Florida Beauty</td></tr>
 <tr><td class="ts-pad" style="padding:0 24px 12px;border-bottom:1px solid ${LINE};font-family:${FONT};font-size:14px;color:${MUTED};">Dispatch notifications</td></tr>
 ${TRAINING_SLOT}
-<tr><td class="ts-pad" style="padding:18px 24px 0;font-family:${FONT};font-size:13px;font-weight:bold;letter-spacing:.5px;color:${MUTED};">EXTENDED STOP · TEAM TRUCK</td></tr>
-<tr><td class="ts-pad" style="padding:2px 24px 0;font-family:${FONT};font-size:30px;font-weight:bold;color:${NAVY};">Truck ${esc(f.unit || 'not recorded')}</td></tr>
+${statusBanner(RED, 'EXTENDED STOP', 'Team truck')}
+<tr><td class="ts-pad" style="padding:14px 24px 0;font-family:${FONT};font-size:30px;font-weight:bold;color:${NAVY};">Truck ${esc(f.unit || 'not recorded')}</td></tr>
 <tr><td class="ts-pad" style="padding:0 24px;font-family:${FONT};font-size:15px;color:${MUTED};">Trip ${esc(f.trip || 'not recorded')}${f.trailer ? ` · Trailer ${esc(f.trailer)}` : ''}</td></tr>
 ${f.sheetAttached
     ? `<tr><td class="ts-pad" style="padding:12px 24px 14px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NAVY}" style="background:${NAVY};border-radius:8px;"><tr><td style="padding:12px 16px;font-family:${FONT};font-size:17px;font-weight:bold;color:#FFFFFF;">&#128206; ${esc(f.sheetNote)}</td></tr></table></td></tr>`
@@ -134,8 +137,9 @@ ${heading('Delivery impact')}
 }
 
 // The email when that truck is really moving again: same stop, same people. Numbers come from the confirmed movement. Pure.
-export function renderRollingEmail(ep, item, { etas = null, now = Date.now(), showPhones = true, mapCid = null } = {}) {
-  const f = teamStopFacts({ unit: ep.unit, trip: ep.trip }, item, { etas, now, showPhones, mapCid });
+export function renderRollingEmail(ep, item0, { etas = null, now = Date.now(), showPhones = true, mapCid = null, note = null } = {}) {
+  const item = item0 || (ep.live ? { trip: { powerUnit: ep.unit }, _samsara: ep.live } : null);
+  const f = teamStopFacts({ unit: ep.unit, trip: (item0 && item0.trip && item0.trip.tripNumber) || ep.trip }, item, { etas, now, showPhones, mapCid });
   const GREEN = '#166534';
   const rolling = fmtMin((now - ep.movingSince) / 60000) || NA;
   const stopped = ep.stoppedSinceMs ? fmtMin((ep.movingSince - ep.stoppedSinceMs) / 60000) : null;
@@ -155,8 +159,8 @@ export function renderRollingEmail(ep, item, { etas = null, now = Date.now(), sh
 <tr><td class="ts-pad" style="padding:20px 24px 2px;font-family:${FONT};font-size:20px;font-weight:bold;color:${NAVY};">Florida Beauty</td></tr>
 <tr><td class="ts-pad" style="padding:0 24px 12px;border-bottom:1px solid ${LINE};font-family:${FONT};font-size:14px;color:${MUTED};">Dispatch notifications</td></tr>
 ${TRAINING_SLOT}
-<tr><td class="ts-pad" style="padding:18px 24px 0;font-family:${FONT};font-size:13px;font-weight:bold;letter-spacing:.5px;color:${MUTED};">MOVEMENT RESUMED</td></tr>
-<tr><td class="ts-pad" style="padding:2px 24px 0;font-family:${FONT};font-size:30px;font-weight:bold;color:${NAVY};">Truck ${esc(f.unit || 'not recorded')}</td></tr>
+${statusBanner(GREEN, 'MOVEMENT RESUMED', 'Truck rolling again')}
+<tr><td class="ts-pad" style="padding:14px 24px 0;font-family:${FONT};font-size:30px;font-weight:bold;color:${NAVY};">Truck ${esc(f.unit || 'not recorded')}</td></tr>
 <tr><td class="ts-pad" style="padding:0 24px 14px;font-family:${FONT};font-size:15px;color:${MUTED};">Trip ${esc(f.trip || 'not recorded')}${f.trailer ? ` · Trailer ${esc(f.trailer)}` : ''}</td></tr>
 ${f.mapCid ? '' : `<tr><td class="ts-pad" style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F0FDF4" style="background:#F0FDF4;border-radius:8px;"><tr>
 <td width="56" valign="top" style="padding:16px 0 16px 16px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td width="44" height="44" align="center" valign="middle" style="width:44px;height:44px;border:3px solid ${GREEN};border-radius:24px;font-family:${FONT};font-size:26px;line-height:26px;font-weight:bold;color:${GREEN};">&#9719;</td></tr></table></td>
@@ -173,14 +177,14 @@ ${heading('Updated driver status')}
 <tr><td class="ts-pad" style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F0FDF4" style="background:#F0FDF4;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${GREEN};">Movement resumed</b><br>${esc(confirm)}</td></tr></table></td></tr>
 ${heading('Delivery update')}
 <tr><td class="ts-pad" style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${kv('Next stop', f.next)}${kv('Appointment', appt)}${kv('Updated ETA (estimated)', f.eta)}${kv('Distance remaining', f.miles != null ? `${f.miles.toLocaleString('en-US')} mi` : null)}${kv('Projected delay', f.risk)}</table></td></tr>
-<tr><td class="ts-pad" style="padding:8px 24px 0;font-family:${FONT};font-size:13px;color:${MUTED};">${esc(caveat)}</td></tr>
+<tr><td class="ts-pad" style="padding:8px 24px 0;font-family:${FONT};font-size:13px;color:${MUTED};">${note ? `<b style="color:#92400E;">${esc(note)}</b><br>` : ''}${esc(caveat)}</td></tr>
 <tr><td class="ts-pad" style="padding:18px 24px 20px;font-family:${FONT};font-size:13px;line-height:1.5;color:${MUTED};"><b style="color:${NAVY};">Jarvis · AI Dispatcher</b><br>Florida Beauty</td></tr>
 </table></td></tr></table></body></html>`;
   const text = ['FLORIDA BEAUTY — Dispatch notifications', '', 'MOVEMENT RESUMED', `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, '',
     `${rolling} ROLLING`, `Latest reported speed: ${speed}`, `Moving since: ${movedAt}`, `Updated: ${f.gpsAt || NA}`, 'Snapshot at email generation—not a live timer.', `Previous stop: ${prev}`, '',
     'UPDATED LOCATION', f.location || 'Location not reported', gpsLine, ...(mapUrl ? [`Open map: ${mapUrl}`] : []), `View live trip: ${liveUrl(f.trip)}`, '',
     'UPDATED DRIVER STATUS', ...(f.drivers.length ? f.drivers.flatMap((d, i) => [`${many ? `Driver ${i + 1}: ` : ''}${d.name}${d.atWheel ? ' (at the wheel)' : ''}`, `  Duty status: ${d.duty || 'Not reported'}`, `  Drive left: ${d.driveLeft || 'Not reported'}  Shift left: ${d.shiftLeft || 'Not reported'}  Cycle left: ${d.cycleLeft || 'Not reported'}`, `  ${d.phone ? phoneText(d.phone) : 'Phone not available'}`]) : ['No driver reported.']), '',
-    'MOVEMENT RESUMED', confirm, '', 'DELIVERY UPDATE', `Next stop: ${f.next || NA}`, `Appointment: ${appt || NA}`, `Updated ETA (estimated): ${f.eta || NA}`, `Distance remaining: ${f.miles != null ? `${f.miles} mi` : NA}`, `Projected delay: ${f.risk || NA}`, caveat, '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n');
+    'MOVEMENT RESUMED', confirm, '', 'DELIVERY UPDATE', `Next stop: ${f.next || NA}`, `Appointment: ${appt || NA}`, `Updated ETA (estimated): ${f.eta || NA}`, `Distance remaining: ${f.miles != null ? `${f.miles} mi` : NA}`, `Projected delay: ${f.risk || NA}`, ...(note ? [note] : []), caveat, '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n');
   return { subject, html, text };
 }
 
