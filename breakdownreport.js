@@ -17,17 +17,17 @@ const RECOVERY_DAYS = 3;          // reported fixed and never seen moving: stop 
 const HANDOFF_WATCH_DAYS = 2;     // TruckMate moved the load: how long the drivers can still be asked about the handoff
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const b64 = (x) => Buffer.from(x).toString('base64url');
-const sign = (body, secret) => crypto.createHmac('sha256', `${secret}:breakdown-report`).update(body).digest('base64url');
+const sign = (body, secret, purpose) => crypto.createHmac('sha256', `${secret}:${purpose}`).update(body).digest('base64url');
 
 // A signed link that can only report this one stop, and only for a week. Pure.
-export function makeToken(p, secret, now = Date.now()) {
+export function makeToken(p, secret, now = Date.now(), purpose = 'breakdown-report') {
   const body = b64(JSON.stringify({ ...p, e: now + LINK_DAYS * DAY }));
-  return `${body}.${sign(body, secret)}`;
+  return `${body}.${sign(body, secret, purpose)}`;
 }
-export function readToken(token, secret, now = Date.now()) {
+export function readToken(token, secret, now = Date.now(), purpose = 'breakdown-report') {
   const [body, sig] = String(token || '').split('.');
   if (!body || !sig) return null;
-  const want = Buffer.from(sign(body, secret)); const got = Buffer.from(sig);
+  const want = Buffer.from(sign(body, secret, purpose)); const got = Buffer.from(sig);
   if (want.length !== got.length || !crypto.timingSafeEqual(want, got)) return null;
   try { const p = JSON.parse(Buffer.from(body, 'base64url').toString()); return p.e > now ? p : null; } catch { return null; }
 }

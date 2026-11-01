@@ -513,10 +513,12 @@ const RULES = [
   // one calm "get a new appointment" alert instead of "will miss by 29h".
   function apptPassed(f, ctx) {
     if (notStarted(f.status, f, ctx.now) && !isRolling(f.status)) return null;
+    // same rule as lateRisk: a broker load only counts against a time a person confirmed on a followed load
+    if (f.broker && !(f.brokerFollow && f.brokerFollow.confirmed)) return null;
     const route = routeEtas(f, ctx);
     const atStop = atConsigneeKey(f, route);
     const behind = new Set(((route && route.passed) || []).map((st) => st.key));   // truck already drove past it
-    const open = f.stops.filter((st) => !st.delivered && !behind.has(st.key) && st.apptMs != null && st.key !== atStop && st.apptMs < ctx.now - 30 * MIN && st.apptMs > ctx.now - 48 * 60 * MIN);
+    const open = f.stops.filter((st) => !st.delivered && !behind.has(st.key) && st.apptMs != null && (!f.broker || st.apptFrom === 'committed') && st.key !== atStop && st.apptMs < ctx.now - 30 * MIN && st.apptMs > ctx.now - 48 * 60 * MIN);
     if (!open.length) return null;
     const st = open.sort((a, b) => a.apptMs - b.apptMs)[0];
     const r = route ? route.find((x) => x.stop.key === st.key) : null;

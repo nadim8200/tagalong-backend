@@ -73,7 +73,7 @@ import { initSynergize } from './synergize.js';
 import { initArtisClients } from './artisclients.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initDispatchLog } from './dispatchlog.js';
-import { initBrokerFollow, askEmail } from './brokerfollow.js';
+import { initBrokerFollow, askEmail, requestStops, confirmedReply } from './brokerfollow.js';
 import { initBreakdownReport, renderBreakdownEmail, chainEmail, breakdownSubject } from './breakdownreport.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
@@ -1082,7 +1082,7 @@ roadCalls = initRoadCalls(app, { requireAuth: requireDispatch, db, docs, help,
 const macroPoint = initMacroPoint(app, { requireAdmin: requireCompanyAdmin, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 missingCases = initMissingCases({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('missing_boxes_case'), getBoard: (site) => truckmate.buildBoard(site) });
 const missingBoxes = initMissingBoxes({ db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('artis_missing_call') });
-brokerFollow = initBrokerFollow(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), commitments, sendMail: (m, o = {}) => sendMail(m, { env: process.env, ...o }), listEmails: () => alertRecipients.resolve('broker_late') });
+brokerFollow = initBrokerFollow(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), commitments, sendMail: (m, o = {}) => sendMail(m, { env: process.env, ...o }), listEmails: () => alertRecipients.resolve('broker_late'), secret: JWT_SECRET, replyInThread: (...a) => inbox.replyInThread(...a) });
 truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => commitments.overlay(...a), (...a) => followProxy.overlay(...a), (...a) => breakdownReport.overlay(...a), (...a) => truckBuilder.overlay(...a), (...a) => artisWeb.overlay(...a), (...a) => artisReports.overlay(...a), (...a) => synergize.overlay(...a), (...a) => artis.overlay(...a), (...a) => stopTasks.overlay(...a), (...a) => macroPoint.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => { etaReport.onFinished(site, rec, reason).catch((e) => console.warn('[eta-report]', e.message)); return rundowns.onFinished(site, rec, reason); } });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
@@ -1155,6 +1155,25 @@ const sendBreakdown = async (report, item, to) => {
 const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), etasFor: async (trip) => (await allEtas())[trip] || null, otherHolds: async (r) => { const it = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((x) => String(((x && x.trip) || {}).tripNumber) === String(r.trip)); const calls = ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000 && (String(rc.trip) === String(r.trip) || String(rc.truck) === String(r.unit))); return !!(it && ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown'))) || calls.length > 0; }, sendChain: async (report, m) => { const to = await alertRecipients.resolve('breakdown_report'); if (to.length) await sendMail({ to, ...m }, { env: process.env, direct: staffOnly(to) }); }, send: async (report, item, extra = []) => { const to = [...new Set([...extra.map((x) => String(x).toLowerCase()).filter((x) => /@floridabeauty\.us$/.test(x)), ...await alertRecipients.resolve('breakdown_report')])]; if (to.length) await sendBreakdown(report, item, to); } });
 // One of each alert email, to Nadim only, built from a real load with made-up stop details. Marked [EXAMPLE]. No alert, no road call,
 // nothing saved, and nobody else: each goes straight to that one address.
+// The delivery confirmation request and the reply it leads to, to Nadim only, from a real load. The button opens the real page; Submit there saves nothing.
+app.post('/admin/confirm-example', requireCompanyAdmin, async (req, res) => {
+  const me = 'ntellez@floridabeauty.us';
+  try {
+    const items = (await truckmate.buildBoard('florida-beauty')).trips || [];
+    const open = (it) => requestStops(it, {}).length;
+    const want = String((req.body || {}).trip || '');
+    const item = want ? items.find((it) => String(((it && it.trip) || {}).tripNumber) === want) : items.filter((it) => open(it) >= 2).find((it) => it._ratecon) || items.find((it) => open(it) >= 2) || items.find((it) => open(it) >= 1);
+    if (!item) return res.status(404).json({ error: 'No load to use.' });
+    const trip = String(item.trip.tripNumber);
+    const stops = requestStops(item, {});
+    const day = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
+    const ask = askEmail(trip, item, { confirmUrl: brokerFollow.exampleLink(trip, 'Example') });
+    const reply = confirmedReply(trip, item, stops.map((s, i) => ({ ...s, local: `${day}T${String(8 + i * 2).padStart(2, '0')}:00` })), 'Example (not a real confirmation)');
+    await sendMail({ ...ask, to: [me], subject: `[EXAMPLE] ${ask.subject}` }, { env: process.env, direct: true });
+    await sendMail({ ...reply, to: [me], subject: `[EXAMPLE] Re: ${ask.subject}` }, { env: process.env, direct: true });
+    return res.json({ ok: true, trip, truck: item.trip.powerUnit, stops: stops.length, sent: ['request', 'confirmed reply'] });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
 app.post('/admin/alert-examples', requireCompanyAdmin, async (req, res) => {
   const me = 'ntellez@floridabeauty.us';
   try {
