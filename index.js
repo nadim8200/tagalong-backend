@@ -1136,12 +1136,14 @@ const sheetFor = async (item, trip) => {
   if (ids.length && sheet.attachments.length < ids.length) console.warn(`[truck-email] trip ${trip}: ${sheet.attachments.length} of ${ids.length} trip sheet pages attached`);
   return sheet;
 };
+// the breakdown chain is our own people only, so it goes for real in training mode without opening that group's other mail
+const staffOnly = (to) => to.length > 0 && to.every((e) => /@floridabeauty\.us$/i.test(e));
 const sendBreakdown = async (report, item, to) => {
   const attachments = await truckMap((item && item._samsara) || {}, 'red');
   const sheet = await sheetFor(item, report.trip);
   const etas = (((await db.get('taWatch:florida-beauty', {})) || {}).etas || {})[report.trip] || null;
   const m = renderBreakdownEmail({ item, report, etas, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached' });
-  await sendMail({ to, ...m, attachments: [...attachments, ...sheet.attachments] }, { env: process.env });
+  await sendMail({ to, ...m, attachments: [...attachments, ...sheet.attachments] }, { env: process.env, direct: staffOnly(to) });
   return m.subject;
 };
 const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), send: async (report, item) => { const to = await alertRecipients.resolve('breakdown_report'); if (to.length) await sendBreakdown(report, item, to); } });
@@ -1160,12 +1162,12 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
   // trucks and trips reported down, or with a road call still open in the last 5 days: a wrecker moves them, they aren't rolling
   openRoadCalls: async () => [...await breakdownReport.held(), ...((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000).flatMap((rc) => [rc.trip, String(rc.truck || '').trim().toLowerCase().replace(/^0+(?=\d)/, '')].filter(Boolean).map(String))],
   onRolling: async (ep, { item, etas }) => {
-    const to = await alertRecipients.resolve('team_stopped');
+    const chain = await breakdownReport.forTrip(ep.trip).catch(() => null);   // a reported breakdown: stay on that email chain, with the same people
+    const to = await alertRecipients.resolve(chain ? 'breakdown_report' : 'team_stopped');
     if (!to.length) return;
     const attachments = await truckMap((item && item._samsara) || {}, 'green');
     const m = renderRollingEmail(ep, item, { etas, now: ep.confirmedAt, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null });
-    const chain = await breakdownReport.forTrip(ep.trip).catch(() => null);   // a reported breakdown: stay on that email chain
-    await sendMail({ to, ...m, ...(chain && chain.subject ? { subject: `Re: ${chain.subject}` } : {}), attachments }, { env: process.env });
+    await sendMail({ to, ...m, ...(chain && chain.subject ? { subject: `Re: ${chain.subject}` } : {}), attachments }, { env: process.env, direct: !!chain && staffOnly(to) });
   },
   onTeamStop: async (a, { item, etas }) => {
     const to = await alertRecipients.resolve('team_stopped');
