@@ -8,6 +8,7 @@
 import { haversineMi } from './watchtower.js';
 import { transferTo } from './manifest.js';
 import { samsaraTokenFrom, getLiveIndex } from './samsara.js';
+import { renderTransferStatus } from './handoffmail.js';
 
 const MIN = 60000;
 const SITE = 'florida-beauty';
@@ -16,6 +17,7 @@ const tripNo = (it) => String(tripOf(it).tripNumber || '');
 const norm = (x) => String(x == null ? '' : x).trim().toLowerCase().replace(/^0+(?=\d)/, '');
 const unitKey = (x) => String(x || '').replace(/[^0-9A-Z]/gi, '').replace(/^0+/, '').toUpperCase();
 export const TOGETHER_MI = 0.5;
+const ROAD_FACTOR = 1.2;
 export const APART_MI = 1.5;            // together → apart again only past this (GPS jitter)
 export const ASK_AFTER_MIN = 15;        // together this long → text the drivers
 export const CALL_AFTER_MIN = 15;       // text not answered this long → call
@@ -26,7 +28,7 @@ const DONE = /^(delvd|deliv|del$|cmplt|complete|canc|void)/i;
 export function transferPlan(it) {
   if (DONE.test(String(tripOf(it).status || ''))) return null;
   const r = it && it._rescue;   // a rescue plan from a breakdown
-  if (r && r.to && unitKey(r.to) !== unitKey(r.from)) return { trip: tripNo(it), from: String(r.from), to: String(r.to), trailer: String(tripOf(it).trailer || '') || null, rescue: { subject: r.subject, recorded: !!r.recorded } };
+  if (r && r.to && unitKey(r.to) !== unitKey(r.from)) return { trip: tripNo(it), from: String(r.from), to: String(r.to), trailer: String(tripOf(it).trailer || '') || null, rescue: { subject: r.subject }, ...(r.place ? { place: String(r.place) } : {}) };
   const m = (it && it._manifest) || null;
   if (!m || !m.truck) return null;
   if (DONE.test(String(tripOf(it).status || ''))) return null;
@@ -83,31 +85,34 @@ export function step(st0, s, now) {
   return { state: st, actions };
 }
 
-const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const when = (ms) => new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: '2-digit' });
-const roll = (r) => (r == null ? 'no GPS' : r ? 'rolling' : 'stopped');
-// The email for one report. Pure.
-export function transferEmail(kind, plan, a, b, s, { outcome = null, now = Date.now() } = {}) {
-  const head = {
+// Where the handoff happens: the place staff named, or on a rescue the spot the broken truck is parked at, labeled as assumed. Never a guess beyond that. Pure.
+export function transferSpot(plan, a, b, geo = null, roadMiles = null) {
+  // road miles: Google's when it has them, else the same straight line × 1.2 the ETAs fall back on
+  const miles = (p, q) => {
+    if (!p || p.lat == null || !q || q.lat == null) return null;
+    const straight = haversineMi(p.lat, p.lng, q.lat, q.lng);
+    return Math.round((straight < 0.5 ? straight : (roadMiles && roadMiles(p, q)) || straight * ROAD_FACTOR) * 10) / 10;
+  };
+  const done = (x) => ({ ...x, aMi: miles(a, x), bMi: miles(b, x) });
+  if (plan.place) { const g = geo ? geo(`P:${plan.place}`) : null; return done({ label: plan.place, lat: (g && g.lat) ?? null, lng: (g && g.lng) ?? null }); }
+  if (plan.rescue && a && a.lat != null && a.speedMph != null && a.speedMph <= 3) return done({ label: `Assumed: where truck ${plan.from} is stopped${a.location ? ` (${a.location})` : ''}. No place was given.`, lat: a.lat, lng: a.lng });
+  return null;
+}
+
+// The email for one report: same subjects as always, the look lives in handoffmail. Pure.
+export function transferEmail(kind, plan, a, b, s, { outcome = null, now = Date.now(), spot = undefined, mapCid = null } = {}) {
+  const status = outcome && outcome.status;
+  const subject = {
     start: `Transfer planned — trip ${plan.trip}: truck ${plan.from} → ${plan.to}`,
     update: `Transfer update — trip ${plan.trip}: trucks ${s.distanceMi != null ? `${s.distanceMi} mi apart` : 'not both on GPS'}`,
     together: `Trucks together — trip ${plan.trip}: ${plan.from} and ${plan.to}`,
-    outcome: `Transfer ${outcome && outcome.status === 'unclear' ? 'not confirmed' : outcome && outcome.status === 'done' ? 'done' : 'not done yet'} — trip ${plan.trip}: ${plan.from} → ${plan.to}`,
-    recorded: `Transfer recorded in TruckMate — trip ${plan.trip}: ${plan.from} → ${plan.to}`,
+    outcome: `Transfer ${status === 'unclear' ? 'not confirmed' : status === 'done' ? 'done' : 'not done yet'} — trip ${plan.trip}: ${plan.from} → ${plan.to}`,
   }[kind];
-  const row = (label, unit, p, r) => `<tr><td><b>${label} ${esc(unit)}</b></td><td>${esc((p && p.location) || '—')}</td><td>${roll(r)}${p && p.speedMph != null ? ` (${p.speedMph} mph)` : ''}</td><td>${p && p.at ? when(Date.parse(p.at)) : '—'}</td></tr>`;
-  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5">
-<p><b>${esc(head)}</b>${plan.trailer ? ` · trailer ${esc(plan.trailer)}` : ''}</p>
-${outcome ? `<p>${esc(outcome.summary || '')}${outcome.source ? ` <i>(${esc(outcome.source)})</i>` : ''}</p>` : ''}
-<table border="1" cellpadding="6" cellspacing="0"><tr><th>Truck</th><th>Where</th><th>Moving</th><th>GPS time</th></tr>
-${row('Leaving truck', plan.from, a, s.aRolling)}${row('Transfer truck', plan.to, b, s.bRolling)}</table>
-<p>Distance between them: <b>${s.distanceMi != null ? `${s.distanceMi} mi` : 'unknown (one truck has no GPS)'}</b>${s.together ? ' — together' : ''} · as of ${when(now)} ET</p>
-${kind === 'together' ? `<p>If they're still together in ${ASK_AFTER_MIN} minutes, Jarvis will text the driver to confirm the transfer (and call if there's no answer).</p>` : ''}
-</div>`;
-  return { subject: head, html, text: `${head}${s.distanceMi != null ? ` · ${s.distanceMi} mi apart` : ''} · ${plan.from}: ${roll(s.aRolling)} · ${plan.to}: ${roll(s.bRolling)}` };
+  const look = kind === 'outcome' ? (status === 'unclear' ? 'unclear' : status === 'done' ? 'done' : 'no') : kind;
+  return renderTransferStatus(look, plan, a, b, s, { outcome, now, askAfter: ASK_AFTER_MIN, subject, spot, mapCid });
 }
 
-export function initTransferWatch({ db, env = process.env, sendMail, recipients, rescueRecipients = null, textDriver = null, voice = null, comms = null, fetchFn = globalThis.fetch, now = () => Date.now(), livePos = null, onConfirmed = null, isConfirmed = null, confirms = (ans) => ans.status === 'done' }) {
+export function initTransferWatch({ db, env = process.env, sendMail, recipients, rescueRecipients = null, textDriver = null, voice = null, comms = null, fetchFn = globalThis.fetch, now = () => Date.now(), livePos = null, onConfirmed = null, isConfirmed = null, confirms = (ans) => ans.status === 'done', renderMap = null }) {
   const enabled = !!(db && db.enabled);
   const key = `taTransferWatch:${SITE}`;
   // live position of any truck by unit number (Samsara)
@@ -127,8 +132,13 @@ export function initTransferWatch({ db, env = process.env, sendMail, recipients,
     const rescue = plan.rescue && rescueRecipients;
     const to = await (rescue ? rescueRecipients() : recipients());
     if (!to.length) return false;
-    const m = transferEmail(kind, plan, a, b, s, { ...extra, now: now() });
-    await sendMail({ to, ...m, ...(rescue && plan.rescue.subject ? { subject: `Re: ${plan.rescue.subject}` } : {}) }, { rescue: !!rescue });
+    // planned and update: a map of both trucks and how far each is from the transfer location
+    const mapped = kind === 'start' || kind === 'update';
+    const spot = mapped ? transferSpot(plan, a, b, extra && extra.geo, extra && extra.roadMiles) : undefined;
+    const pin = (unit, p, mi) => ({ lat: p && p.lat, lng: p && p.lng, label: `Truck ${unit}`, miles: mi });
+    const jpg = mapped && renderMap ? await renderMap({ trucks: [pin(plan.from, a, spot && spot.aMi), pin(plan.to, b, spot && spot.bMi)], spot }).catch(() => null) : null;
+    const m = transferEmail(kind, plan, a, b, s, { ...extra, now: now(), spot, mapCid: jpg ? 'transfermap' : null });
+    await sendMail({ to, ...m, ...(jpg ? { attachments: [{ name: 'transfer-map.jpg', contentType: 'image/jpeg', bytes: jpg, cid: 'transfermap' }] } : {}), ...(rescue && plan.rescue.subject ? { subject: `Re: ${plan.rescue.subject}` } : {}) }, { rescue: !!rescue });
     return true;
   }
   // the drivers' answer since we asked (texts back, or what they said on the call)
@@ -140,7 +150,8 @@ export function initTransferWatch({ db, env = process.env, sendMail, recipients,
     return null;
   }
 
-  async function process(site, board) {
+  const placeWait = new Map();   // a named place takes a cycle or two to find on the map: hold the first email briefly, not forever
+  async function process(site, board, { geo = null, roadMiles = null } = {}) {
     if (!enabled || !board) return [];
     const plans = ((board.trips) || []).map(transferPlan).filter(Boolean);
     if (!plans.length) return [];
@@ -155,23 +166,21 @@ export function initTransferWatch({ db, env = process.env, sendMail, recipients,
       // someone already confirmed it (staff by email): stop asking
       if (isConfirmed && await isConfirmed(plan)) { all[plan.trip] = { ...(prev || {}), from: plan.from, to: plan.to, outcome: { status: 'done', source: 'confirmed' } }; done.push({ trip: plan.trip, actions: [], distanceMi: s.distanceMi }); continue; } // eslint-disable-line no-await-in-loop
       // TruckMate already shows it done → end the watch (a quiet note if we never reported on it)
-      // A rescue keeps going until someone confirms the handoff; so does a watch already waiting on the drivers' answer
-      const asked = prev && prev.askedAt && !prev.outcome;
-      const tmDone = plan.rescue || asked ? null : doneInTruckMate((board.trips || []).find((x) => tripNo(x) === plan.trip), plan);
+      const tmDone = doneInTruckMate((board.trips || []).find((x) => tripNo(x) === plan.trip), plan);
       if (tmDone) {
         const outcome = { status: 'done', source: 'TruckMate', summary: `TruckMate shows trailer ${plan.trailer || ''} on truck ${plan.to} and rolling since ${new Date(tmDone).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: '2-digit' })} ET.`, at: tmDone };
-        if (prev && prev.startedAt) await mail('recorded', plan, a, b, s, { outcome }).catch(() => {}); // eslint-disable-line no-await-in-loop
+        if (prev && prev.startedAt && onConfirmed) await onConfirmed(plan, outcome, { a, b, s }).catch((e) => console.warn('[transfer]', plan.trip, e.message)); // eslint-disable-line no-await-in-loop
         all[plan.trip] = { ...(prev || {}), from: plan.from, to: plan.to, outcome };
         done.push({ trip: plan.trip, actions: prev && prev.startedAt ? ['report_outcome'] : [], distanceMi: s.distanceMi });
         continue;
       }
+      if (!prev && plan.place && geo && geo(`P:${plan.place}`) === undefined && (placeWait.get(plan.trip) || 0) < 3) { placeWait.set(plan.trip, (placeWait.get(plan.trip) || 0) + 1); continue; }
       const { state, actions } = step(prev, s, now());
       state.from = plan.from; state.to = plan.to; state.last = { distanceMi: s.distanceMi, aRolling: s.aRolling, bRolling: s.bRolling, at: new Date(now()).toISOString() };
       for (const act of actions) {
         try {
-          const quiet = plan.rescue && plan.rescue.recorded;   // TruckMate already moved it; the chain knows
-          if (act === 'report_start' && !quiet) await mail('start', plan, a, b, s); // eslint-disable-line no-await-in-loop
-          if (act === 'report_update' && !quiet) await mail('update', plan, a, b, s); // eslint-disable-line no-await-in-loop
+          if (act === 'report_start') await mail('start', plan, a, b, s, { geo, roadMiles }); // eslint-disable-line no-await-in-loop
+          if (act === 'report_update') await mail('update', plan, a, b, s, { geo, roadMiles }); // eslint-disable-line no-await-in-loop
           if (act === 'report_together') await mail('together', plan, a, b, s); // eslint-disable-line no-await-in-loop
           if (act === 'text') {
             const msg = `Florida Beauty dispatch: trucks ${plan.from} and ${plan.to}${plan.trailer ? `, trailer ${plan.trailer}` : ''} (trip ${plan.trip}) — is the transfer done? Reply YES when the trailer is hooked to ${plan.to}, or NO.`;

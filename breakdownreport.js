@@ -7,14 +7,13 @@
 import crypto from 'node:crypto';
 import { brokerLoad } from './watchtower.js';
 import { teamStopFacts, emailParts } from './teamstopmail.js';
-import { snapshotLoad, crewOf } from './handoffmail.js';
+import { snapshotLoad, crewOf, renderFixedReportedEmail } from './handoffmail.js';
 
 const KEY = (site) => `taBreakdownReports:${site}`;    // alert id → { atMs, by, reason, subject, trip, unit, clearedAt }
 const DAY = 86400000;
 const LINK_DAYS = 7;
 const MAX_REASON = 500;
 const RECOVERY_DAYS = 3;          // reported fixed and never seen moving: stop waiting for it
-const HANDOFF_WATCH_DAYS = 2;     // TruckMate moved the load: how long the drivers can still be asked about the handoff
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const b64 = (x) => Buffer.from(x).toString('base64url');
 const sign = (body, secret, purpose) => crypto.createHmac('sha256', `${secret}:${purpose}`).update(body).digest('base64url');
@@ -92,12 +91,6 @@ ${heading('Delivery impact')}
   return { subject, html, text };
 }
 
-// A short follow-up on the breakdown chain. Pure.
-export function chainEmail(report, title, lines) {
-  const { FONT, NAVY, TEXT, MUTED, TRAINING_SLOT } = emailParts;
-  const body = lines.filter(Boolean);
-  return { subject: `Re: ${report.subject}`, text: [title, ...body, '', 'Jarvis · AI Dispatcher · Florida Beauty'].join('\n'), html: `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="max-width:640px;background:#FFFFFF;">${TRAINING_SLOT}<tr><td style="padding:18px 24px 6px;font-family:${FONT};font-size:22px;font-weight:bold;color:${NAVY};">${esc(title)}</td></tr>${body.map((l) => `<tr><td style="padding:2px 24px;font-family:${FONT};font-size:16px;line-height:1.5;color:${TEXT};word-break:break-word;">${esc(l)}</td></tr>`).join('')}<tr><td style="padding:16px 24px 20px;font-family:${FONT};font-size:13px;color:${MUTED};">Jarvis · AI Dispatcher · Florida Beauty</td></tr></table>` };
-}
 const unitKey = (x) => String(x || '').replace(/[^0-9A-Z]/gi, '').replace(/^0+/, '').toUpperCase();
 
 const page = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)}</title><style>body{margin:0;background:#F1F5F9;font-family:Arial,Helvetica,sans-serif;color:#1F2937}main{max-width:520px;margin:0 auto;padding:16px}.c{background:#fff;border-radius:10px;padding:20px}h1{margin:0 0 2px;font-size:24px;color:#13325B}.s{margin:0 0 16px;color:#5B6778}label{display:block;font-weight:bold;margin:14px 0 6px;color:#13325B}textarea,input{width:100%;box-sizing:border-box;font:inherit;font-size:16px;padding:12px;border:1px solid #B8C3D3;border-radius:8px}textarea{min-height:120px}button{width:100%;margin-top:16px;min-height:48px;font:inherit;font-weight:bold;font-size:16px;color:#fff;background:#C62828;border:0;border-radius:8px}button:disabled{opacity:.6}.n{font-size:14px;color:#5B6778;margin-top:12px}.e{color:#C62828;margin-top:10px}</style></head><body><main><div class="c">${body}</div></main></body></html>`;
@@ -109,7 +102,7 @@ export function reportPage(p, token, earlier = null) {
   return page(`Report breakdown, truck ${p.u}`, `<h1>Report breakdown</h1><p class="s">Truck ${esc(p.u)} · Trip ${esc(p.t)}</p><form id="f"><label for="r">What happened?</label><textarea id="r" maxlength="${MAX_REASON}" required placeholder="For example: truck air leak, shop is 5 miles away"></textarea><label for="n">Your name</label><input id="n" maxlength="80" required autocomplete="name"><button id="b" type="submit">Report breakdown</button><div class="e" id="e" role="alert"></div></form><p class="n">This emails the team. It does not call road service or contact customers.</p><script>document.getElementById('f').addEventListener('submit',async function(ev){ev.preventDefault();var b=document.getElementById('b'),e=document.getElementById('e');b.disabled=true;e.textContent='';try{var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:document.getElementById('r').value,name:document.getElementById('n').value})});var j=await r.json();if(!r.ok)throw new Error(j.error||'Could not send.');document.querySelector('.c').innerHTML='<h1>Reported</h1><p class="s">The team has the email. Road service has not been called. You can close this page.</p>';}catch(x){e.textContent=x.message;b.disabled=false;}});</script>`);
 }
 
-export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain = async () => {}, etasFor = async () => null, otherHolds = async () => false, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
+export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain = async () => {}, onTruckMateMove = async () => {}, fixedDetails = async () => ({}), etasFor = async () => null, otherHolds = async () => false, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
   const site = 'florida-beauty';
   const all = async () => (await db.get(KEY(site), {})) || {};
   const link = (a) => `${baseUrl}/br/${makeToken({ a: a.id, t: a.trip, u: a.unit }, secret, now())}`;
@@ -167,7 +160,12 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
     const at = now();
     await patch(k, { clearedAt: r.clearedAt || at, fixedAt: at, fixedBy: by, repair: repair ? oneLine(repair, 300) : null, provider: provider ? oneLine(provider, 120) : null, repairNotes: notes ? oneLine(notes, 300) : null, repairTime: repairTime ? oneLine(repairTime, 60) : null });
     const held2 = await otherHolds(r).catch(() => true);
-    if (r.subject) await sendChain(r, chainEmail(r, 'Breakdown reported fixed', [`Truck ${r.unit}, trip ${r.trip}.`, `Reported fixed by ${by}.`, repair ? `Repair: ${oneLine(repair, 300)}` : null, 'Awaiting confirmed movement.', held2 ? 'This truck is still on hold from another open record, so team truck alerts stay off.' : 'Team truck alerts are back on for this truck.']));
+    if (r.subject) {
+      const saved = (await all())[k];
+      const item = ((await getBoard(site).catch(() => ({ trips: [] }))).trips || []).find((it) => unitKey((it && it.trip && it.trip.powerUnit)) === unitKey(r.unit)) || null;
+      const more = await fixedDetails(saved, item).catch(() => ({}));   // what only the app knows: etas, off-board GPS, the map, open alerts
+      await sendChain(r, { ...renderFixedReportedEmail({ report: saved, item, now: at, held: held2, subject: `Re: ${r.subject}`, ...more, attachments: undefined }), ...(more.attachments ? { attachments: more.attachments } : {}) });
+    }
     return { ok: true, held: held2 };
   }
 
@@ -183,17 +181,18 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
   const releaseRecovery = (key) => patch(key, { recoverySentAt: null });
 
   // Staff sent the rescue plan: follow it on the same chain.
-  async function rescuePlan(trip, { to, by }) {
+  async function rescuePlan(trip, { to, by, place = null }) {
     const k = await keyFor(trip);
     if (!k) return { ok: false, error: `No open breakdown on trip ${trip}.` };
     const r = (await all())[k];
     if (!/\d/.test(String(to || ''))) return { ok: false, error: 'Which truck number is the rescue truck?' };
-    if (unitKey(r.rescue && r.rescue.to) === unitKey(to)) return { ok: true, already: true };
-    await patch(k, { rescue: { to: String(to), by, at: now() } });
+    const spot = place ? oneLine(place, 160) : null;
+    if (unitKey(r.rescue && r.rescue.to) === unitKey(to)) { if (spot) await patch(k, { rescue: { ...r.rescue, place: spot } }); return { ok: true, already: !spot }; }
+    await patch(k, { rescue: { to: String(to), by, at: now(), place: spot } });
     return { ok: true };
   }
 
-  // after each board refresh: the load on another truck in TruckMate = the assignment changed. That is not the physical handoff.
+  // after each board refresh: the load on another truck in TruckMate = the transfer is done. "Transfer completed" goes out from the handoff record.
   async function process(site0, board) {
     const reports = await all();
     for (const [k, r] of Object.entries(reports)) {
@@ -201,17 +200,16 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
       const item = ((board && board.trips) || []).find((it) => String(((it && it.trip) || {}).tripNumber) === String(r.trip));
       const pu = item && item.trip && item.trip.powerUnit;
       if (!pu || unitKey(pu) === unitKey(r.unit)) continue;
-      await patch(k, { clearedAt: now(), transferredTo: String(pu), transferRecordedAt: now(), rescue: r.rescue || { to: String(pu), by: 'TruckMate', at: now() } }); // eslint-disable-line no-await-in-loop
-      if (r.subject) await sendChain(r, chainEmail(r, `Transfer recorded in TruckMate: truck ${r.unit} to ${pu}`, [`TruckMate shows trip ${r.trip} on truck ${pu}.`, (item.trip.trailer ? `Trailer ${item.trip.trailer}.` : null), 'The physical handoff is not confirmed yet. Reply here when it is done, with the time and place.'])).catch((e) => console.warn('[breakdown-report] transfer:', e.message)); // eslint-disable-line no-await-in-loop
+      await patch(k, { clearedAt: now(), transferredTo: String(pu), rescue: r.rescue || { to: String(pu), by: 'TruckMate', at: now() } }); // eslint-disable-line no-await-in-loop
+      await onTruckMateMove({ trip: String(r.trip), from: String(r.unit), to: String(pu), board }).catch((e) => console.warn('[breakdown-report] transfer:', e.message)); // eslint-disable-line no-await-in-loop
     }
   }
 
-  // on the board: a rescue plan feeds the transfer watch, and keeps feeding it after TruckMate moves the load, until someone confirms the handoff
+  // on the board: a rescue plan feeds the transfer watch until TruckMate moves the load
   async function overlay(site0, trips) {
-    const open = Object.values(await all()).filter((r) => r.rescue && (!r.clearedAt || (r.transferRecordedAt && !r.handoffAt && now() - r.transferRecordedAt < HANDOFF_WATCH_DAYS * DAY)));
-    for (const it of trips) { const r = open.find((x) => String(x.trip) === String(((it && it.trip) || {}).tripNumber)); if (r) it._rescue = { from: r.unit, to: r.rescue.to, subject: r.subject, recorded: !!r.transferRecordedAt }; }
+    const open = Object.values(await all()).filter((r) => r.rescue && !r.clearedAt);
+    for (const it of trips) { const r = open.find((x) => String(x.trip) === String(((it && it.trip) || {}).tripNumber)); if (r) it._rescue = { from: r.unit, to: r.rescue.to, subject: r.subject, ...(r.rescue.place ? { place: r.rescue.place } : {}) }; }
   }
-  const handoffDone = (trip) => db.update(KEY(site), (cur) => Object.fromEntries(Object.entries(cur || {}).map(([k, r]) => [k, String(r.trip) === String(trip) && r.rescue ? { ...r, handoffAt: now() } : r])), {});
 
   if (app) {
     app.get('/br/:token', async (req, res) => {
@@ -224,5 +222,5 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
       try { const r = await submit(p, req.body || {}); return res.status(r.code).json(r); } catch (e) { console.warn('[breakdown-report]', e.message); return res.status(500).json({ error: 'Could not send. Call dispatch.' }); }
     });
   }
-  return { link, forTrip, submit, fromEmail, held, clear, fixed, rescuePlan, process, overlay, handoffDone, fixedWaiting, recoveryFor, claimRecovery, releaseRecovery };
+  return { link, forTrip, submit, fromEmail, held, clear, fixed, rescuePlan, process, overlay, fixedWaiting, recoveryFor, claimRecovery, releaseRecovery };
 }

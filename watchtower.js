@@ -1018,7 +1018,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     await loadGeo();
     await loadRoads();
     const board = await buildBoard(site);
-    if (afterBoard) { try { await afterBoard(site, board, { geo, now }); } catch (e) { console.warn('[watchtower] afterBoard:', e.message); } }
+    if (afterBoard) { try { await afterBoard(site, board, { geo, roadMiles, now }); } catch (e) { console.warn('[watchtower] afterBoard:', e.message); } }
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
     if (pushRules) cfg.recipients = await pushRules.emailsFor('priority');   // admin → Push notifications
     const toPush = []; const toMail = []; const toRoll = []; const toEscalate = [];

@@ -57,8 +57,8 @@ test('the whole run: emails to the Truck transfer list, text, then the driver sa
 
 test('report email shows both trucks, rolling or stopped, and the distance', () => {
   const e = transferEmail('update', { trip: '1', from: '734', to: '4504', trailer: '7137' }, { location: 'I-75, GA', speedMph: 61 }, { location: 'Macon, GA', speedMph: 0 }, { distanceMi: 87.4, aRolling: true, bRolling: false, together: false });
-  assert.match(e.html, /734<\/b><\/td><td>I-75, GA<\/td><td>rolling \(61 mph\)/);
-  assert.match(e.html, /4504<\/b><\/td><td>Macon, GA<\/td><td>stopped/);
+  assert.match(e.text, /Truck 734\n  I-75, GA\n  Status: Rolling · 61 mph/);
+  assert.match(e.text, /Truck 4504\n  Macon, GA\n  Status: Stopped/);
   assert.match(e.html, /87.4 mi/);
 });
 
@@ -73,4 +73,40 @@ test('a transfer TruckMate already shows done (624773: spotted, then 4504 depart
   const w = initTransferWatch({ db, sendMail: async (m) => sent.push(m), recipients: async () => ['x@y.com'], livePos: () => ({ ...MIAMI, speedMph: 50 }) });
   await w.process('fb', { trips: [doneItem] }); await w.process('fb', { trips: [doneItem] });
   assert.equal(sent.length, 0);
+});
+
+import { transferSpot } from '../transferwatch.js';
+import { fitView, transferMapSvg, placeLabel } from '../truckmap.js';
+test('the transfer location: a named place, or a parked broken truck marked as assumed, never a guess', () => {
+  const a = { lat: 38.1, lng: -122.2, speedMph: 0, location: 'Vallejo, CA' }; const b = { lat: 38.5, lng: -122.2, speedMph: 60 };
+  const base = { trip: '1', from: '2617', to: '2202' };
+  const geo = () => ({ lat: 38.3, lng: -122.2 });
+  const named = transferSpot({ ...base, place: 'Pilot, Ocala, FL', rescue: {} }, a, b, geo);
+  assert.equal(named.label, 'Pilot, Ocala, FL'); assert.ok(named.aMi > 16 && named.aMi < 18, 'straight line × 1.2 until Google has it'); assert.equal(transferSpot({ ...base, place: 'P' }, a, b, geo, () => 21.4).aMi, 21.4, 'Google road miles when there');
+  const unknown = transferSpot({ ...base, place: 'Somewhere' }, a, b, () => undefined);
+  assert.equal(unknown.lat, null); assert.equal(unknown.aMi, null); assert.equal(unknown.label, 'Somewhere', 'shows what staff wrote, no dot');
+  const parked = transferSpot({ ...base, rescue: {} }, a, b);
+  assert.match(parked.label, /^Assumed: where truck 2617 is stopped \(Vallejo, CA\)\. No place was given\.$/); assert.equal(parked.aMi, 0); assert.ok(parked.bMi > 33);
+  assert.equal(transferSpot({ ...base, rescue: {} }, { ...a, speedMph: 50 }, b), null, 'moving: no assumption');
+  assert.equal(transferSpot(base, a, b), null, 'trip sheet transfer with no place');
+  const e = transferEmail('start', base, a, b, transferStatus(a, b), { spot: null });
+  assert.match(e.text, /Transfer location: Not on file/);
+  const m = transferEmail('update', base, a, b, transferStatus(a, b), { spot: { label: 'P', aMi: 0.2, bMi: 12.6 }, mapCid: 'transfermap' });
+  assert.match(m.text, /Truck 2617 to transfer location: At the transfer location/); assert.match(m.text, /Truck 2202 to transfer location: About 13 road mi \(estimated\)/); assert.match(m.html, /cid:transfermap/);
+  assert.doesNotMatch(transferEmail('together', base, a, a, transferStatus(a, a), {}).text, /Transfer location:/, 'only planned and update');
+});
+test('the map fits every point and shows the red dot only when there is a place', () => {
+  const pts = [{ lat: 38.1, lng: -122.2 }, { lat: 38.5, lng: -122.2 }];
+  const near = fitView(pts); const far = fitView([{ lat: 25, lng: -80 }, { lat: 45, lng: -122 }]);
+  assert.ok(near.zoom > far.zoom); assert.ok(far.zoom >= 3);
+  assert.equal(fitView([pts[0]]).zoom, 13);
+  const svg = (spot) => transferMapSvg([], fitView(pts), { trucks: pts.map((p, i) => ({ ...p, label: `Truck <${i}>`, miles: 12.4 })), spot });
+  assert.match(svg({ lat: 38.3, lng: -122.2 }), /Transfer location/); assert.match(svg({ lat: 38.3, lng: -122.2 }), /12 mi/); assert.match(svg({ lat: 38.3, lng: -122.2 }), /Truck &lt;0&gt;/);
+  assert.doesNotMatch(svg(null), /Transfer location|#C62828/);
+});
+test('map labels stay on the picture and off each other', () => {
+  const taken = [{ l: 500, r: 700, t: 200, b: 300 }];
+  assert.deepEqual(placeLabel('Truck 1', [{ x: 600, y: 250 }, { x: 600, y: 400 }], taken), { x: 600, y: 400 }, 'takes the free spot');
+  assert.equal(taken.length, 2);
+  assert.deepEqual(placeLabel('Truck 2', [{ x: 5, y: 250 }, { x: 300, y: 250 }], []), { x: 300, y: 250 }, 'not off the edge');
 });

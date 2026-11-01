@@ -68,23 +68,24 @@ test('reported down stays down until someone says fixed; the chain hears it; old
   assert.deepEqual(await later.held(), ['625878', '2602'], 'no timer: it waits for word');
   assert.equal((await r.fixed('625878', 'Gio')).ok, true);
   assert.deepEqual(await r.held(), []);
-  assert.match(chain[0].subject, /^Re: FLOWERS BREAKDOWN/); assert.match(chain[0].text, /Reported fixed by Gio/);
+  assert.match(chain[0].subject, /^Re: FLOWERS BREAKDOWN/); assert.match(chain[0].text, /Reported fixed by: Gio/);
   assert.equal((await r.fixed('625878', 'Gio')).ok, false, 'nothing open');
 });
 
 test('rescue: the plan feeds the transfer watch; TruckMate on the new truck closes it once, on the chain', async () => {
-  const chain = []; const db = mem();
-  const r = initBreakdownReport(null, { db, secret: 's', now: () => NOW, getBoard: async () => ({ trips: [flowers] }), send: async () => {}, sendChain: async (rep, m) => chain.push(m) });
+  const chain = []; const moves = []; const db = mem();
+  const r = initBreakdownReport(null, { db, secret: 's', now: () => NOW, getBoard: async () => ({ trips: [flowers] }), send: async () => {}, sendChain: async (rep, m) => chain.push(m), onTruckMateMove: async (x) => moves.push(x) });
   assert.equal((await r.rescuePlan('625878', { to: '4504', by: 'Gio' })).ok, false, 'no breakdown open');
   await r.submit(p, { reason: 'Air leak', name: 'Ana' });
   assert.equal((await r.rescuePlan('625878', { to: '4504', by: 'Gio' })).ok, true);
   const it = { ...flowers }; await r.overlay('fb', [it]);
-  assert.deepEqual(it._rescue, { from: '2602', to: '4504', subject: 'FLOWERS BREAKDOWN AIR LEAK - TK# 2602 TL# 7323 - TRIP# 625878' , recorded: false });
-  assert.deepEqual(transferPlan(it), { trip: '625878', from: '2602', to: '4504', trailer: '7323', rescue: { subject: it._rescue.subject, recorded: false } });
-  await r.process('fb', { trips: [flowers] }); assert.equal(chain.length, 0, 'still on the broken truck');
+  assert.deepEqual(it._rescue, { from: '2602', to: '4504', subject: 'FLOWERS BREAKDOWN AIR LEAK - TK# 2602 TL# 7323 - TRIP# 625878' });
+  assert.deepEqual(transferPlan(it), { trip: '625878', from: '2602', to: '4504', trailer: '7323', rescue: { subject: it._rescue.subject } });
+  await r.process('fb', { trips: [flowers] }); assert.equal(moves.length, 0, 'still on the broken truck');
   const moved = { ...flowers, trip: { ...flowers.trip, powerUnit: '4504' } };
   await r.process('fb', { trips: [moved] }); await r.process('fb', { trips: [moved] });
-  assert.equal(chain.length, 1); assert.match(chain[0].subject, /^Re: /); assert.match(chain[0].text, /Transfer recorded in TruckMate: truck 2602 to 4504/); assert.doesNotMatch(chain[0].text, /Transfer completed/); assert.match(chain[0].text, /TruckMate shows trip 625878 on truck 4504/);
+  assert.equal(moves.length, 1, 'once'); assert.equal(moves[0].from, '2602'); assert.equal(moves[0].to, '4504'); assert.equal(chain.length, 0, 'the transfer email comes from the handoff record');
+  const after = { ...flowers }; await r.overlay('fb', [after]); assert.equal(after._rescue, undefined, 'the watch stops');
   assert.deepEqual(await r.held(), [], 'the new truck is not held');
 });
 

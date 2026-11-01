@@ -33,21 +33,39 @@ test('only a clear yes counts as the handoff', () => {
   assert.equal(answerConfirms({ status: 'done', source: 'TruckMate', summary: 'yes' }), false, 'TruckMate is never a confirmation');
 });
 
-test('TruckMate moving the load sends no Transfer completed; an explicit yes sends exactly one, across repeats and restarts', async () => {
+test('TruckMate moving the load is the transfer: exactly one email, across repeats and restarts', async () => {
   const r = rig();
   await r.x.observe(onFrom()); await r.x.process(onFrom());
+  assert.equal(r.sent.length, 0, 'still on the first truck');
   r.tick(60000); await r.x.observe(onTo()); await r.x.process(onTo());
-  assert.equal(r.sent.length, 0, 'an assignment change alone proves nothing');
-  await r.x.confirm({ trip: '625878', by: 'Gio', source: 'Staff email', atText: '10:15 AM ET', location: 'Pilot, Ocala', type: 'tractor swap', scope: 'full' });
-  await r.x.process(onTo());
-  assert.equal(r.sent.length, 1); assert.deepEqual(r.done, ['625878']);
+  assert.equal(r.sent.length, 1);
+  assert.match(r.sent[0].text, /TRANSFER COMPLETED\nDone in TruckMate\./); assert.match(r.sent[0].html, /Done in TruckMate/); assert.match(r.sent[0].text, /Confirmed by: TruckMate/); assert.match(r.sent[0].text, /Confirmed at: Nov 1, 11:01 AM ET/);
   assert.match(r.sent[0].subject, /^Re: FLOWERS BREAKDOWN/, 'stays on the chain');
   assert.deepEqual(r.sent[0].to, ['b@floridabeauty.us']);
   assert.equal((await r.x.confirm({ trip: '625878', by: 'Gio', source: 'Staff email' })).already, true);
-  await r.x.process(onTo());
+  await r.x.observe(onTo()); await r.x.process(onTo());
   const again = initTransferDone({ db: r.db, sendMail: async (m) => r.sent.push(m), recipients: async () => ['a@floridabeauty.us'], rescueRecipients: async () => ['b@floridabeauty.us'] });
   await again.process(onTo());
   assert.equal(r.sent.length, 1, 'still one after a restart');
+});
+test('a load already on the truck when Jarvis first sees it sends nothing; a driver yes or staff still work first', async () => {
+  const r = rig(); await r.x.observe(onTo()); await r.x.process(onTo());
+  assert.equal(r.sent.length, 0, 'no change seen');
+  const y = rig(); await y.x.observe(onFrom());
+  await y.x.confirm({ trip: '625878', toTruck: '4504', by: 'Driver', source: 'Driver text reply', atMs: NOW }); await y.x.process(onFrom());
+  assert.equal(y.sent.length, 1); assert.match(y.sent[0].text, /Physical handoff confirmed\./);
+  await y.x.observe(onTo()); await y.x.process(onTo()); assert.equal(y.sent.length, 1, 'TruckMate catching up later adds nothing');
+});
+test('TruckMate moves it back after the email went: the same people hear it was reversed', async () => {
+  const r = rig(); await r.x.observe(onFrom()); await r.x.observe(onTo()); await r.x.process(onTo());
+  r.tick(60000); await r.x.process(onFrom()); await r.x.process(onFrom());
+  assert.equal(r.sent.length, 2); assert.match(r.sent[1].text, /TRANSFER REVERSED/);
+});
+test('TruckMate on a different truck than planned wins', async () => {
+  const r = rig(); await r.x.observe(onFrom());
+  assert.equal((await r.x.confirm({ trip: '625878', truck: '2602', toTruck: '9999', by: 'TruckMate', source: 'TruckMate', atMs: NOW, board: { trips: [load('9999')] } })).ok, true);
+  await r.x.process({ trips: [load('9999')] });
+  assert.match(r.sent[0].text, /Truck 2602 → Truck 9999/);
 });
 
 test('a failed send retries; a crash mid-send never doubles; retries stop', async () => {
@@ -72,13 +90,12 @@ test('cancelled or reversed: no stale success', async () => {
   await r.x.cancel({ trip: '625878', by: 'Gio' });
   await r.x.process(onFrom()); assert.equal(r.sent.length, 0);
   const m = rig(); await m.x.observe(onFrom()); await m.x.observe(onTo());
-  await m.x.confirm({ trip: '625878', by: 'Driver', source: 'Driver text reply' });
   await m.x.process(onFrom());
   assert.equal(m.sent.length, 0, 'TruckMate put it back on the first truck');
   assert.equal(Object.values(m.db.s['taTransferDone:florida-beauty'])[0].status, 'reversed');
   const s = rig(); await s.x.observe(onFrom()); await s.x.confirm({ trip: '625878', by: 'Gio', source: 'Staff email' }); await s.x.process(onFrom());
   await s.x.cancel({ trip: '625878', by: 'Gio' });
-  assert.equal(s.sent.length, 2); assert.match(s.sent[1].text, /Transfer reversed/); assert.match(s.sent[1].text, /Disregard/);
+  assert.equal(s.sent.length, 2); assert.match(s.sent[1].text, /TRANSFER REVERSED/); assert.match(s.sent[1].text, /Disregard/);
 });
 
 test('nothing old goes out: records only start from what this code sees', async () => {
@@ -99,6 +116,7 @@ test('staff can confirm a handoff nobody planned on record, only with both truck
 
 const record = async (before, after, confirm = {}) => {
   const r = rig(); await r.x.observe(before); await r.x.observe(after);
+  const k0 = Object.keys(r.db.s['taTransferDone:florida-beauty'])[0]; r.db.s['taTransferDone:florida-beauty'][k0].status = 'open';   // the email details below, not TruckMate's
   await r.x.confirm({ trip: '625878', by: 'Gio', source: 'Staff email', atText: '10:15 AM ET', ...confirm });
   const k = Object.keys(r.db.s['taTransferDone:florida-beauty'])[0];
   return r.db.s['taTransferDone:florida-beauty'][k];
@@ -160,12 +178,6 @@ test('a driver YES goes to the record, not the old "done" email; "ya voy" does n
   const soon = watchRig('ya voy'); await soon.w.process('s', board); soon.tick(16); await soon.w.process('s', board); soon.tick(5); await soon.w.process('s', board);
   assert.equal(soon.conf.length, 0);
 });
-test('after TruckMate moves a rescue the watch stays on it, quietly', async () => {
-  const w = watchRig('');
-  await w.w.process('s', onTo());
-  assert.equal(w.sent.filter((m) => /planned/i.test(m.text + m.subject)).length, 0, 'the chain already heard');
-});
-
 // ---- breakdown fixed & rolling
 function bd() {
   const db = mem(); const chain = []; let t = NOW;
@@ -181,7 +193,7 @@ test('reported fixed with the truck still parked: fixed email, waiting on moveme
   b.tick(5 * 3600000);
   await b.r.fixed('625878', 'Gio', { repair: 'replaced air line', provider: 'TA Ocala' });
   assert.equal(b.chain.length, 1);
-  assert.match(b.chain[0].text, /Breakdown reported fixed/); assert.match(b.chain[0].text, /Awaiting confirmed movement/); assert.doesNotMatch(b.chain[0].text, /rolling/i);
+  assert.match(b.chain[0].text, /BREAKDOWN REPORTED FIXED/); assert.match(b.chain[0].text, /Awaiting confirmed movement/); assert.doesNotMatch(b.chain[0].text, /rolling/i);
   assert.deepEqual(await b.r.held(), [], 'hold lifted');
   assert.equal((await b.r.fixedWaiting()).length, 1);
   assert.equal((await b.r.recoveryFor('02602')).repair, 'replaced air line');
@@ -213,8 +225,7 @@ test('one fixed & rolling per breakdown: claim once, a failed send gives it back
 test('truck moved after its load left: can be fixed, email says where the load went and reuses no ETA', async () => {
   const b = bd(); await open(b);
   b.board.trips[0].trip.powerUnit = '4504'; await b.r.process('s', b.board);
-  assert.match(b.chain[0].text, /Transfer recorded in TruckMate/); assert.match(b.chain[0].text, /not confirmed yet/); assert.doesNotMatch(b.chain[0].text, /Transfer completed/);
-  await b.r.process('s', b.board); assert.equal(b.chain.length, 1, 'recorded once');
+  await b.r.process('s', b.board); assert.equal(b.chain.length, 0, 'the transfer email comes from the handoff record');
   assert.equal((await b.r.fixed('625878', 'Gio', { repair: 'new line' })).ok, true);
   const rep = await b.r.recoveryFor('2602');
   assert.equal(rep.transferredTo, '4504');
@@ -254,4 +265,38 @@ test('the snapshots copy only what is on the load', () => {
   assert.deepEqual(snapshotLoad(load('2602'), etas(NOW), NOW).bills, ['M1']); assert.equal(snapshotLoad(load('2602'), null, NOW).pieces, 900);
   assert.equal(snapshotLoad({ trip: {}, freightBills: [{ billNumber: 'A' }] }, null, NOW).pieces, null, 'no count, no number');
   assert.equal(crewOf(load('2602'), NOW).live.driver1, 'Ana Ruiz');
+});
+
+test('the eight status emails: same subjects, right banner, nothing invented, nothing missing', async () => {
+  const { transferEmail, transferStatus } = await import('../transferwatch.js');
+  const { renderTransferReversedEmail, renderFixedReportedEmail } = await import('../handoffmail.js');
+  const plan = { trip: '9', from: '2617', to: '2202', trailer: '7331' };
+  const a = { lat: 38.1, lng: -122.2, location: 'Vallejo, CA', speedMph: 58, at: new Date(NOW - 60000).toISOString() };
+  const b = { lat: 38.5, lng: -122.2, location: '<b>Napa</b>', speedMph: 0, at: new Date(NOW - 3600000).toISOString() };
+  const s = transferStatus(a, b);
+  const start = transferEmail('start', plan, a, b, s, { now: NOW });
+  assert.equal(start.subject, 'Transfer planned — trip 9: truck 2617 → 2202'); assert.match(start.text, /TRANSFER PLANNED/); assert.match(start.text, /Rolling · 58 mph/); assert.match(start.text, /Stopped · 0 mph/);
+  assert.match(start.text, /Nov 1, 10:59 AM ET/, 'date and timezone'); assert.match(start.text, /may be out of date/); assert.match(start.html, /&lt;b&gt;Napa/); assert.match(start.html, /fb-tone-blue/);
+  assert.doesNotMatch(start.html.replace(/<!--[\s\S]*?-->/g, '') + start.text, /undefined|null|NaN/);
+  const noGps = transferEmail('update', plan, a, null, transferStatus(a, null), { now: NOW });
+  assert.equal(noGps.subject, 'Transfer update — trip 9: trucks not both on GPS'); assert.match(noGps.text, /Unknown\. One truck has no GPS/); assert.match(noGps.text, /Status: Not reported/);
+  assert.match(transferEmail('together', plan, a, a, transferStatus(a, a), { now: NOW }).text, /still together in 15 minutes/);
+  const no = transferEmail('outcome', plan, a, b, s, { now: NOW, outcome: { status: 'not_done', summary: 'Driver replied: "no"', source: 'driver text' } });
+  assert.equal(no.subject, 'Transfer not done yet — trip 9: 2617 → 2202'); assert.match(no.html, /fb-tone-amber/); assert.match(no.text, /ask again/);
+  const un = transferEmail('outcome', plan, a, b, s, { now: NOW, outcome: { status: 'unclear', summary: 'Driver replied: "ya voy"', source: 'driver text' } });
+  assert.equal(un.subject, 'Transfer not confirmed — trip 9: 2617 → 2202'); assert.match(un.text, /does not count as a confirmation/);
+  const rev = renderTransferReversedEmail({ trip: '9', from: '1', to: '2', by: 'Gio', subject: 's' });
+  assert.match(rev.html, /fb-tone-red/); assert.match(rev.text, /Disregard the earlier "Transfer completed" email/);
+  const report = { atMs: NOW - 6 * 3600000, fixedAt: NOW, fixedBy: 'Gio', reason: 'air leak', trip: '9', unit: '2617', before: { trailer: '7331' } };
+  const teamLoad = { trip: { tripNumber: '9', powerUnit: '2617', driver: 'A1', driver2: 'A2' }, _samsara: team({ speedMph: 0 }) };
+  const fix = renderFixedReportedEmail({ report, item: teamLoad, etas: etas(NOW + 3600000), now: NOW, mapCid: 'truckmap', others: ['Reefer temp high'], subject: 's' });
+  assert.equal(fix.subject, 's'); assert.match(fix.html, /fb-tone-amber/); assert.match(fix.html, /cid:truckmap/); assert.match(fix.html, /tel:\+13055550101/); assert.match(fix.html, /Luis Vega/);
+  assert.match(fix.text, /Repair performed: Not provided/); assert.match(fix.text, /Drive left: 5h 0m/); assert.match(fix.text, /Status: Stopped/); assert.match(fix.text, /Orlando, FL/); assert.match(fix.text, /Updated ETA \(estimated\): .*ET/); assert.match(fix.text, /Team truck alerts are back on/); assert.match(fix.text, /1 other open alert on this truck: Reefer temp high/);
+  assert.doesNotMatch(fix.text, /rolling/i);
+  assert.match(renderFixedReportedEmail({ report, item: teamLoad, held: true, now: NOW, subject: 's' }).text, /stay off/);
+  assert.match(renderFixedReportedEmail({ report, item: { ...teamLoad, _samsara: team({ speedMph: 40 }) }, now: NOW, subject: 's' }).text, /Moving · 40 mph, not confirmed yet/);
+  const bare = renderFixedReportedEmail({ report, now: NOW, subject: 's' });
+  assert.match(bare.text, /No current load on this truck/); assert.match(bare.text, /Location not reported/); assert.match(bare.text, /Status: Not reported/); assert.doesNotMatch(bare.html.replace(/<!--[\s\S]*?-->/g, '') + bare.text, /undefined|null|NaN/);
+  assert.doesNotMatch(renderFixedReportedEmail({ report, item: teamLoad, now: NOW, showPhones: false, subject: 's' }).html, /tel:/);
+  for (const m of [start, rev, fix]) assert.match(m.html, /jarvis:training-slot/);
 });

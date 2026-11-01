@@ -36,7 +36,7 @@ import { initLoads } from './loads.js';
 import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
 import { initWatchtower } from './watchtower.js';
-import { renderTruckMap } from './truckmap.js';
+import { renderTruckMap, renderTransferMap } from './truckmap.js';
 import { renderTeamStopEmail, renderRollingEmail, teamStopFacts, tripSheetIds, tripSheetFiles } from './teamstopmail.js';
 import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
@@ -74,7 +74,7 @@ import { initArtisClients } from './artisclients.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initDispatchLog } from './dispatchlog.js';
 import { initBrokerFollow, askEmail, requestStops, confirmedReply } from './brokerfollow.js';
-import { initBreakdownReport, renderBreakdownEmail, chainEmail, breakdownSubject } from './breakdownreport.js';
+import { initBreakdownReport, renderBreakdownEmail, breakdownSubject } from './breakdownreport.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
 import { initVoice } from './voice.js';
@@ -90,7 +90,7 @@ import { initArtis, initMissingBoxes } from './artis.js';
 import { initAlertRecipients } from './alertrecipients.js';
 import { initTransferWatch, transferEmail, transferStatus } from './transferwatch.js';
 import { initTransferDone, answerConfirms } from './transferdone.js';
-import { renderFixedRollingEmail, renderTransferCompletedEmail, handoffFacts, snapshotLoad, crewOf } from './handoffmail.js';
+import { renderFixedRollingEmail, renderTransferCompletedEmail, renderTransferReversedEmail, renderFixedReportedEmail, handoffFacts, snapshotLoad, crewOf } from './handoffmail.js';
 import { initTruckBuilder } from './truckbuilder.js';
 import { initMissingCases } from './missingcase.js';
 import { initStopTasks } from './stoptasks.js';
@@ -1118,11 +1118,12 @@ jarvisChat = initJarvisChat(app, { brokerFollow: followProxy, dispatchLog, miles
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });
 // planned truck transfers (sheet: 734 → 4504): follow both trucks, report, confirm with the drivers
 const transferWatch = initTransferWatch({ db, env: process.env, sendMail: (m, { rescue = false } = {}) => sendMail(m, { env: process.env, direct: rescue && staffOnly([].concat(m.to)) }), recipients: () => alertRecipients.resolve('transfer'), rescueRecipients: () => alertRecipients.resolve('breakdown_report'),
-  textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice, confirms: answerConfirms, isConfirmed: (plan) => transferDone.isConfirmed(plan),
-  onConfirmed: (plan, ans, { b, s }) => transferDone.confirm({ trip: plan.trip, by: `Driver (${ans.source})`, source: ans.source === 'driver text' ? 'Driver text reply' : 'Driver phone call', atMs: Date.parse(ans.at) || null, location: s.together && b ? b.location : null, summary: ans.summary }) });
-// The physical handoff record: "Transfer completed" goes only from here. TruckMate moving a load is the separate "recorded" notice.
+  textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice, renderMap: renderTransferMap, confirms: answerConfirms, isConfirmed: (plan) => transferDone.isConfirmed(plan),
+  onConfirmed: (plan, ans, { b, s }) => transferDone.confirm({ trip: plan.trip, toTruck: plan.to, by: ans.source === 'TruckMate' ? 'TruckMate' : `Driver (${ans.source})`, source: { TruckMate: 'TruckMate', 'driver text': 'Driver text reply' }[ans.source] || 'Driver phone call', atMs: Date.parse(ans.at) || null, location: s.together && b ? b.location : null, summary: ans.summary }) });
+// The handoff record: "Transfer completed" goes only from here, once TruckMate, a driver or staff says it is done.
+const liveForUnit = async (unit) => { const token = samsaraTokenFrom(process.env); return token ? correlate({ trip: { powerUnit: unit } }, await getLiveIndex(token)) : null; };
 const allEtas = async () => ((await db.get('taWatch:florida-beauty', {})) || {}).etas || {};
-const transferDone = initTransferDone({ db, sendMail: (m, { rescue = false } = {}) => sendMail(m, { env: process.env, direct: !!rescue }), recipients: () => alertRecipients.resolve('transfer'), rescueRecipients: () => alertRecipients.resolve('breakdown_report'), staffOnly: (to) => staffOnly(to), etas: allEtas, reportFor: (trip) => breakdownReport.forTrip(trip), onDone: (r) => breakdownReport.handoffDone(r.trip) });
+const transferDone = initTransferDone({ db, sendMail: (m, { rescue = false } = {}) => sendMail(m, { env: process.env, direct: !!rescue }), recipients: () => alertRecipients.resolve('transfer'), rescueRecipients: () => alertRecipients.resolve('breakdown_report'), staffOnly: (to) => staffOnly(to), etas: allEtas, reportFor: (trip) => breakdownReport.forTrip(trip) });
 // the still map in the truck emails: real map, truck marker, the status on top. No picture → the address and link still work
 const truckMap = async (l, tone, badge = {}) => {
   const png = await renderTruckMap({ lat: l.lat, lng: l.lng, tone, ...badge });
@@ -1152,7 +1153,15 @@ const sendBreakdown = async (report, item, to) => {
   await sendMail({ to, ...m, attachments: [...attachments, ...sheet.attachments] }, { env: process.env, direct: staffOnly(to) });
   return m.subject;
 };
-const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), etasFor: async (trip) => (await allEtas())[trip] || null, otherHolds: async (r) => { const it = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((x) => String(((x && x.trip) || {}).tripNumber) === String(r.trip)); const calls = ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000 && (String(rc.trip) === String(r.trip) || String(rc.truck) === String(r.unit))); return !!(it && ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown'))) || calls.length > 0; }, sendChain: async (report, m) => { const to = await alertRecipients.resolve('breakdown_report'); if (to.length) await sendMail({ to, ...m }, { env: process.env, direct: staffOnly(to) }); }, send: async (report, item, extra = []) => { const to = [...new Set([...extra.map((x) => String(x).toLowerCase()).filter((x) => /@floridabeauty\.us$/.test(x)), ...await alertRecipients.resolve('breakdown_report')])]; if (to.length) await sendBreakdown(report, item, to); } });
+const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), etasFor: async (trip) => (await allEtas())[trip] || null, otherHolds: async (r) => { const it = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((x) => String(((x && x.trip) || {}).tripNumber) === String(r.trip)); const calls = ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000 && (String(rc.trip) === String(r.trip) || String(rc.truck) === String(r.unit))); return !!(it && ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown'))) || calls.length > 0; }, fixedDetails: async (r, item) => {
+    const to = await alertRecipients.resolve('breakdown_report');
+    const live = (item && item._samsara) || await liveForUnit(r.unit).catch(() => null);
+    const stopped = !live || live.speedMph == null || Number(live.speedMph) <= 3;
+    const attachments = await truckMap(live || {}, 'amber', { close: stopped });
+    const u = String(r.unit || '').trim().toLowerCase().replace(/^0+(?=\d)/, '');
+    const others = Object.values(((await db.get('taWatch:florida-beauty', {})) || {}).alerts || {}).filter((a) => !a.resolvedAt && a.code !== 'stopped' && String(a.unit || '').trim().toLowerCase().replace(/^0+(?=\d)/, '') === u).map((a) => a.title).filter(Boolean);
+    return { live, etas: (item && (await allEtas())[item.trip.tripNumber]) || null, showPhones: staffOnly(to), mapCid: attachments.length ? 'truckmap' : null, attachments, others };
+  }, onTruckMateMove: ({ trip, from, to, board }) => transferDone.confirm({ trip, truck: from, toTruck: to, by: 'TruckMate', source: 'TruckMate', atMs: Date.now(), board }), sendChain: async (report, m) => { const to = await alertRecipients.resolve('breakdown_report'); if (to.length) await sendMail({ to, ...m }, { env: process.env, direct: staffOnly(to) }); }, send: async (report, item, extra = []) => { const to = [...new Set([...extra.map((x) => String(x).toLowerCase()).filter((x) => /@floridabeauty\.us$/.test(x)), ...await alertRecipients.resolve('breakdown_report')])]; if (to.length) await sendBreakdown(report, item, to); } });
 // One of each alert email, to Nadim only, built from a real load with made-up stop details. Marked [EXAMPLE]. No alert, no road call,
 // nothing saved, and nobody else: each goes straight to that one address.
 // The delivery confirmation request and the reply it leads to, to Nadim only, from a real load. The button opens the real page; Submit there saves nothing.
@@ -1203,20 +1212,27 @@ app.post('/admin/alert-examples', requireCompanyAdmin, async (req, res) => {
     const other = items.find((x) => x !== item && x._samsara && x._samsara.driver1 && x.trip && x.trip.powerUnit) || null;
     const to = other ? String(other.trip.powerUnit) : '0000';
     const plan = { trip, from: String(unit), to, trailer: t.trailer || null };
+    const exampleSpot = pos.lat != null ? { label: 'Example location (made up)', lat: pos.lat + 0.2, lng: pos.lng, aMi: 14, bMi: 14 } : null;
+    const transferJpg = await renderTransferMap({ trucks: [{ lat: pos.lat, lng: pos.lng, label: `Truck ${unit}`, miles: 14 }, { lat: pos2.lat, lng: pos2.lng, label: `Truck ${to}`, miles: 14 }], spot: exampleSpot });
     const ck = (u) => String(u || '').replace(/[^0-9A-Z]/gi, '').replace(/^0+/, '').toUpperCase();
-    const handoff = { trip, from: String(unit), to, before: snapshotLoad(item, etas, now - 3600000), crew: { [ck(unit)]: crewOf(item, now - 3600000), ...(other ? { [ck(to)]: crewOf(other, now - 3600000) } : {}) }, confirm: { by: 'Example (not a real confirmation)', source: 'Staff email', atMs: now - 20 * 60000, location: 'Example location', type: 'tractor swap', scope: 'full' } };
+    const handoff = { trip, from: String(unit), to, before: snapshotLoad(item, etas, now - 3600000), crew: { [ck(unit)]: crewOf(item, now - 3600000), ...(other ? { [ck(to)]: crewOf(other, now - 3600000) } : {}) }, confirm: { by: 'TruckMate', source: 'TruckMate', atMs: now - 20 * 60000 } };
     const handedOver = { ...item, trip: { ...t, powerUnit: to, driver: other && other.trip.driver, driver2: other && other.trip.driver2 }, _samsara: other ? other._samsara : {} };
     const greenPlain = await truckMap(item._samsara || {}, 'green');
+    const amberMap = await truckMap(item._samsara || {}, 'amber', { close: true });
     const fixedReport = { ...report, atMs: now - 6 * 3600000, fixedAt: now - 3600000, fixedBy: 'Example (not a real report)', repair: 'Replaced air line (example)', provider: 'Example truck service', before: snapshotLoad(item, etas, now) };
     const late = lateMessage(item, { key: 'x', place: next.label, customer: null, local: new Date(next.etaMs - 3 * 3600000).toISOString().slice(0, 16), atMs: next.etaMs - 3 * 3600000, etaMs: next.etaMs, lateMin: 180, miles: next.miles });
     const list = [
       ['team truck stopped', { ...renderTeamStopEmail(teamStopFacts(a, item, { etas, mapCid, sheet, reportUrl: 'https://tagalong-backend-fdzx.onrender.com/br/example' })), attachments: [...map, ...sheet.attachments] }],
       ['truck rolling again', { ...renderRollingEmail(rollEp, item, { etas, now, mapCid: green.length ? 'truckmap' : null }), attachments: green }],
       ['breakdown', { ...renderBreakdownEmail({ item, report, etas, mapCid, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached' }), attachments: [...brk, ...sheet.attachments] }],
-      ['rescue planned', { ...transferEmail('start', plan, pos, pos2, transferStatus(pos, pos2), { now }), subject: `Re: ${subject}` }],
-      ['transfer recorded in TruckMate', chainEmail(report, `Transfer recorded in TruckMate: truck ${unit} to ${to}`, [`TruckMate shows trip ${trip} on truck ${to}.`, t.trailer ? `Trailer ${t.trailer}.` : null, 'The physical handoff is not confirmed yet. Reply here when it is done, with the time and place.'])],
+      ['rescue planned', { ...transferEmail('start', plan, pos, pos2, transferStatus(pos, pos2), { now, spot: exampleSpot, mapCid: transferJpg ? 'transfermap' : null }), subject: `Re: ${subject}`, attachments: transferJpg ? [{ name: 'transfer-map.jpg', contentType: 'image/jpeg', bytes: transferJpg, cid: 'transfermap' }] : [] }],
+      ['transfer update', { ...transferEmail('update', plan, pos, pos2, transferStatus(pos, pos2), { now, spot: exampleSpot, mapCid: transferJpg ? 'transfermap' : null }), subject: `Re: ${subject}`, attachments: transferJpg ? [{ name: 'transfer-map.jpg', contentType: 'image/jpeg', bytes: transferJpg, cid: 'transfermap' }] : [] }],
+      ['trucks together', { ...transferEmail('together', plan, pos, pos, transferStatus(pos, pos), { now }), subject: `Re: ${subject}` }],
+      ['transfer not done yet', { ...transferEmail('outcome', plan, pos, pos2, transferStatus(pos, pos2), { now, outcome: { status: 'not_done', summary: 'Driver replied: "no, not yet" (example)', source: 'driver text' } }), subject: `Re: ${subject}` }],
+      ['transfer not confirmed', { ...transferEmail('outcome', plan, pos, pos2, transferStatus(pos, pos2), { now, outcome: { status: 'unclear', summary: 'Driver replied: "ya voy" (example)', source: 'driver text' } }), subject: `Re: ${subject}` }],
       ['transfer completed', { ...renderTransferCompletedEmail(handoffFacts(handoff, handedOver, { etas, now })), subject: `Re: ${subject}` }],
-      ['breakdown reported fixed', chainEmail(report, 'Breakdown reported fixed', [`Truck ${unit}, trip ${trip}.`, 'Reported fixed by Example.', 'Repair: Replaced air line (example)', 'Awaiting confirmed movement.', 'Team truck alerts are back on for this truck.'])],
+      ['transfer reversed', renderTransferReversedEmail({ trip, from: String(unit), to, by: 'Example', subject: `Re: ${subject}` })],
+      ['breakdown reported fixed', { ...renderFixedReportedEmail({ report: fixedReport, item, etas, now, mapCid: amberMap.length ? 'truckmap' : null, subject: `Re: ${subject}` }), attachments: amberMap }],
       ['breakdown fixed & rolling', { ...renderFixedRollingEmail({ ep: { ...rollEp, live: item._samsara, alertsOn: true, openAlerts: [] }, report: fixedReport, item, etas, now, mapCid: greenPlain.length ? 'truckmap' : null }), subject: `Re: ${subject}`, attachments: greenPlain }],
       ['broker follow-up question', askEmail(trip, item)],
       ['broker will miss delivery', { subject: late.subject.replace(/^Late for a committed time/, 'Will miss the delivery time'), html: late.html, text: late.text }],
@@ -1244,7 +1260,7 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
   // trucks and trips reported down, or with a road call still open in the last 5 days: a wrecker moves them, they aren't rolling
   openRoadCalls: async () => [...await breakdownReport.held(), ...((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000).flatMap((rc) => [rc.trip, String(rc.truck || '').trim().toLowerCase().replace(/^0+(?=\d)/, '')].filter(Boolean).map(String))],
   recovering: () => breakdownReport.fixedWaiting(),
-  liveFor: async (unit) => { const token = samsaraTokenFrom(process.env); return token ? correlate({ trip: { powerUnit: unit } }, await getLiveIndex(token)) : null; },
+  liveFor: (unit) => liveForUnit(unit),
   onRolling: async (ep, { item, etas }) => {
     // reported fixed and now really moving: the one "fixed & rolling" email for this breakdown, in place of the plain rolling one
     const fixedReport = await breakdownReport.recoveryFor(ep.unit).catch(() => null);
@@ -1280,7 +1296,7 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
       const noFiles = sheetIds.length ? { status: 'unavailable', note: 'Trip sheet could not be attached. Open it on the load in the console.' } : null;
       await sendMail({ to, ...renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, sheet: noFiles, reportUrl: breakdownReport.link(a) })) }, { env: process.env });
     }
-  }, afterBoard: async (site, board, ctx) => { await transferDone.observe(board).catch((e) => console.warn('[transfer-done]', e.message)); await breakdownReport.process(site, board).catch((e) => console.warn('[breakdown-report]', e.message)); await followProxy.process(site, board).catch((e) => console.warn('[broker-follow]', e.message)); await transferWatch.process(site, board).catch((e) => console.warn('[transfer]', e.message)); await transferDone.process(board).catch((e) => console.warn('[transfer-done]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
+  }, afterBoard: async (site, board, ctx) => { await transferDone.observe(board).catch((e) => console.warn('[transfer-done]', e.message)); await breakdownReport.process(site, board).catch((e) => console.warn('[breakdown-report]', e.message)); await followProxy.process(site, board).catch((e) => console.warn('[broker-follow]', e.message)); await transferWatch.process(site, board, ctx).catch((e) => console.warn('[transfer]', e.message)); await transferDone.process(board).catch((e) => console.warn('[transfer-done]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and

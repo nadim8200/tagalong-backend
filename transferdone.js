@@ -1,11 +1,11 @@
 // ---------------------------------------------------------------
-// The physical handoff record. A truck change in TruckMate, two trucks parked together, or a truck driving off proves nothing:
-// a transfer only counts when a driver answers YES to Jarvis's question or staff say so by email. Each handoff is one saved record
-// (before snapshot, who confirmed, when), and "Transfer completed" goes out once from that record, across retries and restarts.
+// The handoff record. A transfer is done when TruckMate moves the load to the receiving truck, a driver answers YES to Jarvis's
+// question, or staff say so by email, whichever comes first. Trucks parked together or driving off prove nothing. Each handoff is one
+// saved record (before snapshot, who confirmed, when), and "Transfer completed" goes out once from it, across retries and restarts.
 // Records only start when this code is live, so nothing old is ever sent.
 // ---------------------------------------------------------------
 import { transferPlan } from './transferwatch.js';
-import { snapshotLoad, crewOf, handoffFacts, renderTransferCompletedEmail } from './handoffmail.js';
+import { snapshotLoad, crewOf, handoffFacts, renderTransferCompletedEmail, renderTransferReversedEmail } from './handoffmail.js';
 
 const KEY = (site) => `taTransferDone:${site}`;
 const DAY = 86400000;
@@ -58,10 +58,14 @@ export function initTransferDone({ db, sendMail, recipients, rescueRecipients, s
         if (onFrom) crew[unitKey(plan.from)] = crewOf(it, at);
         const receiving = ((board && board.trips) || []).find((x) => unitKey(tripOf(x).powerUnit) === unitKey(plan.to));
         if (receiving) crew[unitKey(plan.to)] = crewOf(receiving, at);
-        c[k] = { ...r, crew, recordedAt: r.recordedAt || (!onFrom && unitKey(tripOf(it).powerUnit) === unitKey(plan.to) ? at : null) };
+        const onTo = !onFrom && unitKey(tripOf(it).powerUnit) === unitKey(plan.to);
+        c[k] = { ...r, crew, seenOnFrom: !!(r.seenOnFrom || onFrom), recordedAt: r.recordedAt || (onTo ? at : null) };
       }
       return c;
     }, {});
+    // TruckMate moved the load: the transfer is done. Only a change Jarvis saw happen, so a load already on that truck sends nothing.
+    const fresh = Object.values(await all()).filter((r) => r.status === 'open' && r.seenOnFrom && r.recordedAt);
+    for (const r of fresh) await confirm({ trip: r.trip, toTruck: r.to, by: 'TruckMate', source: 'TruckMate', atMs: r.recordedAt, board }); // eslint-disable-line no-await-in-loop
   }
 
   const openFor = (c, { trip, truck }) => Object.entries(c).filter(([, r]) => (trip ? String(r.trip) === String(trip) : [unitKey(r.from), unitKey(r.to)].includes(unitKey(truck))) && r.status !== 'cancelled' && r.status !== 'reversed').sort((x, y) => y[1].planAt - x[1].planAt)[0] || null;
@@ -69,6 +73,7 @@ export function initTransferDone({ db, sendMail, recipients, rescueRecipients, s
   // An explicit confirmation: the only way a record reaches "confirmed". Sending happens in process().
   async function confirm({ trip = null, truck = null, toTruck = null, by, source, atMs = null, atText = null, location = null, type = null, scope = null, arrivalFrom = null, arrivalTo = null, summary = null, board = null }) {
     let hit = openFor(await all(), { trip, truck });
+    if (hit && toTruck && unitKey(hit[1].to) !== unitKey(toTruck) && source === 'TruckMate') hit = null;   // TruckMate put it on another truck than planned: it wins
     if (hit && toTruck && unitKey(hit[1].to) !== unitKey(toTruck)) return { ok: false, error: `Jarvis has trip ${hit[1].trip} going to truck ${hit[1].to}, not ${toTruck}. Reply with the right truck.` };
     if (!hit) {
       // nothing was planned on record: staff can still confirm it, with the load and both trucks named
@@ -76,7 +81,8 @@ export function initTransferDone({ db, sendMail, recipients, rescueRecipients, s
       const from = truck || (it && tripOf(it).powerUnit);
       if (!it || !from || !/\d/.test(String(toTruck || '')) || unitKey(from) === unitKey(toTruck)) return { ok: false, error: 'Which load, and which trucks? Reply with the trip and both truck numbers.' };
       const k = eventKey(trip, from, toTruck);
-      const r = { trip: String(trip), from: String(from), to: String(toTruck), rescue: false, subject: null, status: 'open', planAt: now(), attempts: 0, crew: {}, before: unitKey(tripOf(it).powerUnit) === unitKey(from) ? snapshotLoad(it, null, now()) : null };
+      const rep = await reportFor(trip).catch(() => null);   // a breakdown nobody sent a rescue plan for: same thread, and what the load looked like then
+      const r = { trip: String(trip), from: String(from), to: String(toTruck), rescue: !!(rep && rep.subject), subject: (rep && rep.subject) || null, status: 'open', planAt: now(), attempts: 0, crew: rep && rep.crew ? { [unitKey(from)]: rep.crew } : {}, before: unitKey(tripOf(it).powerUnit) === unitKey(from) ? snapshotLoad(it, null, now()) : (rep && rep.before) || null };
       await patch(k, r);
       hit = [k, r];
     }
@@ -96,7 +102,7 @@ export function initTransferDone({ db, sendMail, recipients, rescueRecipients, s
     if (wasSent) {
       const to = await (r.rescue ? rescueRecipients() : recipients());
       const head = `Transfer reversed — Trip ${r.trip}: truck ${r.from} → ${r.to}`;
-      if (to.length) await sendMail({ to, subject: r.subject ? `Re: ${r.subject}` : head, text: `${head}\nReported by ${oneLine(by, 80) || 'Dispatch'}. Disregard the earlier "Transfer completed" email.`, html: `<p style="font-family:Arial,Helvetica,sans-serif;font-size:16px;"><b>${String(head).replace(/[&<>"]/g, '')}</b><br>Reported by ${String(oneLine(by, 80) || 'Dispatch').replace(/[&<>"]/g, '')}. Disregard the earlier "Transfer completed" email.</p>` }, { rescue: r.rescue && staffOnly(to) });
+      if (to.length) await sendMail({ to, ...renderTransferReversedEmail({ trip: r.trip, from: r.from, to: r.to, by: oneLine(by, 80), subject: r.subject ? `Re: ${r.subject}` : head }) }, { rescue: r.rescue && staffOnly(to) });
     }
     return { ok: true, trip: r.trip };
   }
@@ -105,6 +111,12 @@ export function initTransferDone({ db, sendMail, recipients, rescueRecipients, s
   async function process(board) {
     const pending = Object.entries(await all()).filter(([, r]) => r.status === 'confirmed' && (r.attempts || 0) < MAX_TRIES);
     const out = [];
+    // TruckMate moved it back after the email went: tell the same people
+    for (const r of Object.values(await all())) {
+      if (r.status !== 'sent' || !r.confirm || r.confirm.source !== 'TruckMate' || now() - (r.sentAt || 0) > 2 * DAY) continue;
+      const item = findAfter(r, board);
+      if (item && unitKey(tripOf(item).powerUnit) === unitKey(r.from)) await cancel({ trip: r.trip, by: 'TruckMate' }); // eslint-disable-line no-await-in-loop
+    }
     for (const [k, r] of pending) {
       const item = findAfter(r, board);
       // TruckMate had it on the receiving truck and put it back: the handoff is undone, no success email
