@@ -36,6 +36,7 @@ import { initLoads } from './loads.js';
 import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
 import { initWatchtower } from './watchtower.js';
+import { renderTeamStopEmail } from './teamstopmail.js';
 import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
 import { initCarriers } from './carriers.js';
@@ -1110,7 +1111,8 @@ jarvisChat = initJarvisChat(app, { dispatchLog, miles, artis, artisWeb, artisRep
 // planned truck transfers (sheet: 734 → 4504): follow both trucks, report, confirm with the drivers
 const transferWatch = initTransferWatch({ db, env: process.env, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('transfer'),
   textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice });
-initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules, afterBoard: async (site, board, ctx) => { await transferWatch.process(site, board).catch((e) => console.warn('[transfer]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
+initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules,
+  onTeamStop: async (a) => { const to = await alertRecipients.resolve('team_stopped'); if (to.length) await sendMail({ to, ...renderTeamStopEmail(a) }, { env: process.env }); }, afterBoard: async (site, board, ctx) => { await transferWatch.process(site, board).catch((e) => console.warn('[transfer]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and

@@ -638,7 +638,9 @@ const RULES = [
     const duty = String((l.hos && l.hos.status) || '');
     const left = l.hos && l.hos.driveLeftMin;
     const resting = /^(offduty|sleeper|personalconveyance)/i.test(duty) || (left != null && left < 90);
-    if (resting ? mins < 11 * 60 : mins < 45) return null;   // a rest past 11h (10h reset + 1h) is worth a look too
+    // a team has no reason to sit: while one sleeps the other can drive, so "off duty" isn't a rest if either has hours
+    const fresh = f.team ? [[l.hos, l.driver1], [l.hos2, l.driver2]].filter(([h]) => h && h.driveLeftMin >= 60).sort((a, b) => b[0].driveLeftMin - a[0].driveLeftMin)[0] : null;
+    if (resting && fresh ? mins < 60 : (resting ? mins < 11 * 60 : mins < 45)) return null;   // a rest past 11h (10h reset + 1h) is worth a look too
     // parked at / near any customer still to be delivered = unloading, not a problem
     const nearStop = f.stops.some((s2) => {
       if (s2.delivered || !s2.zip) return false;
@@ -651,6 +653,13 @@ const RULES = [
     if (l.lat != null && haversineMi(l.lat, l.lng, o.lat, o.lng) < 30) return null;
     const codes = (l.dtcCodes || []).length;
     const dutyLabel = { onDuty: 'on duty', driving: 'driving status', yardMove: 'yard move', offDuty: 'off duty', sleeperBerth: 'sleeper berth', sleeperBed: 'sleeper berth' }[duty] || (duty || 'duty status unknown');
+    if (resting && fresh) {
+      return {
+        code: 'stopped', teamStop: true, severity: mins >= 120 || codes ? 'critical' : 'warning',
+        title: `Team truck stopped ${fmtMin(mins)}`,
+        detail: `${l.location || 'Unknown location'} · ${dutyLabel}. ${fresh[1] || 'A driver'} has ${fmtMin(fresh[0].driveLeftMin)} of driving left, so a team should be rolling. Call the drivers.${codes ? ` ${codes} engine code${codes === 1 ? '' : 's'} on the truck, could be a breakdown.` : ''}`,
+      };
+    }
     if (resting) {
       return {
         code: 'stopped', severity: 'warning',
@@ -844,11 +853,19 @@ export function boardEtas(board, ctxIn) {
   return out;
 }
 
-export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null }) {
+// Which team-stop alerts get an email now: one at the first alert, one more if it turns red, none once someone owns it. Pure.
+export function teamStopsDue(found, alerts) {
+  return found.filter((a) => a.teamStop).map((a) => ({ a, cur: alerts[a.id], level: a.severity === 'critical' ? 2 : 1 }))
+    .filter(({ cur, level }) => cur && !cur.ack && level > (cur.mailLevel || 0));
+}
+
+export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null, onTeamStop = null }) {
   if (!db || !db.enabled) { console.log('[watchtower] off — needs DATABASE_URL'); return; }
   const sites = String(env.WATCH_SITES || 'florida-beauty').split(',').map((s) => s.trim()).filter(Boolean);
   const CFG = 'taWatchCfg';
   const DEFAULT_CFG = { recipients: [], escalateMin: 15, maxPushes: 3 };
+  // truck → when it stopped, for the timer on the card
+  const stoppedNow = (s) => Object.fromEntries(Object.entries(s.units || {}).filter(([, u]) => u && u.stoppedSince).map(([k, u]) => [k, { since: u.stoppedSince, unknown: !!u.stopStartUnknown }]));
   const stateKey = (site) => `taWatch:${site}`;
 
   // ---- ZIP geocode cache (Google if a server key is set, else OpenStreetMap) ----
@@ -977,7 +994,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     if (afterBoard) { try { await afterBoard(site, board, { geo, now }); } catch (e) { console.warn('[watchtower] afterBoard:', e.message); } }
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
     if (pushRules) cfg.recipients = await pushRules.emailsFor('priority');   // admin → Push notifications
-    const toPush = []; const toEscalate = [];
+    const toPush = []; const toMail = []; const toEscalate = [];
 
     const archived = [];
     await db.update(stateKey(site), (prev) => {
@@ -1014,6 +1031,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
             && now - (cur.lastPushAt || cur.openedAt) >= cfg.escalateMin * MIN) toEscalate.push(cur);
         }
       }
+      for (const { a, cur, level } of teamStopsDue(found, s.alerts)) { cur.mailLevel = level; toMail.push(a); }
       // auto-resolve after two clean cycles; forget resolved ones after 24h
       for (const [id, a] of Object.entries(s.alerts)) {
         if (!a.resolvedAt && !seen.has(id)) {
@@ -1040,6 +1058,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     }
     await notify(cfg, toPush);
     await notify(cfg, toEscalate, { escalated: true });
+    for (const a of toMail) { try { if (onTeamStop) await onTeamStop(a); } catch (e) { console.warn('[watchtower] team stop email:', e.message); } } // eslint-disable-line no-await-in-loop
     await drainGeo();
     await drainRoads();
   }
@@ -1069,7 +1088,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
       const all = list(s);
       const open = all.filter((a) => !a.resolvedAt).sort(rank);
       res.json({
-        site: site(req), lastRun: s.lastRun || null, tripCount: s.tripCount || 0, feedAgeMinutes: s.feedAgeMinutes, etas: s.etas || {}, roads: s.roads || null,
+        site: site(req), lastRun: s.lastRun || null, tripCount: s.tripCount || 0, feedAgeMinutes: s.feedAgeMinutes, etas: s.etas || {}, stopped: stoppedNow(s), roads: s.roads || null,
         counts: { critical: open.filter((a) => a.severity === 'critical').length, warning: open.filter((a) => a.severity === 'warning').length, unacked: open.filter((a) => !a.ack && a.severity === 'critical').length },
         open,
         resolved: all.filter((a) => a.resolvedAt).sort((a, b) => b.resolvedAt - a.resolvedAt).slice(0, 50),
