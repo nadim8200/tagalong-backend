@@ -36,6 +36,7 @@ import { initLoads } from './loads.js';
 import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
 import { initWatchtower } from './watchtower.js';
+import { renderTruckMap } from './truckmap.js';
 import { renderTeamStopEmail, renderRollingEmail, teamStopFacts, tripSheetIds, tripSheetFiles } from './teamstopmail.js';
 import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
@@ -1116,17 +1117,16 @@ jarvisChat = initJarvisChat(app, { brokerFollow: followProxy, dispatchLog, miles
 // planned truck transfers (sheet: 734 → 4504): follow both trucks, report, confirm with the drivers
 const transferWatch = initTransferWatch({ db, env: process.env, sendMail: (m, { rescue = false } = {}) => sendMail(m, { env: process.env, direct: rescue && staffOnly([].concat(m.to)) }), recipients: () => alertRecipients.resolve('transfer'), rescueRecipients: () => alertRecipients.resolve('breakdown_report'),
   textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice });
-// the map comes in as a picture from our own server, so the Google key never goes out in an email; no picture → the address and link still work
-const truckMap = async (l, color) => {
-  const key = process.env.GOOGLE_GEOCODE_KEY || process.env.GOOGLE_MAPS_KEY;
-  if (!key || l.lat == null) return [];
-  try {
-    const r = await fetch(`https://maps.googleapis.com/maps/api/staticmap?center=${l.lat},${l.lng}&zoom=10&size=592x240&scale=2&markers=color:${color}%7C${l.lat},${l.lng}&key=${key}`);
-    if (r.ok && /image/i.test(r.headers.get('content-type') || '')) return [{ name: 'truck-location.png', contentType: 'image/png', bytes: Buffer.from(await r.arrayBuffer()), cid: 'truckmap' }];
-    console.warn('[truck-email] map:', r.status);
-  } catch (e) { console.warn('[truck-email] map:', e.message); }
-  return [];
+// the still map in the truck emails: real map, truck marker, the status on top. No picture → the address and link still work
+const truckMap = async (l, tone, badge = {}) => {
+  const png = await renderTruckMap({ lat: l.lat, lng: l.lng, tone, ...badge });
+  return png ? [{ name: 'truck-location.png', contentType: 'image/png', bytes: png, cid: 'truckmap' }] : [];
 };
+const hhmm = (ms) => { const v = Math.max(0, Math.round(ms / 60000)); return v >= 60 ? `${Math.floor(v / 60)}h ${v % 60}m` : `${v}m`; };
+const etText = (ms) => `${new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} ET`;
+const stopBadge = (a) => ({ big: a.stoppedSinceMs ? hhmm(Date.now() - a.stoppedSinceMs) : null, label: 'STOPPED', lines: [a.stopStartUnknown ? 'Start of the stop not confirmed' : `Stopped since ${etText(a.stoppedSinceMs)}`, 'Snapshot, not a live timer'] });
+const rollBadge = (ep, now) => ({ big: hhmm(now - ep.movingSince), label: 'ROLLING', lines: [ep.speedMph != null ? `Speed ${Math.round(ep.speedMph)} mph` : null, `Moving since ${etText(ep.movingSince)}`, 'Snapshot, not a live timer'] });
+const reportBadge = (r) => ({ big: 'BREAKDOWN', lines: [`Reported ${etText(r.atMs)}`] });
 // the trip sheet goes with an email whenever we have it: one more try if the read fails
 const sheetFor = async (item, trip) => {
   const ids = tripSheetIds(item);
@@ -1139,7 +1139,7 @@ const sheetFor = async (item, trip) => {
 // the breakdown chain is our own people only, so it goes for real in training mode without opening that group's other mail
 const staffOnly = (to) => to.length > 0 && to.every((e) => /@floridabeauty\.us$/i.test(e));
 const sendBreakdown = async (report, item, to) => {
-  const attachments = await truckMap((item && item._samsara) || {}, 'red');
+  const attachments = await truckMap((item && item._samsara) || {}, 'red', reportBadge(report));
   const sheet = await sheetFor(item, report.trip);
   const etas = (((await db.get('taWatch:florida-beauty', {})) || {}).etas || {})[report.trip] || null;
   const m = renderBreakdownEmail({ item, report, etas, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached' });
@@ -1161,13 +1161,16 @@ app.post('/admin/alert-examples', requireCompanyAdmin, async (req, res) => {
     const etas = (((await db.get('taWatch:florida-beauty', {})) || {}).etas || {})[trip] || null;
     const reason = 'Truck air leak';
     const stoppedSinceMs = now - 125 * 60000;
+    const report0 = { atMs: now, by: 'Example (not a real report)', reason, trip, unit };
     const a = { id: 'example', unit, trip, severity: 'critical', title: 'Team truck stopped 2h 5m', stoppedSinceMs };
-    const map = await truckMap(item._samsara || {}, 'blue');
-    const green = await truckMap(item._samsara || {}, 'green');
+    const rollEp = { unit, trip, stoppedSinceMs, movingSince: now - 4 * 60000, speedMph: 58, confirmedAt: now };
+    const map = await truckMap(item._samsara || {}, 'red', stopBadge(a));
+    const brk = await truckMap(item._samsara || {}, 'red', reportBadge(report0));
+    const green = await truckMap(item._samsara || {}, 'green', rollBadge(rollEp, now));
     const sheet = await sheetFor(item, trip);
     const mapCid = map.length ? 'truckmap' : null;
-    const subject = breakdownSubject(item, reason, { unit, trip });
-    const report = { atMs: now, by: 'Example (not a real report)', reason, trip, unit, subject };
+    const report = { ...report0, subject: breakdownSubject(item, reason, { unit, trip }) };
+    const { subject } = report;
     const next = (etas && etas.stops && etas.stops[0]) || { label: t.destZoneDesc || 'the next stop', etaMs: now + 7 * 3600000, miles: 300 };
     const pos = { location: (item._samsara || {}).location, speedMph: 58, lat: (item._samsara || {}).lat, lng: (item._samsara || {}).lng, at: new Date(now).toISOString() };
     const pos2 = { ...pos, lat: pos.lat != null ? pos.lat + 0.4 : null };
@@ -1175,8 +1178,8 @@ app.post('/admin/alert-examples', requireCompanyAdmin, async (req, res) => {
     const late = lateMessage(item, { key: 'x', place: next.label, customer: null, local: new Date(next.etaMs - 3 * 3600000).toISOString().slice(0, 16), atMs: next.etaMs - 3 * 3600000, etaMs: next.etaMs, lateMin: 180, miles: next.miles });
     const list = [
       ['team truck stopped', { ...renderTeamStopEmail(teamStopFacts(a, item, { etas, mapCid, sheet, reportUrl: 'https://tagalong-backend-fdzx.onrender.com/br/example' })), attachments: [...map, ...sheet.attachments] }],
-      ['truck rolling again', { ...renderRollingEmail({ unit, trip, stoppedSinceMs, movingSince: now - 4 * 60000, speedMph: 58, confirmedAt: now }, item, { etas, now, mapCid: green.length ? 'truckmap' : null }), attachments: green }],
-      ['breakdown', { ...renderBreakdownEmail({ item, report, etas, mapCid, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached' }), attachments: [...map, ...sheet.attachments] }],
+      ['truck rolling again', { ...renderRollingEmail(rollEp, item, { etas, now, mapCid: green.length ? 'truckmap' : null }), attachments: green }],
+      ['breakdown', { ...renderBreakdownEmail({ item, report, etas, mapCid, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached' }), attachments: [...brk, ...sheet.attachments] }],
       ['rescue planned', { ...transferEmail('start', plan, pos, pos2, transferStatus(pos, pos2), { now }), subject: `Re: ${subject}` }],
       ['transfer completed', chainEmail(report, `Transfer completed: truck ${unit} to RESCUE TRUCK`, [`TruckMate shows trip ${trip} on truck RESCUE TRUCK.`, t.trailer ? `Trailer ${t.trailer}.` : null])],
       ['breakdown fixed', chainEmail(report, 'Breakdown fixed', [`Truck ${unit}, trip ${trip}.`, 'Reported fixed by Example.', 'Team truck alerts are back on for this truck.'])],
@@ -1209,14 +1212,14 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
     const chain = await breakdownReport.forTrip(ep.trip).catch(() => null);   // a reported breakdown: stay on that email chain, with the same people
     const to = await alertRecipients.resolve(chain ? 'breakdown_report' : 'team_stopped');
     if (!to.length) return;
-    const attachments = await truckMap((item && item._samsara) || {}, 'green');
+    const attachments = await truckMap((item && item._samsara) || {}, 'green', rollBadge(ep, ep.confirmedAt));
     const m = renderRollingEmail(ep, item, { etas, now: ep.confirmedAt, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null });
     await sendMail({ to, ...m, ...(chain && chain.subject ? { subject: `Re: ${chain.subject}` } : {}), attachments }, { env: process.env, direct: !!chain && staffOnly(to) });
   },
   onTeamStop: async (a, { item, etas }) => {
     const to = await alertRecipients.resolve('team_stopped');
     if (!to.length) return;
-    const attachments = await truckMap((item && item._samsara) || {}, 'blue');
+    const attachments = await truckMap((item && item._samsara) || {}, 'red', stopBadge(a));
     const mapCid = attachments.length ? 'truckmap' : null;
     const sheet = await sheetFor(item, a.trip);
     const showPhones = to.every((e) => /@floridabeauty\.us$/i.test(e));

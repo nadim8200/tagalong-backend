@@ -14,7 +14,7 @@ const APPT = { committed: 'committed to the customer', handwritten: 'handwritten
 const digits = (p) => String(p || '').replace(/\D+/g, '').slice(-10);
 const phoneText = (p) => { const d = digits(p); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(p || ''); };
 
-const SHEET_MAX_BYTES = 3 * 1024 * 1024;   // same limit as the billing emails — a big scan must never block the alert
+const SHEET_MAX_BYTES = 2200 * 1024;   // with the map picture this stays under what Outlook accepts — a big scan must never block the alert
 // The stored pages of this load's trip sheet (only sheet pages, never the rest of a packet). Newest version wins. Pure.
 export function tripSheetIds(item) {
   const sh = (item && item._manifest) || null;
