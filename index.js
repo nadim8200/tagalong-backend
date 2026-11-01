@@ -36,7 +36,7 @@ import { initLoads } from './loads.js';
 import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
 import { initWatchtower } from './watchtower.js';
-import { renderTeamStopEmail, teamStopFacts, tripSheetIds, tripSheetFiles } from './teamstopmail.js';
+import { renderTeamStopEmail, renderRollingEmail, teamStopFacts, tripSheetIds, tripSheetFiles } from './teamstopmail.js';
 import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
 import { initCarriers } from './carriers.js';
@@ -73,6 +73,7 @@ import { initArtisClients } from './artisclients.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initDispatchLog } from './dispatchlog.js';
 import { initBrokerFollow } from './brokerfollow.js';
+import { initBreakdownReport, renderBreakdownEmail } from './breakdownreport.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
 import { initVoice } from './voice.js';
@@ -1115,30 +1116,70 @@ jarvisChat = initJarvisChat(app, { brokerFollow: followProxy, dispatchLog, miles
 // planned truck transfers (sheet: 734 → 4504): follow both trucks, report, confirm with the drivers
 const transferWatch = initTransferWatch({ db, env: process.env, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('transfer'),
   textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice });
+// the map comes in as a picture from our own server, so the Google key never goes out in an email; no picture → the address and link still work
+const truckMap = async (l, color) => {
+  const key = process.env.GOOGLE_GEOCODE_KEY || process.env.GOOGLE_MAPS_KEY;
+  if (!key || l.lat == null) return [];
+  try {
+    const r = await fetch(`https://maps.googleapis.com/maps/api/staticmap?center=${l.lat},${l.lng}&zoom=10&size=592x240&scale=2&markers=color:${color}%7C${l.lat},${l.lng}&key=${key}`);
+    if (r.ok && /image/i.test(r.headers.get('content-type') || '')) return [{ name: 'truck-location.png', contentType: 'image/png', bytes: Buffer.from(await r.arrayBuffer()), cid: 'truckmap' }];
+    console.warn('[truck-email] map:', r.status);
+  } catch (e) { console.warn('[truck-email] map:', e.message); }
+  return [];
+};
+// the trip sheet goes with an email whenever we have it: one more try if the read fails
+const sheetFor = async (item, trip) => {
+  const ids = tripSheetIds(item);
+  let pages = [];
+  for (let i = 0; i < 2 && ids.length && pages.length < ids.length; i += 1) { try { pages = await docs.readDocs({ site: 'florida-beauty', ids }); } catch (e) { console.warn('[truck-email] trip sheet:', e.message); } } // eslint-disable-line no-await-in-loop
+  const sheet = tripSheetFiles(pages, ids, trip);
+  if (ids.length && sheet.attachments.length < ids.length) console.warn(`[truck-email] trip ${trip}: ${sheet.attachments.length} of ${ids.length} trip sheet pages attached`);
+  return sheet;
+};
+const sendBreakdown = async (report, item, to) => {
+  const attachments = await truckMap((item && item._samsara) || {}, 'red');
+  const sheet = await sheetFor(item, report.trip);
+  const etas = (((await db.get('taWatch:florida-beauty', {})) || {}).etas || {})[report.trip] || null;
+  const m = renderBreakdownEmail({ item, report, etas, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached' });
+  await sendMail({ to, ...m, attachments: [...attachments, ...sheet.attachments] }, { env: process.env });
+  return m.subject;
+};
+const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), roadCalls: { open: (...a) => roadCalls.open(...a) }, send: async (report, item) => { const to = await alertRecipients.resolve('breakdown_report'); if (to.length) await sendBreakdown(report, item, to); } });
+// one example of the breakdown email, to Nadim only: no road call, nothing saved, nobody else
+app.post('/admin/breakdown-report/example', requireCompanyAdmin, async (req, res) => {
+  try {
+    const trip = String((req.body || {}).trip || '');
+    const item = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((it) => String(((it && it.trip) || {}).tripNumber) === trip);
+    if (!item) return res.status(404).json({ error: 'That trip is not on the board.' });
+    const t = item.trip || {};
+    const subject = await sendBreakdown({ atMs: Date.now(), by: 'Example (not a real report)', reason: String((req.body || {}).reason || 'Truck air leak').slice(0, 200), trip, unit: t.powerUnit, roadCall: 'EXAMPLE' }, item, ['ntellez@floridabeauty.us']);
+    res.json({ ok: true, subject });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules,
+  // trucks and trips with a road call still open in the last 5 days: a wrecker moves them, they aren't rolling
+  openRoadCalls: async () => ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000).flatMap((rc) => [rc.trip, String(rc.truck || '').trim().toLowerCase().replace(/^0+(?=\d)/, '')].filter(Boolean).map(String)),
+  onRolling: async (ep, { item, etas }) => {
+    const to = await alertRecipients.resolve('team_stopped');
+    if (!to.length) return;
+    const attachments = await truckMap((item && item._samsara) || {}, 'green');
+    const m = renderRollingEmail(ep, item, { etas, now: ep.confirmedAt, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null });
+    const chain = await breakdownReport.forTrip(ep.trip).catch(() => null);   // a reported breakdown: stay on that email chain
+    await sendMail({ to, ...m, ...(chain && chain.subject ? { subject: `Re: ${chain.subject}` } : {}), attachments }, { env: process.env });
+  },
   onTeamStop: async (a, { item, etas }) => {
     const to = await alertRecipients.resolve('team_stopped');
     if (!to.length) return;
-    // the map comes in as a picture from our own server, so the Google key never goes out in an email; no picture → the address and link still work
-    const l = (item && item._samsara) || {}; const key = process.env.GOOGLE_GEOCODE_KEY || process.env.GOOGLE_MAPS_KEY;
-    const attachments = [];
-    if (key && l.lat != null) {
-      try { const r = await fetch(`https://maps.googleapis.com/maps/api/staticmap?center=${l.lat},${l.lng}&zoom=10&size=592x240&scale=2&markers=color:blue%7C${l.lat},${l.lng}&key=${key}`); const ok = r.ok && /image/i.test(r.headers.get('content-type') || ''); if (ok) attachments.push({ name: 'truck-location.png', contentType: 'image/png', bytes: Buffer.from(await r.arrayBuffer()), cid: 'truckmap' }); else console.warn('[team-stop] map:', r.status); } catch (e) { console.warn('[team-stop] map:', e.message); }
-    }
+    const attachments = await truckMap((item && item._samsara) || {}, 'blue');
     const mapCid = attachments.length ? 'truckmap' : null;
-    // the trip sheet goes with it whenever we have it: one more try if the read fails, and if Outlook refuses the files the alert still goes out, saying so
-    const sheetIds = tripSheetIds(item);
-    let pages = [];
-    for (let i = 0; i < 2 && sheetIds.length && pages.length < sheetIds.length; i += 1) { try { pages = await docs.readDocs({ site: 'florida-beauty', ids: sheetIds }); } catch (e) { console.warn('[team-stop] trip sheet:', e.message); } } // eslint-disable-line no-await-in-loop
-    const sheet = tripSheetFiles(pages, sheetIds, a.trip);
-    if (sheetIds.length && sheet.attachments.length < sheetIds.length) console.warn(`[team-stop] trip ${a.trip}: ${sheet.attachments.length} of ${sheetIds.length} trip sheet pages attached`);
+    const sheet = await sheetFor(item, a.trip);
     const showPhones = to.every((e) => /@floridabeauty\.us$/i.test(e));
     try {
-      await sendMail({ to, ...renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, mapCid, sheet })), attachments: [...attachments, ...sheet.attachments] }, { env: process.env });
+      await sendMail({ to, ...renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, mapCid, sheet, reportUrl: breakdownReport.link(a) })), attachments: [...attachments, ...sheet.attachments] }, { env: process.env });
     } catch (e) {
       console.warn('[team-stop] sent without files:', e.message);
       const noFiles = sheetIds.length ? { status: 'unavailable', note: 'Trip sheet could not be attached. Open it on the load in the console.' } : null;
-      await sendMail({ to, ...renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, sheet: noFiles })) }, { env: process.env });
+      await sendMail({ to, ...renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, sheet: noFiles, reportUrl: breakdownReport.link(a) })) }, { env: process.env });
     }
   }, afterBoard: async (site, board, ctx) => { await followProxy.process(site, board).catch((e) => console.warn('[broker-follow]', e.message)); await transferWatch.process(site, board).catch((e) => console.warn('[transfer]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
 initCarChat(app, { requireAuth, env: process.env });

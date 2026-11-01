@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { faultSeverity, evaluateBoard, teamStopsDue } from '../watchtower.js';
-import { renderTeamStopEmail, teamStopFacts, tripSheetIds, tripSheetFiles } from '../teamstopmail.js';
+import { faultSeverity, evaluateBoard, teamStopsDue, trackRolling, underOwnPower } from '../watchtower.js';
+import { renderTeamStopEmail, renderRollingEmail, teamStopFacts, tripSheetIds, tripSheetFiles } from '../teamstopmail.js';
 import { compareWithTruckMate } from '../manifest.js';
 
 test('engine faults: network/sensor/manufacturer codes are quiet; protection and derate codes alert', () => {
@@ -112,4 +112,49 @@ test('trip sheet on the team stop email: every page we can read goes, and the em
   assert.match(say(ok).html, /Trip sheet attached/); assert.match(say(ok).text, /Trip sheet attached/);
   assert.match(say(one).html, /1 of 2 pages/);
   assert.doesNotMatch(say(null).html, /Trip sheet attached/); assert.match(say(null).html, /No trip sheet on file/);
+});
+
+const T0 = Date.parse('2026-11-01T12:00:00Z');
+const read = (min, speedMph, lat = 33.6, x = {}) => ({ gpsAt: new Date(T0 + min * 60000).toISOString(), speedMph, lat, lng: -80.3, rpm: 1300, engine: 'On', hos: { status: 'driving' }, ...x });
+const roll = (list, opts = {}, ep0 = { lat: 33.6, lng: -80.3 }) => { let ep = ep0; let hit = null; for (const [min, l, age = 0] of list) { const r = trackRolling(ep, l, T0 + (min + age) * 60000, opts); ep = r.ep; if (r.confirmed && !hit) hit = min; } return { ep, hit }; };
+
+test('rolling again: three real readings over 3 minutes, moved a quarter mile', () => {
+  assert.equal(roll([[0, read(0, 55, 33.61)], [2, read(2, 56, 33.62)], [4, read(4, 57, 33.63)]]).hit, 4);
+});
+test('rolling again: a speed spike, GPS drift, stale or repeated readings never count', () => {
+  assert.equal(roll([[0, read(0, 40, 33.61)], [2, read(2, 0, 33.61)], [4, read(4, 40, 33.61)]]).hit, null, 'a spike');
+  assert.equal(roll([[0, read(0, 12)], [2, read(2, 12)], [4, read(4, 12)]]).hit, null, 'speed but no distance: drift');
+  assert.equal(roll([[0, read(0, 55, 33.61), 30], [2, read(2, 55, 33.62), 30], [4, read(4, 55, 33.63), 30]]).hit, null, 'stale');
+  const same = read(0, 55, 33.61);
+  assert.equal(roll([[0, same], [1, same], [2, same], [3, same]]).hit, null, 'the same reading polled again');
+  assert.equal(roll([[0, read(0, 55, 33.61)], [1, read(1, 55, 33.62)], [1.5, read(1.5, 55, 33.63)]]).hit, null, 'not 3 minutes yet');
+  assert.equal(roll([[0, { speedMph: 55 }], [2, { speedMph: 55 }], [4, { speedMph: 55 }]]).hit, null, 'no GPS time');
+});
+
+test('a towed truck is not rolling: the GPS moves but the engine and the ELD do not', () => {
+  const drive = (x) => [[0, read(0, 55, 33.61, x)], [2, read(2, 55, 33.62, x)], [4, read(4, 55, 33.63, x)]];
+  assert.equal(roll(drive({ rpm: null, engine: 'Off', hos: { status: 'sleeperBed' }, hos2: { status: 'sleeperBed' } })).hit, null, 'on the wrecker, like truck 2611');
+  assert.equal(roll(drive({ rpm: 0 })).hit, null, 'engine not turning');
+  assert.equal(roll(drive({ hos: { status: 'offDuty' } })).hit, null, 'engine on but nobody driving');
+  assert.equal(roll(drive({ hos: { status: 'sleeperBed' }, hos2: { status: 'driving' } })).hit, 4, 'the other team driver');
+  assert.equal(roll(drive({ engine: 'Off', rpm: 1264 })).hit, 4, 'Samsara says Off at highway speed: RPM wins');
+  assert.equal(roll(drive({ hos: null })).hit, 4, 'no ELD clock: the engine is enough');
+  assert.equal(roll(drive({}), { down: true }).hit, null, 'breakdown or road call open');
+  const [a, b] = [drive({ rpm: 0 }), drive({})];
+  assert.equal(roll([...a.map(([m, l]) => [m, l]), [6, read(6, 55, 33.64)], [8, read(8, 55, 33.65)], [10, read(10, 55, 33.66)]]).hit, 10, 'after the repair it counts from the real drive');
+  assert.equal(b.length, 3);
+  assert.equal(underOwnPower({ rpm: null, engine: 'On' }), true);
+});
+
+const ep = { unit: '733', trip: '626258', stoppedSinceMs: T0 - 208 * 60000, movingSince: T0, speedMph: 54.4, confirmedAt: T0 + 2 * 60000 };
+test('rolling email: green timer is time moving, previous stop runs to the moment it moved, drivers stay separate', () => {
+  const m = renderRollingEmail(ep, fullItem, { now: ep.confirmedAt, mapCid: 'truckmap' });
+  assert.equal(m.subject, 'Truck 733 rolling again — Trip 626258');
+  assert.match(m.html, /#166534/); assert.match(m.html, /2m/); assert.match(m.html, /Previous stop: <b>3h 28m<\/b>/); assert.match(m.html, /54 mph/);
+  assert.match(m.html, /jarvis:training-slot/); assert.match(m.html, /cid:truckmap/); assert.match(m.html, /Off duty/, 'a driver keeps the status the ELD reports');
+  assert.match(m.html, /do(es)? not confirm/); assert.doesNotMatch(m.html, /trip history/); assert.match(m.text, /Previous stop: 3h 28m/);
+});
+test('rolling email: missing data says so; an unknown stop start is a floor', () => {
+  const m = renderRollingEmail({ ...ep, stopStartUnknown: true }, { trip: {}, _samsara: {} }, { now: ep.confirmedAt });
+  assert.match(m.html, /at least 3h 28m/); assert.match(m.html, /Location not reported/); assert.match(m.html, /No driver reported/); assert.doesNotMatch(m.html, /Open map/); assert.doesNotMatch(m.html, /On time/);
 });

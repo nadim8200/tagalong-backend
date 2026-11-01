@@ -857,13 +857,34 @@ export function boardEtas(board, ctxIn) {
   return out;
 }
 
+// A truck under its own power: the engine is turning (RPM; Samsara's on/off flag lags and shows Off at 68 mph) and, when
+// the ELD reports, a driver is in Driving status. A tow moves the GPS with neither. Pure.
+export function underOwnPower(l) {
+  const running = l.rpm != null ? l.rpm >= 300 : /^(on|idle)$/i.test(String(l.engine || ''));
+  const clocks = [l.hos, l.hos2].filter((h) => h && h.status);
+  return running && (!clocks.length || clocks.some((h) => h.status === 'driving'));
+}
+// Has an emailed stop really ended? Only on fresh GPS (10 min at most): 10+ mph under its own power on 3 readings in a row,
+// over at least 3 minutes, and a quarter mile from where it sat. A stopped reading, a tow, or an open breakdown / road
+// call starts it over, so a GPS blip or a truck on a wrecker never counts. Pure.
+export const ROLL = { mph: 10, readings: 3, min: 3, miles: 0.25, freshMin: 10, keepHours: 72 };
+export function trackRolling(ep, l, now, { down = false } = {}) {
+  const gpsMs = l && l.gpsAt ? Date.parse(l.gpsAt) : null;
+  if (gpsMs == null || Number.isNaN(gpsMs) || (now - gpsMs) / MIN > ROLL.freshMin || l.speedMph == null) return { ep, confirmed: false };   // stale: no opinion
+  if (down || l.speedMph < ROLL.mph || !underOwnPower(l)) return { ep: { ...ep, movingSince: null, readings: 0, lastGpsAt: null }, confirmed: false };
+  if (ep.lastGpsAt === l.gpsAt) return { ep, confirmed: false };                                                                                   // the same reading again
+  const next = { ...ep, movingSince: ep.movingSince || gpsMs, readings: (ep.readings || 0) + 1, lastGpsAt: l.gpsAt };
+  const far = ep.lat == null || l.lat == null || haversineMi(ep.lat, ep.lng, l.lat, l.lng) >= ROLL.miles;
+  return { ep: next, confirmed: next.readings >= ROLL.readings && (gpsMs - next.movingSince) / MIN >= ROLL.min && far };
+}
+
 // Which team-stop alerts get an email now: one at the first alert, one more if it turns red, none once someone owns it. Pure.
 export function teamStopsDue(found, alerts) {
   return found.filter((a) => a.teamStop).map((a) => ({ a, cur: alerts[a.id], level: a.severity === 'critical' ? 2 : 1 }))
     .filter(({ cur, level }) => cur && !cur.ack && level > (cur.mailLevel || 0));
 }
 
-export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null, onTeamStop = null }) {
+export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null, onTeamStop = null, onRolling = null, openRoadCalls = null }) {
   if (!db || !db.enabled) { console.log('[watchtower] off — needs DATABASE_URL'); return; }
   const sites = String(env.WATCH_SITES || 'florida-beauty').split(',').map((s) => s.trim()).filter(Boolean);
   const CFG = 'taWatchCfg';
@@ -998,7 +1019,8 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     if (afterBoard) { try { await afterBoard(site, board, { geo, now }); } catch (e) { console.warn('[watchtower] afterBoard:', e.message); } }
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
     if (pushRules) cfg.recipients = await pushRules.emailsFor('priority');   // admin → Push notifications
-    const toPush = []; const toMail = []; const toEscalate = [];
+    const toPush = []; const toMail = []; const toRoll = []; const toEscalate = [];
+    const roadDown = new Set(openRoadCalls ? await openRoadCalls().catch(() => []) : []);   // trucks / trips with a road call still open
     let etasNow = {};
 
     const archived = [];
@@ -1015,6 +1037,11 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
         if (l.speedMph > 3) { us.stoppedSince = null; us.stopStartUnknown = false; us.lastMovingAt = now; } else if (!us.stoppedSince) {
           us.stoppedSince = now;
           us.stopStartUnknown = isNew;                  // already parked when we first saw it
+        }
+        // an emailed stop: is the truck really moving again? (once per stop; the note is cleared before the email goes)
+        if (us.stopEpisode) {
+          const r = trackRolling(us.stopEpisode, l, now, { down: !!((item._breakdown && item._breakdown.on) || (item._hold && item._hold.kind === 'breakdown') || roadDown.has(norm(t.powerUnit)) || roadDown.has(String(t.tripNumber))) });
+          if (r.confirmed) { toRoll.push({ ...r.ep, confirmedAt: now, speedMph: l.speedMph }); delete us.stopEpisode; } else if (now - r.ep.at > ROLL.keepHours * 60 * MIN) delete us.stopEpisode; else us.stopEpisode = r.ep;
         }
         s.units[u] = us;
       }
@@ -1037,7 +1064,13 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
             && now - (cur.lastPushAt || cur.openedAt) >= cfg.escalateMin * MIN) toEscalate.push(cur);
         }
       }
-      for (const { a, cur, level } of teamStopsDue(found, s.alerts)) { cur.mailLevel = level; toMail.push(a); }
+      for (const { a, cur, level } of teamStopsDue(found, s.alerts)) {
+        cur.mailLevel = level; toMail.push(a);
+        const us = s.units[norm(a.unit)];
+        const it = (board.trips || []).find((x) => String(((x && x.trip) || x || {}).tripNumber || '') === String(a.trip));
+        const sam = (it && it._samsara) || {};
+        if (us && !us.stopEpisode) us.stopEpisode = { unit: a.unit, trip: a.trip, stoppedSinceMs: a.stoppedSinceMs, stopStartUnknown: !!a.stopStartUnknown, lat: sam.lat ?? null, lng: sam.lng ?? null, at: now };
+      }
       // auto-resolve after two clean cycles; forget resolved ones after 24h
       for (const [id, a] of Object.entries(s.alerts)) {
         if (!a.resolvedAt && !seen.has(id)) {
@@ -1065,6 +1098,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     await notify(cfg, toPush);
     await notify(cfg, toEscalate, { escalated: true });
     for (const a of toMail) { try { if (onTeamStop) await onTeamStop(a, { item: (board.trips || []).find((it) => String(((it && it.trip) || it || {}).tripNumber || '') === String(a.trip)) || null, etas: etasNow[a.trip] || null }); } catch (e) { console.warn('[watchtower] team stop email:', e.message); } } // eslint-disable-line no-await-in-loop
+    for (const ep of toRoll) { try { if (onRolling) await onRolling(ep, { item: (board.trips || []).find((it) => String(((it && it.trip) || it || {}).tripNumber || '') === String(ep.trip)) || null, etas: etasNow[ep.trip] || null }); } catch (e) { console.warn('[watchtower] rolling email:', e.message); } } // eslint-disable-line no-await-in-loop
     await drainGeo();
     await drainRoads();
   }
