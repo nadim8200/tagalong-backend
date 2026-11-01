@@ -1168,7 +1168,7 @@ app.post('/admin/confirm-example', requireCompanyAdmin, async (req, res) => {
     const stops = requestStops(item, {});
     const day = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
     const ask = askEmail(trip, item, { confirmUrl: brokerFollow.exampleLink(trip, 'Example') });
-    const reply = confirmedReply(trip, item, stops.map((s, i) => ({ ...s, local: `${day}T${String(8 + i * 2).padStart(2, '0')}:00` })), 'Example (not a real confirmation)');
+    const reply = confirmedReply(trip, item, stops.map((s, i) => ({ ...s, local: `${day}T${String(8 + i * 2).padStart(2, '0')}:00` })), 'Example (not a real confirmation)', [], { atMs: Date.now(), example: true });
     await sendMail({ ...ask, to: [me], subject: `[EXAMPLE] ${ask.subject}` }, { env: process.env, direct: true });
     await sendMail({ ...reply, to: [me], subject: `[EXAMPLE] Re: ${ask.subject}` }, { env: process.env, direct: true });
     return res.json({ ok: true, trip, truck: item.trip.powerUnit, stops: stops.length, sent: ['request', 'confirmed reply'] });

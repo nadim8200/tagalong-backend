@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { confirmedCommits, openStops, askEmail, requestStops, confirmPage, confirmedReply, initBrokerFollow } from '../brokerfollow.js';
+import { confirmedCommits, openStops, askEmail, requestStops, confirmPage, confirmedReply, monitorStatus, initBrokerFollow } from '../brokerfollow.js';
 import { evaluateBoard } from '../watchtower.js';
 import { commitMs } from '../commitments.js';
 
@@ -195,7 +195,7 @@ test('submit: saves each stop as a person confirmed it, then answers on the thre
   assert.equal(out.code, 200); assert.equal(out.told, true);
   assert.equal(r.saved['626045']['SANTA ROSA|CA'].local, `${future}T08:00`); assert.equal(r.saved['626045']['WEST SACRAMENTO|CA'].by, 'Gio');
   assert.equal(r.thread.length, 1); assert.equal(r.thread[0].id, 'mail1');
-  assert.match(r.thread[0].text, /Confirmed for trip 626045, truck 2617\./); assert.match(r.thread[0].text, /2:30 PM Pacific time/); assert.match(r.thread[0].text, /make sure the truck arrives on time/);
+  assert.match(r.thread[0].text, /DELIVERY APPOINTMENTS CONFIRMED/); assert.match(r.thread[0].text, /Trip 626045 · Truck 2617/); assert.match(r.thread[0].text, /2:30 PM Pacific time/); assert.match(r.thread[0].text, /Confirmed by: Gio/); assert.match(r.thread[0].text, /ETA MONITORING IS PENDING/, 'no ETA on this rig'); assert.doesNotMatch(r.thread[0].text, /arrives on time/);
   assert.equal((await r.f.submitTimes('s', P, { name: 'Ana', stops: [{ key: 'SANTA ROSA|CA', date: future, time: '09:00' }] })).code, 409, 'a second submit changes nothing');
   assert.equal(r.saved['626045']['SANTA ROSA|CA'].by, 'Gio'); assert.equal(r.thread.length, 1);
 });
@@ -240,4 +240,46 @@ test('the example link opens the real page and cannot save', async () => {
   const r = linkRig({ trips: [brokerLoad2] });
   assert.match(r.f.exampleLink('626045', 'Example'), /\/dc\//);
   assert.deepEqual(r.saved, {});
+});
+
+test('confirmation email: banner and wording follow the count, what saved, and real monitoring state', () => {
+  const NOW = Date.parse('2026-11-01T16:00:00Z');
+  const a = { name: 'CEASAR\'S FLOWERS', city: 'WATSONVILLE', state: 'CA', local: '2026-11-03T08:00' };
+  const b = { name: 'SAMPLE NY', city: 'ALBANY', state: 'NY', local: '2026-11-03T14:30' };
+  const it = { trip: { powerUnit: '2617' } };
+  const one = confirmedReply('9', it, [a], 'Gio', [], { atMs: NOW });
+  assert.match(one.text, /^DELIVERY APPOINTMENT CONFIRMED$/m); assert.match(one.text, /appointment has been recorded/); assert.match(one.text, /JARVIS IS MONITORING YOUR DELIVERY/);
+  assert.match(one.text, /Tuesday, November 3, 2026, 8:00 AM Pacific time/); assert.match(one.text, /Confirmation time: Nov 1, 11:00 AM ET/); assert.match(one.text, /More than 1 hour late/);
+  const two = confirmedReply('9', it, [a, b], 'Gio', []);
+  assert.match(two.text, /^DELIVERY APPOINTMENTS CONFIRMED$/m); assert.match(two.text, /2:30 PM Eastern time/); assert.match(two.text, /Confirmation time: Not recorded/);
+  assert.match(confirmedReply('9', it, [a], null).text, /Confirmed by: Not recorded/);
+  assert.match(confirmedReply('9', it, [a], 'G', [], { thresholdMin: 90 }).text, /More than 1 hour 30 minutes late/);
+  const pend = confirmedReply('9', it, [a], 'G', [], { monitoring: 'pending' });
+  assert.match(pend.text, /ETA MONITORING IS PENDING/); assert.doesNotMatch(pend.text, /IS MONITORING YOUR/);
+  const off = confirmedReply('9', it, [a], 'G', [], { monitoring: 'unavailable' });
+  assert.match(off.text, /NOT ACTIVE/); assert.doesNotMatch(off.text, /Delay notification/);
+  assert.match(confirmedReply('9', it, [a], 'G', [], { example: true }).html, /EXAMPLE PREVIEW · Not a real appointment confirmation/);
+  assert.doesNotMatch(one.html, /EXAMPLE PREVIEW/);
+  assert.match(confirmedReply('9', it, [a], 'G', [b]).text, /Still needed: ALBANY, NY\./);
+  assert.match(confirmedReply('9', it, [{ ...a, name: '<x>' }], 'G').html, /&lt;x&gt;/);
+  assert.doesNotMatch(one.text + one.html.replace(/<!--[\s\S]*?-->/g, ''), /undefined|null|NaN/); assert.match(one.text, /does not guarantee on-time arrival/);
+  assert.equal(monitorStatus({ etas: { at: NOW - 60000, stops: [{ etaMs: NOW }] }, now: NOW }), 'active');
+  assert.equal(monitorStatus({ etas: { at: NOW - 3600000, stops: [{ etaMs: NOW }] }, now: NOW }), 'pending', 'stale ETA');
+  assert.equal(monitorStatus({ etas: null, now: NOW }), 'pending'); assert.equal(monitorStatus({ following: false }), 'unavailable');
+});
+test('a failed save is never reported as confirmed, and can be tried again', async () => {
+  const r = linkRig({ trips: [brokerLoad2] }); await follow(r);
+  const db2 = { enabled: true, s: {}, get: async (k, d) => (k in db2.s ? db2.s[k] : d), update: async (k, fn, d) => { db2.s[k] = fn(k in db2.s ? db2.s[k] : d); return db2.s[k]; } };
+  let fail = 'WEST SACRAMENTO|CA'; const thread = []; const saved = {};
+  const commitments = { all: async () => saved, commit: async (t, s) => { if (fail === 'ALL' || s.key === fail) return null; saved[t] = { ...(saved[t] || {}), [s.key]: { atMs: 5, local: s.local, by: s.by, state: s.state } }; return { key: s.key }; } };
+  const f = initBrokerFollow(null, { db: db2, getBoard: async () => ({ trips: [brokerLoad2] }), commitments, sendMail: async () => {}, secret: 's', replyInThread: async (x, y, m) => { thread.push(m); return { sent: true }; } });
+  await f.start('s', '626045', { by: 'Gio', byEmail: 'gio@floridabeauty.us', emailId: 'm' });
+  const both = [{ key: 'SANTA ROSA|CA', date: future, time: '08:00' }, { key: 'WEST SACRAMENTO|CA', date: future, time: '09:00' }];
+  const out = await f.submitTimes('s', P, { name: 'Gio', stops: both });
+  assert.equal(out.code, 200); assert.equal(out.partial, true); assert.deepEqual(out.stops, ['SANTA ROSA|CA']);
+  assert.match(thread[0].text, /^DELIVERY APPOINTMENT CONFIRMED$/m); assert.match(thread[0].text, /Still needed: WEST SACRAMENTO, CA/); assert.doesNotMatch(thread[0].text.split('Still needed')[0], /WEST SACRAMENTO/);
+  fail = 'ALL';
+  assert.equal((await f.submitTimes('s', P, { name: 'Gio', stops: [both[1]] })).code, 500); assert.equal(thread.length, 1, 'nothing saved, nothing sent');
+  fail = null;
+  assert.equal((await f.submitTimes('s', P, { name: 'Gio', stops: [both[1]] })).code, 200); assert.equal(thread.length, 2);
 });

@@ -5,16 +5,18 @@
 // Internal only: nothing here reaches a broker, customer or driver. Hub outbound loads never come through here.
 // ---------------------------------------------------------------
 import { brokerLoad } from './watchtower.js';
-import { stopKey, commitMs, lateStops, lateMessage } from './commitments.js';
+import { stopKey, commitMs, lateStops, lateMessage, LATE_MIN } from './commitments.js';
 import { makeToken, readToken } from './breakdownreport.js';
 import { emailParts } from './teamstopmail.js';
-import { tzOf, zoneName } from './localtime.js';
+import { tzOf, zoneName, fmtLocalShort } from './localtime.js';
 
 const KEY = (site) => `taBrokerFollow:${site}`;     // trip → { since, by, byEmail, source, askedAt, asks, sent }
 const REASK_MS = 2 * 3600000;
 const MAX_ASKS = 2;
 const STAFF_DOMAIN = /@floridabeauty\.us$/i;
 const LINK_PURPOSE = 'delivery-confirm';
+const ETA_FRESH_MS = 30 * 60000;
+const { TRAINING_SLOT } = emailParts;
 const DAY = 86400000;
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const tripOf = (it) => (it && it.trip) || it || {};
@@ -42,6 +44,7 @@ export function openStops(item) {
 const cleanName = (x) => String(x || '').replace(/\s*\*\s*$/, '').replace(/\s+/g, ' ').trim();
 const SOURCE = (c) => (c.fromRC ? 'rate con' : c.fromTM ? 'TruckMate' : c.fromSheet ? 'trip sheet' : c.auto ? 'saved from a previous load' : 'on file');
 const friendlyDate = (local) => new Date(`${String(local).slice(0, 10)}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+const longDate = (local) => new Date(`${String(local).slice(0, 10)}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 const friendlyTime = (local) => { const [h, m] = String(local).slice(11, 16).split(':').map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
 
 // One entry per open stop still needing a person's confirmation: same stops and keys as openStops, never split or joined from display text.
@@ -63,7 +66,7 @@ export function requestStops(item, commits = {}) {
 
 // The email asking for the time. Layout + wording only: who gets it and when come from the caller. Pure.
 export function askEmail(trip, item, { again = false, commits = {}, internal = true, confirmUrl = null } = {}) {
-  const { FONT, NAVY, TEXT, MUTED, LINE, TRAINING_SLOT } = emailParts;
+  const { FONT, NAVY, TEXT, MUTED, LINE } = emailParts;
   const t = tripOf(item);
   const subject = `Trip ${trip}: what time does truck ${t.powerUnit || ''} need to be at delivery?`.replace('truck  need', 'the truck need');
   const stops = requestStops(item, commits);
@@ -117,15 +120,64 @@ export function confirmPage(p, stops, by, note = null) {
   return shell(`Confirm delivery, trip ${p.t}`, `<h1>Set date and time</h1><p class="s">Trip ${esc(p.t)}</p><form id="f">${stops.map(card).join('')}<label for="n">Your name</label><input id="n" maxlength="80" required autocomplete="name" value="${esc(by || '')}"><button id="b" type="submit">Submit</button><div class="e" id="e" role="alert"></div></form><p class="f">Jarvis answers on the email thread. No appointment? Reply to the email with the receiving hours.</p><script>document.getElementById('f').addEventListener('submit',async function(ev){ev.preventDefault();var b=document.getElementById('b'),e=document.getElementById('e');var stops=[].map.call(document.querySelectorAll('.t'),function(t){var i=t.querySelectorAll('input');return{key:t.getAttribute('data-key'),date:i[0].value,time:i[1].value};});if(stops.some(function(x){return(!x.date)!==(!x.time);})){e.textContent='Each stop needs both a date and a time.';return;}b.disabled=true;e.textContent='';try{var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:document.getElementById('n').value,stops:stops})});var j=await r.json();if(!r.ok)throw new Error(j.error||'Could not save.');document.querySelector('.c').innerHTML=j.example?'<h1>Example only</h1><p class="s">Nothing was saved and no email went out. On a real load this is where it says Confirmed.</p>':'<h1>Confirmed</h1><p class="s">Saved. Jarvis will watch the ETA against this time. You can close this page.</p>';}catch(x){e.textContent=x.message;b.disabled=false;}});</script>`);
 }
 
-// What goes back on the thread once times are set. Pure.
-export function confirmedReply(trip, item, saved, by, left = []) {
+// Is the ETA watch really running for this load right now? Pure. → 'active' | 'pending' | 'unavailable'
+export function monitorStatus({ following = true, etas = null, now = Date.now() } = {}) {
+  if (!following) return 'unavailable';
+  const fresh = etas && Array.isArray(etas.stops) && etas.stops.some((x) => x.etaMs) && (etas.at == null || now - Number(etas.at) < ETA_FRESH_MS);
+  return fresh ? 'active' : 'pending';
+}
+const lateWords = (m) => { const h = Math.floor(m / 60); const r = m % 60; return h ? `${h} hour${h === 1 ? '' : 's'}${r ? ` ${r} minutes` : ''}` : `${r} minutes`; };
+const MONITOR = {
+  active: { head: 'JARVIS IS MONITORING YOUR DELIVERY', body: "I'll track the truck's ETA against each confirmed appointment and keep your team informed if a delay is projected." },
+  pending: { head: 'ETA MONITORING IS PENDING', body: 'The appointments are saved. I do not have a current ETA for this truck yet, so nothing is being compared until one comes in.' },
+  unavailable: { head: 'ETA MONITORING IS NOT ACTIVE', body: 'The appointments are saved, but Jarvis is not following this load. Ask Jarvis to follow up on it to start ETA checks.' },
+};
+
+// The confirmation on the thread: only stops whose save succeeded reach here. Pure.
+export function confirmedReply(trip, item, saved, by, left = [], { atMs = null, monitoring = 'active', thresholdMin = LATE_MIN, example = false } = {}) {
+  const { FONT, NAVY, TEXT, MUTED, LINE } = emailParts;
+  const GREEN = '#166534';
   const t = tripOf(item);
-  const line = (s) => `${[s.name, `${s.city}, ${s.state}`].filter(Boolean).join(', ')}: ${friendlyDate(s.local)}, ${friendlyTime(s.local)} ${zoneName(tzOf(`${s.city}, ${s.state}`))} time`;
-  const follow = 'I will follow this load through and watch the ETA against this time to make sure the truck arrives on time. If it looks more than an hour late, the team gets an email.';
-  const still = left.length ? `Still needed: ${left.map((s) => `${s.city}, ${s.state}`).join('; ')}.` : null;
-  const head = `Confirmed for trip ${trip}${t.powerUnit ? `, truck ${t.powerUnit}` : ''}.`;
-  return { text: [head, ...saved.map(line), `Confirmed by ${by}.`, follow, still, 'Jarvis · AI Dispatcher · Florida Beauty'].filter(Boolean).join('\n'),
-    html: `<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1F2937"><p><b>${esc(head)}</b></p>${saved.map((s) => `<p style="margin:0 0 6px">${esc(line(s))}</p>`).join('')}<p>Confirmed by ${esc(by)}.</p><p>${esc(follow)}</p>${still ? `<p><b>${esc(still)}</b></p>` : ''}<p style="font-size:14px;color:#5B6778">Jarvis · AI Dispatcher · Florida Beauty</p></div>` };
+  const one = saved.length === 1;
+  const title = one ? 'DELIVERY APPOINTMENT CONFIRMED' : 'DELIVERY APPOINTMENTS CONFIRMED';
+  const intro = one ? 'The following delivery appointment has been recorded for this trip.' : 'The following delivery appointments have been recorded for this trip.';
+  const ids = `Trip ${trip}${t.powerUnit ? ` · Truck ${t.powerUnit}` : ''}`;
+  const zone = (st) => `${zoneName(tzOf(`${st.city}, ${st.state}`))} time`;
+  const who = by || 'Not recorded';
+  const when = atMs ? fmtLocalShort(atMs, '') : 'Not recorded';
+  const mon = MONITOR[monitoring] || MONITOR.pending;
+  const delay = `Delay notification: More than ${lateWords(thresholdMin)} late`;
+  const delayNote = 'The team will receive an email if the projected delay exceeds this threshold.';
+  const change = 'Reply to this email with the location, revised date, time and timezone.';
+  const promise = 'Monitoring provides updates; it does not guarantee on-time arrival.';
+  const still = left.length ? `Still needed: ${left.map((x) => `${x.city}, ${x.state}`).join('; ')}.` : null;
+  const notice = example ? 'EXAMPLE PREVIEW · Not a real appointment confirmation' : null;
+  const pill = example ? 'Confirmed · Example' : 'Confirmed';
+  const card = (st) => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 12px;border:1px solid ${LINE};border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="padding-right:8px;font-family:${FONT};vertical-align:top;"><div style="font-size:17px;font-weight:bold;color:${NAVY};word-break:break-word;">${esc(st.name || `${st.city}, ${st.state}`)}</div><div style="font-size:15px;color:${MUTED};">${esc(`${st.city}, ${st.state}`)}</div></td><td align="right" valign="top" style="white-space:nowrap;"><span class="fb-pill" style="display:inline-block;padding:4px 8px;border-radius:5px;background:#E8F7EE;font-family:${FONT};font-size:12px;font-weight:bold;color:${GREEN};">${esc(pill)}</span></td></tr></table>
+<div style="margin-top:10px;padding-top:10px;border-top:1px solid ${LINE};font-size:12px;letter-spacing:.4px;color:${MUTED};">DELIVERY APPOINTMENT</div><div style="font-size:16px;font-weight:bold;color:${NAVY};">${esc(longDate(st.local))}</div><div class="fb-time ts-big" style="font-size:42px;line-height:1.15;font-weight:bold;color:${GREEN};">${esc(friendlyTime(st.local))}</div><div style="font-size:16px;color:${TEXT};">${esc(zone(st))}</div></td></tr></table>`;
+  const fact = (k, v) => `<td width="50%" valign="top" style="padding:0 10px;font-family:${FONT};"><div style="font-size:13px;color:${MUTED};">${esc(k)}</div><div style="font-size:15px;font-weight:bold;color:${NAVY};word-break:break-word;">${esc(v)}</div></td>`;
+  const html = `<style>@media (prefers-color-scheme:dark){.fb-page{background:#0B1220!important}.fb-card,.fb-card td,.fb-card table{background:#14202F!important;color:#E5E7EB!important;border-color:#334155!important}.fb-card div,.fb-card b{color:#E5E7EB!important}.fb-card .fb-time,.fb-card .fb-pill{color:#86EFAC!important}.fb-card .fb-pill{background:#123524!important}.fb-card .fb-green,.fb-card .fb-green td,.fb-card .fb-green div{background:#123524!important;color:#BBF7D0!important}.fb-card .fb-blue,.fb-card .fb-blue td,.fb-card .fb-blue div,.fb-card .fb-blue b{background:#17324F!important;color:#DBEAFE!important}}</style>
+<table class="fb-page" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F1F5F9" style="background:#F1F5F9;"><tr><td align="center" style="padding:12px 8px;">
+<table class="fb-card" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="max-width:640px;background:#FFFFFF;border-radius:8px;">
+<tr><td align="center" style="padding:20px 20px 2px;font-family:${FONT};font-size:20px;font-weight:bold;letter-spacing:2px;color:${NAVY};">FLORIDA BEAUTY</td></tr>
+<tr><td align="center" style="padding:0 20px 12px;border-bottom:1px solid ${LINE};font-family:${FONT};font-size:14px;color:${MUTED};">Dispatch notifications</td></tr>
+${TRAINING_SLOT}
+${notice ? `<tr><td bgcolor="#FFF7CC" align="center" style="padding:10px 20px;background:#FFF7CC;font-family:${FONT};font-size:14px;font-weight:bold;color:#92400E;">${esc(notice)}</td></tr>` : ''}
+<tr><td style="padding:16px 20px 0;"><table class="fb-green" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F7EE" style="background:#E8F7EE;border:1px solid #BBE5CA;border-radius:8px;"><tr><td align="center" style="padding:14px 12px;font-family:${FONT};font-size:20px;line-height:1.25;font-weight:bold;color:${GREEN};"><span style="color:${GREEN};">&#9989;</span> ${esc(title)}</td></tr></table></td></tr>
+<tr><td align="center" style="padding:14px 20px 0;font-family:${FONT};font-size:22px;font-weight:bold;color:${NAVY};">${esc(ids)}</td></tr>
+<tr><td align="center" style="padding:6px 20px 14px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};">${esc(intro)}</td></tr>
+<tr><td style="padding:0 20px;">${saved.map(card).join('')}</td></tr>
+${still ? `<tr><td style="padding:0 20px 10px;font-family:${FONT};font-size:15px;font-weight:bold;color:#92400E;">${esc(still)}</td></tr>` : ''}
+<tr><td style="padding:2px 20px 14px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>${fact('Confirmed by', who)}${fact('Confirmation time', when)}</tr></table></td></tr>
+<tr><td style="padding:0 20px;"><table class="fb-blue" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><div style="font-size:17px;font-weight:bold;color:${NAVY};">&#128337; ${esc(mon.head)}</div><div style="padding-top:6px;">${esc(mon.body)}</div>${monitoring === 'unavailable' ? '' : `<div style="margin-top:10px;padding-top:10px;border-top:1px solid #C9DCF3;"><b style="color:${NAVY};">${esc(delay)}</b></div><div style="font-size:14px;color:${MUTED};">${esc(delayNote)}</div>`}<div style="margin-top:10px;padding-top:10px;border-top:1px solid #C9DCF3;font-size:13px;color:${MUTED};">${esc(promise)}</div></td></tr></table></td></tr>
+<tr><td style="padding:16px 20px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Need to change an appointment?</b><br>${esc(change)}</td></tr>
+<tr><td align="center" style="padding:18px 20px 20px;font-family:${FONT};font-size:14px;line-height:1.5;color:${MUTED};"><b style="color:${NAVY};">Jarvis</b><br>AI Dispatcher · Florida Beauty</td></tr>
+</table></td></tr></table>`;
+  const text = ['FLORIDA BEAUTY — Dispatch notifications', ...(notice ? ['', notice] : []), '', title, ids, intro, '',
+    ...saved.flatMap((st) => [st.name || `${st.city}, ${st.state}`, `${st.city}, ${st.state}`, `${longDate(st.local)}, ${friendlyTime(st.local)} ${zone(st)}`, pill, '']),
+    ...(still ? [still, ''] : []), `Confirmed by: ${who}`, `Confirmation time: ${when}`, '', mon.head, mon.body, ...(monitoring === 'unavailable' ? [] : [delay, delayNote]), promise, '', 'Need to change an appointment?', change, '', 'Jarvis', 'AI Dispatcher · Florida Beauty'].join('\n');
+  return { text, html };
 }
 
 export function initBrokerFollow(app, { requireAuth, db, getBoard, commitments, sendMail, listEmails = async () => [], secret = null, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', replyInThread = null, now = () => Date.now() }) {
@@ -200,15 +252,21 @@ export function initBrokerFollow(app, { requireAuth, db, getBoard, commitments, 
     let won = [];
     await save(site, (c) => { const set = { ...((c[t] && c[t].linkSet) || {}) }; won = valid.filter((v) => !set[v.key]); for (const v of won) set[v.key] = { local: v.local, by, at: new Date(now()).toISOString() }; c[t] = { ...c[t], linkSet: set }; return c; });
     if (!won.length) return { code: 409, error: 'These stops are already confirmed.' };
-    for (const v of won) await commitments.commit(t, { key: v.key, city: v.city, state: v.state, customer: v.customer, local: v.local, by }); // eslint-disable-line no-await-in-loop
-    const left = open.filter((s) => !won.some((v) => v.key === s.key));
-    const m = confirmedReply(t, item, won, by, left);
+    // the email only ever reports what really saved; a stop that failed can be submitted again
+    const saved = [];
+    for (const v of won) { if (await commitments.commit(t, { key: v.key, city: v.city, state: v.state, customer: v.customer, local: v.local, by }).catch(() => null)) saved.push(v); } // eslint-disable-line no-await-in-loop
+    const failed = won.filter((v) => !saved.includes(v));
+    if (failed.length) await save(site, (c) => { const set = { ...(c[t].linkSet || {}) }; for (const v of failed) delete set[v.key]; c[t] = { ...c[t], linkSet: set }; return c; });
+    if (!saved.length) return { code: 500, error: 'Could not save. Set it in the console.' };
+    const left = open.filter((s) => !saved.some((v) => v.key === s.key));
+    const etas = ((await db.get(`taWatch:${site}`, {})) || {}).etas || {};
+    const m = confirmedReply(t, item, saved, by, left, { atMs: now(), monitoring: monitorStatus({ following: true, etas: etas[t], now: now() }) });
     let told = false;
     try {
       if (replyInThread && f.emailId) told = !!(await replyInThread(site, f.emailId, { ...m, by: 'Jarvis (delivery confirmation)' })).sent;
       if (!told && f.byEmail && STAFF_DOMAIN.test(f.byEmail)) { await sendMail({ to: [f.byEmail], subject: `Re: ${askEmail(t, item).subject}`, ...m }, { direct: true }); told = true; }
     } catch (e) { console.warn('[broker-follow] confirmed reply:', e.message); }
-    return { code: 200, ok: true, told, stops: won.map((v) => v.key) };
+    return { code: 200, ok: true, told, stops: saved.map((v) => v.key), partial: left.length > 0 };
   }
 
   // after each board refresh: ask again once, and over an hour late against a confirmed time → one email per stop + time
