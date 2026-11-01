@@ -63,7 +63,7 @@ import { initPaperwork } from './paperwork.js';
 import { initClients } from './clients.js';
 import { nameScore } from './voice.js';
 import { initMilestones } from './milestones.js';
-import { initCommitments } from './commitments.js';
+import { initCommitments, lateMessage } from './commitments.js';
 import { initEtaReport } from './etareport.js';
 import { initPastLoads } from './pastloads.js';
 import { initArtisWeb } from './artisweb.js';
@@ -72,8 +72,8 @@ import { initSynergize } from './synergize.js';
 import { initArtisClients } from './artisclients.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initDispatchLog } from './dispatchlog.js';
-import { initBrokerFollow } from './brokerfollow.js';
-import { initBreakdownReport, renderBreakdownEmail } from './breakdownreport.js';
+import { initBrokerFollow, askEmail } from './brokerfollow.js';
+import { initBreakdownReport, renderBreakdownEmail, chainEmail, breakdownSubject } from './breakdownreport.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
 import { initVoice } from './voice.js';
@@ -87,7 +87,7 @@ import { initCarChat } from './carChat.js';
 import { initDbpo } from './dbpo.js';
 import { initArtis, initMissingBoxes } from './artis.js';
 import { initAlertRecipients } from './alertrecipients.js';
-import { initTransferWatch } from './transferwatch.js';
+import { initTransferWatch, transferEmail, transferStatus } from './transferwatch.js';
 import { initTruckBuilder } from './truckbuilder.js';
 import { initMissingCases } from './missingcase.js';
 import { initStopTasks } from './stoptasks.js';
@@ -1147,6 +1147,50 @@ const sendBreakdown = async (report, item, to) => {
   return m.subject;
 };
 const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), sendChain: async (report, m) => { const to = await alertRecipients.resolve('breakdown_report'); if (to.length) await sendMail({ to, ...m }, { env: process.env, direct: staffOnly(to) }); }, send: async (report, item, extra = []) => { const to = [...new Set([...extra.map((x) => String(x).toLowerCase()).filter((x) => /@floridabeauty\.us$/.test(x)), ...await alertRecipients.resolve('breakdown_report')])]; if (to.length) await sendBreakdown(report, item, to); } });
+// One of each alert email, to Nadim only, built from a real load with made-up stop details. Marked [EXAMPLE]. No alert, no road call,
+// nothing saved, and nobody else: each goes straight to that one address.
+app.post('/admin/alert-examples', requireCompanyAdmin, async (req, res) => {
+  const me = 'ntellez@floridabeauty.us';
+  try {
+    const board = await truckmate.buildBoard('florida-beauty');
+    const items = board.trips || [];
+    const want = String((req.body || {}).trip || '');
+    const item = want ? items.find((it) => String(((it && it.trip) || {}).tripNumber) === want) : (items.find((it) => it._samsara && it._samsara.hos2 && it._samsara.lat != null && ((it._manifest && it._manifest.docIds) || []).length) || items.find((it) => it._samsara && it._samsara.lat != null));
+    if (!item) return res.status(404).json({ error: 'No load to use.' });
+    const t = item.trip || {}; const trip = String(t.tripNumber); const unit = t.powerUnit; const now = Date.now();
+    const etas = (((await db.get('taWatch:florida-beauty', {})) || {}).etas || {})[trip] || null;
+    const reason = 'Truck air leak';
+    const stoppedSinceMs = now - 125 * 60000;
+    const a = { id: 'example', unit, trip, severity: 'critical', title: 'Team truck stopped 2h 5m', stoppedSinceMs };
+    const map = await truckMap(item._samsara || {}, 'blue');
+    const green = await truckMap(item._samsara || {}, 'green');
+    const sheet = await sheetFor(item, trip);
+    const mapCid = map.length ? 'truckmap' : null;
+    const subject = breakdownSubject(item, reason, { unit, trip });
+    const report = { atMs: now, by: 'Example (not a real report)', reason, trip, unit, subject };
+    const next = (etas && etas.stops && etas.stops[0]) || { label: t.destZoneDesc || 'the next stop', etaMs: now + 7 * 3600000, miles: 300 };
+    const pos = { location: (item._samsara || {}).location, speedMph: 58, lat: (item._samsara || {}).lat, lng: (item._samsara || {}).lng, at: new Date(now).toISOString() };
+    const pos2 = { ...pos, lat: pos.lat != null ? pos.lat + 0.4 : null };
+    const plan = { trip, from: String(unit), to: 'RESCUE TRUCK', trailer: t.trailer || null };
+    const late = lateMessage(item, { key: 'x', place: next.label, customer: null, local: new Date(next.etaMs - 3 * 3600000).toISOString().slice(0, 16), atMs: next.etaMs - 3 * 3600000, etaMs: next.etaMs, lateMin: 180, miles: next.miles });
+    const list = [
+      ['team truck stopped', { ...renderTeamStopEmail(teamStopFacts(a, item, { etas, mapCid, sheet, reportUrl: 'https://tagalong-backend-fdzx.onrender.com/br/example' })), attachments: [...map, ...sheet.attachments] }],
+      ['truck rolling again', { ...renderRollingEmail({ unit, trip, stoppedSinceMs, movingSince: now - 4 * 60000, speedMph: 58, confirmedAt: now }, item, { etas, now, mapCid: green.length ? 'truckmap' : null }), attachments: green }],
+      ['breakdown', { ...renderBreakdownEmail({ item, report, etas, mapCid, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached' }), attachments: [...map, ...sheet.attachments] }],
+      ['rescue planned', { ...transferEmail('start', plan, pos, pos2, transferStatus(pos, pos2), { now }), subject: `Re: ${subject}` }],
+      ['transfer completed', chainEmail(report, `Transfer completed: truck ${unit} to RESCUE TRUCK`, [`TruckMate shows trip ${trip} on truck RESCUE TRUCK.`, t.trailer ? `Trailer ${t.trailer}.` : null])],
+      ['breakdown fixed', chainEmail(report, 'Breakdown fixed', [`Truck ${unit}, trip ${trip}.`, 'Reported fixed by Example.', 'Team truck alerts are back on for this truck.'])],
+      ['broker follow-up question', askEmail(trip, item)],
+      ['broker will miss delivery', { subject: late.subject.replace(/^Late for a committed time/, 'Will miss the delivery time'), html: late.html, text: late.text }],
+    ];
+    const sent = [];
+    for (const [name, m] of list) {
+      await sendMail({ ...m, to: [me], subject: `[EXAMPLE] ${m.subject}` }, { env: process.env, direct: true }); // eslint-disable-line no-await-in-loop
+      sent.push(name);
+    }
+    return res.json({ ok: true, trip, truck: unit, sent, map: !!mapCid, sheet: sheet.note });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
 // one example of the breakdown email, to Nadim only: no road call, nothing saved, nobody else
 app.post('/admin/breakdown-report/example', requireCompanyAdmin, async (req, res) => {
   try {
