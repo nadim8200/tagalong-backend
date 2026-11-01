@@ -75,11 +75,18 @@ test('team stop email: every section from real data, phones only when allowed, t
   const etas = { stops: [{ label: 'HYDE PARK, MA, 02136', miles: 892, etaMs: NOW2 + 3600000 * 11, apptMs: NOW2 + 3600000 * 10, apptFrom: 'handwritten' }] };
   const m = renderTeamStopEmail(teamStopFacts(alert, fullItem, { etas, now: NOW2, mapCid: 'truckmap' }));
   assert.equal(m.subject, 'Team truck 733 stopped: 3h 28m — trip 626258');
+  assert.match(renderTeamStopEmail(teamStopFacts(alert, fullItem, { etas, now: NOW2 })).html, /3h 28m/);
   assert.match(m.html, /jarvis:training-slot/); assert.match(m.html, /Buff &lt;Blvd&gt;/); assert.match(m.html, /cid:truckmap/);
-  assert.match(m.html, /3h 28m/); assert.match(m.html, /Trailer 262066/); assert.match(m.html, /\(954\) 260-4450/); assert.match(m.html, /tel:\+19542604450/);
+  assert.match(m.html, /Trailer 262066/); assert.match(m.html, /\(954\) 260-4450/); assert.match(m.html, /tel:\+19542604450/);
   assert.match(m.html, /Phone not available/, 'second driver has none'); assert.match(m.text, /1h 0m past the appointment/);
   assert.doesNotMatch(m.html, /could be a breakdown|should be rolling/, 'nothing inferred');
   assert.doesNotMatch(renderTeamStopEmail(teamStopFacts(alert, fullItem, { now: NOW2, showPhones: false })).html, /260-4450/);
+});
+
+test('team stop email: the map carries the timer; the red box only shows when there is no map', () => {
+  const withMap = renderTeamStopEmail(teamStopFacts(alert, fullItem, { now: NOW2, mapCid: 'truckmap' }));
+  assert.doesNotMatch(withMap.html, /STOPPED AT ALERT TIME/); assert.match(withMap.html, /Alert generated: /); assert.match(withMap.text, /STOPPED AT ALERT TIME/);
+  assert.match(renderTeamStopEmail(teamStopFacts(alert, fullItem, { now: NOW2 })).html, /STOPPED AT ALERT TIME/);
 });
 
 test('team stop email: missing data says so and never invents anything', () => {
@@ -153,10 +160,17 @@ const ep = { unit: '733', trip: '626258', stoppedSinceMs: T0 - 208 * 60000, movi
 test('rolling email: green timer is time moving, previous stop runs to the moment it moved, drivers stay separate', () => {
   const m = renderRollingEmail(ep, fullItem, { now: ep.confirmedAt, mapCid: 'truckmap' });
   assert.equal(m.subject, 'Truck 733 rolling again — Trip 626258');
-  assert.match(m.html, /#166534/); assert.match(m.html, /2m/); assert.match(m.html, /Previous stop: <b>3h 28m<\/b>/); assert.match(m.html, /54 mph/);
+  assert.match(m.html, /#166534/); assert.match(m.html, /Previous stop: <b>3h 28m<\/b>/);
   assert.match(m.html, /jarvis:training-slot/); assert.match(m.html, /cid:truckmap/); assert.match(m.html, /Off duty/, 'a driver keeps the status the ELD reports');
   assert.match(m.html, /do(es)? not confirm/); assert.doesNotMatch(m.html, /trip history/); assert.match(m.text, /Previous stop: 3h 28m/);
 });
+test('rolling email: the map carries the timer; the green box only shows when there is no map', () => {
+  const withMap = renderRollingEmail(ep, fullItem, { now: ep.confirmedAt, mapCid: 'truckmap' });
+  assert.doesNotMatch(withMap.html, /Latest reported speed/); assert.match(withMap.html, /cid:truckmap/); assert.match(withMap.html, /Previous stop/);
+  assert.match(withMap.text, /Latest reported speed: 54 mph/, 'the plain version keeps it');
+  assert.match(renderRollingEmail(ep, fullItem, { now: ep.confirmedAt }).html, /Latest reported speed/);
+});
+
 test('rolling email: missing data says so; an unknown stop start is a floor', () => {
   const m = renderRollingEmail({ ...ep, stopStartUnknown: true }, { trip: {}, _samsara: {} }, { now: ep.confirmedAt });
   assert.match(m.html, /at least 3h 28m/); assert.match(m.html, /Location not reported/); assert.match(m.html, /No driver reported/); assert.doesNotMatch(m.html, /Open map/); assert.doesNotMatch(m.html, /On time/);
