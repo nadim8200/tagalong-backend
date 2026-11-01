@@ -659,7 +659,7 @@ const RULES = [
     const dutyLabel = { onDuty: 'on duty', driving: 'driving status', yardMove: 'yard move', offDuty: 'off duty', sleeperBerth: 'sleeper berth', sleeperBed: 'sleeper berth' }[duty] || (duty || 'duty status unknown');
     if (resting && fresh) {
       return {
-        code: 'stopped', teamStop: true, severity: mins >= 120 || codes ? 'critical' : 'warning',
+        code: 'stopped', teamStop: true, stoppedSinceMs: ctx.now - mins * MIN, stopStartUnknown: !!f.stopStartUnknown, severity: mins >= 120 || codes ? 'critical' : 'warning',
         title: `Team truck stopped ${fmtMin(mins)}`,
         detail: `${l.location || 'Unknown location'} · ${dutyLabel}. ${fresh[1] || 'A driver'} has ${fmtMin(fresh[0].driveLeftMin)} of driving left, so a team should be rolling. Call the drivers.${codes ? ` ${codes} engine code${codes === 1 ? '' : 's'} on the truck, could be a breakdown.` : ''}`,
       };
@@ -999,6 +999,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
     if (pushRules) cfg.recipients = await pushRules.emailsFor('priority');   // admin → Push notifications
     const toPush = []; const toMail = []; const toEscalate = [];
+    let etasNow = {};
 
     const archived = [];
     await db.update(stateKey(site), (prev) => {
@@ -1020,6 +1021,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
       const ctx = { now, geo, roadMiles, unitState: (unit) => s.units[norm(unit)] };
       const found = evaluateBoard(board, ctx);
       s.etas = boardEtas(board, ctx);
+      etasNow = s.etas;
       const seen = new Set();
       for (const a of found) {
         seen.add(a.id);
@@ -1062,7 +1064,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     }
     await notify(cfg, toPush);
     await notify(cfg, toEscalate, { escalated: true });
-    for (const a of toMail) { try { if (onTeamStop) await onTeamStop(a); } catch (e) { console.warn('[watchtower] team stop email:', e.message); } } // eslint-disable-line no-await-in-loop
+    for (const a of toMail) { try { if (onTeamStop) await onTeamStop(a, { item: (board.trips || []).find((it) => String(((it && it.trip) || it || {}).tripNumber || '') === String(a.trip)) || null, etas: etasNow[a.trip] || null }); } catch (e) { console.warn('[watchtower] team stop email:', e.message); } } // eslint-disable-line no-await-in-loop
     await drainGeo();
     await drainRoads();
   }

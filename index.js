@@ -36,7 +36,7 @@ import { initLoads } from './loads.js';
 import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
 import { initWatchtower } from './watchtower.js';
-import { renderTeamStopEmail } from './teamstopmail.js';
+import { renderTeamStopEmail, teamStopFacts, tripSheetIds, tripSheetFiles } from './teamstopmail.js';
 import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
 import { initCarriers } from './carriers.js';
@@ -1116,7 +1116,31 @@ jarvisChat = initJarvisChat(app, { brokerFollow: followProxy, dispatchLog, miles
 const transferWatch = initTransferWatch({ db, env: process.env, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('transfer'),
   textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice });
 initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules,
-  onTeamStop: async (a) => { const to = await alertRecipients.resolve('team_stopped'); if (to.length) await sendMail({ to, ...renderTeamStopEmail(a) }, { env: process.env }); }, afterBoard: async (site, board, ctx) => { await followProxy.process(site, board).catch((e) => console.warn('[broker-follow]', e.message)); await transferWatch.process(site, board).catch((e) => console.warn('[transfer]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
+  onTeamStop: async (a, { item, etas }) => {
+    const to = await alertRecipients.resolve('team_stopped');
+    if (!to.length) return;
+    // the map comes in as a picture from our own server, so the Google key never goes out in an email; no picture → the address and link still work
+    const l = (item && item._samsara) || {}; const key = process.env.GOOGLE_GEOCODE_KEY || process.env.GOOGLE_MAPS_KEY;
+    const attachments = [];
+    if (key && l.lat != null) {
+      try { const r = await fetch(`https://maps.googleapis.com/maps/api/staticmap?center=${l.lat},${l.lng}&zoom=10&size=592x240&scale=2&markers=color:blue%7C${l.lat},${l.lng}&key=${key}`); const ok = r.ok && /image/i.test(r.headers.get('content-type') || ''); if (ok) attachments.push({ name: 'truck-location.png', contentType: 'image/png', bytes: Buffer.from(await r.arrayBuffer()), cid: 'truckmap' }); else console.warn('[team-stop] map:', r.status); } catch (e) { console.warn('[team-stop] map:', e.message); }
+    }
+    const mapCid = attachments.length ? 'truckmap' : null;
+    // the trip sheet goes with it whenever we have it: one more try if the read fails, and if Outlook refuses the files the alert still goes out, saying so
+    const sheetIds = tripSheetIds(item);
+    let pages = [];
+    for (let i = 0; i < 2 && sheetIds.length && pages.length < sheetIds.length; i += 1) { try { pages = await docs.readDocs({ site: 'florida-beauty', ids: sheetIds }); } catch (e) { console.warn('[team-stop] trip sheet:', e.message); } } // eslint-disable-line no-await-in-loop
+    const sheet = tripSheetFiles(pages, sheetIds, a.trip);
+    if (sheetIds.length && sheet.attachments.length < sheetIds.length) console.warn(`[team-stop] trip ${a.trip}: ${sheet.attachments.length} of ${sheetIds.length} trip sheet pages attached`);
+    const showPhones = to.every((e) => /@floridabeauty\.us$/i.test(e));
+    try {
+      await sendMail({ to, ...renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, mapCid, sheet })), attachments: [...attachments, ...sheet.attachments] }, { env: process.env });
+    } catch (e) {
+      console.warn('[team-stop] sent without files:', e.message);
+      const noFiles = sheetIds.length ? { status: 'unavailable', note: 'Trip sheet could not be attached. Open it on the load in the console.' } : null;
+      await sendMail({ to, ...renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, sheet: noFiles })) }, { env: process.env });
+    }
+  }, afterBoard: async (site, board, ctx) => { await followProxy.process(site, board).catch((e) => console.warn('[broker-follow]', e.message)); await transferWatch.process(site, board).catch((e) => console.warn('[transfer]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and

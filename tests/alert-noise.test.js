@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { faultSeverity, evaluateBoard, teamStopsDue } from '../watchtower.js';
-import { renderTeamStopEmail } from '../teamstopmail.js';
+import { renderTeamStopEmail, teamStopFacts, tripSheetIds, tripSheetFiles } from '../teamstopmail.js';
 import { compareWithTruckMate } from '../manifest.js';
 
 test('engine faults: network/sensor/manufacturer codes are quiet; protection and derate codes alert', () => {
@@ -64,8 +64,52 @@ test('team stop emails: one at 1 hour, one more when it turns red, none once som
   assert.equal(teamStopsDue([a('warning', { teamStop: false })], { 'stopped:1': {} }).length, 0, 'solo stops never email');
 });
 
-test('team stop email: says what, keeps the training slot, escapes text', () => {
-  const m = renderTeamStopEmail({ unit: '733', trip: '626258', severity: 'critical', title: 'Team truck stopped 2h 5m', detail: 'Summerton, SC · off duty. Chad <b> has 11h 0m of driving left.' });
-  assert.equal(m.subject, 'Team truck 733 stopped: 2h 5m — trip 626258');
-  assert.match(m.html, /jarvis:training-slot/); assert.match(m.html, /Chad &lt;b&gt;/); assert.match(m.text, /626258/);
+const NOW2 = Date.parse('2026-11-01T12:00:00Z');
+const fullItem = { trip: { tripNumber: '626258', powerUnit: '733', trailer: '262066', driver: '0182', driver2: '7914' }, _samsara: { location: '401 Buff <Blvd>, Summerton, SC', lat: 33.6, lng: -80.3, gpsAt: '2026-11-01T11:58:00Z', source: 'samsara', speedMph: 0, driver1: 'Chad Morgan', driver2: 'Jose L Gonzalez', driver1Info: { phone: '9542604450' }, hos: { status: 'offDuty', driveLeftMin: 660, shiftLeftMin: 840, cycleLeftMin: 2760, at: '2026-11-01T11:50:00Z' }, hos2: { status: 'sleeperBerth', driveLeftMin: 282, shiftLeftMin: 282, cycleLeftMin: null }, dtcCodes: [{ code: 'SPN 1', meaning: 'Sample' }] } };
+const alert = { unit: '733', trip: '626258', severity: 'critical', title: 'Team truck stopped 3h 28m', detail: 'x', stoppedSinceMs: NOW2 - 208 * 60000 };
+
+test('team stop email: every section from real data, phones only when allowed, text escaped', () => {
+  const etas = { stops: [{ label: 'HYDE PARK, MA, 02136', miles: 892, etaMs: NOW2 + 3600000 * 11, apptMs: NOW2 + 3600000 * 10, apptFrom: 'handwritten' }] };
+  const m = renderTeamStopEmail(teamStopFacts(alert, fullItem, { etas, now: NOW2, mapCid: 'truckmap' }));
+  assert.equal(m.subject, 'Team truck 733 stopped: 3h 28m — trip 626258');
+  assert.match(m.html, /jarvis:training-slot/); assert.match(m.html, /Buff &lt;Blvd&gt;/); assert.match(m.html, /cid:truckmap/);
+  assert.match(m.html, /3h 28m/); assert.match(m.html, /Trailer 262066/); assert.match(m.html, /\(954\) 260-4450/); assert.match(m.html, /tel:\+19542604450/);
+  assert.match(m.html, /Phone not available/, 'second driver has none'); assert.match(m.text, /1h 0m past the appointment/);
+  assert.doesNotMatch(m.html, /could be a breakdown|should be rolling/, 'nothing inferred');
+  assert.doesNotMatch(renderTeamStopEmail(teamStopFacts(alert, fullItem, { now: NOW2, showPhones: false })).html, /260-4450/);
+});
+
+test('team stop email: missing data says so and never invents anything', () => {
+  const m = renderTeamStopEmail(teamStopFacts({ ...alert, stopStartUnknown: true }, { trip: { tripNumber: '626258' }, _samsara: { gpsAt: '2026-11-01T01:00:00Z', location: 'I-95', lat: null } }, { now: NOW2 }));
+  assert.match(m.html, /At least 3h 28m/); assert.match(m.html, /Not confirmed/);
+  assert.match(m.html, /may be out of date/); assert.match(m.html, /No driver reported/); assert.match(m.html, /No engine codes reported/);
+  assert.doesNotMatch(m.html, /On time/); assert.doesNotMatch(m.html, /Open map/); assert.match(m.text, /Estimated arrival: Not available/);
+});
+
+test('training notice goes in the slot and the subject is untouched outside training', async () => {
+  const { redirectEmail } = await import('../training.js');
+  const m = renderTeamStopEmail(teamStopFacts(alert, fullItem, { now: NOW2 }));
+  assert.match(redirectEmail({ ...m, to: ['a@b.com'] }, ['t@t.com']).html, /TRAINING/);
+  assert.doesNotMatch(m.subject, /TRAINING/);
+});
+
+test('trip sheet on the team stop email: every page we can read goes, and the email says exactly what is attached', () => {
+  assert.deepEqual(tripSheetIds({ _manifest: { docIds: [11, 12] } }), ['11', '12']);
+  assert.deepEqual(tripSheetIds({ _packet: [{ type: 'bol', docId: 1 }, { type: 'manifest_continuation', docId: 3, file: 1, page: 2 }, { type: 'manifest', docId: 2, file: 1, page: 1 }] }), ['2', '3'], 'sheet pages only, in order');
+  assert.deepEqual(tripSheetIds({ _manifest: { docIds: [] }, _docs: [{ id: 1, kind: 'tripsheet', version: 1, page: 1 }, { id: 3, kind: 'tripsheet', version: 2, page: 2 }, { id: 2, kind: 'tripsheet', version: 2, page: 1 }, { id: 4, kind: 'ratecon' }, { id: 5, kind: 'tripsheet', version: 2, restricted: true }] }), ['2', '3'], 'a stored sheet still counts: newest version, never restricted');
+  assert.deepEqual(tripSheetIds({}), []);
+  const pg = (id, n = 10) => ({ id, mediaType: 'application/pdf', data: Buffer.alloc(n) });
+  const ok = tripSheetFiles([pg('1'), pg('2')], ['1', '2'], '626258');
+  assert.equal(ok.note, 'Trip sheet attached'); assert.deepEqual(ok.attachments.map((x) => x.name), ['Trip sheet 626258 page 1.pdf', 'Trip sheet 626258 page 2.pdf']);
+  assert.equal(tripSheetFiles([], [], '1').status, 'none');
+  assert.equal(tripSheetFiles([], ['1'], '1').status, 'unavailable');
+  const one = tripSheetFiles([pg('2')], ['1', '2'], '9');
+  assert.equal(one.status, 'attached', 'one bad page never drops the good one'); assert.match(one.note, /1 of 2 pages/); assert.equal(one.attachments[0].name, 'Trip sheet 9 page 2.pdf');
+  const big = tripSheetFiles([pg('1', 2 * 1024 * 1024), pg('2', 2 * 1024 * 1024)], ['1', '2'], '9');
+  assert.equal(big.attachments.length, 1); assert.match(big.note, /1 of 2 pages/);
+  assert.equal(tripSheetFiles([pg('1', 4 * 1024 * 1024)], ['1'], '1').status, 'too_large');
+  const say = (sheet) => renderTeamStopEmail(teamStopFacts(alert, fullItem, { now: NOW2, sheet }));
+  assert.match(say(ok).html, /Trip sheet attached/); assert.match(say(ok).text, /Trip sheet attached/);
+  assert.match(say(one).html, /1 of 2 pages/);
+  assert.doesNotMatch(say(null).html, /Trip sheet attached/); assert.match(say(null).html, /No trip sheet on file/);
 });
