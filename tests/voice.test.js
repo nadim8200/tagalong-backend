@@ -31,7 +31,7 @@ function setup(extraEnv = {}, opts = {}) {
       : url.includes('create-web-call') ? { call_id: 'web_1', call_status: 'registered', access_token: 'tok_1', transport: 'livekit', ice_servers: [{ urls: 'stun:x' }] } : {};
     return { ok: true, status: 201, json: async () => body };
   };
-  const api = initVoice(app, { ...(opts.help ? { help: opts.help } : {}), ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: opts.board || board }), ...(opts.extra || {}), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
+  const api = initVoice(app, { ...(opts.help ? { help: opts.help } : {}), ...(opts.dispatchLog ? { dispatchLog: opts.dispatchLog } : {}), ...(opts.profiles ? { profiles: opts.profiles } : {}), ...(opts.clients ? { clients: opts.clients } : {}), ...(opts.directory ? { directory: opts.directory } : {}), requireAuth: (q, r, n) => n(), db, comms: { log: async (s, t, e) => logged.push({ trip: t, ...e }) }, carriers: { addCheckins: async (s, t, l) => checkins.push({ trip: t, ...l[0] }) }, getBoard: async () => ({ trips: opts.board || board }), ...(opts.extra || {}), env: { RETELL_API_KEY: KEY, RETELL_FROM_NUMBER: '+13055550000', RETELL_TRANSFER_NUMBER: '305-503-1200', PUBLIC_URL: 'https://mytagalong.app', ...extraEnv }, fetchFn });
   const hit = async (route, body, { sign = true, user = { name: 'Ana' } } = {}) => {
     const raw = JSON.stringify(body);
     const sig = sign ? await Retell.sign(raw, KEY) : 'v=1,d=bad';
@@ -105,7 +105,7 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   const llm = v.retellCalls.find((c) => c.url.endsWith('/create-retell-llm')).body;
   assert.equal(llm.model, undefined, 'no retired top-level model field'); assert.equal(llm.model_temperature, undefined);
   assert.equal(llm.model_config.type, 'cascading'); assert.match(llm.model_config.primary.model, /^claude/); assert.equal(llm.model_config.temperature, 0.2);
-  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'report_missing_boxes', 'take_message', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
+  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'dispatch_log', 'report_missing_boxes', 'take_message', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
   assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
   assert.deepEqual(agent.language, ['en-US', 'es-419', 'he-IL']);
@@ -1041,4 +1041,18 @@ test('past loads on the phone: no load left the day asked → say so, then the n
   assert.equal(r.out.no_load_left_that_day, true);
   assert.match(r.out.say, /no finished load for Direct Flowers left our hub on Tuesday/);
   assert.equal(seen.length, 2); assert.equal(seen[1].outboundDay, null);
+});
+
+test('dispatch notes on the phone: employees only, never a customer or broker', async () => {
+  const seen = [];
+  const dispatchLog = { search: async (s, q) => { seen.push(q); return [{ at: '2026-11-02T12:00:00Z', status: 'open', summary: 'Transfer 734 to 4504 not done', why: 'driver out of hours', from: 'Ana' }]; }, digests: async () => [] };
+  const directory = { load: async () => ({ people: [{ name: 'Ana', phone: '305-555-0100' }] }) };
+  const v = setup({}, { dispatchLog, directory });
+  const out = await v.hit('POST /retell/fn/dispatch_log', { args: { query: '734' }, call: { direction: 'inbound', from_number: '+13125550000' } });
+  assert.equal(out.out.ok, false); assert.equal(out.out.notes, undefined);
+  assert.equal(seen.length, 0, 'the notes were never even read for an outside caller');
+  const staff = await v.hit('POST /retell/fn/dispatch_log', { args: { query: '734', only_open: true }, call: { direction: 'inbound', from_number: '+13055550100' } });
+  assert.equal(staff.out.ok, true); assert.equal(staff.out.notes[0].why, 'driver out of hours');
+  assert.equal(seen[0].status, 'open');
+  assert.equal((await v.hit('POST /retell/fn/dispatch_log', { args: {}, call: { direction: 'inbound', from_number: '+13055550100' } }, { sign: false })).code, 401);
 });

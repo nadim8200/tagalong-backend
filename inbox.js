@@ -276,7 +276,7 @@ export const fmtWall = (w) => { const d = new Date(`${w}:00Z`); return isNaN(d) 
 // "Flowers report") is part of the message — not a scanned trip-sheet page. Pure.
 export const pastedPicture = (a) => !!a && /^image\//i.test(a.contentType || '') && !!a.bytes && Math.floor(String(a.bytes).length * 0.75) <= 1.5 * 1024 * 1024;
 
-export function initInbox(app, { requireAuth, db, stopTasks = null, roadCalls = null, brokerWatch = null, paperwork = null, meetWatch = null, nextLoads = null, groupEmail = null, groupAddresses = null, planSheet = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initInbox(app, { requireAuth, db, dispatchLog = null, stopTasks = null, roadCalls = null, brokerWatch = null, paperwork = null, meetWatch = null, nextLoads = null, groupEmail = null, groupAddresses = null, planSheet = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const key = (site) => `taEmails:${site}`;          // { list: [email…], status }
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
@@ -448,6 +448,12 @@ export function initInbox(app, { requireAuth, db, stopTasks = null, roadCalls = 
         const email0 = { id: m.id, conversationId: m.conversationId || null, from, subject: String(m.subject || '').slice(0, 300), at: m.receivedDateTime, text, attachments: [], trips, why: matches.map((x) => x.why), status: 'handled', auto: 'group', viaGroup: gate.group, reply: { needed: false, kind: 'none', documents: [] }, replies: [],
           summary: `Sent to the ${gate.group} group — not read by AI. Write "Jarvis" in an email to have it act.`, handledBy: 'Jarvis (group email — filed, not read)' };
         fresh.push(email0);
+        // the Dispatch group: Jarvis takes notes on what's going on (learn only — nothing here can text, call, reply or make a task)
+        if (dispatchLog && String(gate.group).toLowerCase() === String((groupEmail && (await groupEmail('dispatch').catch(() => null))) || '').toLowerCase() && !autoNotice(from.address, m.subject) && !/^\s*(re:\s*)?\[TRAINING/i.test(String(m.subject || '')) && !isNewsletter({ from: from.address, text, trips, attachments: m.hasAttachments ? [{}] : [] }, env)) { // eslint-disable-line no-await-in-loop
+          let files = [];
+          if (m.hasAttachments && !/trip\s*-?\s*sheets?|manifests?/i.test(String(m.subject || ''))) { try { files = await saveAttachments(site, m.id, null, { store: false }); } catch (e) { console.warn('[inbox] group files:', e.message); } } // eslint-disable-line no-await-in-loop
+          await dispatchLog.learn(site, email0, files); // eslint-disable-line no-await-in-loop
+        }
         for (const trip of trips) await logOnLoad(site, trip, { type: 'email', dir: 'in', at: email0.at, from: from.address, name: from.name, subject: email0.subject, text: text.slice(0, 600), emailId: m.id, files: [] }); // eslint-disable-line no-await-in-loop
         try { await g(`/messages/${encodeURIComponent(m.id)}`, { method: 'PATCH', body: { isRead: true } }); } catch { /* still remembered */ } // eslint-disable-line no-await-in-loop
         continue;
