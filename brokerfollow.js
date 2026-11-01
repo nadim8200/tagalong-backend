@@ -180,7 +180,7 @@ ${still ? `<tr><td style="padding:0 20px 10px;font-family:${FONT};font-size:15px
   return { text, html };
 }
 
-export function initBrokerFollow(app, { requireAuth, db, getBoard, commitments, sendMail, listEmails = async () => [], secret = null, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', replyInThread = null, now = () => Date.now() }) {
+export function initBrokerFollow(app, { requireAuth, db, getBoard, commitments, sendMail, listEmails = async () => [], copyEmails = async () => [], secret = null, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', replyInThread = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const site0 = 'florida-beauty';
   const all = async (site = site0) => (enabled ? (await db.get(KEY(site), {})) || {} : {});
@@ -190,7 +190,8 @@ export function initBrokerFollow(app, { requireAuth, db, getBoard, commitments, 
   const ask = async (f, trip, item, again) => {
     if (!f.byEmail || !STAFF_DOMAIN.test(f.byEmail)) return false;
     const confirmUrl = secret ? `${baseUrl}/dc/${makeToken({ t: trip, by: f.by || null }, secret, now(), LINK_PURPOSE)}` : null;
-    await sendMail({ to: [f.byEmail], ...askEmail(trip, item, { again, commits: (await commitments.all())[trip], confirmUrl }) }, { direct: true });
+    const cc = (await copyEmails().catch(() => [])).filter((e) => STAFF_DOMAIN.test(e) && e !== f.byEmail);
+    await sendMail({ to: [f.byEmail], cc, ...askEmail(trip, item, { again, commits: (await commitments.all())[trip], confirmUrl }) }, { direct: true });
     return true;
   };
 
@@ -265,6 +266,9 @@ export function initBrokerFollow(app, { requireAuth, db, getBoard, commitments, 
     try {
       if (replyInThread && f.emailId) told = !!(await replyInThread(site, f.emailId, { ...m, by: 'Jarvis (delivery confirmation)' })).sent;
       if (!told && f.byEmail && STAFF_DOMAIN.test(f.byEmail)) { await sendMail({ to: [f.byEmail], subject: `Re: ${askEmail(t, item).subject}`, ...m }, { direct: true }); told = true; }
+      // the people copied on these requests see the confirmation too, as its own email: the thread belongs to whoever wrote it
+      const copies = (await copyEmails().catch(() => [])).filter((e) => STAFF_DOMAIN.test(e) && e !== f.byEmail);
+      if (copies.length) await sendMail({ to: copies, subject: `Re: ${askEmail(t, item).subject}`, ...m }, { direct: true });
     } catch (e) { console.warn('[broker-follow] confirmed reply:', e.message); }
     return { code: 200, ok: true, told, stops: saved.map((v) => v.key), partial: left.length > 0 };
   }

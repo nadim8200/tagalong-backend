@@ -283,3 +283,14 @@ test('a failed save is never reported as confirmed, and can be tried again', asy
   fail = null;
   assert.equal((await f.submitTimes('s', P, { name: 'Gio', stops: [both[1]] })).code, 200); assert.equal(thread.length, 2);
 });
+
+test('the delivery confirmation list gets a copy of the request and the confirmation, staff only', async () => {
+  const db2 = { enabled: true, s: {}, get: async (k, d) => (k in db2.s ? db2.s[k] : d), update: async (k, fn, d) => { db2.s[k] = fn(k in db2.s ? db2.s[k] : d); return db2.s[k]; } };
+  const saved = {}; const mail = []; const thread = [];
+  const commitments = { all: async () => saved, commit: async (t, s) => { saved[t] = { ...(saved[t] || {}), [s.key]: { atMs: 5, local: s.local, by: s.by, state: s.state } }; return { key: s.key }; } };
+  const f = initBrokerFollow(null, { db: db2, getBoard: async () => ({ trips: [brokerLoad2] }), commitments, sendMail: async (m) => mail.push(m), copyEmails: async () => ['inbound-dispatch@floridabeauty.us', 'outside@broker.com', 'gio@floridabeauty.us'], secret: 's', replyInThread: async (x, y, m) => { thread.push(m); return { sent: true }; } });
+  await f.start('s', '626045', { by: 'Gio', byEmail: 'gio@floridabeauty.us', emailId: 'm' });
+  assert.deepEqual(mail[0].to, ['gio@floridabeauty.us']); assert.deepEqual(mail[0].cc, ['inbound-dispatch@floridabeauty.us']);
+  await f.submitTimes('s', P, { name: 'Gio', stops: [{ key: 'SANTA ROSA|CA', date: future, time: '08:00' }] });
+  assert.equal(thread.length, 1); assert.deepEqual(mail[1].to, ['inbound-dispatch@floridabeauty.us']); assert.match(mail[1].subject, /^Re: Trip 626045/); assert.match(mail[1].text, /DELIVERY APPOINTMENT CONFIRMED/);
+});
