@@ -62,6 +62,9 @@ test('team stop emails: one at 1 hour, one more when it turns red, none once som
   assert.equal(teamStopsDue([a('critical')], { 'stopped:1': { mailLevel: 2 } }).length, 0);
   assert.equal(teamStopsDue([a('critical')], { 'stopped:1': { mailLevel: 1, ack: { by: 'Ana' } } }).length, 0, 'someone has it');
   assert.equal(teamStopsDue([a('warning', { teamStop: false })], { 'stopped:1': {} }).length, 0, 'solo stops never email');
+  assert.equal(teamStopsDue([a('critical', { trip: '9', unit: '733' })], { 'stopped:1': {} }, new Set(['733'])).length, 0, 'reported down: paused');
+  assert.equal(teamStopsDue([a('critical', { trip: '9', unit: '733' })], { 'stopped:1': {} }, new Set(['9'])).length, 0, 'the trip counts too');
+  assert.equal(teamStopsDue([a('critical', { trip: '9', unit: '733' })], { 'stopped:1': { mailLevel: 1 } }, new Set()).length, 1, 'fixed: back on');
 });
 
 const NOW2 = Date.parse('2026-11-01T12:00:00Z');

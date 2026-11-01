@@ -878,9 +878,9 @@ export function trackRolling(ep, l, now, { down = false } = {}) {
   return { ep: next, confirmed: next.readings >= ROLL.readings && (gpsMs - next.movingSince) / MIN >= ROLL.min && far };
 }
 
-// Which team-stop alerts get an email now: one at the first alert, one more if it turns red, none once someone owns it. Pure.
-export function teamStopsDue(found, alerts) {
-  return found.filter((a) => a.teamStop).map((a) => ({ a, cur: alerts[a.id], level: a.severity === 'critical' ? 2 : 1 }))
+// Which team-stop alerts get an email now: one at the first alert, one more if it turns red, none once someone owns it or while the truck is reported down. Pure.
+export function teamStopsDue(found, alerts, down = new Set()) {
+  return found.filter((a) => a.teamStop && !down.has(String(a.trip)) && !down.has(norm(a.unit))).map((a) => ({ a, cur: alerts[a.id], level: a.severity === 'critical' ? 2 : 1 }))
     .filter(({ cur, level }) => cur && !cur.ack && level > (cur.mailLevel || 0));
 }
 
@@ -1020,7 +1020,9 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
     if (pushRules) cfg.recipients = await pushRules.emailsFor('priority');   // admin → Push notifications
     const toPush = []; const toMail = []; const toRoll = []; const toEscalate = [];
-    const roadDown = new Set(openRoadCalls ? await openRoadCalls().catch(() => []) : []);   // trucks / trips with a road call still open
+    // reported down: a road call open, a breakdown report, the Breakdown switch, or an email saying so
+    const roadDown = new Set(openRoadCalls ? await openRoadCalls().catch(() => []) : []);
+    for (const it of board.trips || []) { if ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown')) { const t = (it && it.trip) || {}; roadDown.add(String(t.tripNumber)); roadDown.add(norm(t.powerUnit)); } }
     let etasNow = {};
 
     const archived = [];
@@ -1040,8 +1042,9 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
         }
         // an emailed stop: is the truck really moving again? (once per stop; the note is cleared before the email goes)
         if (us.stopEpisode) {
-          const r = trackRolling(us.stopEpisode, l, now, { down: !!((item._breakdown && item._breakdown.on) || (item._hold && item._hold.kind === 'breakdown') || roadDown.has(norm(t.powerUnit)) || roadDown.has(String(t.tripNumber))) });
-          if (r.confirmed) { toRoll.push({ ...r.ep, confirmedAt: now, speedMph: l.speedMph }); delete us.stopEpisode; } else if (now - r.ep.at > ROLL.keepHours * 60 * MIN) delete us.stopEpisode; else us.stopEpisode = r.ep;
+          const isDown = roadDown.has(norm(t.powerUnit)) || roadDown.has(String(t.tripNumber));
+          const r = trackRolling(us.stopEpisode, l, now, { down: isDown });
+          if (r.confirmed) { toRoll.push({ ...r.ep, confirmedAt: now, speedMph: l.speedMph }); delete us.stopEpisode; } else if (!isDown && now - r.ep.at > ROLL.keepHours * 60 * MIN) delete us.stopEpisode; else us.stopEpisode = r.ep;
         }
         s.units[u] = us;
       }
@@ -1064,7 +1067,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
             && now - (cur.lastPushAt || cur.openedAt) >= cfg.escalateMin * MIN) toEscalate.push(cur);
         }
       }
-      for (const { a, cur, level } of teamStopsDue(found, s.alerts)) {
+      for (const { a, cur, level } of teamStopsDue(found, s.alerts, roadDown)) {
         cur.mailLevel = level; toMail.push(a);
         const us = s.units[norm(a.unit)];
         const it = (board.trips || []).find((x) => String(((x && x.trip) || x || {}).tripNumber || '') === String(a.trip));

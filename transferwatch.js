@@ -24,6 +24,9 @@ const DONE = /^(delvd|deliv|del$|cmplt|complete|canc|void)/i;
 
 // The planned transfer on a load: from the sheet's truck to the transfer truck. Pure. → { trip, from, to, trailer } | null
 export function transferPlan(it) {
+  if (DONE.test(String(tripOf(it).status || ''))) return null;
+  const r = it && it._rescue;   // a rescue plan from a breakdown
+  if (r && r.to && unitKey(r.to) !== unitKey(r.from)) return { trip: tripNo(it), from: String(r.from), to: String(r.to), trailer: String(tripOf(it).trailer || '') || null, rescue: { subject: r.subject } };
   const m = (it && it._manifest) || null;
   if (!m || !m.truck) return null;
   if (DONE.test(String(tripOf(it).status || ''))) return null;
@@ -103,7 +106,7 @@ ${kind === 'together' ? `<p>If they're still together in ${ASK_AFTER_MIN} minute
   return { subject: head, html, text: `${head}${s.distanceMi != null ? ` · ${s.distanceMi} mi apart` : ''} · ${plan.from}: ${roll(s.aRolling)} · ${plan.to}: ${roll(s.bRolling)}` };
 }
 
-export function initTransferWatch({ db, env = process.env, sendMail, recipients, textDriver = null, voice = null, comms = null, fetchFn = globalThis.fetch, now = () => Date.now(), livePos = null }) {
+export function initTransferWatch({ db, env = process.env, sendMail, recipients, rescueRecipients = null, textDriver = null, voice = null, comms = null, fetchFn = globalThis.fetch, now = () => Date.now(), livePos = null }) {
   const enabled = !!(db && db.enabled);
   const key = `taTransferWatch:${SITE}`;
   // live position of any truck by unit number (Samsara)
@@ -119,9 +122,12 @@ export function initTransferWatch({ db, env = process.env, sendMail, recipients,
     };
   }
   async function mail(kind, plan, a, b, s, extra) {
-    const to = await recipients();
+    // a rescue stays on the breakdown chain, with the same people
+    const rescue = plan.rescue && rescueRecipients;
+    const to = await (rescue ? rescueRecipients() : recipients());
     if (!to.length) return false;
-    await sendMail({ to, ...transferEmail(kind, plan, a, b, s, { ...extra, now: now() }) });
+    const m = transferEmail(kind, plan, a, b, s, { ...extra, now: now() });
+    await sendMail({ to, ...m, ...(rescue && plan.rescue.subject ? { subject: `Re: ${plan.rescue.subject}` } : {}) }, { rescue: !!rescue });
     return true;
   }
   // the drivers' answer since we asked (texts back, or what they said on the call)
@@ -149,7 +155,7 @@ export function initTransferWatch({ db, env = process.env, sendMail, recipients,
       const tmDone = doneInTruckMate((board.trips || []).find((x) => tripNo(x) === plan.trip), plan);
       if (tmDone) {
         const outcome = { status: 'done', source: 'TruckMate', summary: `TruckMate shows trailer ${plan.trailer || ''} on truck ${plan.to} and rolling since ${new Date(tmDone).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: '2-digit' })} ET.`, at: tmDone };
-        if (prev && prev.startedAt) await mail('outcome', plan, a, b, s, { outcome }).catch(() => {}); // eslint-disable-line no-await-in-loop
+        if (prev && prev.startedAt && !plan.rescue) await mail('outcome', plan, a, b, s, { outcome }).catch(() => {}); // eslint-disable-line no-await-in-loop
         all[plan.trip] = { ...(prev || {}), from: plan.from, to: plan.to, outcome };
         done.push({ trip: plan.trip, actions: prev && prev.startedAt ? ['report_outcome'] : [], distanceMi: s.distanceMi });
         continue;
