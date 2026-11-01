@@ -1005,7 +1005,7 @@ const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmi
 const stopTasks = initStopTasks({ db, env: process.env, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice: { placeCall: (...a) => voice.placeCall(...a), callsFor: (...a) => voice.callsFor(...a) }, replyInThread: (...a) => inbox.replyInThread(...a) });
 const followProxy = { start: (...a) => brokerFollow.start(...a), overlay: (...a) => brokerFollow.overlay(...a), process: (...a) => brokerFollow.process(...a) };
 const dispatchLog = initDispatchLog(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, env: process.env });
-const inbox = initInbox(app, { brokerFollow: followProxy, dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
+const inbox = initInbox(app, { breakdownEmail: (...a) => breakdownReport.fromEmail(...a), brokerFollow: followProxy, dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
@@ -1146,7 +1146,7 @@ const sendBreakdown = async (report, item, to) => {
   await sendMail({ to, ...m, attachments: [...attachments, ...sheet.attachments] }, { env: process.env, direct: staffOnly(to) });
   return m.subject;
 };
-const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), send: async (report, item) => { const to = await alertRecipients.resolve('breakdown_report'); if (to.length) await sendBreakdown(report, item, to); } });
+const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), send: async (report, item, extra = []) => { const to = [...new Set([...extra.map((x) => String(x).toLowerCase()).filter((x) => /@floridabeauty\.us$/.test(x)), ...await alertRecipients.resolve('breakdown_report')])]; if (to.length) await sendBreakdown(report, item, to); } });
 // one example of the breakdown email, to Nadim only: no road call, nothing saved, nobody else
 app.post('/admin/breakdown-report/example', requireCompanyAdmin, async (req, res) => {
   try {

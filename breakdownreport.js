@@ -30,14 +30,20 @@ export function readToken(token, secret, now = Date.now()) {
   try { const p = JSON.parse(Buffer.from(body, 'base64url').toString()); return p.e > now ? p : null; } catch { return null; }
 }
 
-export const loadLabel = (item) => (brokerLoad(item) ? 'BROKER' : 'FLOWERS');
+// What the load is, only from proof: broker bills or a rate con; an ARTIS run or Gus's plan saying flowers. Otherwise null, never a guess. Pure.
+export function loadLabel(item) {
+  if (brokerLoad(item)) return 'BROKER';
+  if (item && (item._tb || /flower/i.test(String((item._plan && item._plan.kind) || '')))) return 'FLOWERS';
+  return null;
+}
 const oneLine = (s, n) => String(s || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
 
 // Same shape dispatch writes: "FLOWERS BREAKDOWN TRUCK AIR LEAK - TK# 2602 TL# 7323 - TRIP# 625878". Pure.
 export function breakdownSubject(item, reason, { unit = null, trip = null } = {}) {
   const t = (item && item.trip) || {};
   const ids = [`TK# ${unit || t.powerUnit || 'N/A'}`, `TL# ${t.trailer || 'N/A'}`].join(' ');
-  return `${loadLabel(item)} BREAKDOWN ${oneLine(reason, 60).toUpperCase()} - ${ids} - TRIP# ${trip || t.tripNumber || 'N/A'}`;
+  const kind = loadLabel(item);
+  return `${kind ? `${kind} ` : ''}BREAKDOWN ${oneLine(reason, 60).toUpperCase()} - ${ids} - TRIP# ${trip || t.tripNumber || 'N/A'}`;
 }
 
 // The email that opens the chain. Pure.
@@ -45,7 +51,9 @@ export function renderBreakdownEmail({ item, report, etas = null, now = Date.now
   const a = { unit: report.unit, trip: report.trip, ack: null };
   const f = teamStopFacts(a, item, { etas, now, showPhones, mapCid });
   const { heading, button, kv, driverCard, FONT, NAVY, TEXT, MUTED, LINE, RED, et, TRAINING_SLOT } = emailParts;
-  const label = loadLabel(item) === 'BROKER' ? 'BROKER LOAD' : 'FLOWERS LOAD';
+  const kind = loadLabel(item);
+  const title = kind === 'BROKER' ? 'BROKER BREAKDOWN' : kind === 'FLOWERS' ? 'FLOWER BREAKDOWN' : 'BREAKDOWN REPORTED';
+  const label = kind ? 'Breakdown reported' : 'Load type not confirmed. Check the load.';
   const many = f.drivers.length > 1;
   const reported = `${report.by} · ${et(report.atMs) || ''}`;
   const rc = 'Road service has NOT been called. Call Michelin or the shop the usual way.';
@@ -56,7 +64,7 @@ export function renderBreakdownEmail({ item, report, etas = null, now = Date.now
 <tr><td style="padding:20px 24px 2px;font-family:${FONT};font-size:20px;font-weight:bold;color:${NAVY};">Florida Beauty</td></tr>
 <tr><td style="padding:0 24px 12px;border-bottom:1px solid ${LINE};font-family:${FONT};font-size:14px;color:${MUTED};">Dispatch notifications</td></tr>
 ${TRAINING_SLOT}
-<tr><td bgcolor="${RED}" style="padding:20px 24px;background:${RED};font-family:${FONT};font-size:30px;line-height:1.15;font-weight:bold;color:#FFFFFF;">BREAKDOWN REPORTED<div style="padding-top:4px;font-size:16px;letter-spacing:.5px;color:#FFFFFF;">${label}</div></td></tr>
+<tr><td bgcolor="${RED}" style="padding:20px 24px;background:${RED};font-family:${FONT};font-size:32px;line-height:1.15;font-weight:bold;color:#FFFFFF;">${title}<div style="padding-top:4px;font-size:16px;font-weight:normal;color:#FFFFFF;">${label}</div></td></tr>
 <tr><td style="padding:16px 24px 0;font-family:${FONT};font-size:30px;font-weight:bold;color:${NAVY};">Truck ${esc(f.unit || 'not recorded')}</td></tr>
 <tr><td style="padding:0 24px 14px;font-family:${FONT};font-size:15px;color:${MUTED};">Trip ${esc(f.trip || 'not recorded')}${f.trailer ? ` · Trailer ${esc(f.trailer)}` : ''}</td></tr>
 ${sheetAttached ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NAVY}" style="background:${NAVY};border-radius:8px;"><tr><td style="padding:12px 16px;font-family:${FONT};font-size:17px;font-weight:bold;color:#FFFFFF;">&#128206; ${esc(sheetNote)}</td></tr></table></td></tr>` : ''}
@@ -71,7 +79,7 @@ ${heading('Delivery impact')}
 <tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${kv('Next stop', f.next)}${kv('Appointment', f.appt)}${kv('Estimated arrival', f.eta)}${kv('Distance remaining', f.miles != null ? `${f.miles.toLocaleString('en-US')} mi` : null)}</table></td></tr>
 <tr><td style="padding:18px 24px 20px;font-family:${FONT};font-size:13px;line-height:1.5;color:${MUTED};">Reply on this email to keep everyone on the chain. Jarvis keeps it on the load.<br><b style="color:${NAVY};">Jarvis · AI Dispatcher</b> · Florida Beauty</td></tr>
 </table></td></tr></table></body></html>`;
-  const text = [`BREAKDOWN REPORTED · ${label}`, `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, ...(sheetNote ? [sheetNote] : []), '', `Reason: ${report.reason}`, `Reported by: ${reported}`, '', 'NEXT STEP FOR DISPATCH', rc, next, consoleUrl, '', f.location || 'Location not reported', ...(mapUrl ? [mapUrl] : []), '', `Next stop: ${f.next || 'Not available'}`, `Estimated arrival: ${f.eta || 'Not available'}`, '', 'Reply on this email to keep everyone on the chain.', 'Jarvis · AI Dispatcher · Florida Beauty'].join('\n');
+  const text = [title, label, `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, ...(sheetNote ? [sheetNote] : []), '', `Reason: ${report.reason}`, `Reported by: ${reported}`, '', 'NEXT STEP FOR DISPATCH', rc, next, consoleUrl, '', f.location || 'Location not reported', ...(mapUrl ? [mapUrl] : []), '', `Next stop: ${f.next || 'Not available'}`, `Estimated arrival: ${f.eta || 'Not available'}`, '', 'Reply on this email to keep everyone on the chain.', 'Jarvis · AI Dispatcher · Florida Beauty'].join('\n');
   return { subject, html, text };
 }
 
@@ -105,6 +113,23 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, baseUrl =
     return { code: 200, ok: true };
   }
 
+  // Staff emailed Jarvis that a truck broke down: same breakdown email, to everyone of ours on their email plus the usual list.
+  // One per load until Breakdown is turned off; the first report stands, later ones just say so.
+  async function fromEmail({ trip, reason, by, emailId, to = [] }) {
+    const clean = oneLine(reason, MAX_REASON);
+    if (clean.length < 3) return { ok: false, error: 'What happened? Reply with the reason.' };
+    const open = await forTrip(trip);
+    if (open && !open.clearedAt && now() - open.atMs < DAY) return { ok: false, duplicate: true, error: `Already reported by ${open.by}.` };
+    const item = ((await getBoard(site).catch(() => ({ trips: [] }))).trips || []).find((it) => String(((it && it.trip) || {}).tripNumber) === String(trip)) || null;
+    if (!item) return { ok: false, error: `Trip ${trip} is not on the board.` };
+    const unit = (item.trip || {}).powerUnit || null;
+    const report = { atMs: now(), by: oneLine(by, 80) || 'Dispatch', reason: clean, trip: String(trip), unit };
+    const subject = breakdownSubject(item, clean, { unit, trip });
+    await db.update(KEY(site), (cur) => ({ ...(cur || {}), [`email:${emailId}`]: { ...report, subject } }), {});
+    await send(report, item, to);
+    return { ok: true, subject };
+  }
+
   // Trucks and trips reported down: the rolling email waits. Ends when Breakdown is turned off on the load, or after 5 days.
   const held = async () => Object.values(await all()).filter((r) => !r.clearedAt && now() - r.atMs < HOLD_DAYS * DAY).flatMap((r) => [String(r.trip), String(r.unit || '').trim().toLowerCase().replace(/^0+(?=\d)/, '')]).filter(Boolean);
   const clear = (trip) => db.update(KEY(site), (cur) => Object.fromEntries(Object.entries(cur || {}).map(([k, r]) => [k, String(r.trip) === String(trip) && !r.clearedAt ? { ...r, clearedAt: now() } : r])), {});
@@ -120,5 +145,5 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, baseUrl =
       try { const r = await submit(p, req.body || {}); return res.status(r.code).json(r); } catch (e) { console.warn('[breakdown-report]', e.message); return res.status(500).json({ error: 'Could not send. Call dispatch.' }); }
     });
   }
-  return { link, forTrip, submit, held, clear };
+  return { link, forTrip, submit, fromEmail, held, clear };
 }
