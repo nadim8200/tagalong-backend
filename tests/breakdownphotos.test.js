@@ -104,8 +104,9 @@ test('an update on an open breakdown goes on the chain with its history, and nee
   assert.equal(sent.length, 2); assert.equal(sent[0].message, 'tech arrived'); assert.equal(sent[0].by, 'Example Dispatcher'); assert.equal(sent[0].fresh.length, 1);
   const open = (await call('GET /truckmate/breakdown/open/:trip', null, { trip: '626143' })).open;
   assert.equal(open.reason, 'light came off'); assert.equal(open.updates.length, 2);
-  const m = renderBreakdownPhotosEmail({ report: sent[1].rep, item: load, by: 'Example Dispatcher', count: 0, message: 'waiting on a part', subject: 'Re: x' });
-  assert.match(m.html, /BREAKDOWN UPDATE/); assert.match(m.text, /waiting on a part/); assert.match(m.text, /Earlier: tech arrived \(Example Dispatcher\)/); assert.match(m.text, /Reason on file: light came off/);
+  const m = renderBreakdownEmail({ item: load, report: sent[1].rep, update: { message: 'waiting on a part', by: 'Example Dispatcher' }, earlier: sent[1].rep.updates.slice(0, -1) });
+  assert.match(m.html, /BROKER BREAKDOWN UPDATE/); assert.match(m.html, /Update from Example Dispatcher/); assert.match(m.text, /Update: waiting on a part/); assert.match(m.text, /Earlier: tech arrived \(Example Dispatcher\)/);
+  assert.match(m.text, /Reason: light came off/); assert.match(m.text, /Load type: BROKER/); assert.doesNotMatch(m.html, /Next step for dispatch/);
 });
 
 test('a corrected truck or trailer goes on the email, with the right location or none', async () => {
@@ -123,4 +124,17 @@ test('a corrected truck or trailer goes on the email, with the right location or
   const ok = await r.fromEmail({ trip: '626143', reason: 'trailer light', by: 'A', emailId: 'y', truck: '2010', trailer: '3000' });
   assert.equal(ok.subject, 'BROKER BREAKDOWN TRAILER 3000 // TK 2010 TL 3000 TO 626143');
   assert.equal(sent[0][0].unit, '2010'); assert.equal(sent[0][1].trip.trailer, '3000');
+});
+
+test('an update is a real reply on the first email, and a plain email if it cannot be', async () => {
+  const { sendInThread } = await import('../mailer.js');
+  const env = { MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
+  const calls = []; let found = true;
+  const fetchFn = async (url, o = {}) => { calls.push(`${o.method || 'GET'} ${url.split('/users/').pop().split('?')[0]}`); const ok = (j, status = 200) => ({ ok: true, status, json: async () => j }); if (/token/.test(url)) return ok({ access_token: 'x', expires_in: 3600 }); if (/sentitems/.test(url)) return ok({ value: found ? [{ id: 'm1' }] : [] }); if (/createReply/.test(url)) return ok({ id: 'd1' }); return ok({}, 202); };
+  const msg = { to: ['a@floridabeauty.us'], subject: 'Re: X', html: '<b>u</b>', attachments: [{ name: 'p.jpg', contentType: 'image/jpeg', bytes: Buffer.from('x'), cid: 'bkphoto1' }] };
+  const r = await sendInThread(msg, 'X', { env, fetchFn, direct: true });
+  assert.equal(r.threaded, true);
+  assert.ok(calls.some((c) => /d1\/send/.test(c))); assert.ok(calls.some((c) => /d1\/attachments/.test(c)));
+  found = false;
+  assert.equal((await sendInThread(msg, 'X', { env, fetchFn, direct: true })).threaded, undefined, 'falls back');
 });

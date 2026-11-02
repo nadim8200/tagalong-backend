@@ -493,7 +493,7 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
   return { subject, html, text };
 }
 
-export function initStatusMail(app, { requireAuth, db, onBreakdownOff = null, docs = null, comms = null, ringcentral = null, track = null, chainReply = null, tempTeam = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initStatusMail(app, { requireAuth, db, isTraining = async () => false, onBreakdownNote = null, onBreakdownOff = null, docs = null, comms = null, ringcentral = null, track = null, chainReply = null, tempTeam = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const cfgKey = 'taStatusMailCfg';
   const key = (site) => `taStatusMail:${site}`;      // { adopted, trips: { trip: { sent, log } } }
@@ -773,6 +773,8 @@ export function initStatusMail(app, { requireAuth, db, onBreakdownOff = null, do
     const at = new Date().toISOString();
     const note = b.note ? String(b.note).replace(/\s+/g, ' ').trim().slice(0, 300) : null;
     const result = { emailed: [], texted: [], emailStatus: 'not sent', textStatus: 'not sent', errors: [] };
+    // what they typed also goes on the breakdown chain, so the team sees it
+    if (note && onBreakdownNote) await Promise.resolve(onBreakdownNote(trip, note, who(req))).catch((e) => console.warn('[status-mail] breakdown note:', e.message));
     try {
       if (b.notify !== false) {
         const all = await everyone(item);
@@ -780,7 +782,7 @@ export function initStatusMail(app, { requireAuth, db, onBreakdownOff = null, do
         if (!all.emails.length) result.emailStatus = 'no customer emails on file';
         else if (!mailConfig(env).ready) result.emailStatus = 'Outlook not connected yet';
         else {
-          try { await sendMail({ to: all.emails, subject: m.mail.subject, html: m.mail.html }, { env, fetchFn }); result.emailed = all.emails; result.emailStatus = 'sent'; } catch (e) { result.emailStatus = 'failed'; result.errors.push(e.message); }
+          try { await sendMail({ to: all.emails, subject: m.mail.subject, html: m.mail.html }, { env, fetchFn }); result.emailed = all.emails; result.emailStatus = (await isTraining()) ? 'held by training mode, customers did not get it' : 'sent'; } catch (e) { result.emailStatus = 'failed'; result.errors.push(e.message); }
         }
         const owner = String((req.user && (req.user.company || req.user.id)) || '__shared');
         const rcCfg = ringcentral && ringcentral.configFor ? await ringcentral.configFor(owner) : null;

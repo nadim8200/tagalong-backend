@@ -102,7 +102,7 @@ import { initStopTasks } from './stoptasks.js';
 import { initMacroPoint } from './macropoint.js';
 import { initRoadCalls } from './roadcall.js';
 import { initRateCon } from './ratecon.js';
-import { sendMail, mailConfig, setMailGuard } from './mailer.js';
+import { sendMail, sendInThread, mailConfig, setMailGuard } from './mailer.js';
 import { initTraining } from './training.js';
 import { initEtaWatch } from './etawatch.js';
 import { initFollowThrough } from './followthrough.js';
@@ -1006,7 +1006,7 @@ helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.en
   sms: { live: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } }, send: (to, text) => rc.sendSms('__shared', { to, text }) } });
 // live tracking link for the rate con contact (one load only; stops once delivered)
 const brokerTrack = initBrokerTrack(app, { db, getBoard: (site) => truckmate.buildBoard(site), env: process.env });
-const statusMail = initStatusMail(app, { onBreakdownOff: (trip) => breakdownReport.clear(trip), tempTeam: () => alertRecipients.resolve('reefer_temp'),  requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env,
+const statusMail = initStatusMail(app, { isTraining: async () => !!(await training.active()), onBreakdownNote: (trip, message, by) => breakdownReport.addUpdate({ trip, message, by }), onBreakdownOff: (trip) => breakdownReport.clear(trip), tempTeam: () => alertRecipients.resolve('reefer_temp'),  requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env,
   track: (site, trip) => brokerTrack.linkFor(site, trip),
   chainReply: (site, trip, m) => (inbox ? inbox.replyOnLoadChain(site, trip, m) : { sent: false }) });
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email
@@ -1174,30 +1174,32 @@ const breakdownPhotoFiles = async (photos = [], room = PHOTOS_BYTES) => {
   return { attachments, note: left ? `${left} more photo${left === 1 ? '' : 's'} could not go in this email. ${LOOK}` : null };
 };
 const total = (list) => list.reduce((n, a) => n + a.bytes.length, 0);
-const sendBreakdown = async (report, item, to) => {
+const sendBreakdown = async (report, item, to, { update = null, photos: newPhotos = null, threadOf = null } = {}) => {
   const attachments = await truckMap((item && item._samsara) || {}, 'red', reportBadge(report));
-  let sheet = await sheetFor(item, report.trip);
-  const photos = await breakdownPhotoFiles(report.photos);
+  let sheet = update ? { status: 'none', note: null, attachments: [] } : await sheetFor(item, report.trip);
+  const photos = await breakdownPhotoFiles(newPhotos || report.photos);
   // photos first: the trip sheet can be opened on the load
   if (photos.attachments.length && total([...attachments, ...sheet.attachments, ...photos.attachments]) > EMAIL_BYTES) sheet = { status: 'unavailable', note: 'Trip sheet left out to fit the photos. Open it on the load in the console.', attachments: [] };
   const etas = (((await db.get('taWatch:florida-beauty', {})) || {}).etas || {})[report.trip] || null;
-  const build = (ph, note) => renderBreakdownEmail({ item, report, etas, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached', photoCids: ph.map((a) => a.cid), photosNote: note });
-  const m = build(photos.attachments, photos.note);
+  const build = (ph, note) => renderBreakdownEmail({ item, report, etas, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached', photoCids: ph.map((a) => a.cid), photosNote: note, update, earlier: update ? (report.updates || []).slice(0, -1).slice(-5) : [] });
+  const m = { ...build(photos.attachments, photos.note), ...(threadOf ? { subject: `Re: ${threadOf}` } : {}) };
   try {
-    await sendMail({ to, ...m, attachments: [...attachments, ...sheet.attachments, ...photos.attachments] }, { env: process.env, direct: staffOnly(to) });
+    await sendInThread({ to, ...m, attachments: [...attachments, ...sheet.attachments, ...photos.attachments] }, threadOf, { env: process.env, direct: staffOnly(to) });
   } catch (e) {
     if (!photos.attachments.length) throw e;
     console.warn('[breakdown] sent without photos:', e.message);
-    await sendMail({ to, ...build([], `Photos could not go in this email. ${LOOK}`), attachments: [...attachments, ...sheet.attachments] }, { env: process.env, direct: staffOnly(to) });
+    await sendMail({ to, ...build([], `Photos could not go in this email. ${LOOK}`), subject: m.subject, attachments: [...attachments, ...sheet.attachments] }, { env: process.env, direct: staffOnly(to) });
   }
   return m.subject;
 };
 const sendBreakdownPhotos = async (report, item, fresh, by, message = null) => {
   const to = await alertRecipients.resolve('breakdown_report');
   if (!to.length) return;
+  const first = report.subject || breakdownSubject(item, report.reason, { unit: report.unit, trip: report.trip, part: report.part });
+  if (message) { await sendBreakdown(report, item, to, { update: { message, by }, photos: fresh, threadOf: first }); return; }
   const photos = await breakdownPhotoFiles(fresh, EMAIL_BYTES);
-  const m = renderBreakdownPhotosEmail({ report, item, by, count: fresh.length, message, subject: `Re: ${report.subject || breakdownSubject(item, report.reason, { unit: report.unit, trip: report.trip, part: report.part })}`, photoCids: photos.attachments.map((a) => a.cid), photosNote: photos.note });
-  await sendMail({ to, ...m, attachments: photos.attachments }, { env: process.env, direct: staffOnly(to) });
+  const m = renderBreakdownPhotosEmail({ report, item, by, count: fresh.length, subject: `Re: ${first}`, photoCids: photos.attachments.map((a) => a.cid), photosNote: photos.note });
+  await sendInThread({ to, ...m, attachments: photos.attachments }, first, { env: process.env, direct: staffOnly(to) });
 };
 // what drivers texted on this load in the last few hours, so a report made after the text has the picture
 const textedPhotos = async (trip) => (((await db.get('taTripComms:florida-beauty', {})) || {})[trip] || []).filter((e) => e.type === 'reply' && (e.photos || []).length && Date.now() - Date.parse(e.at) < 12 * 3600000).flatMap((e) => e.photos);

@@ -95,3 +95,27 @@ export async function sendMail(message, { env = process.env, fetchFn = globalThi
   }
   return { ok: true, to: list, from: cfg.from };
 }
+
+// A real reply on an email Jarvis sent earlier, found by its subject in Sent Items, so Outlook keeps one thread. For our own people only
+// (direct: training mode has nothing to rewrite). If that email can't be found or the reply fails, it goes as a normal email: the news matters more.
+export async function sendInThread(message, originalSubject, { env = process.env, fetchFn = globalThis.fetch, direct = false } = {}) {
+  const plain = () => sendMail(message, { env, fetchFn, direct });
+  const cfg = mailConfig(env);
+  if (!direct || !cfg.ready || !originalSubject) return plain();
+  try {
+    const t = await token(cfg, fetchFn);
+    const api = async (path, method = 'GET', body = null) => {
+      const r = await fetchFn(`${GRAPH}/users/${encodeURIComponent(cfg.from)}${path}`, { method, headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
+      if (!r.ok) throw new Error(`Outlook ${r.status}`);
+      return r.status === 202 || r.status === 204 ? null : r.json().catch(() => null);
+    };
+    const found = await api(`/mailFolders/sentitems/messages?$filter=${encodeURIComponent(`subject eq '${String(originalSubject).replace(/'/g, "''")}'`)}&$top=1&$select=id`);
+    const first = found && found.value && found.value[0];
+    if (!first) return plain();
+    const draft = await api(`/messages/${encodeURIComponent(first.id)}/createReply`, 'POST', {});
+    await api(`/messages/${encodeURIComponent(draft.id)}`, 'PATCH', { subject: message.subject, body: { contentType: 'HTML', content: message.html }, toRecipients: message.to.map((address) => ({ emailAddress: { address } })) });
+    for (const a of message.attachments || []) await api(`/messages/${encodeURIComponent(draft.id)}/attachments`, 'POST', { '@odata.type': '#microsoft.graph.fileAttachment', name: a.name, contentType: a.contentType || 'application/pdf', contentBytes: Buffer.from(a.bytes).toString('base64'), ...(a.cid ? { isInline: true, contentId: a.cid } : {}) }); // eslint-disable-line no-await-in-loop
+    await api(`/messages/${encodeURIComponent(draft.id)}/send`, 'POST');
+    return { ok: true, to: message.to, threaded: true };
+  } catch (e) { console.warn('[mail] thread reply, sending plain:', e.message); return plain(); }
+}
