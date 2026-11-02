@@ -45,7 +45,7 @@ test('questions are written from what people did, by day, with no repeats of the
   assert.equal(await s.a.generate(), 0, 'nothing new since the last look');
   const night = setup({ time: NIGHT, audit: [row()], ai: AI });
   assert.equal(await night.a.generate(), 0); assert.equal(night.calls(), 0, 'no AI at night');
-  const noise = setup({ audit: [row({ action: 'Signed in' }), row({ status: 403 })], ai: AI });
+  const noise = setup({ audit: [row({ action: 'Signed in' }), row({ status: 403 }), row({ action: 'Did /admin/waiting-example' }), row({ action: 'Changed /truckmate/x' })], ai: AI });
   assert.equal(await noise.a.generate(), 0); assert.equal(noise.calls(), 0);
 });
 

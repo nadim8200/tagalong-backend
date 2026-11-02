@@ -14,7 +14,8 @@ const MAX_OPEN = 6;         // questions waiting at once: a bubble nobody can ke
 const MAX_PER_RUN = 3;
 const KEEP = 500;
 const HOURS = [8, 20];      // Miami time: nobody gets a question overnight
-const SKIP = /^(Signed in|Signed out|Failed sign-in|Asked Jarvis|Changed their password|Used forgot password)/;
+// not dispatch work: sign-ins, and actions with no plain name yet, which reach the AI as a web address and make nonsense questions
+const SKIP = /^(Signed in|Signed out|Failed sign-in|Asked Jarvis|Changed their password|Used forgot password|Did \/|Changed \/|Deleted \/)/;
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 const fold = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
