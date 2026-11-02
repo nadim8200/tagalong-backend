@@ -8,6 +8,8 @@ import { findStaff } from './directory.js';
 const KEY = 'taAlertRecipients';
 const TEXT_KEY = 'taAlertTexts';   // who gets a TEXT for alerts that send one (phone numbers or employees)
 export const ALERTS = [
+  { key: 'ratecon_inbound', label: 'New rate con to enter', when: 'Gus sends a rate con to Jarvis: forwarded right away with his instructions, so the load can be entered in the system.', defaults: ['inbound-dispatch@floridabeauty.us'] },
+  { key: 'ratecon_accounting', label: 'Rate con for Accounting (and revised rate cons, TONU)', when: 'A rate con from Gus shows up in TruckMate with a trip and a truck: the load information and the rate con. A revised rate con or a TONU goes right away with what changed.', defaults: ['POD Accounting', 'Rafael Romero'] },
   { key: 'artis_left_short', label: 'Truck left — boxes not received from the shipper', when: 'A truck departed while ARTIS shows boxes for its customers never received at our terminal (once per trip): verify if rejected or contact the shipper.', defaults: ['ntellez@floridabeauty.us'] },
   { key: 'transfer', label: 'Truck transfer', when: 'A trip sheet plans a truck change (e.g. 734 → 4504): planned, every 2 h while apart (rolling or stopped, distance), when the trucks are together, and the driver\'s answer on whether the transfer is done.', defaults: ['ntellez@floridabeauty.us'] },
   { key: 'reefer_temp', label: 'Reefer temperature (internal)', when: 'Every reefer temperature photo from a driver, and any live reading held back from a broker because it is off the rate con range. The broker never gets these automatically — dispatch decides.', defaults: ['Dispatch', 'Luis Jimenez', 'Gustavo'] },

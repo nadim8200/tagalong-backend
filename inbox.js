@@ -356,7 +356,7 @@ export function keepEmails(all) {
 // "Flowers report") is part of the message — not a scanned trip-sheet page. Pure.
 export const pastedPicture = (a) => !!a && /^image\//i.test(a.contentType || '') && !!a.bytes && Math.floor(String(a.bytes).length * 0.75) <= 1.5 * 1024 * 1024;
 
-export function initInbox(app, { requireAuth, db, stopReview = null, transferDone = null, breakdownFixed = null, rescuePlan = null, breakdownEmail = null, breakdownPhotos = null, brokerFollow = null, dispatchLog = null, stopTasks = null, roadCalls = null, brokerWatch = null, paperwork = null, meetWatch = null, nextLoads = null, groupEmail = null, groupAddresses = null, planSheet = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initInbox(app, { requireAuth, db, stopReview = null, transferDone = null, breakdownFixed = null, rescuePlan = null, breakdownEmail = null, breakdownPhotos = null, rateConFlow = null, brokerFollow = null, dispatchLog = null, stopTasks = null, roadCalls = null, brokerWatch = null, paperwork = null, meetWatch = null, nextLoads = null, groupEmail = null, groupAddresses = null, planSheet = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const key = (site) => `taEmails:${site}`;          // { list: [email…], status }
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
@@ -366,6 +366,7 @@ export function initInbox(app, { requireAuth, db, stopReview = null, transferDon
   const board = async (site) => { try { return getBoard ? ((await getBoard(site)).trips || []) : []; } catch { return []; } };
   const tripNo = (it) => String((((it && it.trip) || it || {}).tripNumber) || (it && it._id) || '');
   const status = { lastPoll: null, error: null, canRead: null };
+  const fullBodies = new Map();   // a rate con's forward to the team carries the whole email (what the broker wrote under Gus's forward)
 
   async function logOnLoad(site, trip, entry) { if (comms && comms.log) await comms.log(site, trip, { ...entry, noThread: true }); }
 
@@ -635,7 +636,10 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
       let t = null;
       try { t = await triage(email, attachments); } catch (e) { console.warn('[inbox] triage:', e.message); } // eslint-disable-line no-await-in-loop
       // the GM's rate cons to the team: "follow up", "add the tracking team" are for dispatch, once the load is created. Only the files are Jarvis's
-      if (t && email.quiet) t = { ...t, actions: [], instructions: [], help: null, loadUpdate: null, reply: { needed: false, kind: 'none', documents: [] } };
+      // rate cons Gus sends to Jarvis: his words are for the team, forwarded as they are (rateconflow.js)
+      const gusRateCons = NEXT_LOAD_SENDERS(env).includes(from.address.toLowerCase()) && !!rateConFlow && (email.rcBatch || !!((t && t.attachments) || []).some((a) => a && a.type === 'rate_confirmation'));
+      if (gusRateCons && !email.quiet) { email.rateConFlow = true; fullBodies.set(m.id, m.body && m.body.contentType === 'html' ? htmlToText(m.body.content) : String((m.body && m.body.content) || '')); }
+      if (t && (email.quiet || email.rateConFlow)) t = { ...t, actions: [], instructions: [], help: null, loadUpdate: null, reply: { needed: false, kind: 'none', documents: [] } };
       if (t) {
         email.summary = String(t.summary || '').slice(0, 300);
         email.actions = (Array.isArray(t.actions) ? t.actions : []).slice(0, 10);
@@ -701,6 +705,7 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
           if (email.packet) { email.status = 'handled'; email.handledBy = email.rcBatch ? 'Jarvis (rate cons read — next loads)' : email.packetPending ? 'Jarvis (reading the trip sheets…)' : 'Jarvis (trip sheets read)'; email.reply = { needed: false, kind: 'none', documents: [] }; }
         } catch (e) { email.packetError = e.message; console.warn('[inbox] trip sheets:', e.message); }
       }
+      if (email.rateConFlow) Object.assign(email, { status: 'handled', reply: { needed: false, kind: 'none', documents: [] }, handledBy: 'Jarvis (rate con forwarded to the team)' });
       if (email.quiet) {
         Object.assign(email, { status: 'handled', auto: 'group', viaGroup: gate.group, reply: { needed: false, kind: 'none', documents: [] }, handledBy: 'Jarvis (rate con read — in the loop)' });
         if (dispatchLog) await dispatchLog.learn(site, email, []); // eslint-disable-line no-await-in-loop
@@ -747,6 +752,12 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
   async function afterArrival(site, e, items) {
     const done = [];
     const staff = isInternal(e.from.address, env);
+    // Gus's rate cons: to the team now, to Accounting once the load is in the system
+    if (rateConFlow && (e.rateConFlow || (e.quiet && NEXT_LOAD_SENDERS(env).includes(String(e.from.address).toLowerCase())))) {
+      const entries = [...(e.batchRateCons || []), ...(e.rateCons || []).map((r) => ({ trip: r.trip || null, pendingId: r.pendingId || null }))];
+      try { await rateConFlow.received(site, { email: e, entries, items, fullText: fullBodies.get(e.id) || '', alreadyWithTeam: !!e.quiet }); } catch (err) { console.warn('[inbox] rate con flow:', err.message); }
+      fullBodies.delete(e.id);
+    }
     // rate cons from our staff → next loads for the trucks (a batch from the GM, or single ones)
     if (staff && nextLoads && ((e.batchRateCons || []).length || (e.rateCons || []).length)) {
       try {
@@ -772,7 +783,7 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
         }
       }
     }
-    if (e.quiet) return;
+    if (e.quiet || e.rateConFlow) return;
     // a reply in a chain where Jarvis asked something (which load? what time? not departed yet) → finish it
     const before = e.conversationId ? (((await db.get(key(site), { list: [] })) || {}).list || []).filter((x) => x.id !== e.id && x.conversationId === e.conversationId && !x.followedUp && ((x.instructionResults || []).some((r) => r.skipped) || (x.asks || []).some((a) => a.open))) : [];
     if (staff && before.length && !e.packet) {
