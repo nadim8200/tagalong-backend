@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { matchEmail, htmlToText, newPart, loadFacts, initInbox, pictureSize, quotedPictures, skipPicture, keepEmails, asksForEtaUpdates } from '../inbox.js';
+import { matchEmail, htmlToText, newPart, loadFacts, initInbox, pictureSize, quotedPictures, skipPicture, keepEmails, asksForEtaUpdates, waitingOnAnswer, withoutFooter } from '../inbox.js';
 
 const items = [
   { trip: { tripNumber: '900134', powerUnit: '2403', trailer: '5310', status: 'DISP', origZoneDesc: 'Miami, FL', destZoneDesc: 'Jessup, MD' }, freightBills: [{ billNumber: '624134', endZoneDescription: 'Jessup, MD', actualDelivery: null }], _ratecon: { data: { loadNumber: 'LD-778812', referenceNumbers: ['PO 55123'] } }, _samsara: { location: 'Florence, SC', gpsAt: '2026-10-05T12:00:00Z', speedMph: 61 } },
@@ -440,4 +440,18 @@ test('filed group emails never push real conversations out of the list', () => {
 test('ETA updates only start when someone asks for them', () => {
   for (const t of ['ETA every 3 hours on Native', 'Send me the ETA for 626167', 'Please keep me updated on 625967', 'Keep us posted on this load', 'Status every 2 hours until delivered', 'Mándame el ETA de Native', 'ETA cada 3 horas']) assert.equal(asksForEtaUpdates(t), true, t);
   for (const t of ['Also I see the truck is very late to Native Doraville', 'About Native Doraville\nCustomer was advised about the delay yesterday', 'Thank you for the update.', 'Please follow up', 'We will keep you posted', 'What is the ETA on 626167?']) assert.equal(asksForEtaUpdates(t), false, t);
+});
+
+test('only a real question holds Jarvis in a chain', () => {
+  assert.equal(waitingOnAnswer({ asks: [{ open: true }] }), true);
+  assert.equal(waitingOnAnswer({ instructionResults: [{ skipped: 'needs a trip number — reply with the load number and I will do it' }] }), true);
+  assert.equal(waitingOnAnswer({ instructionResults: [{ skipped: 'which truck is the rescue truck?' }] }), true);
+  assert.equal(waitingOnAnswer({ instructionResults: [{ skipped: 'needs the exact time' }], followedUp: 'x' }), false, 'answered');
+  assert.equal(waitingOnAnswer({ instructionResults: [{ kind: 'email_group', skipped: 'no email group "Tracking Team" — add it in Employees → Email groups' }] }), false, 'the ATG chain');
+  assert.equal(waitingOnAnswer({ instructionResults: [{ sent: 'done' }], replies: [{}] }), false);
+});
+
+test('the broker footer never reaches the AI', () => {
+  assert.equal(withoutFooter('Fixed and ready to roll\n***PLEASE REPLY-ALL FOR UPDATES***\nPLEASE ADD YOUR TRACKING TEAM TO THIS EMAIL CHAIN FOR UPDATES\nPLEASE ONLY USE THIS EMAIL CHAIN FOR UPDATES!!\nRegards'), 'Fixed and ready to roll\nRegards');
+  assert.equal(withoutFooter('Truck is rolling'), 'Truck is rolling');
 });

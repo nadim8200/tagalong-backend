@@ -10,6 +10,10 @@ test('one instruction about five loads becomes one per load', () => {
   assert.ok(out.every((x) => x.split && x.message === 'Follow up on five loads'));
 });
 
+test('the broker footer is never an instruction', () => {
+  assert.deepEqual(parseInstructions([{ kind: 'email_group', group: 'Tracking Team', message: 'Add Tracking Team to ATG load email chain' }, { kind: 'note', message: 'Load rolling' }]).map((i) => i.kind), ['note']);
+});
+
 test('single-load and eta_updates instructions are left alone', () => {
   const ins = parseInstructions([{ kind: 'note', trip: '624620', message: 'x' }, { kind: 'eta_updates', trips: ['624620', '624626'], everyHours: 2 }]);
   const out = expandInstructions(ins);
