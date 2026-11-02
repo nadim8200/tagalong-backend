@@ -93,6 +93,7 @@ import { initTransferWatch, transferEmail, transferStatus } from './transferwatc
 import { initTransferDone, answerConfirms } from './transferdone.js';
 import { initStopCheck } from './stopcheck.js';
 import { initStopReview } from './stopreview.js';
+import { initStaffActions } from './staffactions.js';
 import { readableFile } from './heic.js';
 import { renderFixedRollingEmail, renderTransferCompletedEmail, renderTransferReversedEmail, renderFixedReportedEmail, renderLoginEmail, handoffFacts, snapshotLoad, crewOf, renderStopReviewEmail } from './handoffmail.js';
 import { initTruckBuilder } from './truckbuilder.js';
@@ -975,27 +976,30 @@ const help = { raise: (r) => (helpdesk ? helpdesk.raise(r) : Promise.resolve(nul
 const driverLinks = initDriverLinks(app, { training, help, requireAuth: requireDispatch, db, carriers, ringcentral: rc, docs, push, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // driver calls / texts on a load, and their replies (RingCentral)
 // an employee texting Jarvis (phone on the Employees list) → the same answers as Ask Jarvis, as a short text
-const staffAsk = async ({ phone, text }) => {
+// a picture in a text, saved on the load (or waiting for one)
+const saveTextPhotos = async (r, trip) => {
+  const saved = [];
+  for (const m of r.media) { // eslint-disable-line no-await-in-loop
+    try {
+      const f = await readableFile({ dataBase64: (await rc.mediaBytes('__shared', m.uri)).toString('base64'), mediaType: m.contentType, filename: m.name }); // eslint-disable-line no-await-in-loop
+      const [d] = await docs.storeDocs({ site: 'florida-beauty', kind: 'email', trip, files: [{ filename: f.filename || 'text-photo.jpg', mediaType: f.mediaType, dataBase64: f.dataBase64 }], by: 'Driver text' }); // eslint-disable-line no-await-in-loop
+      if (d) saved.push({ docId: String(d.id), name: String(f.filename || 'text-photo.jpg').slice(0, 80) });
+    } catch (e) { console.warn('[comms] text photo:', e.message); }
+  }
+  return saved;
+};
+const staffAsk = async ({ phone, text, media = [] }) => {
   const d = (s2) => String(s2 || '').replace(/\D+/g, '').slice(-10);
   const me = ((await directory.load().catch(() => ({ people: [] }))).people || []).find((p) => p && p.phone && d(p.phone) === d(phone));
-  if (!me || !jarvisChat || !String(text || '').trim()) return null;
-  const r = await jarvisChat.turn({ mode: 'staff_email', user: { id: `sms:${d(phone)}`, name: me.name, email: me.email || null }, threadId: `sms-${d(phone)}`,
-    text: `[Text message from ${me.name}, Florida Beauty staff. Answer as a short text message: plain words, 1–3 sentences, no links or tables.]\n\n${String(text).slice(0, 1000)}` });
+  if (!me || !jarvisChat || (!String(text || '').trim() && !media.length)) return null;
+  const uploads = media.length ? await saveTextPhotos({ media }, null) : [];
+  const r = await jarvisChat.turn({ mode: 'staff_email', sms: true, uploads, user: { id: `sms:${d(phone)}`, name: me.name, email: me.email || null }, threadId: `sms-${d(phone)}`,
+    text: `[Text message from ${me.name}, Florida Beauty staff. Answer as a short text message: plain words, 1–3 sentences, no links or tables.${uploads.length ? ` ${uploads.length} photo${uploads.length === 1 ? '' : 's'} came with this text.` : ''}]\n\n${String(text).slice(0, 1000)}` });
   return r && r.answer ? r.answer : null;
 };
 let missingCases = null;   // set below, once the alert lists exist
 let roadCalls = null;      // set below too
-const comms = initComms(app, { textPhotos: async (r, trip) => {
-    const saved = [];
-    for (const m of r.media) { // eslint-disable-line no-await-in-loop
-      try {
-        const f = await readableFile({ dataBase64: (await rc.mediaBytes('__shared', m.uri)).toString('base64'), mediaType: m.contentType, filename: m.name }); // eslint-disable-line no-await-in-loop
-        const [d] = await docs.storeDocs({ site: 'florida-beauty', kind: 'email', trip, files: [{ filename: f.filename || 'text-photo.jpg', mediaType: f.mediaType, dataBase64: f.dataBase64 }], by: 'Driver text' }); // eslint-disable-line no-await-in-loop
-        if (d) saved.push({ docId: String(d.id), name: String(f.filename || 'text-photo.jpg').slice(0, 80) });
-      } catch (e) { console.warn('[comms] text photo:', e.message); }
-    }
-    return saved;
-  }, onTextPhotos: (trip, photos, by) => breakdownReport.addPhotos({ trip, photos, by }), staffAsk: (...a) => staffAsk(...a), missingCases: { fromText: (...a) => (missingCases ? missingCases.fromText(...a) : null) }, roadCalls: { fromDriverText: (...a) => (roadCalls ? roadCalls.fromDriverText(...a) : null) }, help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const comms = initComms(app, { textPhotos: saveTextPhotos, onTextPhotos: (trip, photos, by) => breakdownReport.addPhotos({ trip, photos, by }), staffAsk: (...a) => staffAsk(...a), missingCases: { fromText: (...a) => (missingCases ? missingCases.fromText(...a) : null) }, roadCalls: { fromDriverText: (...a) => (roadCalls ? roadCalls.fromDriverText(...a) : null) }, help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
 helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, pushRules, directory, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) },
@@ -1022,6 +1026,7 @@ const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmi
 const stopTasks = initStopTasks({ db, env: process.env, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice: { placeCall: (...a) => voice.placeCall(...a), callsFor: (...a) => voice.callsFor(...a) }, replyInThread: (...a) => inbox.replyInThread(...a) });
 const followProxy = { start: (...a) => brokerFollow.start(...a), overlay: (...a) => brokerFollow.overlay(...a), process: (...a) => brokerFollow.process(...a) };
 const dispatchLog = initDispatchLog(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, env: process.env });
+let staffActions = null;     // set once the breakdown and stop records exist
 const inbox = initInbox(app, { breakdownPhotos: (...a) => breakdownReport.addPhotos(...a), stopReview: { decide: (...a) => stopReview.decide(...a) }, transferDone: { confirm: (...a) => transferDone.confirm(...a), cancel: (...a) => transferDone.cancel(...a) }, breakdownFixed: (...a) => breakdownReport.fixed('' + a[0], a[1], a[2]), rescuePlan: (...a) => breakdownReport.rescuePlan(...a), breakdownEmail: (...a) => breakdownReport.fromEmail(...a), brokerFollow: followProxy, dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
@@ -1109,7 +1114,7 @@ manifestsApi = initManifests(app, { requireAuth: requireDispatch, db, env: proce
 // stopped/breakdown, tracking, engine) and pushes Priority 1 alerts to the
 // fleet managers' TagAlong app.
 const miles = initMiles({ db, env: process.env });
-const voice = initVoice(app, { brokerFollow: followProxy, dispatchLog, miles, artis, artisWeb, docs, stopTimes: etaReport, pastLoads, missingBoxes, missingCases, roadCalls, clients, training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const voice = initVoice(app, { staffActions: (what, input) => staffActions[what](input), brokerFollow: followProxy, dispatchLog, miles, artis, artisWeb, docs, stopTimes: etaReport, pastLoads, missingBoxes, missingCases, roadCalls, clients, training, directory, help, profiles, activity, mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) }, requireAuth: requireDispatch, db, comms, carriers, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 const outbound = initOutbound(app, { requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // a truck's whole trip on the Fleet map: GPS trail, 15+ min stops (what happened), texts + Jarvis calls along the way
 initJourney(app, { requireAuth: requireDispatch, db, activity, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
@@ -1126,7 +1131,7 @@ voice.useOutreach((ev) => outreach.notify(ev));
 const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
 const flowerReport = initFlowerReport(app, { photos: () => (tempPhotos ? tempPhotos.latestPhotos() : []), requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport, stopTimes: etaReport });
-jarvisChat = initJarvisChat(app, { brokerFollow: followProxy, dispatchLog, miles, artis, artisWeb, artisReports, synergize, stopTimes: etaReport, pastLoads, clients, geofences: artisClients, planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
+jarvisChat = initJarvisChat(app, { staffActions: (what, input) => staffActions[what](input), brokerFollow: followProxy, dispatchLog, miles, artis, artisWeb, artisReports, synergize, stopTimes: etaReport, pastLoads, clients, geofences: artisClients, planSheet, nextLoads, playbook, directory, requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site), docs, voice, driver: driverHooks, help,
   packets: (site, files, opts) => (manifestsApi ? manifestsApi.readPacketFromEmail(site, files, opts) : null),
   reports: { flowers: () => flowerReport.make(), outbound: (d) => outbound.make(d) },
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) } });
@@ -1380,6 +1385,7 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
     const driverCheck = await stopCheck.forStop(a, item).catch((e) => { console.warn('[stop-check]', e.message); return null; });
     await sendStopEmail(a, { item, etas, driverCheck });
   }, afterBoard: async (site, board, ctx) => { await timedStep('transferDone.observe', () => transferDone.observe(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('breakdownReport.process', () => breakdownReport.process(site, board)).catch((e) => console.warn('[breakdown-report]', e.message)); await timedStep('followProxy.process', () => followProxy.process(site, board)).catch((e) => console.warn('[broker-follow]', e.message)); await timedStep('transferWatch.process', () => transferWatch.process(site, board, ctx)).catch((e) => console.warn('[transfer]', e.message)); await timedStep('transferDone.process', () => transferDone.process(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('stopCheck.process', () => stopCheck.process(board)).catch((e) => console.warn('[stop-check]', e.message)); await timedStep('stopTasks.process', () => stopTasks.process(site, board)).catch((e) => console.warn('[stop-tasks]', e.message)); await timedStep('commitments.process', () => commitments.process(site, board)).catch((e) => console.warn('[commit]', e.message)); await timedStep('etaReport.process', () => etaReport.process(site, board)).catch((e) => console.warn('[eta-log]', e.message)); await timedStep('stopVisits.process', () => stopVisits.process(site, board)); await timedStep('milestones.process', () => milestones.process(site, board, ctx)); await timedStep('statusMail.process', () => statusMail.process(site, board, ctx)); await timedStep('etaWatch.run', () => etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now })); await timedStep('follow.run', () => follow.run(site, board.trips || [])); } });
+staffActions = initStaffActions({ breakdown: breakdownReport, stopReview, docs, getBoard: (site) => truckmate.buildBoard(site) });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and

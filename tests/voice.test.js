@@ -105,7 +105,7 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   const llm = v.retellCalls.find((c) => c.url.endsWith('/create-retell-llm')).body;
   assert.equal(llm.model, undefined, 'no retired top-level model field'); assert.equal(llm.model_temperature, undefined);
   assert.equal(llm.model_config.type, 'cascading'); assert.match(llm.model_config.primary.model, /^claude/); assert.equal(llm.model_config.temperature, 0.2);
-  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'dispatch_log', 'follow_up_load', 'report_missing_boxes', 'take_message', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
+  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'dispatch_log', 'report_breakdown', 'breakdown_update', 'breakdown_fixed', 'answer_stop', 'follow_up_load', 'report_missing_boxes', 'take_message', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
   assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
   assert.deepEqual(agent.language, ['en-US', 'es-419', 'he-IL']);

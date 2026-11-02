@@ -254,7 +254,7 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
       // an employee (phone on the Employees list) texting Jarvis a question → Jarvis texts the answer back
       if (!kw && staffAsk) {
         try {
-          const ans = await staffAsk({ phone: r.from, text: r.text }); // eslint-disable-line no-await-in-loop
+          const ans = await staffAsk({ phone: r.from, text: r.text, media: r.media || [] }); // eslint-disable-line no-await-in-loop
           if (ans) {
             const reply = String(ans).slice(0, 1200);
             await ringcentral.sendSms('__shared', { to: r.from, text: reply }); // eslint-disable-line no-await-in-loop
