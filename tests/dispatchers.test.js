@@ -100,3 +100,45 @@ test('passwords: admin resets with a temporary password or an email link; nobody
   const fresh = (await call('POST /auth/dispatcher/login', { body: { email: 'leo@floridabeauty.us', password: 'Orchid2026x' } })).body;
   assert.equal(fresh.mustChange, false);
 });
+
+test('an employee manager adds and erases employees and gives plain logins, and nothing an admin keeps', async () => {
+  const { dispatcherMayUse } = await import('../dispatchers.js');
+  const staff = { role: 'dispatcher', staffAdmin: true };
+  for (const [m, p] of [['GET', '/admin/dispatchers'], ['POST', '/admin/dispatchers'], ['POST', '/admin/directory/people'], ['PUT', '/admin/directory/people/s1'], ['POST', '/admin/directory/people/s1/erase']]) assert.equal(dispatcherMayUse(m, p, staff), null, `${m} ${p}`);
+  for (const [m, p] of [['PUT', '/admin/dispatchers/D1'], ['DELETE', '/admin/dispatchers/D1'], ['POST', '/admin/dispatchers/D1/reset'], ['PUT', '/admin/directory'], ['PUT', '/admin/directory/departments'], ['GET', '/admin/audit'], ['PUT', '/admin/training']]) assert.equal(dispatcherMayUse(m, p, staff), 'outside', `${m} ${p}`);
+  assert.equal(dispatcherMayUse('POST', '/admin/directory/people', { role: 'dispatcher' }), 'outside', 'a plain dispatcher cannot');
+  assert.equal(dispatcherMayUse('PUT', '/truckmate/profiles/5', staff), 'settings', 'no settings either');
+
+  const { api, call, sent } = harness({ mail: true });
+  const admin = tok({ id: 1, role: 'admin', admin: true, name: 'Nadim' });
+  const made = await call('POST /admin/dispatchers', { token: admin, body: { name: 'Val', email: 'val@floridabeauty.us', password: 'secret123' } });
+  const boss = await call('POST /admin/dispatchers', { token: admin, body: { name: 'Boss', email: 'boss@floridabeauty.us', password: 'secret123', companyAdmin: true } });
+  const val = { id: made.body.id, role: 'dispatcher', name: 'Val', email: 'val@floridabeauty.us', company: made.body.company, staffAdmin: true };
+  assert.equal((await call('GET /admin/dispatchers', { token: tok(val) })).status, 403, 'not until an admin turns it on');
+  await call(`PUT /admin/dispatchers/:id`, { token: admin, params: { id: made.body.id }, body: { staffAdmin: true } });
+  assert.equal((await call('GET /admin/dispatchers', { token: tok(val) })).status, 403, 'not until they set their own password');
+  await call('POST /auth/dispatcher/password', { token: tok(val), body: { current: 'secret123', next: 'NewPass12345' } });
+  const seen = await call('GET /admin/dispatchers', { token: tok(val) });
+  assert.equal(seen.status, 200); assert.equal(seen.body[0].logins, undefined, 'no sign-in history'); assert.equal(seen.body[0].passwordLog, undefined);
+  // a login: always plain, however it is asked for, and the welcome email goes out
+  const hire = await call('POST /admin/dispatchers', { token: tok(val), body: { name: 'New', email: 'new@floridabeauty.us', temp: true, sendEmail: true, companyAdmin: true, staffAdmin: true, password: 'x' } });
+  assert.equal(hire.status, 200); assert.ok(hire.body.tempPassword); assert.equal(hire.body.companyAdmin, undefined); assert.equal(hire.body.staffAdmin, undefined);
+  assert.equal(hire.body.emailed, true); assert.deepEqual(sent.at(-1).to, ['new@floridabeauty.us']);
+  assert.equal((await call('POST /admin/dispatchers', { token: tok(val), body: { name: 'Out', email: 'friend@gmail.com' } })).status, 403, 'company email only');
+  assert.equal((await call('POST /admin/dispatchers', { token: tok(val), body: { name: 'N', email: 'ntellez@floridabeauty.us' } })).status, 403);
+  // what an admin keeps: the routes behind these stay admin only
+  for (const k of ['PUT /admin/dispatchers/:id', 'DELETE /admin/dispatchers/:id', 'POST /admin/dispatchers/:id/reset']) assert.equal((await call(k, { token: tok(val), params: { id: boss.body.id }, body: { companyAdmin: true } })).status, 403, k);
+  // taken away → gone on the next request, whatever the token says
+  await call(`PUT /admin/dispatchers/:id`, { token: admin, params: { id: made.body.id }, body: { staffAdmin: false } });
+  assert.equal((await call('GET /admin/dispatchers', { token: tok(val) })).status, 403);
+  // erasing: never yourself, never an admin as a manager, and the login goes too
+  const req = { user: { email: 'val@floridabeauty.us' }, staffOnly: true };
+  assert.match(await api.logins.eraseProblem({ email: 'VAL@floridabeauty.us' }, req), /yourself/);
+  assert.match(await api.logins.eraseProblem({ email: 'boss@floridabeauty.us' }, req), /admin/);
+  assert.match(await api.logins.eraseProblem({ email: 'ntellez@floridabeauty.us' }, req), /admin/);
+  assert.equal(await api.logins.eraseProblem({ email: 'new@floridabeauty.us' }, req), null);
+  assert.equal(await api.logins.eraseProblem({ email: 'boss@floridabeauty.us' }, { user: { admin: true, email: 'x@y.z' } }), null, 'an admin can');
+  assert.equal(await api.logins.removeFor({ email: 'new@floridabeauty.us' }, { user: { admin: true } }), true);
+  assert.equal(await api.logins.removeFor({ email: 'new@floridabeauty.us' }, { user: { admin: true } }), false);
+  assert.equal((await call('POST /auth/dispatcher/login', { body: { email: 'new@floridabeauty.us', password: hire.body.tempPassword } })).status, 401, 'an erased employee cannot sign in');
+});

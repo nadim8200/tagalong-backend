@@ -116,3 +116,43 @@ test('directory: an employee\'s Recents — Jarvis + desk calls, missed, and who
   assert.equal(calls[3].status, 'Not answered'); assert.equal(calls[3].sentBy, 'Nadim Tellez'); assert.equal(calls[3].message, 'Call me about 2604');
   assert.equal(calls[4].missed, true); assert.equal(calls[4].status, 'held (training mode)');
 });
+
+test('employees one at a time: add, edit, erase; a manager only adds, erases and fills in a missing email', async () => {
+  const gets = {}; const puts = {}; const posts = {};
+  const removed = []; const db = memDb();
+  db.update = async (k, fn, fb) => { const v = fn(await db.get(k, fb)); await db.set(k, v); return v; };
+  initDirectory({ get: (p, ...h) => { gets[p] = h.at(-1); }, put: (p, ...h) => { puts[p] = h.at(-1); }, post: (p, ...h) => { posts[p] = h.at(-1); } }, { requireAuth: () => {}, requireAdmin: () => {}, db, logins: { eraseProblem: async (p) => (p.name === 'Frank Ducassi' ? 'Only an admin can erase an admin.' : null), removeFor: async (p) => { removed.push(p.name); return true; } } });
+  let out; let code = 200; const res = { json: (j) => { out = j; }, status(c) { code = c; return res; } };
+  const go = async (fn, req) => { code = 200; await fn(req, res); return out; };
+  const list = async () => (await go(gets['/truckmate/directory'], { user: { admin: true } })).people;
+  const was = (await list()).length;
+  assert.equal(out.can.manage, true);
+  assert.equal((await go(gets['/truckmate/directory'], { user: { role: 'dispatcher' } })).can.manage, false);
+  assert.equal((await go(gets['/truckmate/directory'], { user: { role: 'dispatcher', staffAdmin: true } })).can.manage, true);
+  const add = posts['/admin/directory/people']; const edit = puts['/admin/directory/people/:id']; const erase = posts['/admin/directory/people/:id/erase'];
+  await go(add, { body: { name: 'Liz Test', department: 'Dispatch', email: 'Liz@FloridaBeauty.us', phone: '(305) 555-0100' } });
+  assert.equal(out.person.email, 'liz@floridabeauty.us'); assert.equal(out.person.phone, '3055550100');
+  const id = out.person.id;
+  assert.equal((await list()).length, was + 1); assert.equal(out.people[0].name, 'Liz Test');
+  await go(add, { body: { name: 'Twin', email: 'liz@floridabeauty.us' } }); assert.equal(code, 409);
+  await go(add, { body: { name: '  ' } }); assert.equal(code, 400);
+  await go(edit, { params: { id }, body: { note: 'Night shift' } });
+  assert.equal(out.person.note, 'Night shift'); assert.equal(out.person.phone, '3055550100', 'the rest stays');
+  // an employee manager can't edit: only fill in a missing email
+  await go(add, { body: { name: 'No Mail', department: 'Sales' } }); const blank = out.person.id;
+  const staff = { user: { role: 'dispatcher' }, staffOnly: true };
+  await go(edit, { ...staff, params: { id }, body: { email: 'other@floridabeauty.us' } }); assert.equal(code, 403);
+  await go(edit, { ...staff, params: { id: blank }, body: { email: 'x@floridabeauty.us', name: 'Changed' } }); assert.equal(code, 403);
+  await go(edit, { ...staff, params: { id: blank }, body: { email: 'nomail@floridabeauty.us' } }); assert.equal(code, 200); assert.equal(out.person.name, 'No Mail');
+  // erase
+  const frank = (await list()).find((p) => p.name === 'Frank Ducassi');
+  await go(erase, { ...staff, params: { id: frank.id } }); assert.equal(code, 403); assert.deepEqual(removed, [], 'refused: the login stays too');
+  assert.ok((await list()).some((p) => p.name === 'Frank Ducassi'));
+  const req = { user: { name: 'Val' }, params: { id }, body: {} };
+  await go(erase, req); assert.equal(code, 200); assert.equal(out.loginRemoved, true); assert.deepEqual(removed, ['Liz Test']);
+  assert.deepEqual(req.body, { employee: 'Liz Test', loginRemoved: true }, 'the activity log names them');
+  assert.ok(!(await list()).some((p) => p.id === id));
+  assert.deepEqual(findStaff(await list(), 'Liz Test'), [], 'Jarvis no longer knows them');
+  await go(erase, { user: {}, params: { id } }); assert.equal(code, 404);
+  assert.equal((await db.get('taStaffErased', []))[0].by, 'Val');
+});

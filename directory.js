@@ -143,7 +143,12 @@ export function employeeCalls({ jarvis = [], desk = [], staff = [] } = {}) {
   return out.sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 150);
 }
 
-export function initDirectory(app, { requireAuth, requireAdmin, db, contact = null }) {
+const EMAIL_OK = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// One employee as stored. Pure.
+const cleanPerson = (p, i = 0) => ({ id: p.id || `s${Date.now().toString(36)}${i}`, name: String(p.name).slice(0, 80), department: String(p.department || 'Other').slice(0, 60), departmentExt: p.departmentExt ? String(p.departmentExt).slice(0, 30) : null, ext: p.ext ? String(p.ext).replace(/[^\d/ ]/g, '').slice(0, 12) || null : null, phone: last10(p.phone), note: p.note ? String(p.note).slice(0, 60) : null, email: EMAIL_OK.test(String(p.email || '')) ? String(p.email).toLowerCase() : null, channels: { text: !p.channels || p.channels.text !== false, email: !p.channels || p.channels.email !== false, call: !!(p.channels && p.channels.call) }, active: p.active !== false, ...(p.team ? { team: true } : {}) });
+const sameEmail = (a, b) => !!a && !!b && String(a).toLowerCase() === String(b).toLowerCase();
+
+export function initDirectory(app, { requireAuth, requireAdmin, requireManager = requireAdmin, logins = null, db, contact = null }) {
   const enabled = !!(db && db.enabled);
   let cache = { at: 0, d: null };
   async function load() {
@@ -165,16 +170,58 @@ export function initDirectory(app, { requireAuth, requireAdmin, db, contact = nu
     if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });
     const d = await load();
     // dispatchers see what Jarvis may share; admins also see the system-only cell / email
-    res.json({ main: d.main, unclear: isAdmin(req.user) ? UNCLEAR : [], groups: d.groups || [], departments: d.departments || [], people: d.people });
+    res.json({ main: d.main, unclear: isAdmin(req.user) ? UNCLEAR : [], groups: d.groups || [], departments: d.departments || [], people: d.people, can: { manage: isAdmin(req.user) || !!req.user.staffAdmin } });
   });
   app.put('/admin/directory', requireAdmin, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const b = req.body || {};
-    const people = (Array.isArray(b.people) ? b.people : []).filter((p) => p && p.name).slice(0, 400).map((p, i) => ({ id: p.id || `s${Date.now().toString(36)}${i}`, name: String(p.name).slice(0, 80), department: String(p.department || 'Other').slice(0, 60), departmentExt: p.departmentExt ? String(p.departmentExt).slice(0, 30) : null, ext: p.ext ? String(p.ext).replace(/[^\d/ ]/g, '').slice(0, 12) || null : null, phone: last10(p.phone), note: p.note ? String(p.note).slice(0, 60) : null, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(p.email || '')) ? String(p.email).toLowerCase() : null, channels: { text: !p.channels || p.channels.text !== false, email: !p.channels || p.channels.email !== false, call: !!(p.channels && p.channels.call) }, active: p.active !== false, ...(p.team ? { team: true } : {}) }));
+    const people = (Array.isArray(b.people) ? b.people : []).filter((p) => p && p.name).slice(0, 400).map(cleanPerson);
     const cur = await load();
     const d = { main: String(b.main || MAIN_NUMBER).slice(0, 20), people, groups: Array.isArray(b.groups) ? cleanGroups(b.groups) : (cur.groups || SEED_GROUPS), departments: Array.isArray(b.departments) ? cleanDepartments(b.departments) : (cur.departments || []), updatedAt: new Date().toISOString() };
     await db.set(KEY, d); cache = { at: Date.now(), d };
     res.json({ ok: true, count: people.length });
+  });
+
+  // One employee at a time, so two people with the page open can't undo each other's add or erase.
+  const savePeople = async (cur, people) => { const d = { ...cur, people, updatedAt: new Date().toISOString() }; await db.set(KEY, d); cache = { at: Date.now(), d }; };
+  app.post('/admin/directory/people', requireManager, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const b = req.body || {};
+    if (!String(b.name || '').trim()) return res.status(400).json({ error: 'Add their name.' });
+    const cur = await load();
+    if ((cur.people || []).some((p) => sameEmail(p.email, b.email))) return res.status(409).json({ error: 'An employee with that email is already on the list.' });
+    const line = ((cur.departments || []).find((x) => x.name === b.department) || {}).line || ((cur.people || []).find((p) => p.department === b.department && p.departmentExt) || {}).departmentExt || null;
+    const person = cleanPerson({ ...b, id: `n${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name: String(b.name).trim(), departmentExt: line });
+    await savePeople(cur, [person, ...(cur.people || [])]);
+    res.json({ ok: true, person });
+  });
+  app.put('/admin/directory/people/:id', requireManager, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const b = req.body || {};
+    const cur = await load();
+    const p = (cur.people || []).find((x) => x.id === req.params.id);
+    if (!p) return res.status(404).json({ error: 'Not on the list.' });
+    if (req.staffOnly && (p.email || Object.keys(b).some((k) => k !== 'email'))) return res.status(403).json({ error: 'Only an admin can edit an employee.' });   // they can fill in a missing email, for a login
+    if (!String(b.name != null ? b.name : p.name).trim()) return res.status(400).json({ error: 'Add their name.' });
+    const person = cleanPerson({ ...p, ...b, id: p.id });
+    await savePeople(cur, cur.people.map((x) => (x.id === p.id ? person : x)));
+    res.json({ ok: true, person });
+  });
+  // Gone from the list and from Jarvis, for good, with their login. What was said to them stays in the history, and who erased them is kept.
+  app.post('/admin/directory/people/:id/erase', requireManager, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const cur = await load();
+    const p = (cur.people || []).find((x) => x.id === req.params.id);
+    if (!p) return res.status(404).json({ error: 'Not on the list.' });
+    const problem = logins ? await logins.eraseProblem(p, req) : null;
+    if (problem) return res.status(403).json({ error: problem });
+    const loginRemoved = logins ? await logins.removeFor(p, req) : false;
+    const fresh = await load();
+    await savePeople(fresh, (fresh.people || []).filter((x) => x.id !== p.id));
+    const by = (req.user && (req.user.name || req.user.email)) || 'admin';
+    await db.update('taStaffErased', (list) => [{ at: new Date().toISOString(), by, name: p.name, department: p.department, ext: p.ext || null, email: p.email || null, loginRemoved }, ...(Array.isArray(list) ? list : [])].slice(0, 500), []);
+    req.body = { employee: p.name, loginRemoved };   // the activity log reads this, so the row says who was erased
+    res.json({ ok: true, name: p.name, loginRemoved });
   });
 
   // admins: the department list (add one before anyone is in it, set its phone line). A department's line is

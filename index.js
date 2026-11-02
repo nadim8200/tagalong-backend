@@ -935,7 +935,7 @@ const rc = initRingCentral(app, { requireAuth: (req, res, next) => requireDispat
 // Original uploaded documents (rate cons, trip sheets) kept privately in Postgres.
 // Dispatch side (console, Jarvis, loads, emails, calls): admins and active dispatcher accounts only —
 // a TagAlong customer login can't reach it.
-const { requireDispatch, requireAdmin, requireCompanyAdmin, createLogin, signIn: dispatcherSignIn } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true, noCopy: true }), mayReach: async (to) => /@floridabeauty\.us$/i.test(to) || !(await training.active()) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
+const { requireDispatch, requireAdmin, requireCompanyAdmin, requireStaffManager, logins: staffLogins, createLogin, signIn: dispatcherSignIn } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true, noCopy: true }), mayReach: async (to) => /@floridabeauty\.us$/i.test(to) || !(await training.active()) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
 initCompanies(app, { db, requireAdmin, createLogin });
 // one sign-in for every kind of account → lands on that person's service (signin.js)
 initSignin(app, {
@@ -950,7 +950,7 @@ initSignin(app, {
 // who gets which push notifications — one admin screen for all of them
 const pushRules = initPushRules(app, { requireAdmin: requireCompanyAdmin, db, push, listDispatchers: async () => (((await db.get('taDispatchers', { list: [] })) || {}).list || []).map(({ pass, reset, ...d }) => d) });
 // company directory: staff names + extensions (shareable); cells / emails are system-only
-const directory = initDirectory(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, contact: {
+const directory = initDirectory(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, requireManager: requireStaffManager, logins: staffLogins, db, contact: {
   textingLive: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } },
   text: (to, text) => rc.sendSms('__shared', { to, text }),
   email: (to, subject, text) => sendMail({ to: [to], subject, html: `<div style="font-family:Arial,sans-serif;font-size:15px">${String(text).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>`, text }, { env: process.env }),

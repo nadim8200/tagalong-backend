@@ -29,6 +29,8 @@ const LABELS = [
   [/^PUT \/admin\/dispatchers/, 'Changed a login'],
   [/^DELETE \/admin\/dispatchers/, 'Removed a login'],
   [/^PUT \/admin\/training/, 'Changed training mode'],
+  [/^POST \/admin\/directory\/people\/[^/]+\/erase/, 'Erased an employee'],
+  [/^POST \/admin\/directory\/people/, 'Added an employee'],
   [/^PUT \/admin\/directory/, 'Changed the employee list'],
   [/^PUT \/truckmate\/alert-recipients/, 'Changed who gets alert emails'],
   [/^POST \/watchtower\/resolve/, 'Resolved an alert'],

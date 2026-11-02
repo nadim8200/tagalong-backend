@@ -49,11 +49,15 @@ const ADMIN_ONLY = [
 // A company admin (Florida Beauty: Nadim, Ronen) also changes their company's settings and manages their
 // company's logins (/admin/dispatchers — only their own company's, see below).
 const COMPANY_ADMIN = /^\/admin\/(dispatchers|directory|push-rules|training|audit)(\/|$)/;
+// An employee manager (staffAdmin) adds and erases employees and gives them a plain login. Nothing else under /admin.
+const STAFF_MANAGER = /^\/admin\/(dispatchers|directory\/people(\/[^/]+(\/erase)?)?)\/?$/;
+const OWNERS = new Set(['ntellez@floridabeauty.us']);   // the platform admin signs in another way, so no login here says what they are
 export function dispatcherMayUse(method, path, user = null) {
   // Express matches routes regardless of case — check the lower-cased path so /Truckmate/Profiles can't slip past
   const p = String(path || '').split('?')[0].toLowerCase();
   const cAdmin = !!(user && user.companyAdmin);
   if (cAdmin && COMPANY_ADMIN.test(p)) return null;
+  if (user && user.staffAdmin && STAFF_MANAGER.test(p)) return null;
   if (!CONSOLE.test(p)) return 'outside';
   if (!cAdmin && String(method).toUpperCase() !== 'GET' && String(method).toUpperCase() !== 'HEAD' && ADMIN_ONLY.some((re) => re.test(p))) return 'settings';
   return null;
@@ -86,6 +90,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
           // admin rights follow the account, not the token: taken away → gone on the next request
           if (d && d.active !== false) {
             req.user.companyAdmin = !!d.companyAdmin;
+            req.user.staffAdmin = !!(d.staffAdmin && req.user.staffAdmin);
             if (!d.companyAdmin && dispatcherMayUse(req.method, req.originalUrl || req.path, req.user) === 'settings') return res.status(403).json({ error: 'Only an admin can change settings. Ask an admin.' });
             return next();
           }
@@ -106,6 +111,17 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     }
     return res.status(403).json({ error: 'Admins only.' });
   });
+  // the Employees page for an employee manager too (req.staffOnly). Their rights are checked against the account, like an admin's
+  const requireStaffManager = (req, res, next) => requireAuth(req, res, async () => {
+    if (isAdmin(req.user)) return next();
+    if (req.user && req.user.role === 'dispatcher') {
+      const d = (await list()).find((x) => x.id === req.user.id);
+      const on = d && d.active !== false && !d.mustChange && !(d.pwAt && req.user.iat && req.user.iat * 1000 < d.pwAt - 2000);
+      if (on && d.companyAdmin && req.user.companyAdmin) return next();
+      if (on && d.staffAdmin && req.user.staffAdmin) { req.staffOnly = true; return next(); }
+    }
+    return res.status(403).json({ error: 'Admins only.' });
+  });
   // which company a logins-page request is about, and whether a record is in it
   const adminCompany = (req) => (isAdmin(req.user) ? null : String(req.user.company || DEFAULT_COMPANY));
   const inMine = (req) => (x) => { const c = adminCompany(req); return !c || String(x.company || DEFAULT_COMPANY) === c; };
@@ -116,7 +132,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     if (!d || !verifyPassword(pw, d.pass)) return null;
     if (d.active === false) return { error: 'This dispatcher account is turned off. Ask an admin.', status: 401 };
     if (d.mustChange && d.tempUntil && d.tempUntil < Date.now()) return { error: 'This temporary password expired. Ask an admin for a new one.', status: 401 };
-    const user = { id: d.id, email: d.email, name: d.name, role: 'dispatcher', company: d.company || DEFAULT_COMPANY, ...(d.companyAdmin ? { companyAdmin: true } : {}) };
+    const user = { id: d.id, email: d.email, name: d.name, role: 'dispatcher', company: d.company || DEFAULT_COMPANY, ...(d.companyAdmin ? { companyAdmin: true } : {}), ...(d.staffAdmin ? { staffAdmin: true } : {}) };
     const token = sign(user, '7d');
     const at = new Date().toISOString();
     const seen = { at, ip: req.ip || null, device: String(req.headers['user-agent'] || '').slice(0, 160) || null };
@@ -210,12 +226,16 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     if (mail.mayReach && !(await mail.mayReach(d.email))) return { emailed: false, emailError: 'Training mode is on, so nothing goes to an outside address. It was not emailed.' };
     try { await mail.send({ to: [d.email], ...renderLoginEmail({ name: d.name, email: d.email, tempPassword: temp, url: `${appUrl}/truckmate?admin`, by }) }); return { emailed: true }; } catch (e) { console.warn('[dispatchers] login email:', e.message); return { emailed: false, emailError: 'The email did not go out.' }; }
   }
-  app.get('/admin/dispatchers', requireUserAdmin, async (req, res) => {
-    try { res.json((await list(true)).filter(inMine(req)).map((d) => ({ ...view(d), company: d.company || DEFAULT_COMPANY }))); } catch (e) { res.status(500).json({ error: e.message }); }
+  // an employee manager only needs to know who has a login: no sign-in history, no IPs
+  const brief = ({ id, email, name, active, mustChange, companyAdmin, staffAdmin }) => ({ id, email, name, active, mustChange, companyAdmin, staffAdmin });
+  app.get('/admin/dispatchers', requireStaffManager, async (req, res) => {
+    try { res.json((await list(true)).filter(inMine(req)).map((d) => (req.staffOnly ? brief(d) : { ...view(d), company: d.company || DEFAULT_COMPANY }))); } catch (e) { res.status(500).json({ error: e.message }); }
   });
-  app.post('/admin/dispatchers', requireUserAdmin, async (req, res) => {
-    const b = req.body || {};
+  app.post('/admin/dispatchers', requireStaffManager, async (req, res) => {
+    // an employee manager gives a plain login with a temporary password, to someone at the company, and that's all
+    const b = req.staffOnly ? { name: (req.body || {}).name, email: (req.body || {}).email, temp: true, sendEmail: (req.body || {}).sendEmail } : (req.body || {});
     const e = norm(b.email); const name = String(b.name || '').trim().slice(0, 80);
+    if (req.staffOnly && (OWNERS.has(e) || e.split('@')[1] !== norm(req.user.email).split('@')[1])) return res.status(403).json({ error: 'Only an admin can create this login.' });
     // temp: true → we make a temporary password (shown once) — the Employees page "Give login" button
     const temp = !b.password && b.temp ? tempPassword() : null;
     const pw = String(temp || b.password || '');
@@ -238,7 +258,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
       let out = null;
       await save((l) => l.map((x) => {
         if (x.id !== req.params.id || !inMine(req)(x)) return x;
-        out = { ...x, ...(b.name ? { name: String(b.name).slice(0, 80) } : {}), ...(b.active != null ? { active: !!b.active } : {}), ...(b.companyAdmin != null ? { companyAdmin: !!b.companyAdmin } : {}), ...(b.company && isAdmin(req.user) ? { company: String(b.company) } : {}), ...(b.password ? { pass: hashPassword(String(b.password)), mustChange: true, reset: null, passwordChangedAt: new Date().toISOString(), passwordLog: [{ at: new Date().toISOString(), by: who(req), how: 'password set by admin' }, ...(x.passwordLog || [])].slice(0, 30) } : {}), updatedAt: new Date().toISOString(), updatedBy: who(req) };
+        out = { ...x, ...(b.name ? { name: String(b.name).slice(0, 80) } : {}), ...(b.active != null ? { active: !!b.active } : {}), ...(b.companyAdmin != null ? { companyAdmin: !!b.companyAdmin } : {}), ...(b.staffAdmin != null ? { staffAdmin: !!b.staffAdmin } : {}), ...(b.company && isAdmin(req.user) ? { company: String(b.company) } : {}), ...(b.password ? { pass: hashPassword(String(b.password)), mustChange: true, reset: null, passwordChangedAt: new Date().toISOString(), passwordLog: [{ at: new Date().toISOString(), by: who(req), how: 'password set by admin' }, ...(x.passwordLog || [])].slice(0, 30) } : {}), updatedAt: new Date().toISOString(), updatedBy: who(req) };
         return out;
       }));
       if (!out) return res.status(404).json({ error: 'Not found.' });
@@ -258,5 +278,21 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     await save((l) => [...l, d]);
     return { record: view(d), tempPassword: temp };
   }
-  return { requireDispatch, requireAdmin, requireCompanyAdmin: requireUserAdmin, createLogin, signIn: (e, pw, req) => (enabled ? signIn(e, pw, req) : null) };
+  // erasing an employee takes their login too, or someone who left could still sign in. Nobody erases themselves, and an employee manager never touches an admin
+  const loginOf = async (email) => (norm(email) ? (await list(true)).find((x) => x.email === norm(email)) || null : null);
+  const logins = {
+    eraseProblem: async (p, req) => {
+      const e = norm(p.email);
+      if (e && e === norm(req.user && req.user.email)) return "You can't erase yourself.";
+      const d = await loginOf(e);
+      return req.staffOnly && (OWNERS.has(e) || (d && (d.companyAdmin || d.staffAdmin))) ? 'Only an admin can erase an admin.' : null;
+    },
+    removeFor: async (p, req) => {
+      const d = await loginOf(p.email);
+      if (!d || !inMine(req)(d)) return false;
+      await save((l) => l.filter((x) => x.id !== d.id));
+      return true;
+    },
+  };
+  return { requireDispatch, requireAdmin, requireCompanyAdmin: requireUserAdmin, requireStaffManager, logins, createLogin, signIn: (e, pw, req) => (enabled ? signIn(e, pw, req) : null) };
 }
