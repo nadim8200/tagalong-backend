@@ -192,6 +192,9 @@ test('cheaper: group emails are read only when they say "Jarvis" or Jarvis is al
   assert.deepEqual(readGate({ ...base, to: to('dispatch@floridabeauty.us', 'ops@broker.com'), text: 'Driver is at the shipper.' }), { read: false, group: 'an email group' });
   assert.equal(readGate({ ...base, to: to('outbound@floridabeauty.us'), subject: 'OUTBOUND 9 TRIP SHEETS', always: true }).read, true, 'the night\'s trip sheets are always read');
   assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: 'hi', always: true }).read, false, 'a known group stays a group');
+  assert.deepEqual(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: 'follow up', quietFiles: true }), { read: true, quiet: true, why: 'rate cons for the team (via dispatches@floridabeauty.us)', group: 'dispatches@floridabeauty.us' });
+  assert.equal(readGate({ ...base, to: to('dispatch@floridabeauty.us'), text: 'Jarvis, follow up', quietFiles: true }).quiet, undefined, 'naming Jarvis is a real request');
+  assert.equal(readGate({ ...base, to: to('jarvis@floridabeauty.us'), quietFiles: true }).quiet, undefined, 'so is writing to it');
   assert.deepEqual(readGate({ ...base, to: to('dispatches@floridabeauty.us'), subject: 'Load 8192162', text: 'Driver is at the shipper.' }), { read: false, group: 'dispatches@floridabeauty.us' });
   assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: 'Jarvis, follow up with the driver on 624626' }).read, true);
   assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: '@Jarvis send the POD' }).read, true);

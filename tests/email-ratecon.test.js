@@ -54,3 +54,28 @@ test('a forwarded rate con email: rate con read + filed on its load, the email\'
   await routes['POST /truckmate/tasks/:trip/:id']({ params: { trip: '624335', id: out[0].id }, body: { done: true }, query: {}, user: { name: 'Ana' } }, res);
   assert.equal(out[0].done.by, 'Ana');
 });
+
+test('Gus sends a rate con to the team: Jarvis reads it as a next load and says nothing', async () => {
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us', ANTHROPIC_API_KEY: 'x' };
+  const sent = [];
+  const fetchFn = async (url, opts = {}) => {
+    const ok = (j) => ({ ok: true, status: 200, json: async () => j });
+    if (url.includes('oauth2')) return ok({ access_token: 'x', expires_in: 3600 });
+    if (url.includes('/attachments')) return ok({ value: [{ '@odata.type': '#microsoft.graph.fileAttachment', name: 'rate_confirmation.pdf', contentType: 'application/pdf', size: 10, contentBytes: Buffer.from('%PDF-1').toString('base64') }] });
+    if (url.includes('/mailFolders/inbox/messages')) return ok({ value: [{ id: 'gus-1', subject: 'TRINITY LOAD 9953899 NC TO FL TR 2207 TL 3010', from: { emailAddress: { name: 'Gustavo Duarte', address: 'gus@floridabeauty.us' } }, toRecipients: [{ emailAddress: { address: 'dispatch@floridabeauty.us' } }], receivedDateTime: '2026-11-02T19:49:00Z', body: { contentType: 'text', content: 'Please follow up and add the broker on the tracking link' }, conversationId: 'c1', hasAttachments: true }] });
+    if (url.includes('api.anthropic.com')) return ok({ content: [{ type: 'text', text: JSON.stringify({ summary: 'Trinity rate con.', attachments: [{ index: 1, type: 'rate_confirmation' }], refs: {}, reply: { needed: true, kind: 'question', documents: [] }, instructions: [{ kind: 'email_group', group: 'Dispatch', message: 'Add your tracking team' }], actions: [{ kind: 'other', title: 'Add the broker', urgency: 'normal' }] }) }] });
+    if (url.includes('sendMail') || url.includes('/createReply') || url.includes('/reply')) sent.push(url);
+    return ok({});
+  };
+  const filed = []; const considered = []; const learned = [];
+  const db = memDb();
+  const inbox = initInbox({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: (q, r, n) => n(), db, docs: { enabled: true, storeDocs: async () => [{ id: 7 }], linkDocs: async () => {} }, comms: { log: async () => {} }, rateCons: async (site, pages, opts) => { filed.push(opts); return { trip: null, pendingId: 'p1', matchedBy: null, record: { broker: 'Trinity' } }; }, nextLoads: { consider: async (site, entries) => { considered.push(entries); return [{ id: 'n1', truck: '2207', rc: { loadNumber: '9953899', broker: 'Trinity' } }]; } }, dispatchLog: { learn: async (site, e) => { learned.push(e.subject); return { notes: 0 }; } }, env, fetchFn, getBoard: async () => ({ trips: [] }) });
+  await inbox.poll();
+  assert.equal(filed.length, 1, 'the rate con is read'); assert.equal(filed[0].exact, true, 'exact matching, it is a fresh load');
+  assert.deepEqual(considered[0], [{ trip: null, pendingId: 'p1' }], 'and shown as a next load');
+  assert.deepEqual(sent, [], 'no reply, no question');
+  const e = (await db.get('taEmails:florida-beauty')).list[0];
+  assert.equal(e.status, 'handled'); assert.deepEqual(e.instructions, []); assert.deepEqual(e.actions, []);
+  assert.deepEqual(learned, [e.subject], 'still in the loop');
+  assert.deepEqual((await db.get('taLoadTasks:florida-beauty', {})) || {}, {}, 'no to-dos');
+});
