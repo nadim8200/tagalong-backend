@@ -1127,11 +1127,12 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
   });
   app.post('/truckmate/tasks/:trip/:id', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
-    const trip = String(req.params.trip); const done = !!(req.body && req.body.done);
+    const trip = String(req.params.trip); const done = !!(req.body && req.body.done); const own = !!(req.body && req.body.own);
     try {
       const all = await db.update(tasksKey(siteOf(req)), (cur) => {
         const a = { ...(cur || {}) };
-        a[trip] = (a[trip] || []).map((t) => (t.id === req.params.id ? { ...t, done: done ? { by: who(req), at: new Date().toISOString() } : null } : t));
+        const stamp = { by: who(req), at: new Date().toISOString() };
+        a[trip] = (a[trip] || []).map((t) => (t.id !== req.params.id ? t : own ? { ...t, owner: stamp } : { ...t, done: done ? stamp : null }));
         return a;
       }, {});
       res.json(all[trip] || []);

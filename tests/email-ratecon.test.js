@@ -49,6 +49,8 @@ test('a forwarded rate con email: rate con read + filed on its load, the email\'
   const ctx = { now: Date.parse('2026-10-07T02:00:00Z'), geo: () => null, unitState: () => ({}) };
   const alert = evaluateBoard({ trips: items }, ctx).find((a) => a.code === 'email-todo');
   assert.equal(alert.severity, 'critical'); assert.match(alert.title, /^📧 Move delivery appointment to Oct 8, 6:00 AM \(\+1 more\)/);
+  await routes['POST /truckmate/tasks/:trip/:id']({ params: { trip: '624335', id: out[0].id }, body: { own: true }, query: {}, user: { name: 'Ana' } }, res);
+  assert.equal(out[0].owner.by, 'Ana', 'I am on it keeps the to-do open and names who has it'); assert.ok(!out[0].done);
   await routes['POST /truckmate/tasks/:trip/:id']({ params: { trip: '624335', id: out[0].id }, body: { done: true }, query: {}, user: { name: 'Ana' } }, res);
   assert.equal(out[0].done.by, 'Ana');
 });
