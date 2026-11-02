@@ -762,7 +762,8 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
   });
 
   // { on: true|false, notify: true|false, note? }
-  app.post('/truckmate/breakdown/:trip', requireAuth, async (req, res) => {
+  app.post('/truckmate/breakdown/:trip', requireAuth, async (req, res, next) => {
+    if (!/^\d+$/.test(req.params.trip)) return next();   // /report and /update are the breakdown team's routes, not a trip
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const site = siteOf(req); const trip = String(req.params.trip);
     const b = req.body || {};

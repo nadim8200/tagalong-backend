@@ -281,3 +281,13 @@ test('by default milestones are not emailed unless someone asked for updates on 
   const st = await db.get('taStatusMail:fb', { trips: {} });
   assert.match(JSON.stringify(st), /only when asked/);
 });
+
+test('the customer notice route leaves the breakdown team routes alone', async () => {
+  const routes = {};
+  initStatusMail({ get() {}, put() {}, post: (p, ...h) => { routes[`POST ${p}`] = h[h.length - 1]; } }, { requireAuth: (q, s, n) => n(), db: { enabled: true, get: async () => ({}), set: async () => {}, update: async () => ({}) }, env: {} });
+  for (const trip of ['update', 'report', 'fixed']) {
+    let passed = false; let answered = false;
+    await routes['POST /truckmate/breakdown/:trip']({ params: { trip }, body: {}, query: {} }, { status() { answered = true; return this; }, json() { answered = true; } }, () => { passed = true; });
+    assert.equal(passed, true, trip); assert.equal(answered, false, trip);
+  }
+});
