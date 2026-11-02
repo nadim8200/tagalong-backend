@@ -94,7 +94,7 @@ import { initTransferDone, answerConfirms } from './transferdone.js';
 import { initStopCheck } from './stopcheck.js';
 import { initStopReview } from './stopreview.js';
 import { readableFile } from './heic.js';
-import { renderFixedRollingEmail, renderTransferCompletedEmail, renderTransferReversedEmail, renderFixedReportedEmail, handoffFacts, snapshotLoad, crewOf, renderStopReviewEmail } from './handoffmail.js';
+import { renderFixedRollingEmail, renderTransferCompletedEmail, renderTransferReversedEmail, renderFixedReportedEmail, renderLoginEmail, handoffFacts, snapshotLoad, crewOf, renderStopReviewEmail } from './handoffmail.js';
 import { initTruckBuilder } from './truckbuilder.js';
 import { initMissingCases } from './missingcase.js';
 import { initStopTasks } from './stoptasks.js';
@@ -913,7 +913,7 @@ const rc = initRingCentral(app, { requireAuth: chain(requireAuth, allowRoles('di
 // Original uploaded documents (rate cons, trip sheets) kept privately in Postgres.
 // Dispatch side (console, Jarvis, loads, emails, calls): admins and active dispatcher accounts only —
 // a TagAlong customer login can't reach it.
-const { requireDispatch, requireAdmin, requireCompanyAdmin, createLogin, signIn: dispatcherSignIn } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true }) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
+const { requireDispatch, requireAdmin, requireCompanyAdmin, createLogin, signIn: dispatcherSignIn } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true }), mayReach: async (to) => /@floridabeauty\.us$/i.test(to) || !(await training.active()) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
 initCompanies(app, { db, requireAdmin, createLogin });
 // one sign-in for every kind of account → lands on that person's service (signin.js)
 initSignin(app, {
@@ -1257,6 +1257,14 @@ app.post('/admin/confirm-example', requireCompanyAdmin, async (req, res) => {
     await sendMail({ ...reply, to: [me], subject: `[EXAMPLE] Re: ${ask.subject}` }, { env: process.env, direct: true });
     return res.json({ ok: true, trip, truck: item.trip.powerUnit, stops: stops.length, sent: ['request', 'confirmed reply'] });
   } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+// The new-login email, to Nadim only. Made-up name and password: no account is created.
+app.post('/admin/login-email-example', requireCompanyAdmin, async (req, res) => {
+  try {
+    const m = renderLoginEmail({ name: 'Example Employee', email: 'example.employee@floridabeauty.us', tempPassword: 'Example-Only-0000', url: `${process.env.APP_URL || 'https://mytagalong.app'}/truckmate?admin`, by: 'Nadim Tellez' });
+    await sendMail({ to: ['ntellez@floridabeauty.us'], ...m, subject: `[EXAMPLE] ${m.subject}` }, { env: process.env, direct: true });
+    res.json({ ok: true });
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 app.post('/admin/alert-examples', requireCompanyAdmin, async (req, res) => {
   const me = 'ntellez@floridabeauty.us';

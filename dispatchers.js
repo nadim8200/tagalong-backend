@@ -8,6 +8,7 @@
 // A dispatcher who was disabled or removed is locked out on the next request
 // (the account is checked, not just the token). Dispatcher logins last 30 days.
 // ---------------------------------------------------------------
+import { renderLoginEmail } from './handoffmail.js';
 import { randomBytes, createHash } from 'crypto';
 import { DEFAULT_COMPANY } from './companies.js';
 
@@ -197,6 +198,12 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // the new login, emailed to that person only. The login stands either way: if this fails the admin still has the password to pass on
+  async function emailLogin(d, temp, by) {
+    if (!mailReady()) return { emailed: false, emailError: 'Outlook is not connected, so it was not emailed.' };
+    if (mail.mayReach && !(await mail.mayReach(d.email))) return { emailed: false, emailError: 'Training mode is on, so nothing goes to an outside address. It was not emailed.' };
+    try { await mail.send({ to: [d.email], ...renderLoginEmail({ name: d.name, email: d.email, tempPassword: temp, url: `${appUrl}/truckmate?admin`, by }) }); return { emailed: true }; } catch (e) { console.warn('[dispatchers] login email:', e.message); return { emailed: false, emailError: 'The email did not go out.' }; }
+  }
   app.get('/admin/dispatchers', requireUserAdmin, async (req, res) => {
     try { res.json((await list(true)).filter(inMine(req)).map((d) => ({ ...view(d), company: d.company || DEFAULT_COMPANY }))); } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -215,7 +222,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
       const company = adminCompany(req) || String(b.company || DEFAULT_COMPANY);
       const d = { id: `D${Date.now()}${randomBytes(2).toString('hex')}`, email: e, name, pass: hashPassword(pw), active: true, mustChange: true, company, ...(b.companyAdmin ? { companyAdmin: true } : {}), createdAt: at, createdBy: who(req), passwordLog: [{ at, by: who(req), how: 'first password set by admin' }] };
       await save((l) => [...l, d]);
-      res.json({ ...view(d), ...(temp ? { tempPassword: temp } : {}) });
+      res.json({ ...view(d), ...(temp ? { tempPassword: temp } : {}), ...(temp && b.sendEmail ? await emailLogin(d, temp, who(req)) : {}) });
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
   app.put('/admin/dispatchers/:id', requireUserAdmin, async (req, res) => {

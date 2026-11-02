@@ -290,3 +290,32 @@ ${message('What happens next', [next])}
 ${viewTrip(f.trip)}`;
   return { subject, html: shell({ ...(yes ? {} : { tone: 'red' }), mark: yes ? '&#10003;' : '&#10005;', title, sub }, body), text: ['FLORIDA BEAUTY — Dispatch notifications', '', title, sub, `Truck ${f.unit}`, `Trip ${f.trip}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, '', `${yes ? 'Reason' : 'Note'}: ${review.reason || 'No note added.'}`, ...rows.map(([k, v]) => `${k}: ${v}`), `Location: ${f.location || 'Location not reported'}`, '', next, ...mailEnd(f.trip)].join('\n') };
 }
+
+// The email to someone who just got a console login. It holds a temporary password, so it goes only to that person. Pure.
+export function renderLoginEmail({ name, email, tempPassword, url, by = null }) {
+  const first = String(name || '').trim().split(/\s+/)[0] || '';
+  const box = (k, v) => `<tr><td style="padding:6px 16px;font-family:${FONT};font-size:13px;color:${MUTED};">${esc(k)}<div style="font-size:18px;font-weight:bold;color:${NAVY};word-break:break-all;">${esc(v)}</div></td></tr>`;
+  const para = (t) => `<tr><td ${pad} style="padding:12px 24px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};">${t}</td></tr>`;
+  const steps = (list) => `<tr><td ${pad} style="padding:8px 24px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:${TEXT};">${list.map((x, i) => `<div><b>${i + 1}.</b> ${esc(x)}</div>`).join('')}</td></tr>`;
+  const signIn = `<tr><td ${pad} style="padding:16px 24px 0;"><a href="${esc(url)}" style="display:block;padding:15px 18px;border-radius:6px;background:#1D4ED8;font-family:${FONT};font-size:18px;font-weight:bold;text-align:center;color:#FFFFFF;text-decoration:none;">Sign in / Ingresar</a></td></tr>`;
+  const EN = ['Tap Sign in below and enter the username and temporary password above.', 'Choose your own password when it asks you to.', 'You are in. Use your new password from now on.'];
+  const ES = ['Toca Ingresar y escribe el usuario y la contraseña temporal de arriba.', 'Elige tu propia contraseña cuando te lo pida.', 'Listo. Desde ahora usa tu nueva contraseña.'];
+  const keep = 'This password is temporary and stops working once you choose your own. Keep this email private.';
+  const keepEs = 'Esta contraseña es temporal y deja de funcionar cuando elijas la tuya. Mantén este correo en privado.';
+  const notYou = 'Not expecting this? Tell Florida Beauty dispatch and do not sign in.';
+  const notYouEs = '¿No esperabas este correo? Avísale a despacho de Florida Beauty y no ingreses.';
+  const body = `${para(`<b>Hi${first ? ` ${esc(first)}` : ''},</b><br>Your Dynamic Dispatch account has been created${by ? ` by ${esc(by)}` : ''}. This is the email with your temporary password.`)}
+<tr><td ${pad} style="padding:14px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F5F7FA" style="background:#F5F7FA;border-radius:8px;"><tr><td style="height:6px;line-height:6px;font-size:0;">&nbsp;</td></tr>${box('Username / Usuario', email)}${box('Temporary password / Contraseña temporal', tempPassword)}<tr><td style="height:6px;line-height:6px;font-size:0;">&nbsp;</td></tr></table></td></tr>
+${heading('Follow these steps')}${steps(EN)}${signIn}
+${para(`<span style="font-size:13px;color:${MUTED};">${esc(keep)} ${esc(notYou)}</span>`)}
+${heading('En español')}
+${para(`Hola${first ? ` ${esc(first)}` : ''}, tu cuenta de Dynamic Dispatch fue creada${by ? ` por ${esc(by)}` : ''}. Este correo trae tu contraseña temporal.`)}
+${steps(ES)}
+${para(`<span style="font-size:13px;color:${MUTED};">${esc(keepEs)} ${esc(notYouEs)}</span>`)}`;
+  return {
+    subject: 'Your Dynamic Dispatch account / Tu cuenta de Dynamic Dispatch',
+    html: shell({ tone: 'blue', mark: '&#10003;', title: 'YOUR ACCOUNT IS READY', sub: 'Tu cuenta está lista' }, body),
+    text: ['FLORIDA BEAUTY — Dynamic Dispatch', '', 'YOUR ACCOUNT IS READY', `Hi${first ? ` ${first}` : ''}, your Dynamic Dispatch account has been created${by ? ` by ${by}` : ''}.`, '', `Username: ${email}`, `Temporary password: ${tempPassword}`, `Sign in: ${url}`, '', ...EN.map((x, i) => `${i + 1}. ${x}`), '', keep, notYou, '', 'EN ESPAÑOL', `Hola${first ? ` ${first}` : ''}, tu cuenta de Dynamic Dispatch fue creada${by ? ` por ${by}` : ''}.`, ...ES.map((x, i) => `${i + 1}. ${x}`), '', keepEs, notYouEs, '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n'),
+  };
+}
+
