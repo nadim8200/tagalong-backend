@@ -47,6 +47,9 @@ export function signText(text, by) {
   return m ? `${m[1]} ${sig}. ${m[2]}` : `${t} ${sig}`;
 }
 
+// the pictures in an inbound text (MMS). Pure.
+export const mmsImages = (m) => ((m && m.attachments) || []).filter((a) => a && a.type === 'MmsAttachment' && a.uri && /^image\//i.test(a.contentType || '')).slice(0, 6).map((a) => ({ uri: a.uri, contentType: a.contentType, name: a.fileName || `text-photo-${a.id || 1}.jpg` }));
+
 export function initRingCentral(app, { requireAuth, db, pool, env = process.env }) {
   const cfgKey = 'taRingCentral';
 
@@ -381,10 +384,17 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   async function inboundSince(owner, sinceIso) {
     const q = new URLSearchParams({ messageType: 'SMS', direction: 'Inbound', dateFrom: sinceIso, perPage: '100' });
     const j = await rcFetch(owner, `/restapi/v1.0/account/~/extension/~/message-store?${q}`);
-    return (j.records || []).map((m) => ({ id: String(m.id), from: m.from && m.from.phoneNumber, text: m.subject || '', at: m.creationTime }));
+    return (j.records || []).map((m) => ({ id: String(m.id), from: m.from && m.from.phoneNumber, text: m.subject || '', at: m.creationTime, media: mmsImages(m) }));
+  }
+  // the bytes of a picture in a text. The token only ever goes to RingCentral
+  async function mediaBytes(owner, uri) {
+    if (!/(^|\.)ringcentral\.com$/i.test(new URL(uri).hostname)) throw new Error('Not a RingCentral link.');
+    const r = await fetch(uri, { headers: { Authorization: `Bearer ${await accessToken(owner)}` } });
+    if (!r.ok) throw new Error(`RingCentral ${r.status}`);
+    return Buffer.from(await r.arrayBuffer());
   }
   let onCall = null;
   const setOnCall = (fn) => { onCall = fn; };
 
-  return { sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
+  return { mediaBytes, sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
 }

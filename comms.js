@@ -64,7 +64,7 @@ export function recipientFor(item, which = 1, phoneConsent = {}) {
   return { phone: info.phone, name: info.name, consent: phoneConsent[last10(info.phone)] || null, kind: 'company' };
 }
 
-export function initComms(app, { requireAuth, db, staffAsk = null, missingCases = null, roadCalls = null, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, help = null, activity = null, env = process.env }) {
+export function initComms(app, { textPhotos = null, onTextPhotos = null, requireAuth, db, staffAsk = null, missingCases = null, roadCalls = null, ringcentral = null, carriers = null, getBoard = null, driverLinks = null, help = null, activity = null, env = process.env }) {
   const enabled = !!(db && db.enabled);
   const logKey = (site) => `taTripComms:${site}`;
   const askKey = (site) => `taCommsAsks:${site}`;
@@ -247,7 +247,10 @@ export function initComms(app, { requireAuth, db, staffAsk = null, missingCases 
       if (kw) { await handleKeyword(site, r, kw); } // eslint-disable-line no-await-in-loop
       const { trips, confirm } = kw ? { trips: [], confirm: null } : routeReply(r, { asks, driverPhones });
       if (!trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: null }); // eslint-disable-line no-await-in-loop
-      if (trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: trips.join(', ') }); // eslint-disable-line no-await-in-loop
+      // a picture from a driver stays on the load, and goes on the breakdown if there is one
+      const photos = !kw && trips.length === 1 && textPhotos && (r.media || []).length ? await textPhotos(r, trips[0]).catch((e) => { console.warn('[comms] text photos:', e.message); return []; }) : []; // eslint-disable-line no-await-in-loop
+      if (trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: trips.join(', '), ...(photos.length ? { photos } : {}) }); // eslint-disable-line no-await-in-loop
+      if (photos.length && onTextPhotos) await onTextPhotos(trips[0], photos, 'Driver (text)').catch((e) => console.warn('[comms] breakdown photos:', e.message)); // eslint-disable-line no-await-in-loop
       // an employee (phone on the Employees list) texting Jarvis a question → Jarvis texts the answer back
       if (!kw && staffAsk) {
         try {

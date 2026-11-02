@@ -43,22 +43,67 @@ export function loadLabel(item) {
   if (letters.every((l) => l === 'H')) return 'TENNESSEE HUB';
   return null;
 }
+// What to call the load wherever it's shown: the label, or both kinds on a mixed load. Null only with no bills at all. Pure.
+export function loadType(item) {
+  const one = loadLabel(item);
+  if (one) return one;
+  const t = (item && item.trip) || item || {};
+  const letters = [...new Set(((item && (item.freightBills || item.orders)) || t.freightBills || []).map((b) => String(b.billNumber || '').trim().charAt(0).toUpperCase()).filter(Boolean))];
+  if (!letters.length) return null;
+  return [...new Set(letters.map((l) => (l === 'B' ? 'BROKER' : l === 'H' ? 'TENNESSEE HUB' : 'FLOWERS')))].join(' + ');
+}
 const oneLine = (s, n) => String(s || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
 
-// Same shape dispatch writes: "FLOWERS BREAKDOWN TRUCK AIR LEAK - TK# 2602 TL# 7323 - TRIP# 625878". Pure.
+// Same shape dispatch writes: "BREAKDOWN TRAILER 2029 // TK 2008 TL 2029 TO 626143", with the kind of load in front. What broke and the numbers
+// only: the story goes in the email. Names the truck or the trailer when the reason says which, otherwise both. Pure.
 export function breakdownSubject(item, reason, { unit = null, trip = null } = {}) {
   const t = (item && item.trip) || {};
-  const ids = [`TK# ${unit || t.powerUnit || 'N/A'}`, `TL# ${t.trailer || 'N/A'}`].join(' ');
-  const kind = loadLabel(item);
-  return `${kind ? `${kind} ` : ''}BREAKDOWN ${oneLine(reason, 60).toUpperCase()} - ${ids} - TRIP# ${trip || t.tripNumber || 'N/A'}`;
+  const tk = unit || t.powerUnit || 'N/A'; const tl = t.trailer || 'N/A';
+  const r = oneLine(reason, 500);
+  const trailer = /\b(trailers?|reefers?|remolques?|cajas?|thermo ?king|carrier unit|landing gear|mud ?flaps?)\b/i.test(r);
+  const truck = /\b(trucks?|tractors?|cami[oó]n|engine|motor)\b/i.test(r);
+  const what = trailer === truck ? `TRUCK ${tk} TRAILER ${tl}` : trailer ? `TRAILER ${tl}` : `TRUCK ${tk}`;
+  const kind = loadType(item);
+  return `${kind ? `${kind} ` : ''}BREAKDOWN ${what} // TK ${tk} TL ${tl} TO ${trip || t.tripNumber || 'N/A'}`;
+}
+
+// The load, in full, for the email. Only what's on record. Pure.
+export function loadRows(item, now = Date.now()) {
+  const s = snapshotLoad(item, null, now); const t = (item && item.trip) || {};
+  const bills = (item && (item.freightBills || item.orders)) || t.freightBills || [];
+  const temps = [...new Set(bills.map((b) => b.temperature).filter((v) => v != null))];
+  const names = s.customers.slice(0, 8).join(', ') + (s.customers.length > 8 ? ` and ${s.customers.length - 8} more` : '');
+  return [['Load type', loadType(item) || 'Not on file'], ['Truck', s.unit || 'Not on file'], ['Trailer', s.trailer || 'Not on file'], ['Trip', s.trip || 'Not on file'], ['Broker', s.broker], ['Customers', names], ['Freight bills', s.bills.length ? String(s.bills.length) : null], ['Boxes', s.pieces != null ? s.pieces.toLocaleString('en-US') : null], ['Temperature', temps.length ? temps.map((v) => `${v}°F`).join(', ') : null], ['Commodity', s.commodity], ['From', t.origZoneDesc], ['To', t.destZoneDesc]].filter(([, v]) => v);
+}
+
+// The photos, full width, one under the other. Pure.
+const photoBlock = (cids, note) => {
+  const { heading, FONT, MUTED } = emailParts;
+  if (!cids.length && !note) return '';
+  return `${heading('Photos')}${cids.map((c, i) => `<tr><td style="padding:0 24px 10px;"><img src="cid:${esc(c)}" width="592" alt="Breakdown photo ${i + 1}" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></td></tr>`).join('')}${note ? `<tr><td style="padding:0 24px 8px;font-family:${FONT};font-size:14px;color:${MUTED};">${esc(note)}</td></tr>` : ''}`;
+};
+// More photos on an open breakdown. Pure.
+export function renderBreakdownPhotosEmail({ report, item = null, by, count, subject, photoCids = [], photosNote = null, now = Date.now() }) {
+  const { heading, FONT, NAVY, TEXT, MUTED, RED, kv, et, TRAINING_SLOT } = emailParts;
+  const rows = loadRows(item || { trip: { powerUnit: report.unit, tripNumber: report.trip } }, now);
+  const line = `${count} new photo${count === 1 ? '' : 's'} from ${by}.`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;background:#F1F5F9;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F1F5F9"><tr><td align="center" style="padding:12px 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="max-width:640px;background:#FFFFFF;border-radius:8px;">
+${TRAINING_SLOT}
+<tr><td bgcolor="${RED}" style="padding:18px 24px;background:${RED};font-family:${FONT};font-size:26px;font-weight:bold;color:#FFFFFF;">NEW BREAKDOWN PHOTOS<div style="padding-top:4px;font-size:15px;font-weight:normal;color:#FFFFFF;">${esc(line)}</div></td></tr>
+<tr><td style="padding:14px 24px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Reason on file</b><br>${esc(report.reason)}<div style="font-size:13px;color:${MUTED};">Received ${esc(et(now) || '')}</div></td></tr>
+${photoBlock(photoCids, photosNote)}
+${heading('Load')}
+<tr><td style="padding:0 24px 20px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${rows.map(([k, v]) => kv(k, v)).join('')}</table></td></tr>
+</table></td></tr></table></body></html>`;
+  return { subject, html, text: ['NEW BREAKDOWN PHOTOS', line, `Reason on file: ${report.reason}`, ...(photosNote ? [photosNote] : []), '', ...rows.map(([k, v]) => `${k}: ${v}`), '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n') };
 }
 
 // The email that opens the chain. Pure.
-export function renderBreakdownEmail({ item, report, etas = null, now = Date.now(), showPhones = true, mapCid = null, sheetNote = null, sheetAttached = false }) {
+export function renderBreakdownEmail({ item, report, etas = null, now = Date.now(), showPhones = true, mapCid = null, sheetNote = null, sheetAttached = false, photoCids = [], photosNote = null }) {
   const a = { unit: report.unit, trip: report.trip, ack: null };
   const f = teamStopFacts(a, item, { etas, now, showPhones, mapCid });
   const { liveUrl, heading, button, kv, driverCard, FONT, NAVY, TEXT, MUTED, LINE, RED, et, TRAINING_SLOT } = emailParts;
-  const kind = loadLabel(item);
+  const kind = loadType(item);
   const title = kind === 'FLOWERS' ? 'FLOWER BREAKDOWN' : kind ? `${kind} BREAKDOWN` : 'BREAKDOWN REPORTED';
   const label = kind ? 'Breakdown reported' : 'Load type not confirmed. Check the load.';
   const consoleUrl = liveUrl(report.trip);
@@ -78,6 +123,9 @@ ${TRAINING_SLOT}
 ${sheetAttached ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NAVY}" style="background:${NAVY};border-radius:8px;"><tr><td style="padding:12px 16px;font-family:${FONT};font-size:17px;font-weight:bold;color:#FFFFFF;">&#128206; ${esc(sheetNote)}</td></tr></table></td></tr>` : ''}
 <tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b><div style="font-size:24px;line-height:1.25;font-weight:bold;padding:4px 0 8px;word-break:break-word;">${esc(report.reason)}</div>Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
 <tr><td style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Next step for dispatch</b><br>${esc(rc)}<br>${esc(next)}<div>${button(consoleUrl, 'Start Breakdown')}</div></td></tr></table></td></tr>
+${photoBlock(photoCids, photosNote)}
+${heading('Load')}
+<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${loadRows(item, now).map(([k, v]) => kv(k, v)).join('')}</table></td></tr>
 ${heading('Last reported location')}
 ${f.mapCid ? `<tr><td style="padding:0 24px 10px;"><a href="${esc(mapUrl)}"><img src="cid:${esc(f.mapCid)}" width="592" alt="Map of the truck's last reported location" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></a></td></tr>` : ''}
 <tr><td style="padding:0 24px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};word-break:break-word;"><b>${esc(f.location || 'Location not reported')}</b>${mapUrl ? `<div>${button(mapUrl, 'Open map')}</div>` : ''}</td></tr>
@@ -87,7 +135,7 @@ ${heading('Delivery impact')}
 <tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${kv('Next stop', f.next)}${kv('Appointment', f.appt)}${kv('Estimated arrival', f.eta)}${kv('Distance remaining', f.miles != null ? `${f.miles.toLocaleString('en-US')} mi` : null)}</table></td></tr>
 <tr><td style="padding:18px 24px 20px;font-family:${FONT};font-size:13px;line-height:1.5;color:${MUTED};">Reply on this email to keep everyone on the chain. Jarvis keeps it on the load.<br><b style="color:${NAVY};">Jarvis · AI Dispatcher</b> · Florida Beauty</td></tr>
 </table></td></tr></table></body></html>`;
-  const text = [title, label, `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, ...(sheetNote ? [sheetNote] : []), '', `Reason: ${report.reason}`, `Reported by: ${reported}`, '', 'NEXT STEP FOR DISPATCH', rc, next, consoleUrl, '', f.location || 'Location not reported', ...(mapUrl ? [mapUrl] : []), '', `Next stop: ${f.next || 'Not available'}`, `Estimated arrival: ${f.eta || 'Not available'}`, '', 'Reply on this email to keep everyone on the chain.', 'Jarvis · AI Dispatcher · Florida Beauty'].join('\n');
+  const text = [title, label, `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, ...(sheetNote ? [sheetNote] : []), '', `Reason: ${report.reason}`, `Reported by: ${reported}`, ...(photoCids.length ? ['', `${photoCids.length} photo${photoCids.length === 1 ? '' : 's'} in this email.`] : []), ...(photosNote ? [photosNote] : []), '', 'LOAD', ...loadRows(item, now).map(([k, v]) => `${k}: ${v}`), '', 'NEXT STEP FOR DISPATCH', rc, next, consoleUrl, '', f.location || 'Location not reported', ...(mapUrl ? [mapUrl] : []), '', `Next stop: ${f.next || 'Not available'}`, `Estimated arrival: ${f.eta || 'Not available'}`, '', 'Reply on this email to keep everyone on the chain.', 'Jarvis · AI Dispatcher · Florida Beauty'].join('\n');
   return { subject, html, text };
 }
 
@@ -102,7 +150,7 @@ export function reportPage(p, token, earlier = null) {
   return page(`Report breakdown, truck ${p.u}`, `<h1>Report breakdown</h1><p class="s">Truck ${esc(p.u)} · Trip ${esc(p.t)}</p><form id="f"><label for="r">What happened?</label><textarea id="r" maxlength="${MAX_REASON}" required placeholder="For example: truck air leak, shop is 5 miles away"></textarea><label for="n">Your name</label><input id="n" maxlength="80" required autocomplete="name"><button id="b" type="submit">Report breakdown</button><div class="e" id="e" role="alert"></div></form><p class="n">This emails the team. It does not call road service or contact customers.</p><script>document.getElementById('f').addEventListener('submit',async function(ev){ev.preventDefault();var b=document.getElementById('b'),e=document.getElementById('e');b.disabled=true;e.textContent='';try{var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:document.getElementById('r').value,name:document.getElementById('n').value})});var j=await r.json();if(!r.ok)throw new Error(j.error||'Could not send.');document.querySelector('.c').innerHTML='<h1>Reported</h1><p class="s">The team has the email. Road service has not been called. You can close this page.</p>';}catch(x){e.textContent=x.message;b.disabled=false;}});</script>`);
 }
 
-export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain = async () => {}, onTruckMateMove = async () => {}, fixedDetails = async () => ({}), etasFor = async () => null, otherHolds = async () => false, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
+export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain = async () => {}, onTruckMateMove = async () => {}, fixedDetails = async () => ({}), etasFor = async () => null, otherHolds = async () => false, sendPhotos = async () => {}, textedPhotos = async () => [], baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
   const site = 'florida-beauty';
   const all = async () => (await db.get(KEY(site), {})) || {};
   const link = (a) => `${baseUrl}/br/${makeToken({ a: a.id, t: a.trip, u: a.unit }, secret, now())}`;
@@ -117,7 +165,7 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
     await db.update(KEY(site), (cur) => { const c = { ...(cur || {}) }; if (!c[p.a]) { first = true; c[p.a] = { atMs: at, by, reason: clean, trip: p.t, unit: p.u }; } return c; }, {});
     if (!first) return { code: 409, error: 'This stop was already reported.' };
     const item = ((await getBoard(site).catch(() => ({ trips: [] }))).trips || []).find((it) => String(((it && it.trip) || {}).tripNumber) === String(p.t)) || null;
-    const report = { atMs: at, by, reason: clean, trip: p.t, unit: p.u };
+    const report = { atMs: at, by, reason: clean, trip: p.t, unit: p.u, photos: await textedPhotos(p.t).catch(() => []) };
     const before = item ? { before: snapshotLoad(item, await etasFor(p.t).catch(() => null), at), crew: crewOf(item, at) } : {};   // what the load looked like, for a later transfer
     await db.update(KEY(site), (cur) => ({ ...(cur || {}), [p.a]: { ...report, ...before, subject: breakdownSubject(item, clean, { unit: p.u, trip: p.t }) } }), {});
     await send(report, item);
@@ -126,20 +174,33 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
 
   // Staff emailed Jarvis that a truck broke down: same breakdown email, to everyone of ours on their email plus the usual list.
   // One per load until Breakdown is turned off; the first report stands, later ones just say so.
-  async function fromEmail({ trip, reason, by, emailId, to = [] }) {
+  async function fromEmail({ trip, reason, by, emailId, to = [], photos = [] }) {
     const clean = oneLine(reason, MAX_REASON);
     if (clean.length < 3) return { ok: false, error: 'What happened? Reply with the reason.' };
     const open = await forTrip(trip);
-    if (open && !open.clearedAt && now() - open.atMs < DAY) return { ok: false, duplicate: true, error: `Already reported by ${open.by}.` };
+    if (open && !open.clearedAt && now() - open.atMs < DAY) { if (photos.length) await addPhotos({ trip, photos, by }); return { ok: false, duplicate: true, error: `Already reported by ${open.by}.` }; }
     const item = ((await getBoard(site).catch(() => ({ trips: [] }))).trips || []).find((it) => String(((it && it.trip) || {}).tripNumber) === String(trip)) || null;
     if (!item) return { ok: false, error: `Trip ${trip} is not on the board.` };
     const unit = (item.trip || {}).powerUnit || null;
-    const report = { atMs: now(), by: oneLine(by, 80) || 'Dispatch', reason: clean, trip: String(trip), unit };
+    const texted = await textedPhotos(trip).catch(() => []);
+    const report = { atMs: now(), by: oneLine(by, 80) || 'Dispatch', reason: clean, trip: String(trip), unit, photos: [...photos, ...texted.filter((x) => !photos.some((y) => y.docId === x.docId))] };
     const subject = breakdownSubject(item, clean, { unit, trip });
     const before = { before: snapshotLoad(item, await etasFor(trip).catch(() => null), report.atMs), crew: crewOf(item, report.atMs) };
     await db.update(KEY(site), (cur) => ({ ...(cur || {}), [`email:${emailId}`]: { ...report, ...before, subject } }), {});
     await send(report, item, to);
     return { ok: true, subject };
+  }
+
+  // Photos that came in after the report: kept on it, and the chain sees them. Each one once. Nothing open → nothing to add to.
+  async function addPhotos({ trip, photos = [], by }) {
+    const k = await keyFor(trip);
+    if (!k || !photos.length) return { ok: false, added: 0 };
+    let fresh = [];
+    await db.update(KEY(site), (cur) => { const r = (cur || {})[k]; const have = (r.photos || []).map((x) => x.docId); fresh = photos.filter((x) => !have.includes(x.docId)); return { ...(cur || {}), [k]: { ...r, photos: [...(r.photos || []), ...fresh] } }; }, {});
+    if (!fresh.length) return { ok: true, added: 0 };
+    const item = ((await getBoard(site).catch(() => ({ trips: [] }))).trips || []).find((it) => String(((it && it.trip) || {}).tripNumber) === String(trip)) || null;
+    await sendPhotos((await all())[k], item, fresh, oneLine(by, 80) || 'Dispatch');
+    return { ok: true, added: fresh.length };
   }
 
   const keyFor = async (trip) => { const c = await all(); return Object.keys(c).filter((k) => String(c[k].trip) === String(trip) && !c[k].clearedAt).sort((x, y) => c[y].atMs - c[x].atMs)[0] || null; };
@@ -222,5 +283,5 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
       try { const r = await submit(p, req.body || {}); return res.status(r.code).json(r); } catch (e) { console.warn('[breakdown-report]', e.message); return res.status(500).json({ error: 'Could not send. Call dispatch.' }); }
     });
   }
-  return { link, forTrip, submit, fromEmail, held, clear, fixed, rescuePlan, process, overlay, fixedWaiting, recoveryFor, claimRecovery, releaseRecovery };
+  return { link, forTrip, submit, fromEmail, addPhotos, held, clear, fixed, rescuePlan, process, overlay, fixedWaiting, recoveryFor, claimRecovery, releaseRecovery };
 }

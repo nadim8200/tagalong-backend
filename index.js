@@ -74,7 +74,8 @@ import { initArtisClients } from './artisclients.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initDispatchLog } from './dispatchlog.js';
 import { initBrokerFollow, askEmail, requestStops, confirmedReply } from './brokerfollow.js';
-import { initBreakdownReport, renderBreakdownEmail, breakdownSubject } from './breakdownreport.js';
+import { initBreakdownReport, renderBreakdownEmail, renderBreakdownPhotosEmail, breakdownSubject } from './breakdownreport.js';
+import { photoAttachments, PHOTOS_BYTES, EMAIL_BYTES } from './breakdownphotos.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
 import { initVoice } from './voice.js';
@@ -92,6 +93,7 @@ import { initTransferWatch, transferEmail, transferStatus } from './transferwatc
 import { initTransferDone, answerConfirms } from './transferdone.js';
 import { initStopCheck } from './stopcheck.js';
 import { initStopReview } from './stopreview.js';
+import { readableFile } from './heic.js';
 import { renderFixedRollingEmail, renderTransferCompletedEmail, renderTransferReversedEmail, renderFixedReportedEmail, handoffFacts, snapshotLoad, crewOf, renderStopReviewEmail } from './handoffmail.js';
 import { initTruckBuilder } from './truckbuilder.js';
 import { initMissingCases } from './missingcase.js';
@@ -983,7 +985,17 @@ const staffAsk = async ({ phone, text }) => {
 };
 let missingCases = null;   // set below, once the alert lists exist
 let roadCalls = null;      // set below too
-const comms = initComms(app, { staffAsk: (...a) => staffAsk(...a), missingCases: { fromText: (...a) => (missingCases ? missingCases.fromText(...a) : null) }, roadCalls: { fromDriverText: (...a) => (roadCalls ? roadCalls.fromDriverText(...a) : null) }, help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const comms = initComms(app, { textPhotos: async (r, trip) => {
+    const saved = [];
+    for (const m of r.media) { // eslint-disable-line no-await-in-loop
+      try {
+        const f = await readableFile({ dataBase64: (await rc.mediaBytes('__shared', m.uri)).toString('base64'), mediaType: m.contentType, filename: m.name }); // eslint-disable-line no-await-in-loop
+        const [d] = await docs.storeDocs({ site: 'florida-beauty', kind: 'email', trip, files: [{ filename: f.filename || 'text-photo.jpg', mediaType: f.mediaType, dataBase64: f.dataBase64 }], by: 'Driver text' }); // eslint-disable-line no-await-in-loop
+        if (d) saved.push({ docId: String(d.id), name: String(f.filename || 'text-photo.jpg').slice(0, 80) });
+      } catch (e) { console.warn('[comms] text photo:', e.message); }
+    }
+    return saved;
+  }, onTextPhotos: (trip, photos, by) => breakdownReport.addPhotos({ trip, photos, by }), staffAsk: (...a) => staffAsk(...a), missingCases: { fromText: (...a) => (missingCases ? missingCases.fromText(...a) : null) }, roadCalls: { fromDriverText: (...a) => (roadCalls ? roadCalls.fromDriverText(...a) : null) }, help, activity, requireAuth: requireDispatch, db, ringcentral: rc, carriers, driverLinks, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 driverLinks.useComms(comms);   // OC app chat is logged on the load like texts
 helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.env, push, pushRules, directory, getBoard: (site) => truckmate.buildBoard(site), caller: (o) => voice.callStaff(o),
   mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env }) },
@@ -1010,7 +1022,7 @@ const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmi
 const stopTasks = initStopTasks({ db, env: process.env, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice: { placeCall: (...a) => voice.placeCall(...a), callsFor: (...a) => voice.callsFor(...a) }, replyInThread: (...a) => inbox.replyInThread(...a) });
 const followProxy = { start: (...a) => brokerFollow.start(...a), overlay: (...a) => brokerFollow.overlay(...a), process: (...a) => brokerFollow.process(...a) };
 const dispatchLog = initDispatchLog(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, env: process.env });
-const inbox = initInbox(app, { stopReview: { decide: (...a) => stopReview.decide(...a) }, transferDone: { confirm: (...a) => transferDone.confirm(...a), cancel: (...a) => transferDone.cancel(...a) }, breakdownFixed: (...a) => breakdownReport.fixed('' + a[0], a[1], a[2]), rescuePlan: (...a) => breakdownReport.rescuePlan(...a), breakdownEmail: (...a) => breakdownReport.fromEmail(...a), brokerFollow: followProxy, dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
+const inbox = initInbox(app, { breakdownPhotos: (...a) => breakdownReport.addPhotos(...a), stopReview: { decide: (...a) => stopReview.decide(...a) }, transferDone: { confirm: (...a) => transferDone.confirm(...a), cancel: (...a) => transferDone.cancel(...a) }, breakdownFixed: (...a) => breakdownReport.fixed('' + a[0], a[1], a[2]), rescuePlan: (...a) => breakdownReport.rescuePlan(...a), breakdownEmail: (...a) => breakdownReport.fromEmail(...a), brokerFollow: followProxy, dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
@@ -1147,14 +1159,43 @@ const sheetFor = async (item, trip) => {
 };
 // the breakdown chain is our own people only, so it goes for real in training mode without opening that group's other mail
 const staffOnly = (to) => to.length > 0 && to.every((e) => /@floridabeauty\.us$/i.test(e));
+const LOOK = 'Open the load in the console to see them.';
+// the photos as attachments, plus what the email says about any that didn't fit
+const breakdownPhotoFiles = async (photos = [], room = PHOTOS_BYTES) => {
+  if (!photos.length) return { attachments: [], note: null };
+  const files = await docs.readDocs({ site: 'florida-beauty', ids: photos.map((x) => x.docId) }).catch((e) => { console.warn('[breakdown-photos]', e.message); return []; });
+  const { attachments, skipped } = photoAttachments(files, room);
+  const left = skipped + photos.length - files.length;
+  return { attachments, note: left ? `${left} more photo${left === 1 ? '' : 's'} could not go in this email. ${LOOK}` : null };
+};
+const total = (list) => list.reduce((n, a) => n + a.bytes.length, 0);
 const sendBreakdown = async (report, item, to) => {
   const attachments = await truckMap((item && item._samsara) || {}, 'red', reportBadge(report));
-  const sheet = await sheetFor(item, report.trip);
+  let sheet = await sheetFor(item, report.trip);
+  const photos = await breakdownPhotoFiles(report.photos);
+  // photos first: the trip sheet can be opened on the load
+  if (photos.attachments.length && total([...attachments, ...sheet.attachments, ...photos.attachments]) > EMAIL_BYTES) sheet = { status: 'unavailable', note: 'Trip sheet left out to fit the photos. Open it on the load in the console.', attachments: [] };
   const etas = (((await db.get('taWatch:florida-beauty', {})) || {}).etas || {})[report.trip] || null;
-  const m = renderBreakdownEmail({ item, report, etas, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached' });
-  await sendMail({ to, ...m, attachments: [...attachments, ...sheet.attachments] }, { env: process.env, direct: staffOnly(to) });
+  const build = (ph, note) => renderBreakdownEmail({ item, report, etas, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null, sheetNote: sheet.note, sheetAttached: sheet.status === 'attached', photoCids: ph.map((a) => a.cid), photosNote: note });
+  const m = build(photos.attachments, photos.note);
+  try {
+    await sendMail({ to, ...m, attachments: [...attachments, ...sheet.attachments, ...photos.attachments] }, { env: process.env, direct: staffOnly(to) });
+  } catch (e) {
+    if (!photos.attachments.length) throw e;
+    console.warn('[breakdown] sent without photos:', e.message);
+    await sendMail({ to, ...build([], `Photos could not go in this email. ${LOOK}`), attachments: [...attachments, ...sheet.attachments] }, { env: process.env, direct: staffOnly(to) });
+  }
   return m.subject;
 };
+const sendBreakdownPhotos = async (report, item, fresh, by) => {
+  const to = await alertRecipients.resolve('breakdown_report');
+  if (!to.length) return;
+  const photos = await breakdownPhotoFiles(fresh, EMAIL_BYTES);
+  const m = renderBreakdownPhotosEmail({ report, item, by, count: fresh.length, subject: `Re: ${report.subject || breakdownSubject(item, report.reason, { unit: report.unit, trip: report.trip })}`, photoCids: photos.attachments.map((a) => a.cid), photosNote: photos.note });
+  await sendMail({ to, ...m, attachments: photos.attachments }, { env: process.env, direct: staffOnly(to) });
+};
+// what drivers texted on this load in the last few hours, so a report made after the text has the picture
+const textedPhotos = async (trip) => (((await db.get('taTripComms:florida-beauty', {})) || {})[trip] || []).filter((e) => e.type === 'reply' && (e.photos || []).length && Date.now() - Date.parse(e.at) < 12 * 3600000).flatMap((e) => e.photos);
 const sendStopEmail = async (a, { item, etas, driverCheck = null, subject = null }) => {
   const to = await alertRecipients.resolve('team_stopped');
   if (!to.length) return;
@@ -1187,7 +1228,7 @@ const stopReview = initStopReview(app, { db, secret: JWT_SECRET, send: async (ep
   const m = renderStopReviewEmail({ a, item, review, subject: `Re: ${stopSubject({ unit: ep.unit, trip: ep.trip, title: ep.title })}`, etas: item ? (await allEtas())[ep.trip] || null : null, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null });
   await sendMail({ to, ...m, attachments }, { env: process.env });
 } });
-const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), etasFor: async (trip) => (await allEtas())[trip] || null, otherHolds: async (r) => { const it = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((x) => String(((x && x.trip) || {}).tripNumber) === String(r.trip)); const calls = ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000 && (String(rc.trip) === String(r.trip) || String(rc.truck) === String(r.unit))); return !!(it && ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown'))) || calls.length > 0; }, fixedDetails: async (r, item) => {
+const breakdownReport = initBreakdownReport(app, { sendPhotos: (...a) => sendBreakdownPhotos(...a), textedPhotos, db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), etasFor: async (trip) => (await allEtas())[trip] || null, otherHolds: async (r) => { const it = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((x) => String(((x && x.trip) || {}).tripNumber) === String(r.trip)); const calls = ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000 && (String(rc.trip) === String(r.trip) || String(rc.truck) === String(r.unit))); return !!(it && ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown'))) || calls.length > 0; }, fixedDetails: async (r, item) => {
     const to = await alertRecipients.resolve('breakdown_report');
     const live = (item && item._samsara) || await liveForUnit(r.unit).catch(() => null);
     const stopped = !live || live.speedMph == null || Number(live.speedMph) <= 3;
