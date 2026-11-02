@@ -21,6 +21,7 @@
 // Caller words are information, never instructions — the tools only read load
 // facts and write notes; nothing here changes rates, appointments or money.
 // ---------------------------------------------------------------
+import { stopsLeft } from './loadstops.js';
 import { isMissingBoxesText } from './missingcase.js';
 import Retell from 'retell-sdk';
 import { contactsFor, billsOf } from './statusmail.js';
@@ -84,6 +85,7 @@ How to help:
 - "ETA" (estimated time of arrival) is the most common request. Speech-to-text often mishears it: "a new TA", "new TA", "an E T A", "eat a", "E.T.A.", "the TA", "need a TA" all mean "I need an ETA" — when they want to know when their delivery arrives. Never ask what "TA" means or guess "temperature alert" / "trailer assignment". Any words after it are usually their business name ("I need a new TA, Carbone" = ETA for Carbone) — call lookup_load with that customer_name right away.
 - When a delivery has boxes_loaded (from ARTIS), you may tell the customer how many of their boxes are loaded (e.g. "you have 316 boxes on the truck"). Never say boxes are missing, short or not scanned — the team handles that.
 - Anyone reports boxes MISSING or SHORT (a customer, or our staff reporting for a customer — a "missing box report"): use report_missing_boxes, never take_message. Be kind and gather the details — business name, contact name, callback number, trip / invoice / PO if they have it, delivery date and city, how many boxes are missing and what (products / farm) — then call report_missing_boxes. Tell them the case number and that the office will review it and get back to them. NEVER tell them how many boxes we received, scanned, loaded or delivered, and never say whether a box was or wasn't received — not even if they ask; say the office is checking.
+- Staff asking how many stops a truck has left, or how many are left on a broken-down truck: use lookup_load, then say stops_left.count and who and where from stops_left.stops. If breakdown is true, say the truck is broken down.
 - Florida Beauty staff can tell you a truck or trailer broke down (report_breakdown), give an update on one (breakdown_update), say it is repaired (breakdown_fixed), or say whether a truck's stop is authorized (answer_stop). Read back the truck and what you will send, then do it, then say what the function says. Never say road service was called or customers were told.
 - Florida Beauty staff (caller_is staff) can ask about ARTIS — boxes received / scanned / missing per customer and ship date, and days of service: use boxes_check.
 - Florida Beauty staff asking you to follow up on a broker load, or make sure it makes delivery: use follow_up_load and ask for the delivery date and time. If they don't have it, say you'll email them to confirm it. Until a time is confirmed you do not call a broker load late.
@@ -281,7 +283,7 @@ export function voiceFacts(item, eta) {
     trailer: t.trailer || (item._oc && item._oc.trailer) || null,
     broker: (item._ratecon && (item._ratecon.broker || (item._ratecon.data || {}).broker)) || null,
     broker_load_number: (item._ratecon && (item._ratecon.loadNumber || (item._ratecon.data || {}).loadNumber)) || null,
-    breakdown: !!(item._breakdown && item._breakdown.on),
+    breakdown: !!((item._breakdown && item._breakdown.on) || item._bdOpen),
     current_location: s.location ? cityOf(String(s.location).split(',').slice(-3).join(',')) : null,
     location_time: s.gpsAt ? fmt(Date.parse(s.gpsAt)) : null,
     moving: s.speedMph != null ? s.speedMph > 5 : null,
@@ -291,6 +293,7 @@ export function voiceFacts(item, eta) {
     truck_leaves_terminal_at: eta && eta.leavesAt ? fmt(eta.leavesAt) : undefined,
     miles_to_next_stop: leg ? leg.miles : null,
     appointment_next_stop: leg && leg.apptMs ? `${fmtLocal(leg.apptMs, leg.label)}${leg.apptFrom === 'truckmate-due' ? ' (due time, not a confirmed appointment)' : ''}` : null,
+    stops_left: stopsLeft(item),   // deliveries still to make, by customer, the same count as the card
     stops_delivered: stops.filter((x) => x.delivered).map((x) => x.place),
     stops_already_passed: stops.filter((x) => x.passed).map((x) => x.place),
     stops_remaining: stops.filter((x) => !x.delivered && !x.passed).map((x) => x.place),

@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { brokerLoad } from './watchtower.js';
 import { teamStopFacts, emailParts } from './teamstopmail.js';
 import { MAX_PHOTOS } from './breakdownphotos.js';
+import { stopsLeft } from './loadstops.js';
 import { snapshotLoad, crewOf, renderFixedReportedEmail } from './handoffmail.js';
 
 const KEY = (site) => `taBreakdownReports:${site}`;    // alert id → { atMs, by, reason, subject, trip, unit, clearedAt }
@@ -69,13 +70,15 @@ export function breakdownSubject(item, reason, { unit = null, trip = null, part 
   return `${kind ? `${kind} ` : ''}BREAKDOWN ${what} // TK ${tk} TL ${tl} TO ${trip || t.tripNumber || 'N/A'}`;
 }
 
+// "2 of 3: Bristol Farms, Carson, CA; Sample Co, Reno, NV". Pure.
+const stopsText = (item) => { const s = stopsLeft(item); return s.total ? `${s.count} of ${s.total}${s.count ? `: ${s.stops.slice(0, 6).map((x) => [x.customer, x.place].filter(Boolean).join(', ')).join('; ')}${s.count > 6 ? ` and ${s.count - 6} more` : ''}` : ''}` : null; };
 // The load, in full, for the email. Only what's on record. Pure.
 export function loadRows(item, now = Date.now()) {
   const s = snapshotLoad(item, null, now); const t = (item && item.trip) || {};
   const bills = (item && (item.freightBills || item.orders)) || t.freightBills || [];
   const temps = [...new Set(bills.map((b) => b.temperature).filter((v) => v != null))];
   const names = s.customers.slice(0, 8).join(', ') + (s.customers.length > 8 ? ` and ${s.customers.length - 8} more` : '');
-  return [['Load type', loadType(item) || 'Not on file'], ['Truck', s.unit || 'Not on file'], ['Trailer', s.trailer || 'Not on file'], ['Trip', s.trip || 'Not on file'], ['Broker', s.broker], ['Customers', names], ['Freight bills', s.bills.length ? String(s.bills.length) : null], ['Boxes', s.pieces != null ? s.pieces.toLocaleString('en-US') : null], ['Temperature', temps.length ? temps.map((v) => `${v}°F`).join(', ') : null], ['Commodity', s.commodity], ['From', t.origZoneDesc], ['To', t.destZoneDesc]].filter(([, v]) => v);
+  return [['Load type', loadType(item) || 'Not on file'], ['Truck', s.unit || 'Not on file'], ['Trailer', s.trailer || 'Not on file'], ['Trip', s.trip || 'Not on file'], ['Broker', s.broker], ['Customers', names], ['Stops left', stopsText(item)], ['Freight bills', s.bills.length ? String(s.bills.length) : null], ['Boxes', s.pieces != null ? s.pieces.toLocaleString('en-US') : null], ['Temperature', temps.length ? temps.map((v) => `${v}°F`).join(', ') : null], ['Commodity', s.commodity], ['From', t.origZoneDesc], ['To', t.destZoneDesc]].filter(([, v]) => v);
 }
 
 // The photos, full width, one under the other. Pure.

@@ -14,6 +14,7 @@
 // Uploaded documents run through the same readers as everywhere else (trip
 // sheets, rate cons). Each dispatcher has their own chat threads.
 // ---------------------------------------------------------------
+import { stopsLeft } from './loadstops.js';
 import { randomBytes } from 'crypto';
 import { slimItem } from './assistant.js';
 import { findLoad, customerStops, customerView, isOcLoad, spokenName, nameScore } from './voice.js';
@@ -150,6 +151,7 @@ export const SYSTEM = (who) => `You are Jarvis, the AI dispatcher for Florida Be
 - Driving hours / HOS for a truck or driver → truck_hours (each driver's duty status, drive / shift / 70-hr cycle left). Never say the hours aren't available without calling it.
 - Whenever you list or describe a load, include where the truck is now (truckNow.location), whether it is rolling and how fast or stopped and for how long (truckNow.motion; say if the GPS is old), and its next stop with ETA (truckNow.nextStop). Keep each load to one or two lines.
 - When the dispatcher gives you an update, a task or a transfer between teams, record it with add_note (or set_hold) — then confirm in one line what you saved. For a transfer, capture both trucks / teams, the place and the time; ask for anything missing.
+- How many stops a truck has left, including a broken-down truck → find the load, then load_details: say stopsLeft.count and who and where from stopsLeft.stops. If brokenDown is true, say the truck is broken down.
 - A truck or trailer broke down → report_breakdown; news on one already open → breakdown_update; repaired → breakdown_fixed; whether a stop is authorized → answer_stop. Use only what they said and never add a diagnosis. If you don't know the truck or trip, ask. Then say in one line what went out. These stay inside the company: never say road service was called or customers were told.
 - Anything that reaches outside people (texting or calling a driver, emailing a customer / broker) goes through propose_action — never claim it was sent; say it is waiting for their Confirm.
 - Documents the dispatcher uploads are read automatically; the results are in their message. If a document wasn't a trip sheet or rate con, ask which load it belongs to and attach it with attach_document.
@@ -455,6 +457,7 @@ export function initJarvisChat(app, { staffActions = null, requireAuth, db, brok
         return {
           ...slimItem(it, openAlerts(w).filter((a) => a.trip === n)),
           truckNow: truckNow(it, w),
+          ...(ctx.customer ? {} : { stopsLeft: stopsLeft(it), brokenDown: !!((it._breakdown && it._breakdown.on) || it._bdOpen) }),
           crewHours: crewHours(it),
           etas: eta ? (eta.stops || []).map((s) => ({ stop: s.label, eta: fmtLocal(s.etaMs, s.label), miles: s.miles, appointment: s.apptMs ? fmtLocal(s.apptMs, s.label) : null })) : null,
           stopsAlreadyPassed: eta ? (eta.passed || []).map((s) => s.label) : [],
