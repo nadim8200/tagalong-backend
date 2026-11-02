@@ -36,7 +36,7 @@ import { auditTrail, initAudit } from './audit.js';
 import { initLoads } from './loads.js';
 import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
-import { initWatchtower } from './watchtower.js';
+import { initWatchtower, brokerLoad } from './watchtower.js';
 import { renderTruckMap, renderTransferMap } from './truckmap.js';
 import { renderTeamStopEmail, renderRollingEmail, teamStopFacts, stopSubject, tripSheetIds, tripSheetFiles } from './teamstopmail.js';
 import { initManifests } from './manifest.js';
@@ -75,7 +75,7 @@ import { initArtisClients } from './artisclients.js';
 import { initInbox, isInternal } from './inbox.js';
 import { initDispatchLog } from './dispatchlog.js';
 import { initBrokerFollow, askEmail, requestStops, confirmedReply } from './brokerfollow.js';
-import { initBreakdownReport, renderBreakdownEmail, renderBreakdownPhotosEmail, breakdownSubject } from './breakdownreport.js';
+import { loadRows, initBreakdownReport, renderBreakdownEmail, renderBreakdownPhotosEmail, breakdownSubject } from './breakdownreport.js';
 import { photoAttachments, PHOTOS_BYTES, EMAIL_BYTES } from './breakdownphotos.js';
 import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
@@ -96,7 +96,7 @@ import { initStopCheck } from './stopcheck.js';
 import { initStopReview } from './stopreview.js';
 import { initStaffActions } from './staffactions.js';
 import { readableFile } from './heic.js';
-import { renderFixedRollingEmail, renderTransferCompletedEmail, renderTransferReversedEmail, renderFixedReportedEmail, renderLoginEmail, handoffFacts, snapshotLoad, crewOf, renderStopReviewEmail } from './handoffmail.js';
+import { renderWaitingEmail, renderFixedRollingEmail, renderTransferCompletedEmail, renderTransferReversedEmail, renderFixedReportedEmail, renderLoginEmail, handoffFacts, snapshotLoad, crewOf, renderStopReviewEmail } from './handoffmail.js';
 import { initTruckBuilder } from './truckbuilder.js';
 import { initMissingCases } from './missingcase.js';
 import { initStopTasks } from './stoptasks.js';
@@ -109,6 +109,7 @@ import { initEtaWatch } from './etawatch.js';
 import { initFollowThrough } from './followthrough.js';
 import { initPlaybook } from './playbook.js';
 import { initJarvisAsks } from './jarvisasks.js';
+import { initWaitingTime } from './waitingtime.js';
 import { initDirectory } from './directory.js';
 
 const {
@@ -1122,7 +1123,7 @@ const macroPoint = initMacroPoint(app, { requireAdmin: requireCompanyAdmin, db, 
 missingCases = initMissingCases({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('missing_boxes_case'), getBoard: (site) => truckmate.buildBoard(site) });
 const missingBoxes = initMissingBoxes({ db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('artis_missing_call') });
 brokerFollow = initBrokerFollow(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), commitments, sendMail: (m, o = {}) => sendMail(m, { env: process.env, ...o }), listEmails: () => alertRecipients.resolve('broker_late'), copyEmails: () => alertRecipients.resolve('delivery_confirm'), secret: JWT_SECRET, replyInThread: (...a) => inbox.replyInThread(...a) });
-truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => commitments.overlay(...a), (...a) => followProxy.overlay(...a), (...a) => breakdownReport.overlay(...a), (...a) => truckBuilder.overlay(...a), (...a) => artisWeb.overlay(...a), (...a) => artisReports.overlay(...a), (...a) => synergize.overlay(...a), (...a) => artis.overlay(...a), (...a) => stopTasks.overlay(...a), (...a) => macroPoint.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => { etaReport.onFinished(site, rec, reason).catch((e) => console.warn('[eta-report]', e.message)); return rundowns.onFinished(site, rec, reason); } });
+truckmate = initTruckMate(app, { requireAuth: requireDispatch, db, env: process.env, TRACCAR_URL, traccarHeaders, docs, overlays: [(...a) => (waiting ? waiting.overlay(...a) : null), (...a) => commitments.overlay(...a), (...a) => followProxy.overlay(...a), (...a) => breakdownReport.overlay(...a), (...a) => truckBuilder.overlay(...a), (...a) => artisWeb.overlay(...a), (...a) => artisReports.overlay(...a), (...a) => synergize.overlay(...a), (...a) => artis.overlay(...a), (...a) => stopTasks.overlay(...a), (...a) => macroPoint.overlay(...a), profiles.overlay, carriers.overlay, driverLinks.overlay, comms.overlay, inbox.overlay, statusMail.overlay, (site, trips) => (pickupFollow ? pickupFollow.overlay(site, trips) : null), (site, trips) => (tempPhotos ? tempPhotos.overlay(site, trips) : null), (site, trips) => nextLoads.overlay(site, trips), (site, trips) => planSheet.overlay(site, trips), (site, trips) => (jarvisChat ? jarvisChat.overlay(site, trips) : null)], routeProviders: [driverLinks.routeFor], onFinished: (site, rec, reason) => { etaReport.onFinished(site, rec, reason).catch((e) => console.warn('[eta-report]', e.message)); return rundowns.onFinished(site, rec, reason); } });
 
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
@@ -1183,6 +1184,7 @@ const sheetFor = async (item, trip) => {
   return sheet;
 };
 // the breakdown chain is our own people only, so it goes for real in training mode without opening that group's other mail
+let waiting = null;   // set once the emails below can be built
 const staffOnly = (to) => to.length > 0 && to.every((e) => /@floridabeauty\.us$/i.test(e));
 const LOOK = 'Open the load in the console to see them.';
 // the photos as attachments, plus what the email says about any that didn't fit
@@ -1402,13 +1404,39 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
     const m = renderRollingEmail(ep, item, { etas, now: ep.confirmedAt, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null, note: chain && !chain.fixedAt ? `No repair has been reported for this breakdown.${chain.transferredTo ? ` Trip ${chain.trip} moved to truck ${chain.transferredTo}.` : ''}` : ep.review && ep.review.status === 'authorized' ? `This stop was authorized by ${ep.review.by}: ${ep.review.reason}` : null });
     await sendMail({ to, ...m, ...(chain && chain.subject ? { subject: `Re: ${chain.subject}` } : {}), attachments }, { env: process.env, direct: !!chain && staffOnly(to) });
   },
-  onStopSolved: (a, by, note) => stopReview.decide({ unit: a.unit, trip: a.trip, startAt: a.stoppedSinceMs, title: a.title, status: 'authorized', reason: note, by, source: 'console' }),
+  onStopSolved: async (a, by, note, user) => {
+    // the signature: the name on the Employees list, not the short login name
+    const mail = String((user && user.email) || '').toLowerCase();
+    const person = mail ? ((await directory.load().catch(() => ({ people: [] }))).people || []).find((p) => p && String(p.email || '').toLowerCase() === mail) : null;
+    return stopReview.decide({ unit: a.unit, trip: a.trip, startAt: a.stoppedSinceMs, title: a.title, status: 'authorized', reason: note, by: (person && person.name) || by, email: mail || null, source: 'console' });
+  },
   onTeamStop: async (a, { item, etas }) => {
     const driverCheck = await stopCheck.forStop(a, item).catch((e) => { console.warn('[stop-check]', e.message); return null; });
     await sendStopEmail(a, { item, etas, driverCheck });
-  }, afterBoard: async (site, board, ctx) => { await timedStep('transferDone.observe', () => transferDone.observe(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('breakdownReport.process', () => breakdownReport.process(site, board)).catch((e) => console.warn('[breakdown-report]', e.message)); await timedStep('followProxy.process', () => followProxy.process(site, board)).catch((e) => console.warn('[broker-follow]', e.message)); await timedStep('transferWatch.process', () => transferWatch.process(site, board, ctx)).catch((e) => console.warn('[transfer]', e.message)); await timedStep('transferDone.process', () => transferDone.process(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('stopCheck.process', () => stopCheck.process(board)).catch((e) => console.warn('[stop-check]', e.message)); await timedStep('stopTasks.process', () => stopTasks.process(site, board)).catch((e) => console.warn('[stop-tasks]', e.message)); await timedStep('commitments.process', () => commitments.process(site, board)).catch((e) => console.warn('[commit]', e.message)); await timedStep('etaReport.process', () => etaReport.process(site, board)).catch((e) => console.warn('[eta-log]', e.message)); await timedStep('stopVisits.process', () => stopVisits.process(site, board)); await timedStep('milestones.process', () => milestones.process(site, board, ctx)); await timedStep('statusMail.process', () => statusMail.process(site, board, ctx)); await timedStep('etaWatch.run', () => etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now })); await timedStep('follow.run', () => follow.run(site, board.trips || [])); } });
+  }, afterBoard: async (site, board, ctx) => { await timedStep('transferDone.observe', () => transferDone.observe(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('breakdownReport.process', () => breakdownReport.process(site, board)).catch((e) => console.warn('[breakdown-report]', e.message)); await timedStep('followProxy.process', () => followProxy.process(site, board)).catch((e) => console.warn('[broker-follow]', e.message)); await timedStep('transferWatch.process', () => transferWatch.process(site, board, ctx)).catch((e) => console.warn('[transfer]', e.message)); await timedStep('transferDone.process', () => transferDone.process(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('waiting.process', () => (waiting ? waiting.process(board) : null)).catch((e) => console.warn('[waiting-time]', e.message)); await timedStep('stopCheck.process', () => stopCheck.process(board)).catch((e) => console.warn('[stop-check]', e.message)); await timedStep('stopTasks.process', () => stopTasks.process(site, board)).catch((e) => console.warn('[stop-tasks]', e.message)); await timedStep('commitments.process', () => commitments.process(site, board)).catch((e) => console.warn('[commit]', e.message)); await timedStep('etaReport.process', () => etaReport.process(site, board)).catch((e) => console.warn('[eta-log]', e.message)); await timedStep('stopVisits.process', () => stopVisits.process(site, board)); await timedStep('milestones.process', () => milestones.process(site, board, ctx)); await timedStep('statusMail.process', () => statusMail.process(site, board, ctx)); await timedStep('etaWatch.run', () => etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now })); await timedStep('follow.run', () => follow.run(site, board.trips || [])); } });
 staffActions = initStaffActions({ breakdown: breakdownReport, stopReview, docs, getBoard: (site) => truckmate.buildBoard(site) });
 initAudit(app, { db, requireAdmin: requireCompanyAdmin });
+// waiting time at a stop: the emails to dispatch, with the map and the load (waitingtime.js)
+const sendWaiting = async (kind, r, item, reviewUrl, to, { example = false } = {}) => {
+  if (!to.length) return;
+  const attachments = await truckMap((item && item._samsara) || {}, kind === 'start' ? 'amber' : 'blue', { close: true });
+  const m = renderWaitingEmail(kind, r, { item, rows: loadRows(item || { trip: { powerUnit: r.unit, tripNumber: r.trip, trailer: r.trailer } }), etas: item ? (await allEtas())[r.trip] || null : null, reviewUrl, showPhones: staffOnly(to), mapCid: attachments.length ? 'truckmap' : null, example });
+  await sendMail({ to, ...m, attachments }, { env: process.env, direct: staffOnly(to) });
+};
+waiting = initWaitingTime(app, { db, secret: JWT_SECRET, etas: allEtas, recipients: () => alertRecipients.resolve('waiting_time'), send: (kind, r, item, url, to) => sendWaiting(kind, r, item, url, to) });
+// Both waiting time emails, to Nadim only, built from a real load with made-up times. Marked [EXAMPLE]: nothing is saved.
+app.post('/admin/waiting-example', requireCompanyAdmin, async (req, res) => {
+  try {
+    const item = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((it) => it && brokerLoad(it) && it._samsara && it._samsara.lat != null) || null;
+    if (!item) return res.status(409).json({ error: 'No broker load with a location right now.' });
+    const t = item.trip; const now = Date.now(); const H = 3600000;
+    const r = { key: 'example', trip: String(t.tripNumber), unit: t.powerUnit, trailer: t.trailer, kind: 'receiver', stop: 'Example Receiver, Sample City, CA', arrivedMs: now - 5 * H, apptMs: now - 3 * H, startMs: now, status: 'open' };
+    const to = ['ntellez@floridabeauty.us'];
+    await sendWaiting('start', r, item, waiting.link(r, true), to, { example: true });
+    await sendWaiting('total', { ...r, arrivedMs: now - 7 * H, apptMs: now - 5.5 * H, startMs: now - 2.5 * H, leftMs: now, waitedMs: 2.5 * H, status: 'approved', decidedBy: 'Example Dispatcher', decidedAt: now - 2.4 * H }, item, null, to, { example: true });
+    res.json({ ok: true });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and

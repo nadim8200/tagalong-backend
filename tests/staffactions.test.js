@@ -46,7 +46,7 @@ test('updates and fixed need an open breakdown, and say so', async () => {
 test('a stop answer says who and how', async () => {
   const { a, stops } = setup();
   assert.equal((await a.stop({ truck: '4560', authorized: true, reason: 'hotel approved', by: 'Sara', source: 'Text to Jarvis' })).ok, true);
-  assert.deepEqual(stops[0], { unit: '4560', trip: null, status: 'authorized', reason: 'hotel approved', by: 'Sara', source: 'Text to Jarvis' });
+  assert.deepEqual(stops[0], { unit: '4560', trip: null, status: 'authorized', reason: 'hotel approved', by: 'Sara', email: null, source: 'Text to Jarvis' });
   await a.stop({ trip: '1', authorized: false, by: 'Sara', source: 'Ask Jarvis' });
   assert.equal(stops[1].status, 'unauthorized');
 });

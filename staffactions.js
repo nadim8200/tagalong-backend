@@ -49,9 +49,9 @@ export function initStaffActions({ breakdown, stopReview, getBoard, docs = null,
     return r.ok ? { ok: true, trip: hit.trip, say: `Recorded as fixed on trip ${hit.trip}. Jarvis is waiting to see the truck move.` } : { ok: false, say: r.error };
   }
   // the stop is found by truck, or by trip when that's all they gave
-  async function stop({ trip, truck, authorized, reason, by, source }) {
+  async function stop({ trip, truck, authorized, reason, by, email = null, source }) {
     const status = authorized ? 'authorized' : 'unauthorized';
-    const r = await stopReview.decide({ unit: truck || null, trip: trip || null, status, reason, by, source });
+    const r = await stopReview.decide({ unit: truck || null, trip: trip || null, status, reason, by, email, source });
     if (r.already) return { ok: true, say: 'That was already recorded.' };
     return r.ok ? { ok: true, say: authorized ? 'Stop authorized. Alerts for it are off and the team has the email.' : 'Marked not authorized. Alerts keep going and the team has the email.' } : { ok: false, say: r.error };
   }

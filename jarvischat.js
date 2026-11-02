@@ -549,7 +549,7 @@ export function initJarvisChat(app, { staffActions = null, requireAuth, db, brok
         if (name === 'breakdown_update') return staffActions('update', { ...o, message: input.message, uploaded: ctx.uploaded });
         if (name === 'breakdown_fixed') return staffActions('fixed', { ...o, repair: input.repair, provider: input.provider, notes: input.notes });
         if (input.authorized && ctx.source === 'Text to Jarvis') return { ok: false, say: 'Stops can only be authorized from the console or by replying to the stop email.' };   // a text's number can be faked
-        return staffActions('stop', { ...o, authorized: !!input.authorized, reason: input.reason, source: ctx.source });
+        return staffActions('stop', { ...o, email: ctx.user.email || null, authorized: !!input.authorized, reason: input.reason, source: ctx.source });
       }
       case 'attach_document': {
         const it = byTrip(input.trip);

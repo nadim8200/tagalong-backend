@@ -39,12 +39,12 @@ export function initStopReview(app, { db, secret, send, baseUrl = 'https://tagal
   const isAuthorized = async (a) => { const ep = stopEpisodeFor(await state(), { unit: a.unit, trip: a.trip }); return !!(ep && ep.review && ep.review.status === 'authorized'); };
 
   // Saves the answer once, then tells the same people the stop email went to.
-  async function decide({ unit = null, trip = null, since = null, startAt = null, title = null, status, reason, by, source }) {
+  async function decide({ unit = null, trip = null, since = null, startAt = null, title = null, status, reason, by, email = null, source }) {
     const clean = oneLine(reason, MAX_REASON); const who = oneLine(by, 80);
     if (!STOP_WORD[status]) return { code: 400, error: 'Choose Authorized or Not authorized.' };
     if (status === 'authorized' && clean.length < 3) return { code: 400, error: 'Write why this stop is authorized.' };
     if (!who) return { code: 400, error: 'Add your name.' };
-    const review = { status, reason: clean, by: who, source, atMs: now() };
+    const review = { status, reason: clean, by: who, ...(email ? { email: String(email).slice(0, 120) } : {}), source, atMs: now() };
     let out = null;
     await db.update(STATE(SITE), (cur) => { const r = applyStopReview(cur || {}, { unit, trip, since, startAt, title, review }); out = r.out; return r.state; }, {});
     if (!out.ok) return { code: 409, error: out.error };

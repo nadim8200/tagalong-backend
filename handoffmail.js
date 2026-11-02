@@ -277,10 +277,13 @@ export function renderStopReviewEmail({ a, item, review, subject, etas = null, n
   const sub = yes ? 'Alerts for this stop are off' : 'Alerts for this stop continue';
   const next = yes ? 'Jarvis will not send more alerts for this stop. You will get one email when the truck is confirmed rolling again.' : 'Alerts continue until the truck is rolling or someone authorizes the stop.';
   const stopped = f.duration ? `${a.stopStartUnknown ? 'At least ' : ''}${f.duration}` : null;
-  const rows = [[yes ? 'Authorized by' : 'Marked by', review.by], ['When', et(review.atMs)], ['How', STOP_FROM[review.source] || review.source], ['Stopped so far', stopped], ['Stopped since', f.stoppedSince]].filter(([, v]) => v);
+  const signed = `${yes ? 'Approved' : 'Marked not authorized'} by ${review.by}`;
+  const how = `${et(review.atMs)} · ${STOP_FROM[review.source] || review.source}${review.source === 'email button' ? ' (name as typed)' : ''}`;
+  const rows = [['Stopped so far', stopped], ['Stopped since', f.stoppedSince]].filter(([, v]) => v);
   const mapUrl = f.lat != null ? `https://www.google.com/maps?q=${encodeURIComponent(`${f.lat},${f.lng}`)}` : null;
   const body = `${trucksLine(f.unit)}${tripLine(f.trip, f.trailer)}
 ${message(yes ? 'Reason' : 'Note', [review.reason ? `"${review.reason}"` : 'No note added.'])}
+${message(signed, [review.email, how])}
 <tr><td style="height:12px;line-height:12px;font-size:0;">&nbsp;</td></tr>
 ${table(rows.map(([k, v]) => kv(k, v)).join(''))}
 ${heading('Location')}
@@ -288,7 +291,7 @@ ${f.mapCid ? `<tr><td ${pad} style="padding:0 24px 10px;"><a href="${esc(mapUrl)
 <tr><td ${pad} style="padding:0 24px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};word-break:break-word;"><b>${esc(f.location || 'Location not reported')}</b></td></tr>
 ${message('What happens next', [next])}
 ${viewTrip(f.trip)}`;
-  return { subject, html: shell({ ...(yes ? {} : { tone: 'red' }), mark: yes ? '&#10003;' : '&#10005;', title, sub }, body), text: ['FLORIDA BEAUTY — Dispatch notifications', '', title, sub, `Truck ${f.unit}`, `Trip ${f.trip}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, '', `${yes ? 'Reason' : 'Note'}: ${review.reason || 'No note added.'}`, ...rows.map(([k, v]) => `${k}: ${v}`), `Location: ${f.location || 'Location not reported'}`, '', next, ...mailEnd(f.trip)].join('\n') };
+  return { subject, html: shell({ ...(yes ? {} : { tone: 'red' }), mark: yes ? '&#10003;' : '&#10005;', title, sub }, body), text: ['FLORIDA BEAUTY — Dispatch notifications', '', title, sub, `Truck ${f.unit}`, `Trip ${f.trip}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, '', `${yes ? 'Reason' : 'Note'}: ${review.reason || 'No note added.'}`, signed, ...(review.email ? [review.email] : []), how, ...rows.map(([k, v]) => `${k}: ${v}`), `Location: ${f.location || 'Location not reported'}`, '', next, ...mailEnd(f.trip)].join('\n') };
 }
 
 // The email to someone who just got a console login. It holds a temporary password, so it goes only to that person. Pure.
@@ -328,5 +331,35 @@ ${question ? message('What Jarvis asked', [question]) : ''}${answer ? message('W
 ${heading(`What Jarvis will do now`)}${lessons.map(row).join('')}
 ${message('', ['These lessons are live. If one is wrong, erase it and Jarvis stops using it.'])}`;
   return { subject: `Jarvis learned ${n} new ${word}${by ? ` from ${by}` : ''}`, html: shell({ tone: 'blue', mark: '&#10003;', title: 'JARVIS LEARNED SOMETHING', sub: 'Check that it is right' }, body), text: ['JARVIS LEARNED SOMETHING', ...(by ? [`Taught by: ${by}`] : []), ...(question ? [`Jarvis asked: ${question}`] : []), ...(answer ? [`They answered: ${answer}`] : []), '', ...lessons.flatMap((l) => [l.title, `${l.when ? `When ${l.when}: ` : ''}${l.do}`, `Erase this lesson: ${l.eraseUrl}`, '']), 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n') };
+}
+
+// Waiting time at a stop, for dispatch: the clock is due (kind 'start') or the truck left (kind 'total'). Pure.
+export function renderWaitingEmail(kind, r, { item = null, rows = [], etas = null, reviewUrl = null, now = Date.now(), showPhones = true, mapCid = null, example = false } = {}) {
+  const f = teamStopFacts({ unit: r.unit, trip: r.trip }, item, { etas, now, showPhones, mapCid });
+  const where = `${r.kind === 'shipper' ? 'Shipper' : 'Receiver'}${r.stop ? `: ${r.stop}` : ''}`;
+  const start = kind === 'start';
+  const title = start ? 'WAITING TIME IS SET TO BEGIN' : 'WAITING TIME TOTAL';
+  const left = !start && r.status === 'open';
+  const sub = start ? 'Approve it or not' : left ? 'Nobody approved this clock' : 'Truck has left';
+  const facts = [['Stop', where], ['Arrived', et(r.arrivedMs)], ['Appointment', r.apptMs ? et(r.apptMs) : 'None on file, counted from arrival'], [start ? 'Clock starts' : 'Clock started', et(r.startMs)], ...(start ? [] : [['Left', et(r.leftMs)]]), ...(r.decidedBy ? [['Approved by', `${r.decidedBy}${r.decidedAt ? ` · ${et(r.decidedAt)}` : ''}`]] : [])];
+  const big = start ? null : fmtMin((r.waitedMs || 0) / 60000) || '0m';
+  const mapUrl = f.lat != null ? `https://www.google.com/maps?q=${encodeURIComponent(`${f.lat},${f.lng}`)}` : null;
+  const choose = (href, label, color) => `<td width="50%" style="padding:6px 3px 0;"><a href="${esc(href)}" style="display:block;padding:14px 6px;border-radius:6px;background:${color};font-family:${FONT};font-size:17px;font-weight:bold;text-align:center;color:#FFFFFF;text-decoration:none;">${esc(label)}</a></td>`;
+  const body = `${trucksLine(f.unit || r.unit)}${tripLine(f.trip || r.trip, f.trailer || r.trailer)}
+${big ? `<tr><td ${pad} style="padding:12px 24px 0;font-family:${FONT};"><div class="ts-big" style="font-size:40px;line-height:1.1;font-weight:bold;color:${NAVY};">${esc(big)}</div><div style="font-size:13px;font-weight:bold;letter-spacing:.4px;color:${MUTED};">TOTAL WAITING TIME</div></td></tr>` : ''}
+<tr><td style="height:12px;line-height:12px;font-size:0;">&nbsp;</td></tr>
+${table(facts.map(([k, v]) => kv(k, v)).join(''))}
+${start && reviewUrl ? `<tr><td ${pad} style="padding:12px 24px 0;font-family:${FONT};font-size:15px;font-weight:bold;color:${NAVY};">Start the waiting time clock?<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>${choose(`${reviewUrl}?d=approved`, 'Approve', '#166534')}${choose(`${reviewUrl}?d=declined`, "Don't approve", NAVY)}</tr></table></td></tr>` : ''}
+${left ? message('Not approved', ['Nobody answered the waiting time email, so this total was never approved.']) : ''}
+${heading('Location')}
+${f.mapCid ? `<tr><td ${pad} style="padding:0 24px 10px;"><a href="${esc(mapUrl)}"><img src="cid:${esc(f.mapCid)}" width="592" alt="Map of the truck" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></a></td></tr>` : ''}
+<tr><td ${pad} style="padding:0 24px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};word-break:break-word;"><b>${esc(f.location || 'Location not reported')}</b></td></tr>
+${heading(f.drivers.length > 1 ? 'Driver team' : 'Driver')}
+<tr><td ${pad} style="padding:0 24px;">${drivers(f.drivers, f.drivers.length > 1)}</td></tr>
+${heading('Load')}
+${table(rows.map(([k, v]) => kv(k, v)).join(''))}
+${viewTrip(f.trip || r.trip)}`;
+  const subject = `${example ? '[EXAMPLE] ' : ''}${start ? 'Waiting time set to begin' : `Waiting time total ${big}`} — Truck ${f.unit || r.unit} · Trip ${f.trip || r.trip}`;
+  return { subject, html: shell({ tone: start ? 'amber' : 'blue', mark: start ? '&#9719;' : '&#10003;', title, sub }, body), text: [title, sub, `Truck ${f.unit || r.unit}`, `Trip ${f.trip || r.trip}`, ...(big ? [`Total waiting time: ${big}`] : []), ...facts.map(([k, v]) => `${k}: ${v}`), ...(start && reviewUrl ? [`Approve: ${reviewUrl}?d=approved`, `Don't approve: ${reviewUrl}?d=declined`] : []), ...(left ? ['Nobody answered the waiting time email, so this total was never approved.'] : []), '', ...rows.map(([k, v]) => `${k}: ${v}`), ...mailEnd(f.trip || r.trip)].join('\n') };
 }
 

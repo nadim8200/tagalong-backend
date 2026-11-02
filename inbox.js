@@ -748,7 +748,7 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
           if (!t2 && !truck2) { done.push({ ...ins, skipped: 'needs the truck or trip number — reply with it' }); continue; }
           if (!stopReview || !isInternal(e.from.address, env)) { done.push({ ...ins, skipped: 'not available' }); continue; }
           try {
-            const r = await stopReview.decide({ unit: truck2, trip: t2, status: ins.kind === 'stop_authorized' ? 'authorized' : 'unauthorized', reason: ins.reason, by: e.from.name || e.from.address, source: 'email reply' }); // eslint-disable-line no-await-in-loop
+            const r = await stopReview.decide({ unit: truck2, trip: t2, status: ins.kind === 'stop_authorized' ? 'authorized' : 'unauthorized', reason: ins.reason, by: e.from.name || e.from.address, email: e.from.address, source: 'email reply' }); // eslint-disable-line no-await-in-loop
             done.push(r.ok ? { ...ins, trip: t2, sent: r.already ? 'already recorded' : `stop marked ${ins.kind === 'stop_authorized' ? 'authorized' : 'not authorized'} — the team has the email`, answered: true } : { ...ins, trip: t2, skipped: r.error });
           } catch (err) { done.push({ ...ins, error: err.message }); }
           continue;

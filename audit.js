@@ -6,7 +6,7 @@
 const SECRET = /pass|pwd|token|secret|api.?key|authorization|credential|ssn|card|cvv|bytes|base64|signature|^next$|^current$/i;
 const MAX_TEXT = 200;
 const SKIP = /^\/(jarvis\/transcribe|push\/|retell\/)/;
-const LINK = /^\/(br|dc|sr|lesson)\/[^/]+/;
+const LINK = /^\/(br|dc|sr|lesson|wt)\/[^/]+/;
 const MUTATES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 // The body without anything secret, cut short, files reduced to a count. Pure.
@@ -44,6 +44,7 @@ const LABELS = [
   [/^POST \/sr\//, 'Answered a stop from an email link'],
   [/^POST \/dc\//, 'Confirmed delivery times from an email link'],
   [/^POST \/lesson\//, 'Erased a Jarvis lesson'],
+  [/^POST \/wt\//, 'Answered a waiting time email'],
   [/^POST \/truckmate\/asks\//, 'Answered a Jarvis question'],
 ];
 const VERB = { POST: 'Did', PUT: 'Changed', PATCH: 'Changed', DELETE: 'Deleted' };

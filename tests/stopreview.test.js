@@ -77,7 +77,7 @@ test('the stop email has the two buttons, updates do not', () => {
 
 test('the answer email says who, why and what happens next', () => {
   const m = renderStopReviewEmail({ a: a(), item: null, review, subject: 'Re: x' });
-  assert.match(m.html, /STOP AUTHORIZED/); assert.match(m.text, /Authorized by: Sara/); assert.match(m.text, /hotel approved/); assert.match(m.text, /will not send more alerts/);
+  assert.match(m.html, /STOP AUTHORIZED/); assert.match(m.text, /Approved by Sara/); assert.match(m.text, /hotel approved/); assert.match(m.text, /will not send more alerts/);
   const no = renderStopReviewEmail({ a: a(), item: null, review: { ...review, status: 'unauthorized', reason: '' }, subject: 'Re: x' });
   assert.match(no.html, /STOP NOT AUTHORIZED/); assert.match(no.text, /No note added/);
 });
@@ -93,4 +93,10 @@ test('the page escapes what people typed and preselects the button', () => {
 test('staff replies become a stop answer with the reason', () => {
   const [x] = parseInstructions([{ kind: 'stop_authorized', truck: '4560', reason: 'hotel approved' }]);
   assert.equal(x.reason, 'hotel approved'); assert.equal(x.truck, '4560');
+});
+
+test('the email signs the stop with who, their email, when and how', () => {
+  const m = renderStopReviewEmail({ a: a(), item: null, review: { ...review, by: 'Saray Trujillo', email: 'strujillo@floridabeauty.us', source: 'console' }, subject: 'Re: x' });
+  assert.match(m.html, /Approved by Saray Trujillo/); assert.match(m.html, /strujillo@floridabeauty\.us/); assert.match(m.text, /Marked Solved in the console/);
+  assert.match(renderStopReviewEmail({ a: a(), item: null, review, subject: 'x' }).text, /name as typed/, 'a typed name says so');
 });

@@ -1230,7 +1230,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
         return st;
       }, { alerts: {} });
       const closed = s.alerts[id];
-      if (closed && closed.teamStop && onStopSolved) await onStopSolved(closed, who(req), String(note).trim()).catch((e) => console.warn('[watchtower] stop solved:', e.message));
+      if (closed && closed.teamStop && onStopSolved) await onStopSolved(closed, who(req), String(note).trim(), req.user).catch((e) => console.warn('[watchtower] stop solved:', e.message));
       res.json({ ok: true, alert: closed || null });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
