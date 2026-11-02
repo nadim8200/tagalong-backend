@@ -917,7 +917,7 @@ export function applyStopReview(prev, { unit = null, trip = null, since = null, 
   return { state: s, out: { ok: true, ep: { ...ep } } };
 }
 
-export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null, onTeamStop = null, onRolling = null, onStopSolved = null, recovering = null, liveFor = null, openRoadCalls = null }) {
+export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null, onTeamStop = null, onRolling = null, onStopSolved = null, atStopNow = null, recovering = null, liveFor = null, openRoadCalls = null }) {
   if (!db || !db.enabled) { console.log('[watchtower] off — needs DATABASE_URL'); return; }
   const sites = String(env.WATCH_SITES || 'florida-beauty').split(',').map((s) => s.trim()).filter(Boolean);
   const CFG = 'taWatchCfg';
@@ -1056,6 +1056,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     const toPush = []; const toMail = []; const toRoll = []; const toEscalate = [];
     // reported down: a road call open, a breakdown report, the Breakdown switch, or an email saying so
     const roadDown = new Set(openRoadCalls ? await openRoadCalls().catch(() => []) : []);
+    const waitingNow = atStopNow ? await atStopNow().catch(() => new Set()) : new Set();   // the waiting clock has them: at a shipper or receiver, not a stop to chase
     for (const it of board.trips || []) { if ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown')) { const t = (it && it.trip) || {}; roadDown.add(String(t.tripNumber)); roadDown.add(norm(t.powerUnit)); } }
     let etasNow = {};
     // reported fixed, not yet seen moving. A truck that lost its load to a transfer isn't on the board, so read its GPS directly
@@ -1124,7 +1125,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
             && now - (cur.lastPushAt || cur.openedAt) >= cfg.escalateMin * MIN) toEscalate.push(cur);
         }
       }
-      for (const { a, cur, level } of teamStopsDue(found, s.alerts, roadDown, s.units)) {
+      for (const { a, cur, level } of teamStopsDue(found, s.alerts, new Set([...roadDown, ...waitingNow]), s.units)) {
         cur.mailLevel = level;
         const us = s.units[norm(a.unit)];
         const it = (board.trips || []).find((x) => String(((x && x.trip) || x || {}).tripNumber || '') === String(a.trip));

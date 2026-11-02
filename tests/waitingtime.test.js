@@ -177,3 +177,88 @@ test('the confirmation says yes or no, by whom and why', () => {
   const no = renderWaitingEmail('decided', { ...r, status: 'declined' }, { rows: [], now: T0 });
   assert.match(no.html, /WAITING TIME NOT APPROVED/); assert.match(no.text, /Not approved by: Sara/);
 });
+
+const { kindFromAnswer, parkedAtPickup } = await import('../waitingtime.js');
+
+test('where the truck is, from what someone answered', () => {
+  for (const t of ['Still at the shipper Getting loaded', 'being loaded', 'at pickup', 'cargando']) assert.equal(kindFromAnswer(t), 'shipper', t);
+  for (const t of ['at the receiver', 'Unloading now', 'descargando']) assert.equal(kindFromAnswer(t), 'receiver', t);
+  for (const t of ['hotel approved', 'load is delayed', 'drivers resting', '']) assert.equal(kindFromAnswer(t), null, t);
+});
+
+test('a depart marked right after the arrival isn\'t the truck leaving', () => {
+  const quick = { _times: { statusHistory: [{ status: 'ARRSHIP', at: iso(T0) }, { status: 'DEPSHIP', at: iso(T0 + 60000) }] } };
+  assert.deepEqual(atStop(quick), { kind: 'shipper', arrivedMs: T0, quick: true });
+  assert.equal(atStop({ _times: { statusHistory: [{ status: 'ARRSHIP', at: iso(T0) }, { status: 'DEPSHIP', at: iso(T0 + H) }] } }), null, 'an hour later is a real departure');
+});
+
+test('parked at the rate con\'s pickup by city or ZIP', () => {
+  const it = (location, status = 'DEPSHIP') => ({ trip: { status }, _samsara: { location }, _ratecon: { data: { pickups: [{ city: 'Rochelle', state: 'IL', zip: '61068' }] } } });
+  assert.equal(parkedAtPickup(it('1010 Americold Drive, Rochelle, IL, 61068'), 'parked'), 0);
+  assert.equal(parkedAtPickup(it('1010 Americold Drive, Rochelle, IL'), 'parked'), 0);
+  assert.equal(parkedAtPickup(it('1010 Americold Drive, Rochelle, IL'), 'moved'), null);
+  assert.equal(parkedAtPickup(it('I-39, Mendota, IL'), 'parked'), null);
+  assert.equal(parkedAtPickup(it('Rochelle, IL', 'ARRCONS'), 'parked'), null, 'past the pickup');
+  assert.equal(parkedAtPickup({ _samsara: { location: 'Rochelle, IL' } }, 'parked'), null, 'no rate con');
+});
+
+const truck2606 = (over = {}) => ({ trip: { tripNumber: '626289', powerUnit: '2606', trailer: '7317', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'B180767' }], _times: { statusHistory: [{ status: 'ARRSHIP', at: iso(T0 - 2 * H) }, { status: 'DEPSHIP', at: iso(T0 - H) }] }, _samsara: { speedMph: 0, gpsAt: iso(T0), location: 'Rochelle, IL, 61068' }, ...over });
+const gio = (reason = 'Still at the shipper Getting loaded', status = 'authorized') => ({ units: { 2606: { stopEpisode: { unit: '2606', trip: '626289', stoppedSinceMs: T0 - H, review: { status, reason, by: 'Gio' } } } } });
+const started = () => { const db = mem(); db.s['taWaiting:florida-beauty:began'] = 1; let clock = T0; const sent = []; const w = initWaitingTime(null, { db, secret: 's', etas: async () => ({ 626289: { stops: [{ label: 'MIAMI, FL', miles: 1440, apptMs: T0 + 40 * H }] } }), recipients: async () => ['a@floridabeauty.us'], send: async (kind, r) => sent.push([kind, r]), now: () => clock }); return { db, w, sent, at: (ms) => { clock = ms; } }; };
+
+test('Gio says it is at the shipper: the clock runs from when it stopped, and the delivery 1,440 miles away has no say', async () => {
+  const h = started();
+  h.db.s['taWatch:florida-beauty'] = gio();
+  await h.w.process({ trips: [truck2606()] });
+  const r = Object.values(h.db.s['taWaiting:florida-beauty'])[0];
+  assert.equal(r.kind, 'shipper'); assert.equal(r.startMs, T0 + 2 * H, '3 hours from the stop, not from the delivery appointment'); assert.match(r.source, /Gio/);
+  assert.deepEqual([...await h.w.openTrips()], ['626289'], 'no stop emails while it is counted');
+  const parked = truck2606(); parked._samsara = { ...parked._samsara, gpsAt: iso(T0 + 2 * H) };
+  h.at(T0 + 2 * H); await h.w.process({ trips: [parked] });
+  assert.equal(h.sent[0][0], 'start');
+  const moving = truck2606(); moving._samsara = { ...moving._samsara, speedMph: 60, gpsAt: iso(T0 + 3 * H) };
+  h.at(T0 + 3 * H); await h.w.process({ trips: [moving] });
+  const moved2 = truck2606(); moved2._samsara = { ...moved2._samsara, speedMph: 60, gpsAt: iso(T0 + 3 * H + 240000) };
+  h.at(T0 + 3 * H + 240000); await h.w.process({ trips: [moved2] });
+  assert.equal(h.sent[1][0], 'total'); assert.equal(h.sent[1][1].waitedMs, H, 'until the truck really rolled, not the 1-minute depart');
+  assert.equal((await h.w.openTrips()).size, 0);
+});
+
+test('other answers, or an unauthorized stop, start nothing', async () => {
+  for (const ep of [gio('hotel approved'), gio('at the shipper', 'unauthorized')]) {
+    const h = started(); h.db.s['taWatch:florida-beauty'] = ep; // eslint-disable-line no-await-in-loop
+    await h.w.process({ trips: [truck2606()] }); // eslint-disable-line no-await-in-loop
+    assert.deepEqual(h.db.s['taWaiting:florida-beauty'] || {}, {});
+  }
+  const lt = started(); lt.db.s['taWatch:florida-beauty'] = gio();
+  await lt.w.process({ trips: [truck2606({ freightBills: Array(30).fill({ billNumber: 'T1' }) })] });
+  assert.deepEqual(lt.db.s['taWaiting:florida-beauty'] || {}, {}, 'broker loads only');
+});
+
+test('the GPS parks it at the pickup: one clock for the trip, whatever else says so', async () => {
+  const h = started();
+  h.db.s['taWatch:florida-beauty'] = gio();
+  const it = truck2606({ _ratecon: { data: { pickups: [{ city: 'Rochelle', state: 'IL', date: '2026-11-02', time: '09:00' }] } } });
+  await h.w.process({ trips: [it] });
+  await h.w.process({ trips: [it] });
+  assert.equal(Object.keys(h.db.s['taWaiting:florida-beauty']).length, 1);
+  const g = started();
+  await g.w.process({ trips: [it] });
+  const r = Object.values(g.db.s['taWaiting:florida-beauty'])[0];
+  assert.equal(r.source, 'GPS at the pickup'); assert.equal(r.kind, 'shipper');
+});
+
+test('a one-minute depart on a parked truck keeps the clock; rolling ends it', async () => {
+  const hist = [{ status: 'ARRSHIP', at: iso(T0) }, { status: 'DEPSHIP', at: iso(T0 + 60000) }];
+  const h = started();
+  await h.w.process({ trips: [truck2606({ _times: { statusHistory: hist } })] });
+  assert.equal(Object.values(h.db.s['taWaiting:florida-beauty'])[0].quick, true);
+  const it = (mph, ms) => { const x = truck2606({ _times: { statusHistory: hist } }); x._samsara = { ...x._samsara, speedMph: mph, gpsAt: iso(ms) }; return x; };
+  h.at(T0 + 3 * H); await h.w.process({ trips: [it(0, T0 + 3 * H)] });
+  assert.equal(h.sent[0][0], 'start');
+  const q = started();
+  await q.w.process({ trips: [truck2606({ _times: { statusHistory: hist } })] });
+  q.at(T0 + 10 * 60000); await q.w.process({ trips: [it(60, T0 + 10 * 60000)] });
+  q.at(T0 + 15 * 60000); await q.w.process({ trips: [it(60, T0 + 15 * 60000)] });
+  assert.equal(q.sent.length, 0); assert.equal((await q.w.openTrips()).size, 0, 'never asked: it really left');
+});

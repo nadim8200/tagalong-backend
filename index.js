@@ -1388,7 +1388,7 @@ app.post('/admin/breakdown-report/example', requireCompanyAdmin, async (req, res
     res.json({ ok: true, subject });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules,
+initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules, atStopNow: async () => (waiting ? waiting.openTrips() : new Set()),
   // trucks and trips reported down, or with a road call still open in the last 5 days: a wrecker moves them, they aren't rolling
   openRoadCalls: async () => [...await breakdownReport.held(), ...((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000).flatMap((rc) => [rc.trip, String(rc.truck || '').trim().toLowerCase().replace(/^0+(?=\d)/, '')].filter(Boolean).map(String))],
   recovering: () => breakdownReport.fixedWaiting(),
