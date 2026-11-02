@@ -52,9 +52,12 @@ const COMPANY_ADMIN = /^\/admin\/(dispatchers|directory|push-rules|training|audi
 // An employee manager (staffAdmin) adds and erases employees and gives them a plain login. Nothing else under /admin.
 const STAFF_MANAGER = /^\/admin\/(dispatchers|directory\/people(\/[^/]+(\/erase)?)?)\/?$/;
 const OWNERS = new Set(['ntellez@floridabeauty.us']);   // the platform admin signs in another way, so no login here says what they are
+// Pages behind a signed link (email buttons, tracking, the driver page) carry their own key and need no login, so a login is never a reason to refuse them
+const SIGNED_LINK = /^\/(br|dc|sr|wt|lesson|track)\/[^/]+\/?$|^\/driver\/(link|code)(\/|$)/;
 export function dispatcherMayUse(method, path, user = null) {
   // Express matches routes regardless of case — check the lower-cased path so /Truckmate/Profiles can't slip past
   const p = String(path || '').split('?')[0].toLowerCase();
+  if (SIGNED_LINK.test(p)) return null;
   const cAdmin = !!(user && user.companyAdmin);
   if (cAdmin && COMPANY_ADMIN.test(p)) return null;
   if (user && user.staffAdmin && STAFF_MANAGER.test(p)) return null;

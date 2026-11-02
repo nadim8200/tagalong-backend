@@ -142,3 +142,12 @@ test('an employee manager adds and erases employees and gives plain logins, and 
   assert.equal(await api.logins.removeFor({ email: 'new@floridabeauty.us' }, { user: { admin: true } }), false);
   assert.equal((await call('POST /auth/dispatcher/login', { body: { email: 'new@floridabeauty.us', password: hire.body.tempPassword } })).status, 401, 'an erased employee cannot sign in');
 });
+
+test('a signed-in dispatcher can open any email link, and a link path opens nothing else', async () => {
+  const { dispatcherMayUse } = await import('../dispatchers.js');
+  for (const [m, p] of [['GET', '/sr/abc.def'], ['POST', '/sr/abc.def'], ['GET', '/br/abc'], ['POST', '/br/abc'], ['GET', '/dc/abc'], ['POST', '/dc/abc'], ['GET', '/wt/abc'], ['POST', '/wt/abc'], ['GET', '/lesson/abc'], ['POST', '/lesson/abc'], ['GET', '/track/abc'], ['GET', '/driver/link/abc'], ['POST', '/driver/link/abc/docs'], ['POST', '/driver/code']]) {
+    assert.equal(dispatcherMayUse(m, p, { role: 'dispatcher' }), null, `${m} ${p}`);
+    assert.equal(dispatcherMayUse(m, p, { role: 'dispatcher', companyAdmin: true }), null, `${m} ${p} as admin`);
+  }
+  for (const p of ['/sr', '/sr/abc/more', '/admin/dispatchers', '/loads', '/track', '/driverx/link/abc']) assert.equal(dispatcherMayUse('GET', p, { role: 'dispatcher' }), 'outside', p);
+});
