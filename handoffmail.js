@@ -337,12 +337,12 @@ ${message('', ['These lessons are live. If one is wrong, erase it and Jarvis sto
 export function renderWaitingEmail(kind, r, { item = null, rows = [], etas = null, reviewUrl = null, now = Date.now(), showPhones = true, mapCid = null, example = false } = {}) {
   const f = teamStopFacts({ unit: r.unit, trip: r.trip }, item, { etas, now, showPhones, mapCid });
   const where = `${r.kind === 'shipper' ? 'Shipper' : 'Receiver'}${r.stop ? `: ${r.stop}` : ''}`;
-  const start = kind === 'start';
-  const title = start ? 'WAITING TIME IS SET TO BEGIN' : 'WAITING TIME TOTAL';
-  const left = !start && r.status === 'open';
-  const sub = start ? 'Approve it or not' : left ? 'Nobody approved this clock' : 'Truck has left';
-  const facts = [['Stop', where], ['Arrived', et(r.arrivedMs)], ['Appointment', r.apptMs ? et(r.apptMs) : 'None on file, counted from arrival'], [start ? 'Clock starts' : 'Clock started', et(r.startMs)], ...(start ? [] : [['Left', et(r.leftMs)]]), ...(r.decidedBy ? [['Approved by', `${r.decidedBy}${r.decidedAt ? ` · ${et(r.decidedAt)}` : ''}`]] : [])];
-  const big = start ? null : fmtMin((r.waitedMs || 0) / 60000) || '0m';
+  const start = kind === 'start'; const decided = kind === 'decided'; const yes = r.status === 'approved';
+  const title = start ? 'WAITING TIME IS SET TO BEGIN' : decided ? `WAITING TIME ${yes ? 'APPROVED' : 'NOT APPROVED'}` : 'WAITING TIME TOTAL';
+  const left = kind === 'total' && r.status === 'open';
+  const sub = start ? 'Approve it or not' : decided ? (yes ? 'The clock is running' : 'No waiting time on this stop') : left ? 'Nobody approved this clock' : 'Truck has left';
+  const facts = [['Stop', where], ['Arrived', et(r.arrivedMs)], ['Appointment', r.apptMs ? et(r.apptMs) : 'None on file, counted from arrival'], [start ? 'Clock starts' : 'Clock started', et(r.startMs)], ...(kind === 'total' ? [['Left', et(r.leftMs)]] : []), ...(r.decidedBy ? [[yes ? 'Approved by' : 'Not approved by', `${r.decidedBy}${r.decidedAt ? ` · ${et(r.decidedAt)}` : ''}`]] : []), ...(r.note ? [['Reason', r.note]] : [])];
+  const big = kind === 'total' ? fmtMin((r.waitedMs || 0) / 60000) || '0m' : null;
   const mapUrl = f.lat != null ? `https://www.google.com/maps?q=${encodeURIComponent(`${f.lat},${f.lng}`)}` : null;
   const choose = (href, label, color) => `<td width="50%" style="padding:6px 3px 0;"><a href="${esc(href)}" style="display:block;padding:14px 6px;border-radius:6px;background:${color};font-family:${FONT};font-size:17px;font-weight:bold;text-align:center;color:#FFFFFF;text-decoration:none;">${esc(label)}</a></td>`;
   const body = `${trucksLine(f.unit || r.unit)}${tripLine(f.trip || r.trip, f.trailer || r.trailer)}
@@ -359,7 +359,8 @@ ${heading(f.drivers.length > 1 ? 'Driver team' : 'Driver')}
 ${heading('Load')}
 ${table(rows.map(([k, v]) => kv(k, v)).join(''))}
 ${viewTrip(f.trip || r.trip)}`;
-  const subject = `${example ? '[EXAMPLE] ' : ''}${start ? 'Waiting time set to begin' : `Waiting time total ${big}`} — Truck ${f.unit || r.unit} · Trip ${f.trip || r.trip}`;
-  return { subject, html: shell({ tone: start ? 'amber' : 'blue', mark: start ? '&#9719;' : '&#10003;', title, sub }, body), text: [title, sub, `Truck ${f.unit || r.unit}`, `Trip ${f.trip || r.trip}`, ...(big ? [`Total waiting time: ${big}`] : []), ...facts.map(([k, v]) => `${k}: ${v}`), ...(start && reviewUrl ? [`Approve: ${reviewUrl}?d=approved`, `Don't approve: ${reviewUrl}?d=declined`] : []), ...(left ? ['Nobody answered the waiting time email, so this total was never approved.'] : []), '', ...rows.map(([k, v]) => `${k}: ${v}`), ...mailEnd(f.trip || r.trip)].join('\n') };
+  const first = `Waiting time set to begin — Truck ${f.unit || r.unit} · Trip ${f.trip || r.trip}`;
+  const subject = `${example ? '[EXAMPLE] ' : ''}${start ? first : decided ? `Re: ${first}` : `Waiting time total ${big} — Truck ${f.unit || r.unit} · Trip ${f.trip || r.trip}`}`;
+  return { subject, html: shell({ ...(decided && yes ? {} : { tone: start ? 'amber' : decided ? 'red' : 'blue' }), mark: start ? '&#9719;' : decided && !yes ? '&#10005;' : '&#10003;', title, sub }, body), text: [title, sub, `Truck ${f.unit || r.unit}`, `Trip ${f.trip || r.trip}`, ...(big ? [`Total waiting time: ${big}`] : []), ...facts.map(([k, v]) => `${k}: ${v}`), ...(start && reviewUrl ? [`Approve: ${reviewUrl}?d=approved`, `Don't approve: ${reviewUrl}?d=declined`] : []), ...(left ? ['Nobody answered the waiting time email, so this total was never approved.'] : []), '', ...rows.map(([k, v]) => `${k}: ${v}`), ...mailEnd(f.trip || r.trip)].join('\n') };
 }
 

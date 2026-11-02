@@ -1419,11 +1419,11 @@ initAudit(app, { db, requireAdmin: requireCompanyAdmin });
 // waiting time at a stop: the emails to dispatch, with the map and the load (waitingtime.js)
 const sendWaiting = async (kind, r, item, reviewUrl, to, { example = false } = {}) => {
   if (!to.length) return;
-  const attachments = await truckMap((item && item._samsara) || {}, kind === 'start' ? 'amber' : 'blue', { close: true });
+  const attachments = await truckMap((item && item._samsara) || {}, kind === 'start' ? 'amber' : kind === 'decided' ? (r.status === 'approved' ? 'green' : 'red') : 'blue', { close: true });
   const m = renderWaitingEmail(kind, r, { item, rows: loadRows(item || { trip: { powerUnit: r.unit, tripNumber: r.trip, trailer: r.trailer } }), etas: item ? (await allEtas())[r.trip] || null : null, reviewUrl, showPhones: staffOnly(to), mapCid: attachments.length ? 'truckmap' : null, example });
-  await sendMail({ to, ...m, attachments }, { env: process.env, direct: staffOnly(to) });
+  await sendInThread({ to, ...m, attachments }, kind === 'decided' ? m.subject.replace(/^Re: /, '') : null, { env: process.env, direct: staffOnly(to) });
 };
-waiting = initWaitingTime(app, { db, secret: JWT_SECRET, etas: allEtas, recipients: () => alertRecipients.resolve('waiting_time'), send: (kind, r, item, url, to) => sendWaiting(kind, r, item, url, to) });
+waiting = initWaitingTime(app, { db, secret: JWT_SECRET, etas: allEtas, getBoard: () => truckmate.buildBoard('florida-beauty'), recipients: () => alertRecipients.resolve('waiting_time'), send: (kind, r, item, url, to) => sendWaiting(kind, r, item, url, to) });
 // Both waiting time emails, to Nadim only, built from a real load with made-up times. Marked [EXAMPLE]: nothing is saved.
 app.post('/admin/waiting-example', requireCompanyAdmin, async (req, res) => {
   try {
