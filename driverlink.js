@@ -35,6 +35,7 @@
 
 import crypto from 'crypto';
 import { wantsContact } from './helpdesk.js';
+import { scanPdf } from './scanpdf.js';
 
 const LINK_DAYS = 5;
 const MIN_STORE_GAP_MS = 25 * 1000;   // keep at most one stored point per ~25s
@@ -567,7 +568,9 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       const files = (Array.isArray(b.files) ? b.files : []).slice(0, 8);
       if (!files.length) return res.status(400).json({ error: 'Add at least one photo.' });
       const by = `${(link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'Driver'} (tracking link)`;
-      const stored = await docs.storeDocs({ site: link.site, kind: 'driverdoc', trip: link.trip, files: files.map((f, i) => ({ ...f, filename: f.filename || `${kind.toUpperCase()}-${link.trip}-${i + 1}.jpg`, page: i + 1 })), by });
+      // pages from the page scanner become one PDF for the load
+      const scanned = b.scan && (kind === 'pod' || kind === 'bol') ? [{ filename: `${kind.toUpperCase()}-${link.trip}.pdf`, mediaType: 'application/pdf', dataBase64: (await scanPdf(files.map((f) => Buffer.from(String(f.dataBase64 || ''), 'base64')))).toString('base64') }] : null;
+      const stored = await docs.storeDocs({ site: link.site, kind: 'driverdoc', trip: link.trip, files: (scanned || files).map((f, i) => ({ ...f, filename: f.filename || `${kind.toUpperCase()}-${link.trip}-${i + 1}.jpg`, page: i + 1 })), by });
       await docs.markDocs({ site: link.site, ids: stored.map((d) => d.id), docType: kind === 'bol' ? 'bill_of_lading' : kind === 'temp' ? 'reefer_temp' : kind === 'breakdown' ? 'breakdown_photo' : 'proof_of_delivery' });
       if (kind === 'breakdown' && roadHook) Promise.resolve(roadHook(link.site, String(link.trip), { docIds: stored.map((d) => d.id), via: 'upload link', by })).catch(() => {});
       if (kind === 'temp' && photoHook) Promise.resolve(photoHook(link.site, String(link.trip), { docIds: stored.map((d) => d.id), via: 'upload link', by, forced: true })).catch(() => {});

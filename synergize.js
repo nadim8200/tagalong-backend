@@ -93,7 +93,8 @@ export function brokerDue(items = [], checked = {}, now = Date.now(), every = 2 
   return items.filter((it) => brokerLoad(it) && !it._oc && now - (checked[tripNo(it)] || 0) >= every);
 }
 
-// Billing gets the paperwork: one email per load with the POD / BOL Jarvis just found in Synergize (attached).
+// The billing email for a load's POD / BOL in Synergize. It no longer goes out on its own: accounting uploads these to Synergize themselves, so
+// it only told them what they had just done. Admins can still send one as an example.
 // Pure — returns { subject, html }. docs: [{ type, bill, created, name }]; rc: the load's rate con (optional).
 export const BILLING_TYPES = /^(POD|BOL|Bill of Lading|Proof of Delivery)/i;
 const escB = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -222,7 +223,6 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
     const s = await st();
     const known = s.docs || {};
     const found = [];
-    const forBilling = [];   // new POD / BOL found this time → billing
     for (const bill of [...new Set(bills.map(String).filter(Boolean))]) {
       let list = [];
       try { list = await listDocs(bill); } catch (e) { if (/session|sign-in/i.test(e.message)) throw e; continue; } // eslint-disable-line no-await-in-loop
@@ -240,13 +240,11 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
           const [stored] = await docs.storeDocs({ site: SITE, kind: 'artisdoc', trip, files: [{ filename: docFileName(d), mediaType: 'application/pdf', dataBase64: pdf.toString('base64') }], by }); // eslint-disable-line no-await-in-loop
           known[id] = { ...meta, docId: String(stored.id), name: docFileName(d) };
           found.push(known[id]);
-          if (BILLING_TYPES.test(meta.type)) forBilling.push({ ...known[id], bytes: pdf });
           // a rate con in ARTIS → on the load when dispatch hasn't put one there
           if (onRateCon && /rate/i.test(meta.type)) await onRateCon(trip, { filename: docFileName(d), dataBase64: pdf.toString('base64') }).catch((e) => console.warn('[synergize] rate con:', e.message)); // eslint-disable-line no-await-in-loop
         } catch (e) { console.warn('[synergize]', bill, e.message); }
       }
     }
-    if (forBilling.length && onBillingDocs) await onBillingDocs(trip, forBilling).catch((e) => console.warn('[synergize] billing email:', e.message));
     await db.update(KEY, (cur) => {
       const c = cur || { trips: {}, docs: {}, watch: {}, done: {} };
       const mine = new Map(((c.trips || {})[trip] || []).map((x) => [x.artisId, x]));

@@ -189,7 +189,9 @@ test('cheaper: group emails are read only when they say "Jarvis" or Jarvis is al
   const base = { me: 'jarvis@floridabeauty.us', groupAddrs: ['dispatches@floridabeauty.us', 'customerservice@floridabeauty.us'] };
   const to = (...a) => a.map((address) => ({ emailAddress: { address } }));
   assert.equal(readGate({ ...base, to: to('jarvis@floridabeauty.us') }).read, true, 'sent to Jarvis');
-  assert.equal(readGate({ ...base, to: to('ops@broker.com') }).read, true, 'Bcc / unknown route → read');
+  assert.deepEqual(readGate({ ...base, to: to('dispatch@floridabeauty.us', 'ops@broker.com'), text: 'Driver is at the shipper.' }), { read: false, group: 'an email group' });
+  assert.equal(readGate({ ...base, to: to('outbound@floridabeauty.us'), subject: 'OUTBOUND 9 TRIP SHEETS', always: true }).read, true, 'the night\'s trip sheets are always read');
+  assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: 'hi', always: true }).read, false, 'a known group stays a group');
   assert.deepEqual(readGate({ ...base, to: to('dispatches@floridabeauty.us'), subject: 'Load 8192162', text: 'Driver is at the shipper.' }), { read: false, group: 'dispatches@floridabeauty.us' });
   assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: 'Jarvis, follow up with the driver on 624626' }).read, true);
   assert.equal(readGate({ ...base, to: to('dispatches@floridabeauty.us'), text: '@Jarvis send the POD' }).read, true);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { matchEmail, htmlToText, newPart, loadFacts, initInbox } from '../inbox.js';
+import { matchEmail, htmlToText, newPart, loadFacts, initInbox, pictureSize, quotedPictures, skipPicture, keepEmails } from '../inbox.js';
 
 const items = [
   { trip: { tripNumber: '900134', powerUnit: '2403', trailer: '5310', status: 'DISP', origZoneDesc: 'Miami, FL', destZoneDesc: 'Jessup, MD' }, freightBills: [{ billNumber: '624134', endZoneDescription: 'Jessup, MD', actualDelivery: null }], _ratecon: { data: { loadNumber: 'LD-778812', referenceNumbers: ['PO 55123'] } }, _samsara: { location: 'Florence, SC', gpsAt: '2026-10-05T12:00:00Z', speedMph: 61 } },
@@ -394,4 +394,45 @@ test('a report pasted as a picture in a trip-sheet email is read with the email 
   assert.ok(blocks.some((b) => b.type === 'image'), 'the pasted report picture is shown to the AI');
   assert.ok(!blocks.some((b) => b.type === 'document'), 'the scanned PDF is not (the trip-sheet reader has it)');
   assert.match(JSON.stringify(blocks), /never answer with a vague/);
+});
+
+test('only the new message is read, in English or Spanish, however the older one is quoted', () => {
+  for (const q of ['From: Erin Meese\nSent: Monday\nTo: x', 'From: Erin\nDate: Mon\nTo: x', 'De: Erin\nEnviado: lunes\nPara: x', 'El lun, 2 nov 2026 a las 9:00, Erin escribió:', '________________________________\nold']) {
+    assert.equal(newPart(`Truck is loaded\n${q}\nolder words`), 'Truck is loaded', q);
+  }
+});
+
+const png = (w, h) => { const b = Buffer.alloc(32); b.writeUInt32BE(0x89504e47, 0); b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20); return b.toString('base64'); };
+const jpeg = (w, h) => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 17, 8, h >> 8, h & 255, w >> 8, w & 255, 3, 0, 0, 0, 0]).toString('base64');
+
+test('a picture\'s size comes from its first bytes', () => {
+  assert.deepEqual(pictureSize(png(640, 120)), { w: 640, h: 120 });
+  assert.deepEqual(pictureSize(jpeg(4032, 3024)), { w: 4032, h: 3024 });
+  assert.equal(pictureSize(Buffer.from('not a picture at all, truly').toString('base64')), null);
+});
+
+test('pictures: logos, signatures and repeats are skipped; a real photo is read', () => {
+  const pic = (o) => ({ contentType: 'image/png', isInline: true, hash: 'new', contentBytes: png(1200, 900), ...o });
+  assert.equal(skipPicture(pic({ contentBytes: jpeg(4032, 3024), contentType: 'image/jpeg' })), null, 'a photo of a trailer');
+  assert.equal(skipPicture(pic({ isInline: false })), null, 'an attached picture');
+  assert.equal(skipPicture(pic({}), { seen: new Set(['new']) }), 'seen before');
+  assert.equal(skipPicture(pic({ contentBytes: png(600, 90) })), 'logo or icon', 'a signature banner');
+  assert.equal(skipPicture(pic({ contentBytes: png(150, 150) })), 'logo or icon');
+  assert.equal(skipPicture(pic({ contentBytes: png(150, 150), isInline: false })), null, 'attached on purpose');
+  assert.equal(skipPicture(pic({ contentId: '<a@b>' }), { quoted: new Set(['a@b']) }), 'in the quoted history');
+  assert.equal(skipPicture({ contentType: 'application/pdf', hash: 'x' }, { seen: new Set(['x']) }), null, 'only pictures');
+});
+
+test('a picture that only sits under the quoted message belongs to the history', () => {
+  const html = '<p>See the new photo <img src="cid:NEW"></p><div id="divRplyFwdMsg"><b>From:</b> Erin</div><img src="cid:old1"><img src="cid:NEW">';
+  assert.deepEqual([...quotedPictures(html)], ['old1']);
+  assert.equal(quotedPictures('<p>just <img src="cid:a"></p>').size, 0);
+});
+
+test('filed group emails never push real conversations out of the list', () => {
+  const all = [...Array(900)].map((_, i) => ({ id: `g${i}`, auto: 'group' })).concat([...Array(600)].map((_, i) => ({ id: `e${i}` })));
+  const kept = keepEmails(all);
+  assert.equal(kept.filter((e) => e.auto === 'group').length, 300);
+  assert.equal(kept.filter((e) => !e.auto).length, 500);
+  assert.equal(kept.find((e) => !e.auto).id, 'e0');
 });

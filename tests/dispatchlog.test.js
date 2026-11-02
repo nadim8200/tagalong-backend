@@ -115,3 +115,11 @@ test('an email sent straight to Jarvis still takes the normal path', async () =>
   const h = run({ to: 'jarvis@floridabeauty.us' }); await h.inbox.poll();
   assert.deepEqual(h.learned, []);
 });
+
+test('signatures come off, and a plain thanks costs nothing', async () => {
+  const { withoutSignature, nothingToNote } = await import('../dispatchlog.js');
+  assert.equal(withoutSignature('Trailer has a flat, driver waiting\nThanks,\nErin Meese\nRedwood Logistics\n312-555-0100'), 'Trailer has a flat, driver waiting');
+  assert.equal(withoutSignature('Thanks for the update on 2611'), 'Thanks for the update on 2611', 'a first line stays');
+  for (const t of ['ok', 'Ok thanks', 'Thank you!', 'Copy', 'Gracias', 'Received.', 'Listo']) assert.equal(nothingToNote(t), true, t);
+  for (const t of ['ok the truck broke down', 'Truck 2611 is fixed', 'Thanks, but the driver is not there']) assert.equal(nothingToNote(t), false, t);
+});
