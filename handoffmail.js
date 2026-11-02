@@ -364,3 +364,17 @@ ${viewTrip(f.trip || r.trip)}`;
   return { subject, html: shell({ ...(decided && yes ? {} : { tone: start ? 'amber' : decided ? 'red' : 'blue' }), mark: start ? '&#9719;' : decided && !yes ? '&#10005;' : '&#10003;', title, sub }, body), text: [title, sub, `Truck ${f.unit || r.unit}`, `Trip ${f.trip || r.trip}`, ...(big ? [`Total waiting time: ${big}`] : []), ...facts.map(([k, v]) => `${k}: ${v}`), ...(start && reviewUrl ? [`Approve: ${reviewUrl}?d=approved`, `Don't approve: ${reviewUrl}?d=declined`] : []), ...(left ? ['Nobody answered the waiting time email, so this total was never approved.'] : []), '', ...rows.map(([k, v]) => `${k}: ${v}`), ...mailEnd(f.trip || r.trip)].join('\n') };
 }
 
+// A manager's Teach Jarvis conversation, for the owner to build, with a way to reach them. Pure.
+export function renderRequestEmail({ request: r, summary = null, phone = null, attached = 0, skipped = 0 }) {
+  const digits = String(phone || '').replace(/\D+/g, '');
+  const call = digits.length >= 10 ? `tel:+1${digits.slice(-10)}` : null;
+  const notes = [...(attached ? [`${attached} file${attached === 1 ? '' : 's'} attached.`] : []), ...(skipped ? [`${skipped} more could not fit. Open Teach Jarvis to see them.`] : [])];
+  const line = (m) => `<tr><td ${pad} style="padding:10px 24px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};word-break:break-word;"><b style="color:${m.from === 'jarvis' ? '#1D4ED8' : NAVY};">${esc(m.from === 'jarvis' ? 'Jarvis' : m.by)}</b> <span style="font-size:12px;color:${MUTED};">${esc(et(m.at) || '')}</span><div style="white-space:pre-wrap;">${esc(m.text)}</div>${(m.files || []).length ? `<div style="font-size:13px;color:${MUTED};">&#128206; ${esc(m.files.map((f) => f.name).join(', '))}</div>` : ''}</td></tr>`;
+  const body = `${table([['From', r.by], ['Email', r.email], ['Started', et(r.at)]].map(([k, v]) => kv(k, v)).join(''))}
+<tr><td ${pad} style="padding:10px 24px 0;">${call ? button(call, `Call ${r.by}`) : ''}${r.email ? button(`mailto:${r.email}`, `Email ${r.by}`) : ''}</td></tr>
+${summary ? message('What they want', [summary]) : ''}
+${notes.length ? message('', notes) : ''}
+${heading('The whole conversation')}${r.messages.map(line).join('')}`;
+  return { subject: `Teach Jarvis: ${r.by} — ${r.title}`, html: shell({ tone: 'blue', mark: '&#10003;', title: 'NEW JARVIS REQUEST', sub: `From ${r.by}` }, body), text: ['NEW JARVIS REQUEST', `From: ${r.by} <${r.email}>`, ...(call ? [`Call: ${call.slice(4)}`] : []), ...(summary ? ['', summary] : []), ...notes, '', ...r.messages.flatMap((m) => [`${m.from === 'jarvis' ? 'Jarvis' : m.by}: ${m.text}`, ...((m.files || []).length ? [`Files: ${m.files.map((f) => f.name).join(', ')}`] : []), '']), 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n') };
+}
+

@@ -109,6 +109,7 @@ import { initEtaWatch } from './etawatch.js';
 import { initFollowThrough } from './followthrough.js';
 import { initPlaybook } from './playbook.js';
 import { initJarvisAsks } from './jarvisasks.js';
+import { initJarvisRequests } from './jarvisrequests.js';
 import { initWaitingTime } from './waitingtime.js';
 import { initDirectory } from './directory.js';
 
@@ -1416,6 +1417,7 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
   }, afterBoard: async (site, board, ctx) => { await timedStep('transferDone.observe', () => transferDone.observe(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('breakdownReport.process', () => breakdownReport.process(site, board)).catch((e) => console.warn('[breakdown-report]', e.message)); await timedStep('followProxy.process', () => followProxy.process(site, board)).catch((e) => console.warn('[broker-follow]', e.message)); await timedStep('transferWatch.process', () => transferWatch.process(site, board, ctx)).catch((e) => console.warn('[transfer]', e.message)); await timedStep('transferDone.process', () => transferDone.process(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('waiting.process', () => (waiting ? waiting.process(board) : null)).catch((e) => console.warn('[waiting-time]', e.message)); await timedStep('stopCheck.process', () => stopCheck.process(board)).catch((e) => console.warn('[stop-check]', e.message)); await timedStep('stopTasks.process', () => stopTasks.process(site, board)).catch((e) => console.warn('[stop-tasks]', e.message)); await timedStep('commitments.process', () => commitments.process(site, board)).catch((e) => console.warn('[commit]', e.message)); await timedStep('etaReport.process', () => etaReport.process(site, board)).catch((e) => console.warn('[eta-log]', e.message)); await timedStep('stopVisits.process', () => stopVisits.process(site, board)); await timedStep('milestones.process', () => milestones.process(site, board, ctx)); await timedStep('statusMail.process', () => statusMail.process(site, board, ctx)); await timedStep('etaWatch.run', () => etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now })); await timedStep('follow.run', () => follow.run(site, board.trips || [])); } });
 staffActions = initStaffActions({ breakdown: breakdownReport, stopReview, docs, getBoard: (site) => truckmate.buildBoard(site) });
 initAudit(app, { db, requireAdmin: requireCompanyAdmin });
+initJarvisRequests(app, { requireAuth: requireDispatch, db, docs, env: process.env, sendMail: (m) => sendMail(m, { env: process.env, direct: true, noCopy: true }), phoneOf: async (email) => (((await directory.load()).people || []).find((p) => p && String(p.email || '').toLowerCase() === email) || {}).phone || null });
 // waiting time at a stop: the emails to dispatch, with the map and the load (waitingtime.js)
 const sendWaiting = async (kind, r, item, reviewUrl, to, { example = false } = {}) => {
   if (!to.length) return;

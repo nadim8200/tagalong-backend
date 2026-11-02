@@ -46,6 +46,8 @@ const LABELS = [
   [/^POST \/lesson\//, 'Erased a Jarvis lesson'],
   [/^POST \/wt\//, 'Answered a waiting time email'],
   [/^POST \/truckmate\/asks\//, 'Answered a Jarvis question'],
+  [/^POST \/truckmate\/requests\/[^/]+\/done/, 'Sent a Teach Jarvis request'],
+  [/^POST \/truckmate\/requests/, 'Wrote in Teach Jarvis'],
 ];
 const VERB = { POST: 'Did', PUT: 'Changed', PATCH: 'Changed', DELETE: 'Deleted' };
 // What happened, in plain words. Pure.
