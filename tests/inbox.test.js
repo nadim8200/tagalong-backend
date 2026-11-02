@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { matchEmail, htmlToText, newPart, loadFacts, initInbox, pictureSize, quotedPictures, skipPicture, keepEmails } from '../inbox.js';
+import { matchEmail, htmlToText, newPart, loadFacts, initInbox, pictureSize, quotedPictures, skipPicture, keepEmails, asksForEtaUpdates } from '../inbox.js';
 
 const items = [
   { trip: { tripNumber: '900134', powerUnit: '2403', trailer: '5310', status: 'DISP', origZoneDesc: 'Miami, FL', destZoneDesc: 'Jessup, MD' }, freightBills: [{ billNumber: '624134', endZoneDescription: 'Jessup, MD', actualDelivery: null }], _ratecon: { data: { loadNumber: 'LD-778812', referenceNumbers: ['PO 55123'] } }, _samsara: { location: 'Florence, SC', gpsAt: '2026-10-05T12:00:00Z', speedMph: 61 } },
@@ -435,4 +435,9 @@ test('filed group emails never push real conversations out of the list', () => {
   assert.equal(kept.filter((e) => e.auto === 'group').length, 300);
   assert.equal(kept.filter((e) => !e.auto).length, 500);
   assert.equal(kept.find((e) => !e.auto).id, 'e0');
+});
+
+test('ETA updates only start when someone asks for them', () => {
+  for (const t of ['ETA every 3 hours on Native', 'Send me the ETA for 626167', 'Please keep me updated on 625967', 'Keep us posted on this load', 'Status every 2 hours until delivered', 'Mándame el ETA de Native', 'ETA cada 3 horas']) assert.equal(asksForEtaUpdates(t), true, t);
+  for (const t of ['Also I see the truck is very late to Native Doraville', 'About Native Doraville\nCustomer was advised about the delay yesterday', 'Thank you for the update.', 'Please follow up', 'We will keep you posted', 'What is the ETA on 626167?']) assert.equal(asksForEtaUpdates(t), false, t);
 });
