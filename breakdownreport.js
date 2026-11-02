@@ -7,6 +7,7 @@
 import crypto from 'node:crypto';
 import { brokerLoad } from './watchtower.js';
 import { teamStopFacts, emailParts } from './teamstopmail.js';
+import { MAX_PHOTOS } from './breakdownphotos.js';
 import { snapshotLoad, crewOf, renderFixedReportedEmail } from './handoffmail.js';
 
 const KEY = (site) => `taBreakdownReports:${site}`;    // alert id → { atMs, by, reason, subject, trip, unit, clearedAt }
@@ -56,13 +57,14 @@ const oneLine = (s, n) => String(s || '').replace(/[\r\n\t]+/g, ' ').replace(/\s
 
 // Same shape dispatch writes: "BREAKDOWN TRAILER 2029 // TK 2008 TL 2029 TO 626143", with the kind of load in front. What broke and the numbers
 // only: the story goes in the email. Names the truck or the trailer when the reason says which, otherwise both. Pure.
-export function breakdownSubject(item, reason, { unit = null, trip = null } = {}) {
+export function breakdownSubject(item, reason, { unit = null, trip = null, part = null } = {}) {
   const t = (item && item.trip) || {};
   const tk = unit || t.powerUnit || 'N/A'; const tl = t.trailer || 'N/A';
   const r = oneLine(reason, 500);
   const trailer = /\b(trailers?|reefers?|remolques?|cajas?|thermo ?king|carrier unit|landing gear|mud ?flaps?)\b/i.test(r);
   const truck = /\b(trucks?|tractors?|cami[oó]n|engine|motor)\b/i.test(r);
-  const what = trailer === truck ? `TRUCK ${tk} TRAILER ${tl}` : trailer ? `TRAILER ${tl}` : `TRUCK ${tk}`;
+  const says = part === 'truck' || part === 'trailer' ? part : trailer === truck ? null : trailer ? 'trailer' : 'truck';
+  const what = !says ? `TRUCK ${tk} TRAILER ${tl}` : says === 'trailer' ? `TRAILER ${tl}` : `TRUCK ${tk}`;
   const kind = loadType(item);
   return `${kind ? `${kind} ` : ''}BREAKDOWN ${what} // TK ${tk} TL ${tl} TO ${trip || t.tripNumber || 'N/A'}`;
 }
@@ -82,20 +84,26 @@ const photoBlock = (cids, note) => {
   if (!cids.length && !note) return '';
   return `${heading('Photos')}${cids.map((c, i) => `<tr><td style="padding:0 24px 10px;"><img src="cid:${esc(c)}" width="592" alt="Breakdown photo ${i + 1}" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></td></tr>`).join('')}${note ? `<tr><td style="padding:0 24px 8px;font-family:${FONT};font-size:14px;color:${MUTED};">${esc(note)}</td></tr>` : ''}`;
 };
-// More photos on an open breakdown. Pure.
-export function renderBreakdownPhotosEmail({ report, item = null, by, count, subject, photoCids = [], photosNote = null, now = Date.now() }) {
+// An update on an open breakdown, or just more photos, on the same chain. Pure.
+export function renderBreakdownPhotosEmail({ report, item = null, by, count, subject, message = null, photoCids = [], photosNote = null, now = Date.now() }) {
   const { heading, FONT, NAVY, TEXT, MUTED, RED, kv, et, TRAINING_SLOT } = emailParts;
   const rows = loadRows(item || { trip: { powerUnit: report.unit, tripNumber: report.trip } }, now);
-  const line = `${count} new photo${count === 1 ? '' : 's'} from ${by}.`;
+  const title = message ? 'BREAKDOWN UPDATE' : 'NEW BREAKDOWN PHOTOS';
+  const line = message ? `From ${by}` : `${count} new photo${count === 1 ? '' : 's'} from ${by}.`;
+  const color = message ? '#B45309' : RED;
+  const earlier = (report.updates || []).slice(0, -1).slice(-5);
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;background:#F1F5F9;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F1F5F9"><tr><td align="center" style="padding:12px 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="max-width:640px;background:#FFFFFF;border-radius:8px;">
 ${TRAINING_SLOT}
-<tr><td bgcolor="${RED}" style="padding:18px 24px;background:${RED};font-family:${FONT};font-size:26px;font-weight:bold;color:#FFFFFF;">NEW BREAKDOWN PHOTOS<div style="padding-top:4px;font-size:15px;font-weight:normal;color:#FFFFFF;">${esc(line)}</div></td></tr>
-<tr><td style="padding:14px 24px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Reason on file</b><br>${esc(report.reason)}<div style="font-size:13px;color:${MUTED};">Received ${esc(et(now) || '')}</div></td></tr>
+<tr><td bgcolor="${color}" style="padding:18px 24px;background:${color};font-family:${FONT};font-size:26px;font-weight:bold;color:#FFFFFF;">${title}<div style="padding-top:4px;font-size:15px;font-weight:normal;color:#FFFFFF;">${esc(line)}</div></td></tr>
+<tr><td style="padding:14px 24px 0;font-family:${FONT};font-size:24px;font-weight:bold;color:${NAVY};">Truck ${esc(report.unit || 'not recorded')}<div style="font-size:15px;font-weight:normal;color:${MUTED};">Trip ${esc(report.trip)}</div></td></tr>
+${message ? `<tr><td style="padding:12px 24px 0;font-family:${FONT};font-size:17px;line-height:1.45;font-weight:bold;color:${TEXT};word-break:break-word;">${esc(message)}<div style="font-size:13px;font-weight:normal;color:${MUTED};">${esc(et(now) || '')}</div></td></tr>` : ''}
+<tr><td style="padding:14px 24px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Reason on file</b><br>${esc(report.reason)}${message ? '' : `<div style="font-size:13px;color:${MUTED};">Received ${esc(et(now) || '')}</div>`}</td></tr>
+${earlier.length ? `${heading('Earlier updates')}${earlier.map((u) => `<tr><td style="padding:0 24px 8px;font-family:${FONT};font-size:14px;line-height:1.45;color:${TEXT};word-break:break-word;">${esc(u.message)}<div style="font-size:12px;color:${MUTED};">${esc(u.by)} · ${esc(et(u.atMs) || '')}</div></td></tr>`).join('')}` : ''}
 ${photoBlock(photoCids, photosNote)}
 ${heading('Load')}
 <tr><td style="padding:0 24px 20px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${rows.map(([k, v]) => kv(k, v)).join('')}</table></td></tr>
 </table></td></tr></table></body></html>`;
-  return { subject, html, text: ['NEW BREAKDOWN PHOTOS', line, `Reason on file: ${report.reason}`, ...(photosNote ? [photosNote] : []), '', ...rows.map(([k, v]) => `${k}: ${v}`), '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n') };
+  return { subject, html, text: [title, line, ...(message ? [message] : []), `Reason on file: ${report.reason}`, ...earlier.map((u) => `Earlier: ${u.message} (${u.by})`), ...(photosNote ? [photosNote] : []), '', ...rows.map(([k, v]) => `${k}: ${v}`), '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n') };
 }
 
 // The email that opens the chain. Pure.
@@ -112,7 +120,7 @@ export function renderBreakdownEmail({ item, report, etas = null, now = Date.now
   const rc = 'Road service has NOT been called. Call Michelin or the shop the usual way.';
   const next = 'Start Breakdown on the load if customers need to be told. Starting it shows you who gets notified before anything goes out.';
   const mapUrl = f.lat != null ? `https://www.google.com/maps?q=${encodeURIComponent(`${f.lat},${f.lng}`)}` : null;
-  const subject = breakdownSubject(item, report.reason, { unit: report.unit, trip: report.trip });
+  const subject = breakdownSubject(item, report.reason, { unit: report.unit, trip: report.trip, part: report.part });
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"></head><body style="margin:0;padding:0;background:#F1F5F9;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F1F5F9"><tr><td align="center" style="padding:12px 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="max-width:640px;background:#FFFFFF;border-radius:8px;">
 <tr><td style="padding:20px 24px 2px;font-family:${FONT};font-size:20px;font-weight:bold;color:${NAVY};">Florida Beauty</td></tr>
 <tr><td style="padding:0 24px 12px;border-bottom:1px solid ${LINE};font-family:${FONT};font-size:14px;color:${MUTED};">Dispatch notifications</td></tr>
@@ -121,7 +129,7 @@ ${TRAINING_SLOT}
 <tr><td style="padding:16px 24px 0;font-family:${FONT};font-size:30px;font-weight:bold;color:${NAVY};">Truck ${esc(f.unit || 'not recorded')}</td></tr>
 <tr><td style="padding:0 24px 14px;font-family:${FONT};font-size:15px;color:${MUTED};">Trip ${esc(f.trip || 'not recorded')}${f.trailer ? ` · Trailer ${esc(f.trailer)}` : ''}</td></tr>
 ${sheetAttached ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NAVY}" style="background:${NAVY};border-radius:8px;"><tr><td style="padding:12px 16px;font-family:${FONT};font-size:17px;font-weight:bold;color:#FFFFFF;">&#128206; ${esc(sheetNote)}</td></tr></table></td></tr>` : ''}
-<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b><div style="font-size:24px;line-height:1.25;font-weight:bold;padding:4px 0 8px;word-break:break-word;">${esc(report.reason)}</div>Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
+<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b><div style="font-size:24px;line-height:1.25;font-weight:bold;padding:4px 0 8px;word-break:break-word;">${esc(report.reason)}</div>${report.driverSays ? `<div style="padding:0 0 8px;"><b style="color:${RED};">What the driver says</b><br>${esc(report.driverSays)}</div>` : ''}Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
 <tr><td style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Next step for dispatch</b><br>${esc(rc)}<br>${esc(next)}<div>${button(consoleUrl, 'Start Breakdown')}</div></td></tr></table></td></tr>
 ${photoBlock(photoCids, photosNote)}
 ${heading('Load')}
@@ -135,7 +143,7 @@ ${heading('Delivery impact')}
 <tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${kv('Next stop', f.next)}${kv('Appointment', f.appt)}${kv('Estimated arrival', f.eta)}${kv('Distance remaining', f.miles != null ? `${f.miles.toLocaleString('en-US')} mi` : null)}</table></td></tr>
 <tr><td style="padding:18px 24px 20px;font-family:${FONT};font-size:13px;line-height:1.5;color:${MUTED};">Reply on this email to keep everyone on the chain. Jarvis keeps it on the load.<br><b style="color:${NAVY};">Jarvis · AI Dispatcher</b> · Florida Beauty</td></tr>
 </table></td></tr></table></body></html>`;
-  const text = [title, label, `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, ...(sheetNote ? [sheetNote] : []), '', `Reason: ${report.reason}`, `Reported by: ${reported}`, ...(photoCids.length ? ['', `${photoCids.length} photo${photoCids.length === 1 ? '' : 's'} in this email.`] : []), ...(photosNote ? [photosNote] : []), '', 'LOAD', ...loadRows(item, now).map(([k, v]) => `${k}: ${v}`), '', 'NEXT STEP FOR DISPATCH', rc, next, consoleUrl, '', f.location || 'Location not reported', ...(mapUrl ? [mapUrl] : []), '', `Next stop: ${f.next || 'Not available'}`, `Estimated arrival: ${f.eta || 'Not available'}`, '', 'Reply on this email to keep everyone on the chain.', 'Jarvis · AI Dispatcher · Florida Beauty'].join('\n');
+  const text = [title, label, `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, ...(sheetNote ? [sheetNote] : []), '', `Reason: ${report.reason}`, ...(report.driverSays ? [`What the driver says: ${report.driverSays}`] : []), `Reported by: ${reported}`, ...(photoCids.length ? ['', `${photoCids.length} photo${photoCids.length === 1 ? '' : 's'} in this email.`] : []), ...(photosNote ? [photosNote] : []), '', 'LOAD', ...loadRows(item, now).map(([k, v]) => `${k}: ${v}`), '', 'NEXT STEP FOR DISPATCH', rc, next, consoleUrl, '', f.location || 'Location not reported', ...(mapUrl ? [mapUrl] : []), '', `Next stop: ${f.next || 'Not available'}`, `Estimated arrival: ${f.eta || 'Not available'}`, '', 'Reply on this email to keep everyone on the chain.', 'Jarvis · AI Dispatcher · Florida Beauty'].join('\n');
   return { subject, html, text };
 }
 
@@ -150,7 +158,7 @@ export function reportPage(p, token, earlier = null) {
   return page(`Report breakdown, truck ${p.u}`, `<h1>Report breakdown</h1><p class="s">Truck ${esc(p.u)} · Trip ${esc(p.t)}</p><form id="f"><label for="r">What happened?</label><textarea id="r" maxlength="${MAX_REASON}" required placeholder="For example: truck air leak, shop is 5 miles away"></textarea><label for="n">Your name</label><input id="n" maxlength="80" required autocomplete="name"><button id="b" type="submit">Report breakdown</button><div class="e" id="e" role="alert"></div></form><p class="n">This emails the team. It does not call road service or contact customers.</p><script>document.getElementById('f').addEventListener('submit',async function(ev){ev.preventDefault();var b=document.getElementById('b'),e=document.getElementById('e');b.disabled=true;e.textContent='';try{var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:document.getElementById('r').value,name:document.getElementById('n').value})});var j=await r.json();if(!r.ok)throw new Error(j.error||'Could not send.');document.querySelector('.c').innerHTML='<h1>Reported</h1><p class="s">The team has the email. Road service has not been called. You can close this page.</p>';}catch(x){e.textContent=x.message;b.disabled=false;}});</script>`);
 }
 
-export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain = async () => {}, onTruckMateMove = async () => {}, fixedDetails = async () => ({}), etasFor = async () => null, otherHolds = async () => false, sendPhotos = async () => {}, textedPhotos = async () => [], baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
+export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain = async () => {}, onTruckMateMove = async () => {}, fixedDetails = async () => ({}), etasFor = async () => null, otherHolds = async () => false, sendPhotos = async () => {}, textedPhotos = async () => [], requireAuth = null, storePhotos = async () => [], baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
   const site = 'florida-beauty';
   const all = async () => (await db.get(KEY(site), {})) || {};
   const link = (a) => `${baseUrl}/br/${makeToken({ a: a.id, t: a.trip, u: a.unit }, secret, now())}`;
@@ -174,7 +182,7 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
 
   // Staff emailed Jarvis that a truck broke down: same breakdown email, to everyone of ours on their email plus the usual list.
   // One per load until Breakdown is turned off; the first report stands, later ones just say so.
-  async function fromEmail({ trip, reason, by, emailId, to = [], photos = [] }) {
+  async function fromEmail({ trip, reason, by, emailId, to = [], photos = [], driverSays = null, part = null }) {
     const clean = oneLine(reason, MAX_REASON);
     if (clean.length < 3) return { ok: false, error: 'What happened? Reply with the reason.' };
     const open = await forTrip(trip);
@@ -183,8 +191,8 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
     if (!item) return { ok: false, error: `Trip ${trip} is not on the board.` };
     const unit = (item.trip || {}).powerUnit || null;
     const texted = await textedPhotos(trip).catch(() => []);
-    const report = { atMs: now(), by: oneLine(by, 80) || 'Dispatch', reason: clean, trip: String(trip), unit, photos: [...photos, ...texted.filter((x) => !photos.some((y) => y.docId === x.docId))] };
-    const subject = breakdownSubject(item, clean, { unit, trip });
+    const report = { atMs: now(), by: oneLine(by, 80) || 'Dispatch', reason: clean, trip: String(trip), unit, ...(driverSays ? { driverSays: oneLine(driverSays, MAX_REASON) } : {}), ...(part ? { part } : {}), photos: [...photos, ...texted.filter((x) => !photos.some((y) => y.docId === x.docId))] };
+    const subject = breakdownSubject(item, clean, { unit, trip, part });
     const before = { before: snapshotLoad(item, await etasFor(trip).catch(() => null), report.atMs), crew: crewOf(item, report.atMs) };
     await db.update(KEY(site), (cur) => ({ ...(cur || {}), [`email:${emailId}`]: { ...report, ...before, subject } }), {});
     await send(report, item, to);
@@ -202,6 +210,20 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
     await sendPhotos((await all())[k], item, fresh, oneLine(by, 80) || 'Dispatch');
     return { ok: true, added: fresh.length };
   }
+
+  // A dispatcher's update on an open breakdown: where the repair stands, what the tech or driver said. It stays on the record and goes out on the chain.
+  async function addUpdate({ trip, message, by, photos = [] }) {
+    const text = oneLine(message, MAX_REASON); const who = oneLine(by, 80) || 'Dispatch';
+    if (text.length < 3) return { ok: false, error: 'Write the update.' };
+    const k = await keyFor(trip);
+    if (!k) return { ok: false, error: `No open breakdown on trip ${trip}.` };
+    let fresh = [];
+    await db.update(KEY(site), (cur) => { const r = (cur || {})[k]; const have = (r.photos || []).map((x) => x.docId); fresh = photos.filter((x) => !have.includes(x.docId)); return { ...(cur || {}), [k]: { ...r, photos: [...(r.photos || []), ...fresh], updates: [...(r.updates || []), { atMs: now(), by: who, message: text }] } }; }, {});
+    const item = ((await getBoard(site).catch(() => ({ trips: [] }))).trips || []).find((it) => String(((it && it.trip) || {}).tripNumber) === String(trip)) || null;
+    await sendPhotos((await all())[k], item, fresh, who, text);
+    return { ok: true };
+  }
+  const openFor = async (trip) => { const k = await keyFor(trip); if (!k) return null; const { by, reason, atMs, part, updates = [] } = (await all())[k]; return { by, reason, atMs, part: part || null, updates }; };
 
   const keyFor = async (trip) => { const c = await all(); return Object.keys(c).filter((k) => String(c[k].trip) === String(trip) && !c[k].clearedAt).sort((x, y) => c[y].atMs - c[x].atMs)[0] || null; };
   const patch = (k, fields) => db.update(KEY(site), (cur) => ({ ...(cur || {}), [k]: { ...(cur || {})[k], ...fields } }), {});
@@ -273,6 +295,33 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
   }
 
   if (app) {
+    // A dispatcher reports it from the load's card: what broke, what the driver says, and pictures. Same email as any other report.
+    if (requireAuth) app.post('/truckmate/breakdown/report', requireAuth, async (req, res) => {
+      const b = req.body || {}; const by = (req.user && (req.user.name || req.user.email)) || 'Dispatch';
+      if (oneLine(b.problem, MAX_REASON).length < 3) return res.status(400).json({ error: 'Write what the breakdown is.' });
+      const files = (Array.isArray(b.photos) ? b.photos : []).filter((f) => f && f.dataBase64 && /^image\//i.test(f.mediaType || '')).slice(0, MAX_PHOTOS);
+      let photos = []; let photosFailed = false;
+      try { photos = files.length ? await storePhotos(String(b.trip), files, by) : []; } catch (e) { console.warn('[breakdown-report] photos:', e.message); photosFailed = true; }
+      try {
+        const r = await fromEmail({ trip: String(b.trip), reason: b.problem, driverSays: b.driverSays, part: ['truck', 'trailer'].includes(b.part) ? b.part : null, by, emailId: `console:${b.trip}:${now()}`, photos });
+        if (r.duplicate) return res.status(409).json({ error: `${r.error}${photos.length ? ' Your photos went out on that email chain.' : ''}` });
+        return r.ok ? res.json({ ok: true, subject: r.subject, photosFailed }) : res.status(400).json({ error: r.error });
+      } catch (e) { console.warn('[breakdown-report]', e.message); return res.status(502).json({ error: 'The breakdown email did not go out. Try again or call dispatch.' }); }
+    });
+    if (requireAuth) {
+      app.get('/truckmate/breakdown/open/:trip', requireAuth, async (req, res) => { try { res.json({ open: await openFor(req.params.trip) }); } catch (e) { res.status(500).json({ error: e.message }); } });
+      app.post('/truckmate/breakdown/update', requireAuth, async (req, res) => {
+        const b = req.body || {}; const by = (req.user && (req.user.name || req.user.email)) || 'Dispatch';
+        if (oneLine(b.message, MAX_REASON).length < 3) return res.status(400).json({ error: 'Write the update.' });
+        const files = (Array.isArray(b.photos) ? b.photos : []).filter((f) => f && f.dataBase64 && /^image\//i.test(f.mediaType || '')).slice(0, MAX_PHOTOS);
+        let photos = []; let photosFailed = false;
+        try { photos = files.length ? await storePhotos(String(b.trip), files, by) : []; } catch (e) { console.warn('[breakdown-report] photos:', e.message); photosFailed = true; }
+        try {
+          const r = await addUpdate({ trip: String(b.trip), message: b.message, by, photos });
+          return r.ok ? res.json({ ok: true, photosFailed }) : res.status(409).json({ error: r.error });
+        } catch (e) { console.warn('[breakdown-report]', e.message); return res.status(502).json({ error: 'The update saved, but the email did not go out. Tell the team.' }); }
+      });
+    }
     app.get('/br/:token', async (req, res) => {
       const p = readToken(req.params.token, secret, now());
       res.set('Cache-Control', 'no-store').type('html').send(reportPage(p, req.params.token, p ? (await all())[p.a] : null));
@@ -283,5 +332,5 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
       try { const r = await submit(p, req.body || {}); return res.status(r.code).json(r); } catch (e) { console.warn('[breakdown-report]', e.message); return res.status(500).json({ error: 'Could not send. Call dispatch.' }); }
     });
   }
-  return { link, forTrip, submit, fromEmail, addPhotos, held, clear, fixed, rescuePlan, process, overlay, fixedWaiting, recoveryFor, claimRecovery, releaseRecovery };
+  return { link, forTrip, submit, fromEmail, addPhotos, addUpdate, openFor, held, clear, fixed, rescuePlan, process, overlay, fixedWaiting, recoveryFor, claimRecovery, releaseRecovery };
 }

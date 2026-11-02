@@ -1049,6 +1049,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     await loadGeo();
     await loadRoads();
     const board = await buildBoard(site);
+    const boardMs = Date.now() - now;
     if (afterBoard) { try { await afterBoard(site, board, { geo, roadMiles, now }); } catch (e) { console.warn('[watchtower] afterBoard:', e.message); } }
     const cfg = { ...DEFAULT_CFG, ...(await db.get(CFG, {})) };
     if (pushRules) cfg.recipients = await pushRules.emailsFor('priority');   // admin → Push notifications
@@ -1158,6 +1159,8 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
         return all;
       }, {});
     }
+    const took = Date.now() - now;
+    if (took > 60000) console.warn(`[watchtower] slow cycle: ${Math.round(took / 1000)}s, board ${Math.round(boardMs / 1000)}s`);
     await notify(cfg, toPush);
     await notify(cfg, toEscalate, { escalated: true });
     for (const a of toMail) { try { if (onTeamStop) await onTeamStop(a, { item: (board.trips || []).find((it) => String(((it && it.trip) || it || {}).tripNumber || '') === String(a.trip)) || null, etas: etasNow[a.trip] || null }); } catch (e) { console.warn('[watchtower] team stop email:', e.message); } } // eslint-disable-line no-await-in-loop

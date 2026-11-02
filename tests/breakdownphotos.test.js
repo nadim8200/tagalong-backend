@@ -73,3 +73,37 @@ test('pictures in a text are found, other attachments are not', () => {
   assert.deepEqual(mmsImages({ attachments: [{ id: 1, type: 'Text', uri: 'u1', contentType: 'text/plain' }, { id: 2, type: 'MmsAttachment', uri: 'https://media.ringcentral.com/x', contentType: 'image/jpeg', fileName: 'p.jpg' }, { id: 3, type: 'MmsAttachment', uri: 'u', contentType: 'video/mp4' }] }), [{ uri: 'https://media.ringcentral.com/x', contentType: 'image/jpeg', name: 'p.jpg' }]);
   assert.deepEqual(mmsImages({}), []);
 });
+
+test('reporting from the card: the choice sets the subject, the driver line and photos go in, and a repeat only adds photos', async () => {
+  const routes = {}; const sent = []; const extra = [];
+  const app = { get() {}, post(p, ...h) { routes[p] = h[h.length - 1]; } };
+  initBreakdownReport(app, { requireAuth: (q, s, n) => n(), db: mem(), secret: 's', getBoard: async () => ({ trips: [load] }), send: async (rep) => sent.push(rep), sendPhotos: async (rep, item, fresh) => extra.push(fresh.length), storePhotos: async (trip, files) => files.map((f, i) => ({ docId: `${i + 1}`, name: f.filename })), now: () => 1000 });
+  const call = (body) => new Promise((resolve) => { let code = 200; routes['/truckmate/breakdown/report']({ body, user: { name: 'Example Dispatcher' } }, { status(c) { code = c; return this; }, json: (j) => resolve({ code, ...j }) }); });
+  assert.equal((await call({ trip: '626143', problem: ' ' })).code, 400);
+  const photo = { dataBase64: 'eA==', mediaType: 'image/jpeg', filename: 'a.jpg' };
+  const ok = await call({ trip: '626143', part: 'trailer', problem: 'light came off', driverSays: 'it fell off on the highway', photos: [photo, { dataBase64: 'eA==', mediaType: 'application/pdf', filename: 'x.pdf' }] });
+  assert.equal(ok.subject, 'BROKER BREAKDOWN TRAILER 2029 // TK 2008 TL 2029 TO 626143');
+  assert.equal(sent[0].by, 'Example Dispatcher'); assert.equal(sent[0].driverSays, 'it fell off on the highway'); assert.equal(sent[0].photos.length, 1, 'pictures only');
+  const again = await call({ trip: '626143', problem: 'more pictures', photos: [photo, { ...photo, filename: 'b.jpg' }] });
+  assert.equal(again.code, 409); assert.match(again.error, /photos went out/); assert.deepEqual(extra, [1], 'only the new one');
+  const m = renderBreakdownEmail({ item: load, report: sent[0] });
+  assert.match(m.html, /What the driver says/); assert.match(m.text, /What the driver says: it fell off/); assert.equal(m.subject, ok.subject);
+});
+
+test('an update on an open breakdown goes on the chain with its history, and needs an open breakdown', async () => {
+  const routes = {}; const sent = [];
+  const app = { get(p, ...h) { routes[`GET ${p}`] = h[h.length - 1]; }, post(p, ...h) { routes[p] = h[h.length - 1]; } };
+  initBreakdownReport(app, { requireAuth: (q, s, n) => n(), db: mem(), secret: 's', getBoard: async () => ({ trips: [load] }), send: async () => {}, sendPhotos: async (rep, item, fresh, by, message) => sent.push({ rep, fresh, by, message }), storePhotos: async (trip, files) => files.map((f, i) => ({ docId: `u${i}`, name: f.filename })), now: () => 1000 });
+  const call = (p, body, q = {}) => new Promise((resolve) => { let code = 200; routes[p]({ body, params: q, user: { name: 'Example Dispatcher' } }, { status(c) { code = c; return this; }, json: (j) => resolve({ code, ...j }) }); });
+  assert.equal((await call('GET /truckmate/breakdown/open/:trip', null, { trip: '626143' })).open, null);
+  assert.equal((await call('/truckmate/breakdown/update', { trip: '626143', message: 'tech on the way' })).code, 409, 'nothing open');
+  await call('/truckmate/breakdown/report', { trip: '626143', part: 'trailer', problem: 'light came off' });
+  assert.equal((await call('/truckmate/breakdown/update', { trip: '626143', message: ' ' })).code, 400);
+  assert.equal((await call('/truckmate/breakdown/update', { trip: '626143', message: 'tech arrived', photos: [{ dataBase64: 'eA==', mediaType: 'image/jpeg', filename: 'p.jpg' }] })).ok, true);
+  await call('/truckmate/breakdown/update', { trip: '626143', message: 'waiting on a part' });
+  assert.equal(sent.length, 2); assert.equal(sent[0].message, 'tech arrived'); assert.equal(sent[0].by, 'Example Dispatcher'); assert.equal(sent[0].fresh.length, 1);
+  const open = (await call('GET /truckmate/breakdown/open/:trip', null, { trip: '626143' })).open;
+  assert.equal(open.reason, 'light came off'); assert.equal(open.updates.length, 2);
+  const m = renderBreakdownPhotosEmail({ report: sent[1].rep, item: load, by: 'Example Dispatcher', count: 0, message: 'waiting on a part', subject: 'Re: x' });
+  assert.match(m.html, /BREAKDOWN UPDATE/); assert.match(m.text, /waiting on a part/); assert.match(m.text, /Earlier: tech arrived \(Example Dispatcher\)/); assert.match(m.text, /Reason on file: light came off/);
+});

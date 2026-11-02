@@ -1187,11 +1187,11 @@ const sendBreakdown = async (report, item, to) => {
   }
   return m.subject;
 };
-const sendBreakdownPhotos = async (report, item, fresh, by) => {
+const sendBreakdownPhotos = async (report, item, fresh, by, message = null) => {
   const to = await alertRecipients.resolve('breakdown_report');
   if (!to.length) return;
   const photos = await breakdownPhotoFiles(fresh, EMAIL_BYTES);
-  const m = renderBreakdownPhotosEmail({ report, item, by, count: fresh.length, subject: `Re: ${report.subject || breakdownSubject(item, report.reason, { unit: report.unit, trip: report.trip })}`, photoCids: photos.attachments.map((a) => a.cid), photosNote: photos.note });
+  const m = renderBreakdownPhotosEmail({ report, item, by, count: fresh.length, message, subject: `Re: ${report.subject || breakdownSubject(item, report.reason, { unit: report.unit, trip: report.trip, part: report.part })}`, photoCids: photos.attachments.map((a) => a.cid), photosNote: photos.note });
   await sendMail({ to, ...m, attachments: photos.attachments }, { env: process.env, direct: staffOnly(to) });
 };
 // what drivers texted on this load in the last few hours, so a report made after the text has the picture
@@ -1217,6 +1217,8 @@ const stopCheck = initStopCheck({ db, textDriver: (site, trip, text, by, which) 
   getReplies: async (trip, since) => (((await db.get('taTripComms:florida-beauty', {})) || {})[trip] || []).filter((e) => e.type === 'reply' && Date.parse(e.at) >= since),
   sendUpdate: async (a, item, driverCheck) => (await stopReview.isAuthorized(a)) ? null : sendStopEmail(a, { item, etas: item ? (await allEtas())[a.trip] || null : null, driverCheck, subject: 'thread' }),
   startBreakdown: (x) => breakdownReport.fromEmail({ ...x, to: [] }) });
+// a step of the once-a-minute check that runs long says so in the log
+const timedStep = async (name, fn) => { const t0 = Date.now(); try { return await fn(); } finally { const ms = Date.now() - t0; if (ms > 5000) console.warn(`[watchtower] slow step ${name}: ${Math.round(ms / 1000)}s`); } };
 // Dispatch answers the stop email: everyone it went to hears who said what.
 const stopReview = initStopReview(app, { db, secret: JWT_SECRET, send: async (ep, review) => {
   const to = await alertRecipients.resolve('team_stopped');
@@ -1228,7 +1230,15 @@ const stopReview = initStopReview(app, { db, secret: JWT_SECRET, send: async (ep
   const m = renderStopReviewEmail({ a, item, review, subject: `Re: ${stopSubject({ unit: ep.unit, trip: ep.trip, title: ep.title })}`, etas: item ? (await allEtas())[ep.trip] || null : null, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null });
   await sendMail({ to, ...m, attachments }, { env: process.env });
 } });
-const breakdownReport = initBreakdownReport(app, { sendPhotos: (...a) => sendBreakdownPhotos(...a), textedPhotos, db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), etasFor: async (trip) => (await allEtas())[trip] || null, otherHolds: async (r) => { const it = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((x) => String(((x && x.trip) || {}).tripNumber) === String(r.trip)); const calls = ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000 && (String(rc.trip) === String(r.trip) || String(rc.truck) === String(r.unit))); return !!(it && ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown'))) || calls.length > 0; }, fixedDetails: async (r, item) => {
+const breakdownReport = initBreakdownReport(app, { requireAuth: requireDispatch, storePhotos: async (trip, files, by) => {
+    const saved = [];
+    for (const f0 of files) { // eslint-disable-line no-await-in-loop
+      const f = await readableFile({ dataBase64: f0.dataBase64, mediaType: f0.mediaType, filename: f0.filename }); // eslint-disable-line no-await-in-loop
+      const [d] = await docs.storeDocs({ site: 'florida-beauty', kind: 'email', trip, files: [{ filename: f.filename || 'breakdown-photo.jpg', mediaType: f.mediaType, dataBase64: f.dataBase64 }], by }); // eslint-disable-line no-await-in-loop
+      if (d) saved.push({ docId: String(d.id), name: String(f.filename || 'breakdown-photo.jpg').slice(0, 80) });
+    }
+    return saved;
+  }, sendPhotos: (...a) => sendBreakdownPhotos(...a), textedPhotos, db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), etasFor: async (trip) => (await allEtas())[trip] || null, otherHolds: async (r) => { const it = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((x) => String(((x && x.trip) || {}).tripNumber) === String(r.trip)); const calls = ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000 && (String(rc.trip) === String(r.trip) || String(rc.truck) === String(r.unit))); return !!(it && ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown'))) || calls.length > 0; }, fixedDetails: async (r, item) => {
     const to = await alertRecipients.resolve('breakdown_report');
     const live = (item && item._samsara) || await liveForUnit(r.unit).catch(() => null);
     const stopped = !live || live.speedMph == null || Number(live.speedMph) <= 3;
@@ -1369,7 +1379,7 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
   onTeamStop: async (a, { item, etas }) => {
     const driverCheck = await stopCheck.forStop(a, item).catch((e) => { console.warn('[stop-check]', e.message); return null; });
     await sendStopEmail(a, { item, etas, driverCheck });
-  }, afterBoard: async (site, board, ctx) => { await transferDone.observe(board).catch((e) => console.warn('[transfer-done]', e.message)); await breakdownReport.process(site, board).catch((e) => console.warn('[breakdown-report]', e.message)); await followProxy.process(site, board).catch((e) => console.warn('[broker-follow]', e.message)); await transferWatch.process(site, board, ctx).catch((e) => console.warn('[transfer]', e.message)); await transferDone.process(board).catch((e) => console.warn('[transfer-done]', e.message)); await stopCheck.process(board).catch((e) => console.warn('[stop-check]', e.message)); await stopTasks.process(site, board).catch((e) => console.warn('[stop-tasks]', e.message)); await commitments.process(site, board).catch((e) => console.warn('[commit]', e.message)); await etaReport.process(site, board).catch((e) => console.warn('[eta-log]', e.message)); await stopVisits.process(site, board); await milestones.process(site, board, ctx); await statusMail.process(site, board, ctx); await etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now }); await follow.run(site, board.trips || []); } });
+  }, afterBoard: async (site, board, ctx) => { await timedStep('transferDone.observe', () => transferDone.observe(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('breakdownReport.process', () => breakdownReport.process(site, board)).catch((e) => console.warn('[breakdown-report]', e.message)); await timedStep('followProxy.process', () => followProxy.process(site, board)).catch((e) => console.warn('[broker-follow]', e.message)); await timedStep('transferWatch.process', () => transferWatch.process(site, board, ctx)).catch((e) => console.warn('[transfer]', e.message)); await timedStep('transferDone.process', () => transferDone.process(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('stopCheck.process', () => stopCheck.process(board)).catch((e) => console.warn('[stop-check]', e.message)); await timedStep('stopTasks.process', () => stopTasks.process(site, board)).catch((e) => console.warn('[stop-tasks]', e.message)); await timedStep('commitments.process', () => commitments.process(site, board)).catch((e) => console.warn('[commit]', e.message)); await timedStep('etaReport.process', () => etaReport.process(site, board)).catch((e) => console.warn('[eta-log]', e.message)); await timedStep('stopVisits.process', () => stopVisits.process(site, board)); await timedStep('milestones.process', () => milestones.process(site, board, ctx)); await timedStep('statusMail.process', () => statusMail.process(site, board, ctx)); await timedStep('etaWatch.run', () => etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now })); await timedStep('follow.run', () => follow.run(site, board.trips || [])); } });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
