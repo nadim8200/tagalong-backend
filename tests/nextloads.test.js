@@ -142,3 +142,12 @@ test('a next load assigned to a truck still on a run waits behind it (shown insi
   assert.equal(nxt._queuedBehind.trip, '624901'); assert.equal(nxt._queuedBehind.truck, '2620'); assert.equal(nxt._queuedBehind.order, 1);
   assert.equal(cur._queuedBehind, undefined);
 });
+
+test('a bill read off a scan has to fit the load', async () => {
+  const { rateConFits } = await import('../manifest.js');
+  const redwood = { trip: { origZoneDesc: 'ITASCA, IL, 60143', destZoneDesc: 'COCOA, FL, 32926' }, freightBills: [{ billNumber: 'B180764', endZoneDescription: 'MONROE, GA, 30655' }] };
+  assert.equal(rateConFits({ loadNumber: 'LDS15583376', pickups: [{ city: 'Riviera Beach' }], deliveries: [{ city: 'Doral' }] }, redwood), false);
+  assert.equal(rateConFits({ deliveries: [{ city: 'Monroe' }] }, redwood), true);
+  assert.equal(rateConFits({}, redwood), true, 'nothing to rule it out');
+  assert.equal(rateConFits({ loadNumber: 'XY12345', deliveries: [{ city: 'Doral' }] }, { freightBills: [{ reference: 'XY-12345' }] }), true);
+});

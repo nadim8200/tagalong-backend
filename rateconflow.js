@@ -70,10 +70,13 @@ export function routeMatch(rc, it) {
 // still on another run, so it has to be a trip that wasn't there when the rate con came, or one waiting to start on the same route. Two candidates: it waits.
 export function findLoad(entry, items = []) {
   const ready = (x) => (x && tripNo(x) && tripOf(x).powerUnit ? x : null);
-  const named = entry.trip && ready(items.find((x) => tripNo(x) === entry.trip));
+  // a trip or bill number can be misread off a scan, so it has to agree with the load number or the route. Accounting never gets a guess
+  const byLoad = (x) => !!entry.rc.loadNumber && (carries(x, { rc: { loadNumber: entry.rc.loadNumber } }) || same((x._ratecon && x._ratecon.data && x._ratecon.data.loadNumber), entry.rc.loadNumber));
+  const agrees = (x) => byLoad(x) || (!entry.rc.pickup && !entry.rc.delivery) || !!routeMatch(entry.rc, x);
+  const named = entry.trip && ready(items.find((x) => tripNo(x) === entry.trip && agrees(x)));
   if (named) return { it: named, by: `trip ${entry.trip}` };
-  const exact = ready(items.find((x) => carries(x, { rc: { bill: entry.rc.bill, loadNumber: entry.rc.loadNumber } }) || (entry.rc.loadNumber && same((x._ratecon && x._ratecon.data && x._ratecon.data.loadNumber), entry.rc.loadNumber))));
-  if (exact) return { it: exact, by: 'load number' };
+  const exact = ready(items.find(byLoad)) || ready(items.find((x) => entry.rc.bill && carries(x, { rc: { bill: entry.rc.bill } }) && agrees(x)));
+  if (exact) return { it: exact, by: byLoad(exact) ? 'load number' : 'bill' };
   const truck = digits(entry.rc.truck); const trailer = digits(entry.rc.trailer);
   if (!truck && !trailer) return null;
   const seen = new Set(entry.seenTrips || []);

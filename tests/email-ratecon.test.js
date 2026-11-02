@@ -79,3 +79,22 @@ test('Gus sends a rate con to the team: Jarvis reads it as a next load and says 
   assert.deepEqual(learned, [e.subject], 'still in the loop');
   assert.deepEqual((await db.get('taLoadTasks:florida-beauty', {})) || {}, {}, 'no to-dos');
 });
+
+test('one PDF of several pages from Gus is read as a batch, never as one rate con', async () => {
+  const { PDFDocument } = await import('pdf-lib');
+  const doc = await PDFDocument.create(); doc.addPage(); doc.addPage();
+  const b64 = Buffer.from(await doc.save()).toString('base64');
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us', ANTHROPIC_API_KEY: 'x' };
+  const fetchFn = async (url) => {
+    const ok = (j) => ({ ok: true, status: 200, json: async () => j });
+    if (url.includes('oauth2')) return ok({ access_token: 'x', expires_in: 3600 });
+    if (url.includes('/attachments')) return ok({ value: [{ '@odata.type': '#microsoft.graph.fileAttachment', name: '4107_001.pdf', contentType: 'application/pdf', size: 10, contentBytes: b64 }] });
+    if (url.includes('/mailFolders/inbox/messages')) return ok({ value: [{ id: 'gus-2', subject: 'last batch', from: { emailAddress: { name: 'Gustavo Duarte', address: 'gus@floridabeauty.us' } }, toRecipients: [{ emailAddress: { address: 'jarvis@floridabeauty.us' } }], receivedDateTime: '2026-11-02T23:39:00Z', body: { contentType: 'text', content: 'batch' }, conversationId: 'c2', hasAttachments: true }] });
+    if (url.includes('api.anthropic.com')) return ok({ content: [{ type: 'text', text: JSON.stringify({ summary: 'Rate cons.', attachments: [{ index: 1, type: 'rate_confirmation' }], refs: { bill: 'B180764' } }) }] });
+    return ok({});
+  };
+  const single = []; const batch = [];
+  const inbox = initInbox({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: (q, r, n) => n(), db: memDb(), docs: { enabled: true, storeDocs: async () => [{ id: 7 }], linkDocs: async () => {} }, comms: { log: async () => {} }, rateCons: async (...a) => { single.push(a); return null; }, packets: async (site, files, opts) => { batch.push(opts); return { trips: [], rateCons: [] }; }, env, fetchFn, getBoard: async () => ({ trips: [] }) });
+  await inbox.poll();
+  assert.equal(single.length, 0, 'not read as one'); assert.equal(batch.length, 1); assert.equal(batch[0].exact, true);
+});

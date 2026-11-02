@@ -149,3 +149,14 @@ test('from the email to Accounting by truck, and the email says how it matched',
   await h.f.process('s', { trips: [running, trip('626300')] });
   assert.match(h.mails[1].html, /Matched by/); assert.match(h.mails[1].html, /truck 2207, trailer 3010, route/); assert.deepEqual(h.saved, ['626300']);
 });
+
+test('a misread trip or bill never reaches Accounting: Traffic Tech Riviera Beach → Doral on the Redwood load to Cocoa', async () => {
+  const redwood = { trip: { tripNumber: '626282', powerUnit: '2401', trailer: '7136', status: 'DEPSHIP', origZoneDesc: 'ITASCA, IL, 60143', destZoneDesc: 'COCOA, FL, 32926' }, freightBills: [{ billNumber: 'B180764', endZoneDescription: 'COCOA, FL, 32926' }, { billNumber: 'B180764-AA', endZoneDescription: 'MONROE, GA, 30655' }] };
+  const rc = { broker: 'Traffic Tech', loadNumber: 'LDS15583376', bill: 'B180764', pickup: 'Riviera Beach, FL', delivery: 'Doral, FL' };
+  assert.equal(findLoad({ rc, trip: '626282' }, [redwood]), null, 'the trip number');
+  assert.equal(findLoad({ rc }, [redwood]), null, 'the bill');
+  const right = { ...redwood, trip: { ...redwood.trip, tripNumber: '626400', origZoneDesc: 'RIVIERA BEACH, FL', destZoneDesc: 'DORAL, FL' }, freightBills: [{ billNumber: 'B180764', endZoneDescription: 'DORAL, FL, 33166' }] };
+  assert.equal(findLoad({ rc }, [right]).by, 'bill', 'a bill that agrees with the route');
+  const withRef = { ...redwood, freightBills: [{ billNumber: 'B1', referenceNumber: 'LDS15583376' }] };
+  assert.equal(findLoad({ rc, trip: '626282' }, [withRef]).by, 'trip 626282', 'the load number settles it');
+});

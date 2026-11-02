@@ -474,6 +474,18 @@ export function sheetChanges(prev, next) {
   return { added, removed, changed, previousUploadedAt: prev.uploadedAt || null, previousVersion: prev.version || 1 };
 }
 
+// Could this rate con be this trip? Its load number is on the trip, or its pickup or delivery city is. Unknown cities can't rule it out. Pure.
+export function rateConFits(rc, it, cityKey = (x) => String(x || '').split(',')[0].trim().toUpperCase()) {
+  const t = (it && it.trip) || it || {};
+  const bills = (it && (it.freightBills || it.orders)) || t.freightBills || [];
+  const ln = String(rc.loadNumber || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (ln.length >= 5 && JSON.stringify(bills).toUpperCase().replace(/[^A-Z0-9]/g, '').includes(ln)) return true;
+  const want = [...(rc.pickups || []), ...(rc.deliveries || [])].map((x) => cityKey(x && x.city)).filter(Boolean);
+  if (!want.length) return true;
+  const trip = [t.origZoneDesc, t.destZoneDesc, ...bills.map((b) => b.endZoneDescription)].map(cityKey);
+  return want.some((c) => trip.includes(c));
+}
+
 export function initManifests(app, { requireAuth, db, env = process.env, buildBoard, docs = null, carriers = null, anthropic = null, ratecon = null }) {
   const enabled = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN);
   const client = anthropic || (enabled ? new Anthropic() : null);
@@ -605,6 +617,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     for (const lab of labels.filter(Boolean)) {
       const bk = billKey(lab);
       const hit = items.find(([, it]) => billsOf2(it).some((b) => b && billKey(b.billNumber) === bk));
+      if (hit && exact && !rateConFits(rc, hit[1], cityKey2)) continue;   // a bill read off a scan: another broker's load on another route isn't this rate con
       if (hit) return { trip: hit[0], matchedBy: `bill ${billsOf2(hit[1]).find((b) => b && billKey(b.billNumber) === bk).billNumber}` };
     }
     const stopRefs = [...(rc.pickups || []), ...(rc.deliveries || [])].map((x) => x && x.refs);
@@ -659,7 +672,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     const savedRcs = (db && db.enabled) ? ((await db.get(`taTruckMateRateCon:${site}`, {})) || {}) : {};
     let m = matchRateCon(rc, [...labels, rc.fbfBillNumber], brd, shs, savedRcs, { exact });
     if (!m && !exact && hintTrip && brd.has(String(hintTrip))) m = { trip: String(hintTrip), matchedBy: source === 'email' ? 'the trip / bill number in the email' : 'the load it was uploaded to' };
-    const bill = rc.fbfBillNumber || labels.find(Boolean) || null;
+    const bill = (m || !exact) ? rc.fbfBillNumber || labels.find(Boolean) || null : null;
     const record = { ...rc, fbfBillNumber: bill ? billKey(bill) : null, filename, pageCount, uploadedAt: new Date().toISOString(), uploadedBy: by, source, ...(exact ? { nextLoadBatch: true } : {}) };
     if (m) {
       if (docs && docs.enabled && docs.retypeDocs && docIds.length) { try { record.version = await docs.retypeDocs({ site, ids: docIds, kind: 'ratecon', trip: m.trip }); record.docIds = docIds; } catch (e) { record.docError = e.message; } }

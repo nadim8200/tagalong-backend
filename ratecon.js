@@ -94,6 +94,17 @@ export function initRateCon(app, { requireAuth, db, env = process.env, docs = nu
 
   // Check / uncheck one handling instruction. Records WHO signed it off and WHEN
   // as proof; unchecking clears the sign-off.
+  // an admin takes a rate con that landed on the wrong load off it. The file itself stays in the documents
+  app.delete('/truckmate/ratecon/:trip', requireAuth, async (req, res) => {
+    const u = req.user || {};
+    if (!(u.admin || u.role === 'admin' || u.companyAdmin)) return res.status(403).json({ error: 'Admins only.' });
+    if (!db || !db.enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const site = String((req.query && req.query.site) || 'florida-beauty'); const trip = String(req.params.trip);
+    let found = false;
+    await db.update(storeKey(site), (cur) => { const all = { ...(cur || {}) }; found = !!all[trip]; delete all[trip]; return all; }, {});
+    return found ? res.json({ ok: true, trip }) : res.status(404).json({ error: 'No rate con on that load.' });
+  });
+
   app.post('/truckmate/ratecon/:trip/check', requireAuth, async (req, res) => {
     try {
       const site = String(req.query.site || 'florida-beauty');

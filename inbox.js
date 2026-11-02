@@ -34,6 +34,7 @@ import { isTrainingEmail, removals } from './playbook.js';
 import { fmtLocal } from './localtime.js';
 import { readableFile } from './heic.js';
 import { createHash } from 'node:crypto';
+import { PDFDocument } from 'pdf-lib';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const OK_ATTACH = /^(application\/pdf|image\/(png|jpe?g|webp|gif|heic|heif))$/i;
@@ -575,6 +576,10 @@ export function initInbox(app, { requireAuth, db, stopReview = null, transferDon
       if (attachments.length && trips.length > 1 && docs.linkDocs) await docs.linkDocs({ site, kind: 'email', links: attachments.map((a) => ({ docId: a.docId, trips })) }); // eslint-disable-line no-await-in-loop
       const email = { id: m.id, conversationId: m.conversationId || null, from, subject: String(m.subject || '').slice(0, 300), at: m.receivedDateTime, text, attachments: attachments.map(({ bytes, ...a }) => a), trips, why: matches.map((x) => x.why), status: 'new', replies: [] };
       email.rcBatch = !isPacketEmail(email.subject, attachments) && isRateConBatch(from.address, email.subject, text, attachments, env);
+      // Gus's scanner puts a whole batch in one PDF: more than one page is read as a batch, page by page, never as one rate con
+      if (!email.rcBatch && !isPacketEmail(email.subject, attachments) && NEXT_LOAD_SENDERS(env).includes(from.address.toLowerCase()) && attachments.length === 1 && /pdf/i.test(attachments[0].contentType || '')) {
+        try { email.rcBatch = (await PDFDocument.load(Buffer.from(attachments[0].bytes, 'base64'), { ignoreEncryption: true })).getPageCount() > 1; } catch { /* read it as usual */ } // eslint-disable-line no-await-in-loop
+      }
       email.packet = isPacketEmail(email.subject, attachments) || email.rcBatch;
       email.quiet = !!gate.quiet;
       // a staff member TRAINING Jarvis → learn from it (not a live request) and say what was learned
@@ -655,7 +660,7 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
           more.forEach((x) => { if (!trips.includes(x.trip)) { trips.push(x.trip); email.why.push(`${x.why} (read from the email)`); } });
         }
         // rate cons → read in full and filed on their load
-        const rcIdx = new Set((t.attachments || []).filter((a) => a && a.type === 'rate_confirmation').map((a) => Number(a.index) - 1));
+        const rcIdx = new Set(email.rcBatch ? [] : (t.attachments || []).filter((a) => a && a.type === 'rate_confirmation').map((a) => Number(a.index) - 1));
         email.rateCons = [];
         for (const i of rcIdx) {
           const a = attachments[i];
