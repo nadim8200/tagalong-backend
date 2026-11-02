@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import jpeg from 'jpeg-js';
 import { photosOf, exifOrientation, shrinkPixels, shrinkPhoto, photoAttachments, MAX_PHOTOS } from '../breakdownphotos.js';
-import { renderBreakdownEmail, renderBreakdownPhotosEmail, initBreakdownReport, loadType, loadRows, breakdownSubject } from '../breakdownreport.js';
+import { correctedLoad, renderBreakdownEmail, renderBreakdownPhotosEmail, initBreakdownReport, loadType, loadRows, breakdownSubject } from '../breakdownreport.js';
 import { mmsImages } from '../ringcentral.js';
 
 const noise = (w, h) => { const data = Buffer.alloc(w * h * 4); for (let i = 0; i < data.length; i += 1) data[i] = (i * 2654435761) >>> 24; return jpeg.encode({ data, width: w, height: h }, 95).data; };
@@ -106,4 +106,21 @@ test('an update on an open breakdown goes on the chain with its history, and nee
   assert.equal(open.reason, 'light came off'); assert.equal(open.updates.length, 2);
   const m = renderBreakdownPhotosEmail({ report: sent[1].rep, item: load, by: 'Example Dispatcher', count: 0, message: 'waiting on a part', subject: 'Re: x' });
   assert.match(m.html, /BREAKDOWN UPDATE/); assert.match(m.text, /waiting on a part/); assert.match(m.text, /Earlier: tech arrived \(Example Dispatcher\)/); assert.match(m.text, /Reason on file: light came off/);
+});
+
+test('a corrected truck or trailer goes on the email, with the right location or none', async () => {
+  const other = { trip: { tripNumber: '2', powerUnit: '4560' }, _samsara: { location: 'Other truck' } };
+  const here = { ...load, _samsara: { location: 'This truck' } };
+  assert.equal(correctedLoad(here, [here, other], {}), here, 'nothing changed');
+  assert.equal(correctedLoad(here, [here], { truck: '2008', trailer: '2029' }), here, 'same numbers');
+  assert.equal(correctedLoad(here, [here, other], { trailer: '7000' })._samsara.location, 'This truck');
+  assert.equal(correctedLoad(here, [here, other], { truck: '4560' })._samsara.location, 'Other truck');
+  assert.equal(correctedLoad(here, [here], { truck: '9999' })._samsara, undefined, 'never the wrong truck');
+  assert.equal(here.trip.powerUnit, '2008', 'the load itself is untouched');
+  const sent = [];
+  const r = initBreakdownReport(null, { db: mem(), secret: 's', getBoard: async () => ({ trips: [here, other] }), send: async (rep, item) => sent.push([rep, item]), now: () => 1000 });
+  assert.equal((await r.fromEmail({ trip: '999', reason: 'flat tire', by: 'A', emailId: 'x' })).ok, false, 'a trip not on the board is refused');
+  const ok = await r.fromEmail({ trip: '626143', reason: 'trailer light', by: 'A', emailId: 'y', truck: '2010', trailer: '3000' });
+  assert.equal(ok.subject, 'BROKER BREAKDOWN TRAILER 3000 // TK 2010 TL 3000 TO 626143');
+  assert.equal(sent[0][0].unit, '2010'); assert.equal(sent[0][1].trip.trailer, '3000');
 });

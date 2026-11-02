@@ -106,6 +106,18 @@ ${heading('Load')}
   return { subject, html, text: [title, line, ...(message ? [message] : []), `Reason on file: ${report.reason}`, ...earlier.map((u) => `Earlier: ${u.message} (${u.by})`), ...(photosNote ? [photosNote] : []), '', ...rows.map(([k, v]) => `${k}: ${v}`), '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n') };
 }
 
+// The dispatcher corrected the truck or trailer on the report: the email goes by that, TruckMate isn't touched. A different truck never
+// shows this load's truck's location: it takes that truck's own, or none. Pure.
+export function correctedLoad(item, board = [], { truck = null, trailer = null } = {}) {
+  const t = (item && item.trip) || {};
+  const newTruck = truck && String(truck) !== String(t.powerUnit || '') ? String(truck) : null;
+  const newTrailer = trailer && String(trailer) !== String(t.trailer || '') ? String(trailer) : null;
+  if (!newTruck && !newTrailer) return item;
+  const { _samsara, ...rest } = item;
+  const live = newTruck ? (board.find((it) => String(((it && it.trip) || {}).powerUnit) === newTruck) || {})._samsara : _samsara;
+  return { ...rest, trip: { ...t, ...(newTruck ? { powerUnit: newTruck } : {}), ...(newTrailer ? { trailer: newTrailer } : {}) }, ...(live ? { _samsara: live } : {}) };
+}
+
 // The email that opens the chain. Pure.
 export function renderBreakdownEmail({ item, report, etas = null, now = Date.now(), showPhones = true, mapCid = null, sheetNote = null, sheetAttached = false, photoCids = [], photosNote = null }) {
   const a = { unit: report.unit, trip: report.trip, ack: null };
@@ -182,13 +194,15 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
 
   // Staff emailed Jarvis that a truck broke down: same breakdown email, to everyone of ours on their email plus the usual list.
   // One per load until Breakdown is turned off; the first report stands, later ones just say so.
-  async function fromEmail({ trip, reason, by, emailId, to = [], photos = [], driverSays = null, part = null }) {
+  async function fromEmail({ trip, reason, by, emailId, to = [], photos = [], driverSays = null, part = null, truck = null, trailer = null }) {
     const clean = oneLine(reason, MAX_REASON);
     if (clean.length < 3) return { ok: false, error: 'What happened? Reply with the reason.' };
     const open = await forTrip(trip);
     if (open && !open.clearedAt && now() - open.atMs < DAY) { if (photos.length) await addPhotos({ trip, photos, by }); return { ok: false, duplicate: true, error: `Already reported by ${open.by}.` }; }
-    const item = ((await getBoard(site).catch(() => ({ trips: [] }))).trips || []).find((it) => String(((it && it.trip) || {}).tripNumber) === String(trip)) || null;
-    if (!item) return { ok: false, error: `Trip ${trip} is not on the board.` };
+    const board = ((await getBoard(site).catch(() => ({ trips: [] }))).trips || []);
+    const onLoad = board.find((it) => String(((it && it.trip) || {}).tripNumber) === String(trip)) || null;
+    if (!onLoad) return { ok: false, error: `Trip ${trip} is not on the board.` };
+    const item = correctedLoad(onLoad, board, { truck, trailer });
     const unit = (item.trip || {}).powerUnit || null;
     const texted = await textedPhotos(trip).catch(() => []);
     const report = { atMs: now(), by: oneLine(by, 80) || 'Dispatch', reason: clean, trip: String(trip), unit, ...(driverSays ? { driverSays: oneLine(driverSays, MAX_REASON) } : {}), ...(part ? { part } : {}), photos: [...photos, ...texted.filter((x) => !photos.some((y) => y.docId === x.docId))] };
@@ -303,7 +317,7 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
       let photos = []; let photosFailed = false;
       try { photos = files.length ? await storePhotos(String(b.trip), files, by) : []; } catch (e) { console.warn('[breakdown-report] photos:', e.message); photosFailed = true; }
       try {
-        const r = await fromEmail({ trip: String(b.trip), reason: b.problem, driverSays: b.driverSays, part: ['truck', 'trailer'].includes(b.part) ? b.part : null, by, emailId: `console:${b.trip}:${now()}`, photos });
+        const r = await fromEmail({ trip: String(b.trip), reason: b.problem, driverSays: b.driverSays, part: ['truck', 'trailer'].includes(b.part) ? b.part : null, truck: oneLine(b.truck, 20) || null, trailer: oneLine(b.trailer, 20) || null, by, emailId: `console:${b.trip}:${now()}`, photos });
         if (r.duplicate) return res.status(409).json({ error: `${r.error}${photos.length ? ' Your photos went out on that email chain.' : ''}` });
         return r.ok ? res.json({ ok: true, subject: r.subject, photosFailed }) : res.status(400).json({ error: r.error });
       } catch (e) { console.warn('[breakdown-report]', e.message); return res.status(502).json({ error: 'The breakdown email did not go out. Try again or call dispatch.' }); }
