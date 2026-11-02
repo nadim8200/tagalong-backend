@@ -267,3 +267,26 @@ ${monitorBlock(alerts, [otherLine, next], caveat)}`;
     ...b.text, '', 'MONITORING STATUS', alerts, otherLine, next, caveat, '', 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n');
   return { subject, html: shell({ tone: 'amber', mark: '&#9888;&#65038;', title: 'BREAKDOWN REPORTED FIXED', sub: 'Awaiting confirmed movement' }, body), text };
 }
+
+// The answer to a stop email: who said what, and what happens next. Pure.
+const STOP_FROM = { 'email button': 'From the stop email', 'email reply': 'Reply to the stop email', console: 'Marked Solved in the console' };
+export function renderStopReviewEmail({ a, item, review, subject, etas = null, now = Date.now(), showPhones = true, mapCid = null }) {
+  const f = teamStopFacts(a, item, { etas, now, showPhones, mapCid });
+  const yes = review.status === 'authorized';
+  const title = yes ? 'STOP AUTHORIZED' : 'STOP NOT AUTHORIZED';
+  const sub = yes ? 'Alerts for this stop are off' : 'Alerts for this stop continue';
+  const next = yes ? 'Jarvis will not send more alerts for this stop. You will get one email when the truck is confirmed rolling again.' : 'Alerts continue until the truck is rolling or someone authorizes the stop.';
+  const stopped = f.duration ? `${a.stopStartUnknown ? 'At least ' : ''}${f.duration}` : null;
+  const rows = [[yes ? 'Authorized by' : 'Marked by', review.by], ['When', et(review.atMs)], ['How', STOP_FROM[review.source] || review.source], ['Stopped so far', stopped], ['Stopped since', f.stoppedSince]].filter(([, v]) => v);
+  const mapUrl = f.lat != null ? `https://www.google.com/maps?q=${encodeURIComponent(`${f.lat},${f.lng}`)}` : null;
+  const body = `${trucksLine(f.unit)}${tripLine(f.trip, f.trailer)}
+${message(yes ? 'Reason' : 'Note', [review.reason ? `"${review.reason}"` : 'No note added.'])}
+<tr><td style="height:12px;line-height:12px;font-size:0;">&nbsp;</td></tr>
+${table(rows.map(([k, v]) => kv(k, v)).join(''))}
+${heading('Location')}
+${f.mapCid ? `<tr><td ${pad} style="padding:0 24px 10px;"><a href="${esc(mapUrl)}"><img src="cid:${esc(f.mapCid)}" width="592" alt="Map of the truck near ${esc(f.location || 'its reported position')}" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></a></td></tr>` : ''}
+<tr><td ${pad} style="padding:0 24px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};word-break:break-word;"><b>${esc(f.location || 'Location not reported')}</b></td></tr>
+${message('What happens next', [next])}
+${viewTrip(f.trip)}`;
+  return { subject, html: shell({ ...(yes ? {} : { tone: 'red' }), mark: yes ? '&#10003;' : '&#10005;', title, sub }, body), text: ['FLORIDA BEAUTY — Dispatch notifications', '', title, sub, `Truck ${f.unit}`, `Trip ${f.trip}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, '', `${yes ? 'Reason' : 'Note'}: ${review.reason || 'No note added.'}`, ...rows.map(([k, v]) => `${k}: ${v}`), `Location: ${f.location || 'Location not reported'}`, '', next, ...mailEnd(f.trip)].join('\n') };
+}

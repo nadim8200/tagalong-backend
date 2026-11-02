@@ -37,7 +37,7 @@ import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
 import { initWatchtower } from './watchtower.js';
 import { renderTruckMap, renderTransferMap } from './truckmap.js';
-import { renderTeamStopEmail, renderRollingEmail, teamStopFacts, tripSheetIds, tripSheetFiles } from './teamstopmail.js';
+import { renderTeamStopEmail, renderRollingEmail, teamStopFacts, stopSubject, tripSheetIds, tripSheetFiles } from './teamstopmail.js';
 import { initManifests } from './manifest.js';
 import { initDocuments } from './documents.js';
 import { initCarriers } from './carriers.js';
@@ -91,7 +91,8 @@ import { initAlertRecipients } from './alertrecipients.js';
 import { initTransferWatch, transferEmail, transferStatus } from './transferwatch.js';
 import { initTransferDone, answerConfirms } from './transferdone.js';
 import { initStopCheck } from './stopcheck.js';
-import { renderFixedRollingEmail, renderTransferCompletedEmail, renderTransferReversedEmail, renderFixedReportedEmail, handoffFacts, snapshotLoad, crewOf } from './handoffmail.js';
+import { initStopReview } from './stopreview.js';
+import { renderFixedRollingEmail, renderTransferCompletedEmail, renderTransferReversedEmail, renderFixedReportedEmail, handoffFacts, snapshotLoad, crewOf, renderStopReviewEmail } from './handoffmail.js';
 import { initTruckBuilder } from './truckbuilder.js';
 import { initMissingCases } from './missingcase.js';
 import { initStopTasks } from './stoptasks.js';
@@ -1009,7 +1010,7 @@ const planSheet = initPlanSheet(app, { requireAuth: requireDispatch, requireAdmi
 const stopTasks = initStopTasks({ db, env: process.env, textDriver: (site, trip, text, by) => driverHooks.text(site, trip, text, by), voice: { placeCall: (...a) => voice.placeCall(...a), callsFor: (...a) => voice.callsFor(...a) }, replyInThread: (...a) => inbox.replyInThread(...a) });
 const followProxy = { start: (...a) => brokerFollow.start(...a), overlay: (...a) => brokerFollow.overlay(...a), process: (...a) => brokerFollow.process(...a) };
 const dispatchLog = initDispatchLog(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, env: process.env });
-const inbox = initInbox(app, { transferDone: { confirm: (...a) => transferDone.confirm(...a), cancel: (...a) => transferDone.cancel(...a) }, breakdownFixed: (...a) => breakdownReport.fixed('' + a[0], a[1], a[2]), rescuePlan: (...a) => breakdownReport.rescuePlan(...a), breakdownEmail: (...a) => breakdownReport.fromEmail(...a), brokerFollow: followProxy, dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
+const inbox = initInbox(app, { stopReview: { decide: (...a) => stopReview.decide(...a) }, transferDone: { confirm: (...a) => transferDone.confirm(...a), cancel: (...a) => transferDone.cancel(...a) }, breakdownFixed: (...a) => breakdownReport.fixed('' + a[0], a[1], a[2]), rescuePlan: (...a) => breakdownReport.rescuePlan(...a), breakdownEmail: (...a) => breakdownReport.fromEmail(...a), brokerFollow: followProxy, dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
@@ -1161,7 +1162,7 @@ const sendStopEmail = async (a, { item, etas, driverCheck = null, subject = null
   const mapCid = attachments.length ? 'truckmap' : null;
   const sheet = await sheetFor(item, a.trip);
   const showPhones = to.every((e) => /@floridabeauty\.us$/i.test(e));
-  const body = (extra) => { const m = renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, driverCheck, reportUrl: breakdownReport.link(a), ...extra })); return subject ? { ...m, subject: `Re: ${m.subject}` } : m; };
+  const body = (extra) => { const m = renderTeamStopEmail(teamStopFacts(a, item, { etas, showPhones, driverCheck, reportUrl: breakdownReport.link(a), reviewUrl: subject ? null : stopReview.link(a), ...extra })); return subject ? { ...m, subject: `Re: ${m.subject}` } : m; };
   try {
     await sendMail({ to, ...body({ mapCid, sheet }), attachments: [...attachments, ...sheet.attachments] }, { env: process.env });
   } catch (e) {
@@ -1173,8 +1174,19 @@ const sendStopEmail = async (a, { item, etas, driverCheck = null, subject = null
 // Extended stops: ask the drivers, and put what they say on the stop email. Silent until company texting is live (comms says so).
 const stopCheck = initStopCheck({ db, textDriver: (site, trip, text, by, which) => comms.textDriverAuto(site, trip, text, by, which),
   getReplies: async (trip, since) => (((await db.get('taTripComms:florida-beauty', {})) || {})[trip] || []).filter((e) => e.type === 'reply' && Date.parse(e.at) >= since),
-  sendUpdate: async (a, item, driverCheck) => sendStopEmail(a, { item, etas: item ? (await allEtas())[a.trip] || null : null, driverCheck, subject: 'thread' }),
+  sendUpdate: async (a, item, driverCheck) => (await stopReview.isAuthorized(a)) ? null : sendStopEmail(a, { item, etas: item ? (await allEtas())[a.trip] || null : null, driverCheck, subject: 'thread' }),
   startBreakdown: (x) => breakdownReport.fromEmail({ ...x, to: [] }) });
+// Dispatch answers the stop email: everyone it went to hears who said what.
+const stopReview = initStopReview(app, { db, secret: JWT_SECRET, send: async (ep, review) => {
+  const to = await alertRecipients.resolve('team_stopped');
+  if (!to.length) return;
+  const item = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((x) => String(((x && x.trip) || {}).tripNumber) === String(ep.trip)) || null;
+  const a = { unit: ep.unit, trip: ep.trip, stoppedSinceMs: ep.stoppedSinceMs, stopStartUnknown: ep.stopStartUnknown };
+  const yes = review.status === 'authorized';
+  const attachments = await truckMap((item && item._samsara) || {}, yes ? 'green' : 'red', stopBadge(a));
+  const m = renderStopReviewEmail({ a, item, review, subject: `Re: ${stopSubject({ unit: ep.unit, trip: ep.trip, title: ep.title })}`, etas: item ? (await allEtas())[ep.trip] || null : null, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null });
+  await sendMail({ to, ...m, attachments }, { env: process.env });
+} });
 const breakdownReport = initBreakdownReport(app, { db, secret: JWT_SECRET, getBoard: (site) => truckmate.buildBoard(site), etasFor: async (trip) => (await allEtas())[trip] || null, otherHolds: async (r) => { const it = ((await truckmate.buildBoard('florida-beauty')).trips || []).find((x) => String(((x && x.trip) || {}).tripNumber) === String(r.trip)); const calls = ((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000 && (String(rc.trip) === String(r.trip) || String(rc.truck) === String(r.unit))); return !!(it && ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown'))) || calls.length > 0; }, fixedDetails: async (r, item) => {
     const to = await alertRecipients.resolve('breakdown_report');
     const live = (item && item._samsara) || await liveForUnit(r.unit).catch(() => null);
@@ -1301,9 +1313,10 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
     const to = await alertRecipients.resolve(chain ? 'breakdown_report' : 'team_stopped');
     if (!to.length) return;
     const attachments = await truckMap(ep.live || (item && item._samsara) || {}, 'green', rollBadge(ep, ep.confirmedAt));
-    const m = renderRollingEmail(ep, item, { etas, now: ep.confirmedAt, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null, note: chain && !chain.fixedAt ? `No repair has been reported for this breakdown.${chain.transferredTo ? ` Trip ${chain.trip} moved to truck ${chain.transferredTo}.` : ''}` : null });
+    const m = renderRollingEmail(ep, item, { etas, now: ep.confirmedAt, showPhones: to.every((e) => /@floridabeauty\.us$/i.test(e)), mapCid: attachments.length ? 'truckmap' : null, note: chain && !chain.fixedAt ? `No repair has been reported for this breakdown.${chain.transferredTo ? ` Trip ${chain.trip} moved to truck ${chain.transferredTo}.` : ''}` : ep.review && ep.review.status === 'authorized' ? `This stop was authorized by ${ep.review.by}: ${ep.review.reason}` : null });
     await sendMail({ to, ...m, ...(chain && chain.subject ? { subject: `Re: ${chain.subject}` } : {}), attachments }, { env: process.env, direct: !!chain && staffOnly(to) });
   },
+  onStopSolved: (a, by, note) => stopReview.decide({ unit: a.unit, trip: a.trip, startAt: a.stoppedSinceMs, title: a.title, status: 'authorized', reason: note, by, source: 'console' }),
   onTeamStop: async (a, { item, etas }) => {
     const driverCheck = await stopCheck.forStop(a, item).catch((e) => { console.warn('[stop-check]', e.message); return null; });
     await sendStopEmail(a, { item, etas, driverCheck });

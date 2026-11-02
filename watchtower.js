@@ -646,7 +646,7 @@ const RULES = [
     const resting = /^(offduty|sleeper|personalconveyance)/i.test(duty) || (left != null && left < 90);
     // a team has no reason to sit: while one sleeps the other can drive, so "off duty" isn't a rest if either has hours
     const fresh = f.team ? [[l.hos, l.driver1], [l.hos2, l.driver2]].filter(([h]) => h && h.driveLeftMin >= 60).sort((a, b) => b[0].driveLeftMin - a[0].driveLeftMin)[0] : null;
-    if (resting && fresh ? mins < 60 : (resting ? mins < 11 * 60 : mins < 45)) return null;   // a rest past 11h (10h reset + 1h) is worth a look too
+    if (resting && fresh ? mins < TEAM_STOP_MIN : (resting ? mins < 11 * 60 : mins < 45)) return null;   // a rest past 11h (10h reset + 1h) is worth a look too
     // parked at / near any customer still to be delivered = unloading, not a problem
     const nearStop = f.stops.some((s2) => {
       if (s2.delivered || !s2.zip) return false;
@@ -869,6 +869,7 @@ export function underOwnPower(l) {
 // Has an emailed stop really ended? Only on fresh GPS (10 min at most): 10+ mph under its own power on 3 readings in a row,
 // over at least 3 minutes, and a quarter mile from where it sat. A stopped reading, a tow, or an open breakdown / road
 // call starts it over, so a GPS blip or a truck on a wrecker never counts. Pure.
+export const TEAM_STOP_MIN = 75;   // first team-stop alert
 export const ROLL = { mph: 10, readings: 3, min: 3, miles: 0.25, freshMin: 10, keepHours: 72 };
 export function trackRolling(ep, l, now, { down = false } = {}) {
   const gpsMs = l && l.gpsAt ? Date.parse(l.gpsAt) : null;
@@ -880,13 +881,43 @@ export function trackRolling(ep, l, now, { down = false } = {}) {
   return { ep: next, confirmed: next.readings >= ROLL.readings && (gpsMs - next.movingSince) / MIN >= ROLL.min && far };
 }
 
-// Which team-stop alerts get an email now: one at the first alert, one more if it turns red, none once someone owns it or while the truck is reported down. Pure.
-export function teamStopsDue(found, alerts, down = new Set()) {
-  return found.filter((a) => a.teamStop && !down.has(String(a.trip)) && !down.has(norm(a.unit))).map((a) => ({ a, cur: alerts[a.id], level: a.severity === 'critical' ? 2 : 1 }))
-    .filter(({ cur, level }) => cur && !cur.ack && level > (cur.mailLevel || 0));
+const NEW_STOP_MIN = 15;     // a stop clock this much later than the emailed one, away from that spot, is a different stop
+const NEW_STOP_MI = 1;
+const stopOf = (units, unit) => ((units || {})[norm(unit)] || {}).stopEpisode || null;
+// dispatch said this stop is fine: it stays quiet until the truck really moves. Pure.
+export const stopAuthorized = (units, a) => a.code === 'stopped' && ((stopOf(units, a.unit) || {}).review || {}).status === 'authorized';
+// a person closed this alert and it's still the same problem: stays closed. Worse news, or it clearing and coming back, opens it again. Pure.
+export const personClosed = (cur, a) => !!cur && !!cur.resolvedAt && cur.resolvedBy !== 'auto' && !cur.clearedAt && !(SEV[a.severity] > SEV[cur.severity]);
+// Which team-stop alerts get an email now: one at the first alert, one more if it turns red, none once someone owns or answers it or while the
+// truck is reported down. Counted on the stop itself, so a closed alert or a GPS dropout that reopens it can't send it again. Pure.
+export function teamStopsDue(found, alerts, down = new Set(), units = {}) {
+  return found.filter((a) => a.teamStop && !down.has(String(a.trip)) && !down.has(norm(a.unit)) && !stopAuthorized(units, a)).map((a) => ({ a, cur: alerts[a.id], level: a.severity === 'critical' ? 2 : 1 }))
+    .filter(({ a, cur, level }) => cur && !cur.ack && !cur.resolvedAt && level > Math.max(cur.mailLevel || 0, (stopOf(units, a.unit) || {}).mailLevel || 0));
+}
+// The stop a truck or trip is on. Pure.
+export function stopEpisodeFor(state, { unit = null, trip = null }) {
+  const units = (state && state.units) || {};
+  if (unit && stopOf(units, unit)) return stopOf(units, unit);
+  return trip ? (Object.values(units).map((u) => u && u.stopEpisode).find((ep) => ep && String(ep.trip) === String(trip)) || null) : null;
+}
+function closeForStop(a, review) { a.resolvedAt = review.atMs; a.resolvedBy = review.by; a.note = review.reason; if (!a.ack) a.ack = { by: review.by, at: review.atMs }; }
+// Records dispatch's answer on the stop; authorized also closes its open alert. `since` = the stop the link was for. Works on the state it's handed.
+export function applyStopReview(prev, { unit = null, trip = null, since = null, startAt = null, title = null, review }) {
+  const s = { alerts: {}, units: {}, ...(prev || {}) };
+  let ep = stopEpisodeFor(s, { unit, trip });
+  if (ep && since != null && ep.stoppedSinceMs !== since) return { state: s, out: { ok: false, error: 'This stop has ended.' } };
+  if (!ep) {
+    if (!unit || startAt == null) return { state: s, out: { ok: false, error: since != null ? 'This stop has ended.' : 'No open stop on that truck.' } };
+    const us = s.units[norm(unit)] || (s.units[norm(unit)] = {});
+    ep = us.stopEpisode = { unit, trip, stoppedSinceMs: startAt, stopStartUnknown: false, lat: null, lng: null, at: review.atMs, title };
+  }
+  if (ep.review && ep.review.status === review.status) return { state: s, out: { ok: true, already: true } };
+  ep.review = review;
+  if (review.status === 'authorized') for (const a of Object.values(s.alerts)) if (a.code === 'stopped' && norm(a.unit) === norm(ep.unit) && !a.resolvedAt) closeForStop(a, review);
+  return { state: s, out: { ok: true, ep: { ...ep } } };
 }
 
-export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null, onTeamStop = null, onRolling = null, recovering = null, liveFor = null, openRoadCalls = null }) {
+export function initWatchtower(app, { requireAuth, db, env = process.env, buildBoard, push, afterBoard = null, pushRules = null, onTeamStop = null, onRolling = null, onStopSolved = null, recovering = null, liveFor = null, openRoadCalls = null }) {
   if (!db || !db.enabled) { console.log('[watchtower] off — needs DATABASE_URL'); return; }
   const sites = String(env.WATCH_SITES || 'florida-beauty').split(',').map((s) => s.trim()).filter(Boolean);
   const CFG = 'taWatchCfg';
@@ -1067,10 +1098,20 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
       const found = evaluateBoard(board, ctx);
       s.etas = boardEtas(board, ctx);
       etasNow = s.etas;
+      // a later stop somewhere else is a new stop, even if the move between them was never confirmed
+      for (const a of found) {
+        const ep = stopOf(s.units, a.unit);
+        if (!a.teamStop || !a.stoppedSinceMs || !ep || a.stoppedSinceMs - ep.stoppedSinceMs < NEW_STOP_MIN * MIN) continue;
+        const l = ((board.trips || []).find((x) => String(((x && x.trip) || x || {}).tripNumber || '') === String(a.trip)) || {})._samsara || {};
+        if (ep.lat != null && l.lat != null && haversineMi(ep.lat, ep.lng, l.lat, l.lng) < NEW_STOP_MI) continue;
+        delete ep.mailLevel; delete ep.review; delete ep.title; ep.stoppedSinceMs = a.stoppedSinceMs; ep.lat = l.lat ?? null; ep.lng = l.lng ?? null; ep.at = now;
+      }
       const seen = new Set();
       for (const a of found) {
         seen.add(a.id);
         const cur = s.alerts[a.id];
+        if (stopAuthorized(s.units, a)) { if (cur && !cur.resolvedAt) closeForStop(cur, stopOf(s.units, a.unit).review); continue; }
+        if (personClosed(cur, a)) { cur.lastSeenAt = now; cur.clearMiss = 0; continue; }
         if (!cur || cur.resolvedAt) {
           s.alerts[a.id] = { ...a, openedAt: now, lastSeenAt: now, miss: 0, pushes: 0, ack: null, resolvedAt: null };
           if (a.severity === 'critical') toPush.push(s.alerts[a.id]);
@@ -1082,12 +1123,15 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
             && now - (cur.lastPushAt || cur.openedAt) >= cfg.escalateMin * MIN) toEscalate.push(cur);
         }
       }
-      for (const { a, cur, level } of teamStopsDue(found, s.alerts, roadDown)) {
-        cur.mailLevel = level; toMail.push(a);
+      for (const { a, cur, level } of teamStopsDue(found, s.alerts, roadDown, s.units)) {
+        cur.mailLevel = level;
         const us = s.units[norm(a.unit)];
         const it = (board.trips || []).find((x) => String(((x && x.trip) || x || {}).tripNumber || '') === String(a.trip));
         const sam = (it && it._samsara) || {};
         if (us && !us.stopEpisode) us.stopEpisode = { unit: a.unit, trip: a.trip, stoppedSinceMs: a.stoppedSinceMs, stopStartUnknown: !!a.stopStartUnknown, lat: sam.lat ?? null, lng: sam.lng ?? null, at: now };
+        const ep = us && us.stopEpisode;
+        if (ep) { ep.mailLevel = level; ep.title = ep.title || a.title; }
+        toMail.push(ep ? { ...a, stoppedSinceMs: ep.stoppedSinceMs, stopStartUnknown: !!ep.stopStartUnknown } : a);
       }
       // auto-resolve after two clean cycles; forget resolved ones after 24h
       for (const [id, a] of Object.entries(s.alerts)) {
@@ -1095,6 +1139,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
           a.miss = (a.miss || 0) + 1;
           if (a.miss >= 2) { a.resolvedAt = now; a.resolvedBy = 'auto'; }
         }
+        if (a.resolvedAt && a.resolvedBy !== 'auto' && !a.clearedAt && !seen.has(id) && (a.clearMiss = (a.clearMiss || 0) + 1) >= 2) a.clearedAt = now;
         if (a.resolvedAt && now - a.resolvedAt > 24 * 60 * MIN) { archived.push(a); delete s.alerts[id]; }
       }
       for (const a of [...toPush, ...toEscalate]) { a.pushes = (a.pushes || 0) + 1; a.lastPushAt = now; }
@@ -1181,7 +1226,9 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
         }
         return st;
       }, { alerts: {} });
-      res.json({ ok: true, alert: s.alerts[id] || null });
+      const closed = s.alerts[id];
+      if (closed && closed.teamStop && onStopSolved) await onStopSolved(closed, who(req), String(note).trim()).catch((e) => console.warn('[watchtower] stop solved:', e.message));
+      res.json({ ok: true, alert: closed || null });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
