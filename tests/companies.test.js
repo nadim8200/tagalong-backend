@@ -67,7 +67,7 @@ test('logins page: a company admin sees and changes only their own company\'s lo
     const made = (await call('POST', '/admin/dispatchers', { name: 'Acme disp', email: 'd@acme.com', password: 'Truck-Mile-1234', company: 'florida-beauty' })).body;
     assert.equal(made.company, 'acme-logistics', 'cannot create into another company');
     const given = (await call('POST', '/admin/dispatchers', { name: 'Acme cs', email: 'cs@acme.com', temp: true })).body;
-    assert.match(given.tempPassword, /^[A-Za-z]+-[A-Za-z]+-\d{4}$/, 'Give login: a temporary password made for them');
+    assert.match(given.tempPassword, /^[A-Za-z]+-[A-Za-z]+-\d{4}-[A-Z2-9]{4}$/, 'Give login: a temporary password made for them');
     assert.equal((await call('PUT', '/admin/dispatchers/D2', { active: false })).status, 404, 'cannot touch Florida Beauty logins');
     assert.equal((await call('DELETE', '/admin/dispatchers/D2')).status, 200);
     assert.ok(mm.get('taDispatchers').list.some((d) => d.id === 'D2'), 'Valeria still there');

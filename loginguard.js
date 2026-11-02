@@ -32,7 +32,7 @@ export function loginGuard({ now = () => Date.now(), limits = LIMITS } = {}) {
 // Express middleware for the sign-in routes.
 export function loginGuardMiddleware(guard = loginGuard()) {
   return (req, res, next) => {
-    const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || (req.socket && req.socket.remoteAddress) || '';
+    const ip = req.ip || (req.socket && req.socket.remoteAddress) || '';
     const email = String((req.body && req.body.email) || '').trim().toLowerCase();
     const wait = guard.blocked(ip, email);
     if (wait) { res.set('Retry-After', String(wait)); return res.status(429).json({ error: `Too many sign-in attempts. Try again in ${Math.ceil(wait / 60)} minute${wait > 60 ? 's' : ''}.` }); }

@@ -928,7 +928,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     const a = argsOf(req); const call = callOf(req);
     try {
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
-      const staff = consoleCall(call) || people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const staff = consoleCall(call) || people.some((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
       if (!staff) return res.json({ ok: false, say: 'That information is for Florida Beauty staff only. Offer to take a message.' });
       if (!artis || !artis.ready()) return res.json({ ok: false, say: 'ARTIS is not connected right now. Offer to have dispatch check.' });
       const r = await artis.cargo({ date: a.ship_date || undefined, customer: a.customer || '' });
@@ -941,9 +941,11 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     const a = argsOf(req); const call = callOf(req);
     try {
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
-      const me = people.find((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const me = people.find((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
       if (!me && !consoleCall(call)) return res.json({ ok: false, say: 'That is for Florida Beauty staff only. Offer to take a message.' });
       if (!staffActions) return res.json({ ok: false, say: 'That is not connected right now. Offer to take a message for dispatch.' });
+      // a caller ID can be faked, and turning off a stopped truck's alerts is what a thief would want
+      if (a.authorized === true && !consoleCall(call)) return res.json({ ok: false, say: 'Stops can only be authorized from the console or by replying to the stop email. Say so, and offer to take a message.' });
       const [what, input] = build(a);
       return res.json(await staffActions(what, { truck: a.truck || null, trip: a.trip_number || null, by: (me && me.name) || 'console call', ...input }));
     } catch (e) { return res.json({ ok: false, say: `That did not work (${e.message}). Offer to have dispatch check.` }); }
@@ -956,7 +958,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     const a = argsOf(req); const call = callOf(req);
     try {
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
-      const me = people.find((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const me = people.find((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
       if (!me && !consoleCall(call)) return res.json({ ok: false, say: 'That is for Florida Beauty staff only. Offer to take a message.' });
       if (!brokerFollow) return res.json({ ok: false, say: 'Follow-up is not connected right now. Offer to have dispatch check.' });
       const r = await brokerFollow.start(site, a.trip_number, { by: (me && me.name) || 'console call', byEmail: (me && me.email) || null, source: 'phone', deliverAt: a.delivery_time || null, city: a.city || null });
@@ -968,7 +970,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     const a = argsOf(req); const call = callOf(req);
     try {
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
-      const staff = consoleCall(call) || people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const staff = consoleCall(call) || people.some((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
       if (!staff) return res.json({ ok: false, say: 'That information is for Florida Beauty staff only. Offer to take a message.' });
       if (!dispatchLog) return res.json({ ok: false, say: 'The dispatch notes are not connected right now. Offer to have dispatch check.' });
       const notes = await dispatchLog.search(site, { query: a.query || '', status: a.only_open ? 'open' : null, days: a.days });
@@ -1197,7 +1199,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     try {
       if (!pastLoads) return res.json({ ok: false, say: 'Past loads are not available right now.' });
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
-      const staff = consoleCall(call) || people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const staff = consoleCall(call) || people.some((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
       const confirmed = callName.get(call.call_id);
       if (!staff && !confirmed) return res.json({ ok: false, say: 'First find their business with lookup_load (customer name) — past loads go only to the business they belong to.' });
       const customer = staff ? (a.customer_name || null) : confirmed;
@@ -1219,7 +1221,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     const a = argsOf(req); const call = callOf(req);
     try {
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
-      const staff = consoleCall(call) || people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const staff = consoleCall(call) || people.some((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
       if (!staff) return res.json({ ok: false, say: 'That information is for Florida Beauty staff only.' });
       if (!pastLoads || !pastLoads.etaVsActual) return res.json({ ok: false, say: 'Not available right now.' });
       const all = await items();
@@ -1242,7 +1244,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     const a = argsOf(req); const call = callOf(req);
     try {
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
-      const staff = consoleCall(call) || people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const staff = consoleCall(call) || people.some((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
       if (!staff) return res.json({ ok: false, say: 'That information is for Florida Beauty staff only.' });
       if (!stopTimes) return res.json({ ok: false, say: 'Stop times are not set up yet.' });
       const fits = (x, y) => Math.max(nameScore(x, y), nameScore(y, x)) >= 0.75;
@@ -1256,7 +1258,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     const a = argsOf(req); const call = callOf(req);
     try {
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
-      const staff = consoleCall(call) || people.some((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const staff = consoleCall(call) || people.some((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
       if (!staff) return res.json({ ok: false, say: 'That information is for Florida Beauty staff only.' });
       if (!miles) return res.json({ ok: false, say: 'The mile calculator is not set up yet.' });
       const r = await miles.ask({ from: a.from, to: a.to, truck: a.truck_number, trip: a.trip_number }, await items());
@@ -1293,7 +1295,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     try {
       if (!artisWeb || !artisWeb.manifestDoc) return res.json({ ok: false, say: 'The manifest system isn\'t connected right now. Offer to have dispatch email it.' });
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
-      const me = people.find((p) => p && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const me = people.find((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
       const staff = consoleCall(call) || !!me;
       const want = String(a.customer_name || '').trim();
       // customers: only the business they already confirmed on this call

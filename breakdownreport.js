@@ -21,8 +21,8 @@ const b64 = (x) => Buffer.from(x).toString('base64url');
 const sign = (body, secret, purpose) => crypto.createHmac('sha256', `${secret}:${purpose}`).update(body).digest('base64url');
 
 // A signed link that can only report this one stop, and only for a week. Pure.
-export function makeToken(p, secret, now = Date.now(), purpose = 'breakdown-report') {
-  const body = b64(JSON.stringify({ ...p, e: now + LINK_DAYS * DAY }));
+export function makeToken(p, secret, now = Date.now(), purpose = 'breakdown-report', days = LINK_DAYS) {
+  const body = b64(JSON.stringify({ ...p, e: now + days * DAY }));
   return `${body}.${sign(body, secret, purpose)}`;
 }
 export function readToken(token, secret, now = Date.now(), purpose = 'breakdown-report') {

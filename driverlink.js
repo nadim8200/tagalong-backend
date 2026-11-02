@@ -446,7 +446,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   const tries = new Map();
   app.post('/driver/code', async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Tracking is not available right now.' });
-    const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+    const ip = String(req.ip || '');
     const t = tries.get(ip) || { n: 0, since: Date.now() };
     if (Date.now() - t.since > 15 * MIN) { t.n = 0; t.since = Date.now(); }
     t.n += 1; tries.set(ip, t);

@@ -26,8 +26,11 @@ test('training: emails go to the test addresses with who they were for; texts / 
   const held = await t.hold('call', { to: '+13055550117', trip: '623869', purpose: 'pickup check' });
   assert.equal(held.training, true);
   assert.equal(sent.length, 1); assert.match(sent[0].subject, /would have called/);
-  await routes['GET /truckmate/training']({}, res);
-  assert.equal(out.on, true);
+  await routes['GET /truckmate/training']({ user: { admin: true } }, res);
+  assert.equal(out.on, true); assert.equal(out.show, true);
+  // only the platform admin can tell: a dispatcher or company admin sees nothing, and no addresses
+  await routes['GET /truckmate/training']({ user: { role: 'dispatcher', companyAdmin: true } }, res);
+  assert.deepEqual([out.on, out.show, out.to.length, out.allow.length], [false, false, 0, 0]);
 });
 
 import { guardWithAllow, allowedMatch, DEFAULT_ALLOW } from '../training.js';

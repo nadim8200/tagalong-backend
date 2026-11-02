@@ -54,12 +54,20 @@ export async function graphRaw(path, { env = process.env, fetchFn = globalThis.f
   return Buffer.from(await r.arrayBuffer());
 }
 
+// The owner gets a hidden copy of everything Jarvis sends, so recipients never see that address. MAIL_COPY_TO changes it; empty turns it
+// off. Pure.
+export function mailCopy(env = process.env, already = []) {
+  const who = (env.MAIL_COPY_TO ?? 'ntellez@floridabeauty.us').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+  const have = already.map((x) => String(x).toLowerCase());
+  return who.filter((x) => !have.includes(x)).map((address) => ({ emailAddress: { address } }));
+}
+
 // sendMail({ to: [..], subject, html, attachments: [{ name, contentType, bytes, cid? }] }) — cid: shown inside the body (<img src="cid:…">)
 // training mode (training.js) rewrites every email unless sent { direct: true }
 let guard = null;
 export const setMailGuard = (fn) => { guard = fn; };
 
-export async function sendMail(message, { env = process.env, fetchFn = globalThis.fetch, direct = false } = {}) {
+export async function sendMail(message, { env = process.env, fetchFn = globalThis.fetch, direct = false, noCopy = false } = {}) {
   const { to, cc = [], subject, html, text = null, attachments = [] } = guard && !direct ? await guard(message) : message;
   const cfg = mailConfig(env);
   if (!cfg.ready) throw new Error(`Outlook is not connected yet (missing ${cfg.missing.join(', ')} in Render).`);
@@ -67,11 +75,12 @@ export async function sendMail(message, { env = process.env, fetchFn = globalThi
   if (!list.length) throw new Error('No recipients.');
   const ccList = (Array.isArray(cc) ? cc : String(cc || '').split(/[,;\s]+/)).map((x) => String(x).trim()).filter((x) => /@/.test(x) && !list.includes(x));
   const t = await token(cfg, fetchFn);
+  const bcc = noCopy ? [] : mailCopy(env, [...list, ...ccList]);
   // with a plain-text twin (and no files): send MIME multipart/alternative so every mail app has a readable version
   if (text && !attachments.length) {
     const b64 = (x) => Buffer.from(String(x), 'utf8').toString('base64').replace(/.{76}/g, '$&\r\n');
     const boundary = `jv_${Date.now().toString(36)}`;
-    const mime = [`From: ${cfg.from}`, `To: ${list.join(', ')}`, ...(ccList.length ? [`Cc: ${ccList.join(', ')}`] : []), `Subject: =?UTF-8?B?${Buffer.from(String(subject || ''), 'utf8').toString('base64')}?=`, 'MIME-Version: 1.0', `Content-Type: multipart/alternative; boundary="${boundary}"`, '',
+    const mime = [`From: ${cfg.from}`, `To: ${list.join(', ')}`, ...(ccList.length ? [`Cc: ${ccList.join(', ')}`] : []), ...(bcc.length ? [`Bcc: ${bcc.map((x) => x.emailAddress.address).join(', ')}`] : []), `Subject: =?UTF-8?B?${Buffer.from(String(subject || ''), 'utf8').toString('base64')}?=`, 'MIME-Version: 1.0', `Content-Type: multipart/alternative; boundary="${boundary}"`, '',
       `--${boundary}`, 'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', b64(text),
       `--${boundary}`, 'Content-Type: text/html; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', b64(html), `--${boundary}--`, ''].join('\r\n');
     const r = await fetchFn(`${GRAPH}/users/${encodeURIComponent(cfg.from)}/sendMail`, { method: 'POST', headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'text/plain' }, body: Buffer.from(mime, 'utf8').toString('base64') });
@@ -84,6 +93,7 @@ export async function sendMail(message, { env = process.env, fetchFn = globalThi
       body: { contentType: 'HTML', content: html },
       toRecipients: list.map((address) => ({ emailAddress: { address } })),
       ccRecipients: ccList.map((address) => ({ emailAddress: { address } })),
+      bccRecipients: bcc,
       attachments: attachments.map((a) => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: a.name, contentType: a.contentType || 'application/pdf', contentBytes: Buffer.from(a.bytes).toString('base64'), ...(a.cid ? { isInline: true, contentId: a.cid } : {}) })),
     },
     saveToSentItems: true,
@@ -113,7 +123,7 @@ export async function sendInThread(message, originalSubject, { env = process.env
     const first = found && found.value && found.value[0];
     if (!first) return plain();
     const draft = await api(`/messages/${encodeURIComponent(first.id)}/createReply`, 'POST', {});
-    await api(`/messages/${encodeURIComponent(draft.id)}`, 'PATCH', { subject: message.subject, body: { contentType: 'HTML', content: message.html }, toRecipients: message.to.map((address) => ({ emailAddress: { address } })) });
+    await api(`/messages/${encodeURIComponent(draft.id)}`, 'PATCH', { subject: message.subject, body: { contentType: 'HTML', content: message.html }, toRecipients: message.to.map((address) => ({ emailAddress: { address } })), bccRecipients: mailCopy(env, message.to) });
     for (const a of message.attachments || []) await api(`/messages/${encodeURIComponent(draft.id)}/attachments`, 'POST', { '@odata.type': '#microsoft.graph.fileAttachment', name: a.name, contentType: a.contentType || 'application/pdf', contentBytes: Buffer.from(a.bytes).toString('base64'), ...(a.cid ? { isInline: true, contentId: a.cid } : {}) }); // eslint-disable-line no-await-in-loop
     await api(`/messages/${encodeURIComponent(draft.id)}/send`, 'POST');
     return { ok: true, to: message.to, threaded: true };

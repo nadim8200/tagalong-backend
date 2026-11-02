@@ -300,8 +300,8 @@ export function renderLoginEmail({ name, email, tempPassword, url, by = null }) 
   const signIn = `<tr><td ${pad} style="padding:16px 24px 0;"><a href="${esc(url)}" style="display:block;padding:15px 18px;border-radius:6px;background:#1D4ED8;font-family:${FONT};font-size:18px;font-weight:bold;text-align:center;color:#FFFFFF;text-decoration:none;">Sign in / Ingresar</a></td></tr>`;
   const EN = ['Tap Sign in below and enter the username and temporary password above.', 'Choose your own password when it asks you to.', 'You are in. Use your new password from now on.'];
   const ES = ['Toca Ingresar y escribe el usuario y la contraseña temporal de arriba.', 'Elige tu propia contraseña cuando te lo pida.', 'Listo. Desde ahora usa tu nueva contraseña.'];
-  const keep = 'This password is temporary and stops working once you choose your own. Keep this email private.';
-  const keepEs = 'Esta contraseña es temporal y deja de funcionar cuando elijas la tuya. Mantén este correo en privado.';
+  const keep = 'This password is temporary. It expires in 3 days and stops working once you choose your own. Keep this email private.';
+  const keepEs = 'Esta contraseña es temporal. Vence en 3 días y deja de funcionar cuando elijas la tuya. Mantén este correo en privado.';
   const notYou = 'Not expecting this? Tell Florida Beauty dispatch and do not sign in.';
   const notYouEs = '¿No esperabas este correo? Avísale a despacho de Florida Beauty y no ingreses.';
   const body = `${para(`<b>Hi${first ? ` ${esc(first)}` : ''},</b><br>Your Dynamic Dispatch account has been created${by ? ` by ${esc(by)}` : ''}. This is the email with your temporary password.`)}

@@ -128,6 +128,19 @@ export function initDb({ TRACCAR_URL, traccarHeaders, DATABASE_URL }) {
         )
       `);
       await pool.query('CREATE INDEX IF NOT EXISTS ta_alert_log_user_at ON ta_alert_log (user_key, at DESC)');
+      // who did what: rows are only ever added
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ta_audit (
+          id     bigserial PRIMARY KEY,
+          at     timestamptz NOT NULL DEFAULT now(),
+          actor  text NOT NULL,
+          trip   text,
+          company text,
+          entry  jsonb NOT NULL
+        )
+      `);
+      await pool.query('CREATE INDEX IF NOT EXISTS ta_audit_at ON ta_audit (at DESC)');
+      await pool.query('CREATE INDEX IF NOT EXISTS ta_audit_trip ON ta_audit (trip, at DESC)');
 
       // First boot: copy whatever is still in Traccar into the database.
       const { rows } = await pool.query('SELECT 1 FROM ta_kv LIMIT 1');
@@ -237,7 +250,27 @@ export function initDb({ TRACCAR_URL, traccarHeaders, DATABASE_URL }) {
     return rows.map((r) => r.entry);
   }
 
+  async function appendAudit(e) {
+    if (!enabled) { console.log('[audit]', JSON.stringify(e)); return; }
+    await ensureReady();
+    await pool.query('INSERT INTO ta_audit (at, actor, trip, company, entry) VALUES ($1, $2, $3, $4, $5)', [e.at, e.actor, e.trip, e.company, JSON.stringify(e)]);
+  }
+  async function readAudit({ actor = null, trip = null, before = null, company = null, limit = 200 } = {}) {
+    if (!enabled) return [];
+    await ensureReady();
+    const { rows } = await pool.query(
+      `SELECT id, at, entry FROM ta_audit
+        WHERE ($1::text IS NULL OR actor ILIKE '%' || $1 || '%')
+          AND ($2::text IS NULL OR trip = $2)
+          AND ($3::bigint IS NULL OR id < $3)
+          AND ($4::text IS NULL OR company = $4)
+        ORDER BY id DESC LIMIT $5`,
+      [actor, trip, before, company, Math.min(limit, 500)],
+    );
+    return rows.map((r) => ({ id: Number(r.id), ...r.entry, at: r.at }));
+  }
+
   // Exposed so modules that need real tables (loads, events) can use the same
   // pool rather than opening a second one.
-  return { enabled, get, set, update, appendAlert, readAlerts, ensureReady, pool };
+  return { enabled, get, set, update, appendAlert, readAlerts, appendAudit, readAudit, ensureReady, pool };
 }

@@ -23,7 +23,7 @@
 // mark emails read). Without Mail.Read the inbox just stays off.
 // ---------------------------------------------------------------
 import { photosOf } from './breakdownphotos.js';
-import { graph, graphRaw, mailConfig, sendMail } from './mailer.js';
+import { graph, graphRaw, mailConfig, sendMail, mailCopy } from './mailer.js';
 import { mimeFiles } from './mime.js';
 import { contactsFor } from './statusmail.js';
 import { buildUpdateFor, renderFollowUpNote } from './updateemail.js';
@@ -141,10 +141,20 @@ export function bouncedAddresses(text, ignore = []) {
     .filter((a) => !skip.has(a) && !SYSTEM_SENDER.test(a.split('@')[0])).slice(0, 5);
 }
 
+// A From address can be faked, so a staff address has to be backed by what Microsoft recorded when the mail arrived. 'ok' = sent inside
+// our tenant or it passed the domain's checks; 'failed' = it did not; 'unknown' = Microsoft's headers aren't there to judge by. Pure.
+export function senderCheck(headers) {
+  const get = (n) => ((headers || []).find((h) => String(h && h.name).toLowerCase() === n) || {}).value;
+  const authAs = String(get('x-ms-exchange-organization-authas') || '');
+  const results = String(get('authentication-results') || '');
+  if (/^internal$/i.test(authAs.trim())) return 'ok';
+  if (/\b(dmarc|compauth)=pass\b/i.test(results)) return 'ok';
+  return authAs || results ? 'failed' : 'unknown';
+}
 export function isInternal(address, env = process.env) {
   if (SYSTEM_SENDER.test(String(address || '').split('@')[0])) return false;   // our mail system's notices are not staff
   const dom = String(address || '').toLowerCase().split('@')[1] || '';
-  const ours = String(env.INBOX_TRUSTED_DOMAINS || `${String(env.MAIL_FROM || '').toLowerCase().split('@')[1] || ''},floridabeauty.us,floridabeauty.com`).split(',').map((x) => x.trim()).filter(Boolean);
+  const ours = String(env.INBOX_TRUSTED_DOMAINS || `${String(env.MAIL_FROM || '').toLowerCase().split('@')[1] || ''},floridabeauty.us`).split(',').map((x) => x.trim()).filter(Boolean);
   return !!dom && ours.includes(dom);
 }
 // The nightly trip-sheet email ("OUTBOUND 10 TRIP SHEETS…", "Trip sheets 10/07"). Pure.
@@ -443,6 +453,17 @@ export function initInbox(app, { requireAuth, db, stopReview = null, transferDon
       const text = newPart(m.body && m.body.contentType === 'html' ? htmlToText(m.body.content) : String((m.body && m.body.content) || '')).slice(0, 6000);
       const from = { name: (m.from && m.from.emailAddress && m.from.emailAddress.name) || '', address: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '' };
       if (from.address && from.address.toLowerCase() === String(mailConfig(env).from).toLowerCase()) continue;
+      // says it's from our staff: staff can instruct Jarvis, so make sure it really is
+      if (isInternal(from.address, env)) {
+        const seen = await g(`/messages/${encodeURIComponent(m.id)}?$select=internetMessageHeaders`).then((x) => senderCheck(x && x.internetMessageHeaders)).catch(() => 'unknown'); // eslint-disable-line no-await-in-loop
+        if (seen === 'unknown') console.warn('[inbox] sender could not be verified:', from.address);
+        if (seen === 'failed') {
+          console.warn('[inbox] blocked, failed sender checks:', from.address);
+          await g(`/messages/${encodeURIComponent(m.id)}`, { method: 'PATCH', body: { isRead: true } }).catch(() => {}); // eslint-disable-line no-await-in-loop
+          if (db.appendAudit) await db.appendAudit({ at: new Date(), actor: from.address, company: null, trip: null, role: 'email', action: 'Blocked an email that failed sender checks', method: 'EMAIL', path: 'inbox', status: 403, detail: { subject: String(m.subject || '').slice(0, 200) } }).catch(() => {}); // eslint-disable-line no-await-in-loop
+          continue;
+        }
+      }
       const threadTrips = (store.list || []).filter((e) => e.conversationId && e.conversationId === m.conversationId).flatMap((e) => e.trips || []);
       const matches = matchEmail({ subject: m.subject, text }, items, { threadTrips });
       const trips = matches.map((x) => x.trip);
@@ -939,13 +960,13 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     if (training_) {
       await sendMail({ to: [e.from.address], subject: /^re:/i.test(e.subject || '') ? e.subject : `Re: ${e.subject || ''}`, html, text: body && body.text ? body.text : text, attachments: files.map((f, i) => ({ name: ((e.draftDocs || []).find((x) => x.id === f.id) || {}).name || `document-${i + 1}.pdf`, contentType: f.mediaType, bytes: f.data })) }, { env, fetchFn });
     } else if (files.length) {
-      const draft = await g(`/messages/${encodeURIComponent(e.id)}/${body && body.all ? 'createReplyAll' : 'createReply'}`, { method: 'POST', body: { comment: html } });
+      const draft = await g(`/messages/${encodeURIComponent(e.id)}/${body && body.all ? 'createReplyAll' : 'createReply'}`, { method: 'POST', body: { comment: html, message: { bccRecipients: mailCopy(env) } } });
       for (const [i, f] of files.entries()) {
         await g(`/messages/${encodeURIComponent(draft.id)}/attachments`, { method: 'POST', body: { '@odata.type': '#microsoft.graph.fileAttachment', name: ((e.draftDocs || []).find((x) => x.id === f.id) || {}).name || `document-${i + 1}.${/pdf/.test(f.mediaType) ? 'pdf' : 'jpg'}`, contentType: f.mediaType, contentBytes: Buffer.from(f.data).toString('base64') } }); // eslint-disable-line no-await-in-loop
       }
       await g(`/messages/${encodeURIComponent(draft.id)}/send`, { method: 'POST', body: {} });
     } else {
-      await g(`/messages/${encodeURIComponent(e.id)}/${body && body.all ? 'replyAll' : 'reply'}`, { method: 'POST', body: { comment: html } });
+      await g(`/messages/${encodeURIComponent(e.id)}/${body && body.all ? 'replyAll' : 'reply'}`, { method: 'POST', body: { comment: html, message: { bccRecipients: mailCopy(env) } } });
     }
     const at = new Date().toISOString();
     await update(site, e.id, (x) => ({ ...x, status: 'replied', draft: null, replies: [...(x.replies || []), { at, by, text, files: files.length }] }));
@@ -1177,7 +1198,7 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     if (!chain) return { sent: false };
     const training_ = training && training.active ? await training.active() : null;
     if (training_) await sendMail({ to, cc, subject: /^re:/i.test(chain.subject || '') ? chain.subject : `Re: ${chain.subject || ''}`, html, text }, { env, fetchFn });
-    else await g(`/messages/${encodeURIComponent(chain.id)}/reply`, { method: 'POST', body: { message: { toRecipients: to.map((address) => ({ emailAddress: { address } })), ccRecipients: cc.map((address) => ({ emailAddress: { address } })) }, comment: html } });
+    else await g(`/messages/${encodeURIComponent(chain.id)}/reply`, { method: 'POST', body: { message: { bccRecipients: mailCopy(env, to), toRecipients: to.map((address) => ({ emailAddress: { address } })), ccRecipients: cc.map((address) => ({ emailAddress: { address } })) }, comment: html } });
     const at = new Date().toISOString();
     await update(site, chain.id, (x) => ({ ...x, replies: [...(x.replies || []), { at, by, text: String(text || '').slice(0, 600), files: 0 }] }));
     return { sent: true, chain: chain.id, subject: chain.subject };

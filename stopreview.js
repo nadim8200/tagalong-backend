@@ -35,7 +35,7 @@ document.getElementById('f').addEventListener('submit',async function(ev){ev.pre
 
 export function initStopReview(app, { db, secret, send, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
   const state = async () => (await db.get(STATE(SITE), {})) || {};
-  const link = (a) => `${baseUrl}/sr/${makeToken({ a: a.id, t: a.trip, u: a.unit, s: a.stoppedSinceMs || null }, secret, now(), PURPOSE)}`;
+  const link = (a) => `${baseUrl}/sr/${makeToken({ a: a.id, t: a.trip, u: a.unit, s: a.stoppedSinceMs || null }, secret, now(), PURPOSE, 1)}`;   // a day: it can turn alerts off, and emails get forwarded
   const isAuthorized = async (a) => { const ep = stopEpisodeFor(await state(), { unit: a.unit, trip: a.trip }); return !!(ep && ep.review && ep.review.status === 'authorized'); };
 
   // Saves the answer once, then tells the same people the stop email went to.

@@ -32,6 +32,7 @@ import { scryptSync, randomBytes, timingSafeEqual } from 'crypto';
 import 'dotenv/config';
 import { initPush } from './push.js';
 import { initDb } from './db.js';
+import { auditTrail, initAudit } from './audit.js';
 import { initLoads } from './loads.js';
 import { initPod } from './pod.js';
 import { initDispatcher } from './dispatcher.js';
@@ -138,12 +139,25 @@ if (!JWT_SECRET) { console.error('FATAL: set JWT_SECRET'); process.exit(1); }
 
 const origins = ALLOWED_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean);
 const app = express();
+app.set('trust proxy', 1);   // Render's proxy: req.ip is the real caller, not whatever a client puts in X-Forwarded-For
 // keep the raw body for Retell (its signature is over the exact bytes)
 app.use(express.json({ limit: '15mb', verify: (req, _res, buf) => { if (req.url && req.url.startsWith('/retell/')) req.rawBody = buf.toString('utf8'); } }));
 // gzip: the trip board is ~4 MB of JSON — ~10x smaller on the wire (phones especially)
 app.use(compression({ threshold: 2048 }));
 app.use(cookieParser());
 app.use(cors({ origin: origins, credentials: true }));
+
+// basic browser protections on everything we serve
+app.use((req, res, next) => { res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer' }); next(); });
+// a browser on another site can't act with someone's cookie. The console sends a Bearer token, and our own email-link pages are same-host
+app.use((req, res, next) => {
+  const o = req.headers.origin;
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method) || !o || !origins.length || !(req.cookies && req.cookies.ta_session) || String(req.headers.authorization || '').startsWith('Bearer ')) return next();
+  if (origins.includes(o) || o === `https://${req.headers.host}`) return next();
+  return res.status(403).json({ error: 'Request refused.' });
+});
+// the signature on everything anyone does, ahead of every gate so a refused attempt is on record too (audit.js)
+app.use(auditTrail({ userOf: (req) => { const t = (req.cookies && req.cookies.ta_session) || String(req.headers.authorization || '').replace(/^Bearer /, ''); return t ? jwt.verify(t, JWT_SECRET) : null; }, write: (e) => db.appendAudit(e) }));
 
 // Dispatcher logins: only the AI dispatcher console, and never its settings (see dispatchers.js).
 app.use((req, res, next) => {
@@ -246,7 +260,7 @@ const norm = (e) => String(e || '').toLowerCase().trim();
 
 // ---- owner / admin login (verified by Traccar) ----
 // password guessing → locked out (every sign-in / reset route)
-app.use(/^\/auth\/(?:[a-z]+\/)?(?:login|signin|reset|forgot|password-reset)$/, loginGuardMiddleware());
+app.use(/^\/auth\/(?:[a-z]+\/)?(?:login|signin|reset|forgot|password-reset)\/?$/i, loginGuardMiddleware());
 
 // Traccar email + password → { u, sess } (u = the full Traccar user) or null. Throws when Traccar can't be reached.
 async function traccarCheck(email, password) {
@@ -286,6 +300,9 @@ function makeAccountRoutes(kind, listKey) {
       let created;
       await writeAccounts((acc) => {
         if (acc[listKey].some((x) => x.email === e)) throw Object.assign(new Error('exists'), { code: 'exists' });
+        // the company name decides whose data an account sees, so nobody can sign up into someone else's
+        const co = String(company || '').trim().toLowerCase();
+        if (co && (['florida-beauty', 'florida beauty', '__shared'].includes(co) || acc[listKey].some((x) => String(x.company || '').trim().toLowerCase() === co || String(x.id).toLowerCase() === co))) throw Object.assign(new Error('taken'), { code: 'taken' });
         created = { id: uid(kind[0].toUpperCase()), email: e, name: name || '', company: company || '', pass: hashPassword(password), createdAt: new Date().toISOString() };
         acc[listKey].push(created);
         return acc;
@@ -295,6 +312,7 @@ function makeAccountRoutes(kind, listKey) {
       res.json({ ...user, token });
     } catch (err) {
       if (err.code === 'exists') return res.status(409).json({ error: 'An account with that email already exists.' });
+      if (err.code === 'taken') return res.status(409).json({ error: 'That company already has an account. Ask its admin to add you.' });
       // Log the real cause — a bare "Could not create the account" gives the
       // user nothing and gives us nothing either.
       console.error(`[auth] ${kind} signup failed:`, err.message);
@@ -910,11 +928,11 @@ initFleet(app, { requireAuth: chain(requireAuth, allowRoles('fleet')), db, env: 
 
 // RingCentral: SMS from the company's own business numbers, plus the call log
 // so "was this customer actually called?" comes from records, not memory.
-const rc = initRingCentral(app, { requireAuth: chain(requireAuth, allowRoles('dispatcher')), db, pool: db.pool, env: process.env });
+const rc = initRingCentral(app, { requireAuth: (req, res, next) => requireDispatch(req, res, next), db, pool: db.pool, env: process.env });
 // Original uploaded documents (rate cons, trip sheets) kept privately in Postgres.
 // Dispatch side (console, Jarvis, loads, emails, calls): admins and active dispatcher accounts only —
 // a TagAlong customer login can't reach it.
-const { requireDispatch, requireAdmin, requireCompanyAdmin, createLogin, signIn: dispatcherSignIn } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true }), mayReach: async (to) => /@floridabeauty\.us$/i.test(to) || !(await training.active()) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
+const { requireDispatch, requireAdmin, requireCompanyAdmin, createLogin, signIn: dispatcherSignIn } = initDispatchers(app, { requireAuth, db, hashPassword, verifyPassword, sign: (user, exp) => jwt.sign(user, JWT_SECRET, { expiresIn: exp }), setCookie: (res, t) => res.cookie(COOKIE, t, { ...cookieOpts, maxAge: 30 * 24 * 3600 * 1000 }), mail: { ready: () => mailConfig(process.env).ready, send: (m) => sendMail(m, { env: process.env, direct: true, noCopy: true }), mayReach: async (to) => /@floridabeauty\.us$/i.test(to) || !(await training.active()) }, appUrl: process.env.APP_URL || 'https://mytagalong.app' });
 initCompanies(app, { db, requireAdmin, createLogin });
 // one sign-in for every kind of account → lands on that person's service (signin.js)
 initSignin(app, {
@@ -990,7 +1008,7 @@ const saveTextPhotos = async (r, trip) => {
 };
 const staffAsk = async ({ phone, text, media = [] }) => {
   const d = (s2) => String(s2 || '').replace(/\D+/g, '').slice(-10);
-  const me = ((await directory.load().catch(() => ({ people: [] }))).people || []).find((p) => p && p.phone && d(p.phone) === d(phone));
+  const me = ((await directory.load().catch(() => ({ people: [] }))).people || []).find((p) => p && p.active !== false && p.phone && d(p.phone) === d(phone));
   if (!me || !jarvisChat || (!String(text || '').trim() && !media.length)) return null;
   const uploads = media.length ? await saveTextPhotos({ media }, null) : [];
   const r = await jarvisChat.turn({ mode: 'staff_email', sms: true, uploads, user: { id: `sms:${d(phone)}`, name: me.name, email: me.email || null }, threadId: `sms-${d(phone)}`,
@@ -1388,11 +1406,13 @@ initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildB
     await sendStopEmail(a, { item, etas, driverCheck });
   }, afterBoard: async (site, board, ctx) => { await timedStep('transferDone.observe', () => transferDone.observe(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('breakdownReport.process', () => breakdownReport.process(site, board)).catch((e) => console.warn('[breakdown-report]', e.message)); await timedStep('followProxy.process', () => followProxy.process(site, board)).catch((e) => console.warn('[broker-follow]', e.message)); await timedStep('transferWatch.process', () => transferWatch.process(site, board, ctx)).catch((e) => console.warn('[transfer]', e.message)); await timedStep('transferDone.process', () => transferDone.process(board)).catch((e) => console.warn('[transfer-done]', e.message)); await timedStep('stopCheck.process', () => stopCheck.process(board)).catch((e) => console.warn('[stop-check]', e.message)); await timedStep('stopTasks.process', () => stopTasks.process(site, board)).catch((e) => console.warn('[stop-tasks]', e.message)); await timedStep('commitments.process', () => commitments.process(site, board)).catch((e) => console.warn('[commit]', e.message)); await timedStep('etaReport.process', () => etaReport.process(site, board)).catch((e) => console.warn('[eta-log]', e.message)); await timedStep('stopVisits.process', () => stopVisits.process(site, board)); await timedStep('milestones.process', () => milestones.process(site, board, ctx)); await timedStep('statusMail.process', () => statusMail.process(site, board, ctx)); await timedStep('etaWatch.run', () => etaWatch.run({ items: board.trips || [], geo: ctx.geo, now: ctx.now })); await timedStep('follow.run', () => follow.run(site, board.trips || [])); } });
 staffActions = initStaffActions({ breakdown: breakdownReport, stopReview, docs, getBoard: (site) => truckmate.buildBoard(site) });
+initAudit(app, { db, requireAdmin: requireCompanyAdmin });
 initCarChat(app, { requireAuth, env: process.env });
 
 // Customer call-ahead. SMS prefers RingCentral (the company's own number) and
 // falls back to Twilio. DRY-RUN until NOTIFY_ALLOW_SEND=true — see notify.js.
-initNotify(app, { requireAuth: chain(requireAuth, allowRoles('fleet')), db, pool: db.pool, env: process.env, ringcentral: rc });
+// a fleet account uses its own texting setup, never the company's number
+initNotify(app, { requireAuth: chain(requireAuth, allowRoles('fleet')), db, pool: db.pool, env: process.env, ringcentral: { ...rc, configFor: async (o) => ((await rc.hasOwnConfig(o)) ? rc.configFor(o) : null), sendSms: async (o, m) => { if (!(await rc.hasOwnConfig(o))) throw new Error('Set up your own texting first.'); return rc.sendSms(o, m); } } });
 
 // Dynamic BPO campaign portal — live call workspace (claims + per-lead updates).
 initDbpo(app, { db, requireAuth: requireAdmin });

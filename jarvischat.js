@@ -541,6 +541,7 @@ export function initJarvisChat(app, { staffActions = null, requireAuth, db, brok
         if (name === 'report_breakdown') return staffActions('report', { ...o, part: input.part, problem: input.problem, driverSays: input.driver_says, uploaded: ctx.uploaded });
         if (name === 'breakdown_update') return staffActions('update', { ...o, message: input.message, uploaded: ctx.uploaded });
         if (name === 'breakdown_fixed') return staffActions('fixed', { ...o, repair: input.repair, provider: input.provider, notes: input.notes });
+        if (input.authorized && ctx.source === 'Text to Jarvis') return { ok: false, say: 'Stops can only be authorized from the console or by replying to the stop email.' };   // a text's number can be faked
         return staffActions('stop', { ...o, authorized: !!input.authorized, reason: input.reason, source: ctx.source });
       }
       case 'attach_document': {

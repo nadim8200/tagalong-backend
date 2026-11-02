@@ -782,7 +782,7 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
         if (!all.emails.length) result.emailStatus = 'no customer emails on file';
         else if (!mailConfig(env).ready) result.emailStatus = 'Outlook not connected yet';
         else {
-          try { await sendMail({ to: all.emails, subject: m.mail.subject, html: m.mail.html }, { env, fetchFn }); result.emailed = all.emails; result.emailStatus = (await isTraining()) ? 'held by training mode, customers did not get it' : 'sent'; } catch (e) { result.emailStatus = 'failed'; result.errors.push(e.message); }
+          try { await sendMail({ to: all.emails, subject: m.mail.subject, html: m.mail.html }, { env, fetchFn }); result.emailed = all.emails; result.emailStatus = (await isTraining()) ? 'held, customers did not get it' : 'sent'; } catch (e) { result.emailStatus = 'failed'; result.errors.push(e.message); }
         }
         const owner = String((req.user && (req.user.company || req.user.id)) || '__shared');
         const rcCfg = ringcentral && ringcentral.configFor ? await ringcentral.configFor(owner) : null;

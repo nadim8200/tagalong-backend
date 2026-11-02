@@ -74,7 +74,7 @@ export function initTraining(app, { requireAuth, requireAdmin, db, sendDirect })
     return { training: true, held: kind, to: info.to || null };
   }
 
-  app.get('/truckmate/training', requireAuth, async (req, res) => { const c = await cfg(); res.json({ on: !!c.on, to: c.to || [], allow: c.allow || [], since: c.since || null, by: c.by || null }); });
+  app.get('/truckmate/training', requireAuth, async (req, res) => { const c = await cfg(); const u = req.user || {}; if (!(u.admin || u.role === 'admin')) return res.json({ on: false, show: false, to: [], allow: [] }); return res.json({ on: !!c.on, show: true, to: c.to || [], allow: c.allow || [], since: c.since || null, by: c.by || null }); });   // only the platform admin sees it's on
   app.put('/admin/training', requireAdmin, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const b = req.body || {};

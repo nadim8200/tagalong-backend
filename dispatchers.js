@@ -18,7 +18,10 @@ const view = ({ pass, reset, ...d }) => d;   // never the password (it's only st
 const sha = (t) => createHash('sha256').update(String(t)).digest('hex');
 // A temporary password an admin can read out: Truck-Miami-4821 style. Pure-ish.
 const WORDS = ['Truck', 'Trailer', 'Miami', 'Reefer', 'Rose', 'Orchid', 'Dock', 'Route', 'Cargo', 'Flora', 'Lane', 'Mile', 'Haul', 'Bloom', 'Tulip', 'Fleet'];
-export const tempPassword = () => { const b = randomBytes(4); return `${WORDS[b[0] % 16]}-${WORDS[b[1] % 16]}-${1000 + (b.readUInt16BE(2) % 9000)}`; };
+const CODE = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';   // no 0/O or 1/I/L: it gets read out loud
+export const tempPassword = () => { const b = randomBytes(8); return `${WORDS[b[0] % 16]}-${WORDS[b[1] % 16]}-${1000 + (b.readUInt16BE(2) % 9000)}-${[...b.subarray(4)].map((x) => CODE[x % CODE.length]).join('')}`; };
+const TEMP_DAYS = 3;
+const tempUntil = () => Date.now() + TEMP_DAYS * 86400000;
 // Is this new password OK? → error text or null. Pure.
 export function passwordProblem(next, { current = null, email = '' } = {}) {
   const p = String(next || '');
@@ -37,7 +40,7 @@ export function passwordProblem(next, { current = null, email = '' } = {}) {
 const CONSOLE = /^\/(truckmate|watchtower|voice|jarvis)(\/|$)|^\/ringcentral\/(call|calls|sms|my-phone|numbers)(\/|$)|^\/auth\/(me|logout|dispatcher)(\/|$)|^\/push\/(register|unregister)$/;
 const ADMIN_ONLY = [
   /\/settings\/?$/, /\/config\/?$/,                    // every settings / config screen
-  /^\/voice\/setup/,                                      // Jarvis voice agent in Retell
+  /^\/voice\/setup/, /^\/voice\/voice/,                                      // Jarvis voice agent in Retell
   /^\/truckmate\/activity\/push/,                         // who gets call / text pushes
   /^\/truckmate\/profiles(\/|$)/,                         // customer & broker profiles, authorized numbers
   /^\/truckmate\/caller-numbers(\/|$)/,                   // which customer a caller's phone number is saved for
@@ -45,7 +48,7 @@ const ADMIN_ONLY = [
 ];
 // A company admin (Florida Beauty: Nadim, Ronen) also changes their company's settings and manages their
 // company's logins (/admin/dispatchers — only their own company's, see below).
-const COMPANY_ADMIN = /^\/admin\/(dispatchers|directory|push-rules|training)(\/|$)/;
+const COMPANY_ADMIN = /^\/admin\/(dispatchers|directory|push-rules|training|audit)(\/|$)/;
 export function dispatcherMayUse(method, path, user = null) {
   // Express matches routes regardless of case — check the lower-cased path so /Truckmate/Profiles can't slip past
   const p = String(path || '').split('?')[0].toLowerCase();
@@ -76,6 +79,8 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
       if (req.user && req.user.role === 'dispatcher') {
         try {
           const d = (await list()).find((x) => x.id === req.user.id);
+          // a password reset ends every session that was open before it
+          if (d && d.pwAt && req.user.iat && req.user.iat * 1000 < d.pwAt - 2000) return res.status(401).json({ error: 'Session expired.' });
           if (d && d.active !== false && d.mustChange) return res.status(403).json({ error: 'Set your own password first.', mustChange: true });
           if (d && d.active !== false && String(d.company || DEFAULT_COMPANY) !== String(req.user.company || DEFAULT_COMPANY)) return res.status(401).json({ error: 'Your account was moved — sign in again.' });
           // admin rights follow the account, not the token: taken away → gone on the next request
@@ -110,10 +115,11 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     const d = (await list(true)).find((x) => x.email === e);
     if (!d || !verifyPassword(pw, d.pass)) return null;
     if (d.active === false) return { error: 'This dispatcher account is turned off. Ask an admin.', status: 401 };
+    if (d.mustChange && d.tempUntil && d.tempUntil < Date.now()) return { error: 'This temporary password expired. Ask an admin for a new one.', status: 401 };
     const user = { id: d.id, email: d.email, name: d.name, role: 'dispatcher', company: d.company || DEFAULT_COMPANY, ...(d.companyAdmin ? { companyAdmin: true } : {}) };
     const token = sign(user, '7d');
     const at = new Date().toISOString();
-    const seen = { at, ip: String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim() || null, device: String(req.headers['user-agent'] || '').slice(0, 160) || null };
+    const seen = { at, ip: req.ip || null, device: String(req.headers['user-agent'] || '').slice(0, 160) || null };
     await save((l) => l.map((x) => (x.id === d.id ? { ...x, lastLoginAt: at, logins: [seen, ...(x.logins || [])].slice(0, 20) } : x)));
     return { user, token, mustChange: !!d.mustChange };
   }
@@ -176,7 +182,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
       if (!d || d.reset.until < Date.now()) return res.status(400).json({ error: 'This reset link expired or was already used. Ask for a new one.' });
       const bad = passwordProblem(b.password, { email: d.email });
       if (bad) return res.status(400).json({ error: bad });
-      await save((l) => l.map((x) => (x.id === d.id ? logPw({ ...x, pass: hashPassword(String(b.password)), mustChange: false, reset: null }, { at: new Date().toISOString(), by: d.name, how: 'reset by email link' }) : x)));
+      await save((l) => l.map((x) => (x.id === d.id ? logPw({ ...x, pass: hashPassword(String(b.password)), mustChange: false, pwAt: Date.now(), reset: null }, { at: new Date().toISOString(), by: d.name, how: 'reset by email link' }) : x)));
       res.json({ ok: true, email: d.email });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -193,7 +199,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
         return res.json({ ok: true, emailed: d.email });
       }
       const temp = tempPassword();
-      await save((l) => l.map((x) => (x.id === d.id ? logPw({ ...x, pass: hashPassword(temp), mustChange: true, reset: null }, { at: new Date().toISOString(), by: who(req), how: 'temporary password set by admin' }) : x)));
+      await save((l) => l.map((x) => (x.id === d.id ? logPw({ ...x, pass: hashPassword(temp), mustChange: true, tempUntil: tempUntil(), pwAt: Date.now(), reset: null }, { at: new Date().toISOString(), by: who(req), how: 'temporary password set by admin' }) : x)));
       res.json({ ok: true, tempPassword: temp });   // shown to the admin once; never stored readable
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -220,7 +226,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
       const at = new Date().toISOString();
       // a company admin adds logins to their own company; the platform admin picks the company
       const company = adminCompany(req) || String(b.company || DEFAULT_COMPANY);
-      const d = { id: `D${Date.now()}${randomBytes(2).toString('hex')}`, email: e, name, pass: hashPassword(pw), active: true, mustChange: true, company, ...(b.companyAdmin ? { companyAdmin: true } : {}), createdAt: at, createdBy: who(req), passwordLog: [{ at, by: who(req), how: 'first password set by admin' }] };
+      const d = { id: `D${Date.now()}${randomBytes(2).toString('hex')}`, email: e, name, pass: hashPassword(pw), active: true, mustChange: true, tempUntil: tempUntil(), company, ...(b.companyAdmin ? { companyAdmin: true } : {}), createdAt: at, createdBy: who(req), passwordLog: [{ at, by: who(req), how: 'first password set by admin' }] };
       await save((l) => [...l, d]);
       res.json({ ...view(d), ...(temp ? { tempPassword: temp } : {}), ...(temp && b.sendEmail ? await emailLogin(d, temp, who(req)) : {}) });
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -248,7 +254,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     const e = norm(email);
     if ((await list(true)).some((x) => x.email === e)) throw Object.assign(new Error('A login with that email already exists.'), { status: 409 });
     const temp = tempPassword(); const at = new Date().toISOString();
-    const d = { id: `D${Date.now()}${randomBytes(2).toString('hex')}`, email: e, name, pass: hashPassword(temp), active: true, mustChange: true, company, ...(companyAdmin ? { companyAdmin: true } : {}), createdAt: at, createdBy: by, passwordLog: [{ at, by, how: 'temporary password when the company was created' }] };
+    const d = { id: `D${Date.now()}${randomBytes(2).toString('hex')}`, email: e, name, pass: hashPassword(temp), active: true, mustChange: true, tempUntil: tempUntil(), company, ...(companyAdmin ? { companyAdmin: true } : {}), createdAt: at, createdBy: by, passwordLog: [{ at, by, how: 'temporary password when the company was created' }] };
     await save((l) => [...l, d]);
     return { record: view(d), tempPassword: temp };
   }

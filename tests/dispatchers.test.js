@@ -79,7 +79,7 @@ test('passwords: admin resets with a temporary password or an email link; nobody
   await call('POST /auth/dispatcher/password', { token: login.token, body: { current: 'Welcome2026', next: 'Hibiscus77' } });
   // admin: temporary password (shown once) → must change again at the next sign-in
   const r = await call('POST /admin/dispatchers/:id/reset', { token: admin, params: { id: made.id } });
-  assert.match(r.body.tempPassword, /^[A-Z][a-z]+-[A-Z][a-z]+-\d{4}$/);
+  assert.match(r.body.tempPassword, /^[A-Z][a-z]+-[A-Z][a-z]+-\d{4}-[A-Z2-9]{4}$/);
   const again = (await call('POST /auth/dispatcher/login', { body: { email: 'leo@floridabeauty.us', password: r.body.tempPassword } })).body;
   assert.equal(again.mustChange, true);
   const list = (await call('GET /admin/dispatchers', { token: admin })).body;
