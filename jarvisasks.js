@@ -46,6 +46,8 @@ export function readQuestions(raw, { actors = [], earlier = [] } = {}) {
 
 export function initJarvisAsks(app, { requireAuth, db, secret, playbook, sendMail = null, owner = 'ntellez@floridabeauty.us', readAudit = async () => [], env = process.env, fetchFn = globalThis.fetch, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
+  // off: the questions weren't useful. Lessons people teach Jarvis, and their emails, still work. JARVIS_ASKS=on brings them back
+  const asking = () => env.JARVIS_ASKS === 'on';
   const all = async () => { const l = await db.get(KEY, []); return Array.isArray(l) ? l : []; };
   const save = (fn) => db.update(KEY, (cur) => fn(Array.isArray(cur) ? cur : []).slice(-KEEP), []);
   const eraseLink = (l) => `${baseUrl}/lesson/${makeToken({ l: l.id }, secret, now(), PURPOSE, LINK_DAYS)}`;
@@ -102,7 +104,7 @@ ${known || '(nothing yet)'}`;
   }
 
   if (app) {
-    app.get('/truckmate/asks/next', requireAuth, async (req, res) => { try { res.json({ ask: nextFor(await all(), req.user) }); } catch (e) { res.status(500).json({ error: e.message }); } });
+    app.get('/truckmate/asks/next', requireAuth, async (req, res) => { try { res.json({ ask: asking() ? nextFor(await all(), req.user) : null }); } catch (e) { res.status(500).json({ error: e.message }); } });
     app.post('/truckmate/asks/:id', requireAuth, async (req, res) => {
       try {
         if ((req.body || {}).pass) { await save((l) => l.map((x) => (x.id === req.params.id ? { ...x, passed: [...(x.passed || []), req.user.name || req.user.email] } : x))); return res.json({ ok: true }); }
@@ -122,6 +124,6 @@ ${known || '(nothing yet)'}`;
       try { await playbook.remove([p.l]); return res.json({ ok: true }); } catch (e) { return res.status(500).json({ error: e.message }); }
     });
   }
-  if (enabled && env.NODE_ENV !== 'test') { const go = () => generate().catch((e) => console.warn('[jarvis-asks]', e.message)); setTimeout(go, 10 * 60000); setInterval(go, 2 * 3600000); }
+  if (enabled && env.NODE_ENV !== 'test' && asking()) { const go = () => generate().catch((e) => console.warn('[jarvis-asks]', e.message)); setTimeout(go, 10 * 60000); setInterval(go, 2 * 3600000); }
   return { generate, answer, tellOwner, eraseLink };
 }

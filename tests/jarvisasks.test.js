@@ -25,13 +25,14 @@ test('the AI\'s questions are cleaned: three at most, no repeats, only people it
 });
 
 const setup = ({ time = NOON, audit = [], ai = '{"questions":[]}' } = {}) => {
+  const env = { NODE_ENV: 'test', ANTHROPIC_API_KEY: 'k', JARVIS_ASKS: 'on' };
   const db = mem(); const mails = []; const removed = []; const lessons = [{ id: 'pb1', title: 'Hotel stops', when: 'a team is out of hours', do: 'Approve the hotel with Armando.' }];
   const routes = {};
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h[h.length - 1]; }, post: (p, ...h) => { routes[`POST ${p}`] = h[h.length - 1]; } };
   const playbook = { text: async () => '', all: async () => lessons, remove: async (ids) => removed.push(...ids), learn: async ({ text }) => { playbook.lastText = text; return { lessons }; } };
   let calls = 0;
-  const a = initJarvisAsks(app, { requireAuth: (q, s, n) => n(), db, secret: 's', playbook, sendMail: async (m) => mails.push(m), readAudit: async () => audit, env: { NODE_ENV: 'test', ANTHROPIC_API_KEY: 'k' }, fetchFn: async () => { calls += 1; return { ok: true, json: async () => ({ content: [{ type: 'text', text: ai }] }) }; }, now: () => time });
-  return { a, db, mails, removed, routes, playbook, calls: () => calls };
+  const a = initJarvisAsks(app, { requireAuth: (q, s, n) => n(), db, secret: 's', playbook, sendMail: async (m) => mails.push(m), readAudit: async () => audit, env, fetchFn: async () => { calls += 1; return { ok: true, json: async () => ({ content: [{ type: 'text', text: ai }] }) }; }, now: () => time });
+  return { a, db, env, mails, removed, routes, playbook, calls: () => calls };
 };
 const row = (x = {}) => ({ at: new Date(NOON - 60000).toISOString(), actor: 'Sara', role: 'dispatcher', action: 'Resolved an alert', status: 200, trip: '626133', detail: { note: 'hotel approved' }, ...x });
 const AI = JSON.stringify({ questions: [{ to: 'Sara', question: 'What makes a hotel stop OK to approve?', why: 'To know when to stay quiet', trip: '626133' }] });
@@ -77,4 +78,12 @@ test('opening the erase link changes nothing; pressing the button erases it', as
 test('the lesson email escapes what people typed', () => {
   const m = renderLessonEmail({ lessons: [{ title: '<b>x', do: 'y', eraseUrl: 'https://x/lesson/t' }], by: 'Sara', question: 'q', answer: '<script>', now: NOON });
   assert.doesNotMatch(m.html, /<script>/); assert.match(m.html, /Erase this lesson/); assert.match(m.subject, /1 new lesson from Sara/);
+});
+
+test('off by default: nobody gets a question, even one already waiting', async () => {
+  const s = setup({ audit: [row()], ai: AI });
+  await s.a.generate();
+  assert.ok((await call(s.routes['GET /truckmate/asks/next'], { user: { name: 'Sara' } })).ask);
+  delete s.env.JARVIS_ASKS;
+  assert.equal((await call(s.routes['GET /truckmate/asks/next'], { user: { name: 'Sara' } })).ask, null);
 });
