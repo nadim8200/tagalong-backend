@@ -319,3 +319,14 @@ ${para(`<span style="font-size:13px;color:${MUTED};">${esc(keepEs)} ${esc(notYou
   };
 }
 
+// What Jarvis just learned, for the owner to check, with a way to erase each lesson. Pure.
+export function renderLessonEmail({ lessons, by = null, question = null, answer = null, now = Date.now() }) {
+  const n = lessons.length; const word = `lesson${n === 1 ? '' : 's'}`;
+  const row = (l) => `<tr><td ${pad} style="padding:12px 24px 0;"><table class="fb-blue2" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#F5F7FA" style="background:#F5F7FA;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};word-break:break-word;"><b style="color:${NAVY};">${esc(l.title)}</b><div>${esc(l.when ? `When ${l.when}: ` : '')}${esc(l.do)}</div><div>${button(l.eraseUrl, 'Erase this lesson')}</div></td></tr></table></td></tr>`;
+  const body = `${table([['Taught by', by], ['When', et(now)]].filter(([, v]) => v).map(([k, v]) => kv(k, v)).join(''))}
+${question ? message('What Jarvis asked', [question]) : ''}${answer ? message('What they answered', [answer]) : ''}
+${heading(`What Jarvis will do now`)}${lessons.map(row).join('')}
+${message('', ['These lessons are live. If one is wrong, erase it and Jarvis stops using it.'])}`;
+  return { subject: `Jarvis learned ${n} new ${word}${by ? ` from ${by}` : ''}`, html: shell({ tone: 'blue', mark: '&#10003;', title: 'JARVIS LEARNED SOMETHING', sub: 'Check that it is right' }, body), text: ['JARVIS LEARNED SOMETHING', ...(by ? [`Taught by: ${by}`] : []), ...(question ? [`Jarvis asked: ${question}`] : []), ...(answer ? [`They answered: ${answer}`] : []), '', ...lessons.flatMap((l) => [l.title, `${l.when ? `When ${l.when}: ` : ''}${l.do}`, `Erase this lesson: ${l.eraseUrl}`, '']), 'Jarvis · AI Dispatcher', 'Florida Beauty'].join('\n') };
+}
+

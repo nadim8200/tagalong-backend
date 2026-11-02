@@ -108,6 +108,7 @@ import { initTraining } from './training.js';
 import { initEtaWatch } from './etawatch.js';
 import { initFollowThrough } from './followthrough.js';
 import { initPlaybook } from './playbook.js';
+import { initJarvisAsks } from './jarvisasks.js';
 import { initDirectory } from './directory.js';
 
 const {
@@ -139,7 +140,7 @@ if (!JWT_SECRET) { console.error('FATAL: set JWT_SECRET'); process.exit(1); }
 
 const origins = ALLOWED_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean);
 const app = express();
-app.set('trust proxy', 1);   // Render's proxy: req.ip is the real caller, not whatever a client puts in X-Forwarded-For
+app.set('trust proxy', 2);   // Cloudflare, then Render: req.ip is the real caller, not whatever a client puts in X-Forwarded-For
 // keep the raw body for Retell (its signature is over the exact bytes)
 app.use(express.json({ limit: '15mb', verify: (req, _res, buf) => { if (req.url && req.url.startsWith('/retell/')) req.rawBody = buf.toString('utf8'); } }));
 // gzip: the trip board is ~4 MB of JSON — ~10x smaller on the wire (phones especially)
@@ -1031,7 +1032,8 @@ let manifestsApi = null;   // set below — the inbox hands it rate cons that ar
 // Jarvis reaching a driver (asked by staff in an email or in the chat): the TagAlong app first (OC drivers), else a text — consent / STOP rules apply
 const driverHooks = { text: async (site, trip, message, by) => { const a = await driverLinks.messageDriver(site, trip, message, by).catch(() => ({ skipped: true })); return a && a.sent ? a : comms.textDriverAuto(site, trip, message, by); }, call: async (site, trip, by) => { try { return { called: true, ...(await voice.placeCall(String(trip), { purpose: 'check', by })) }; } catch (e) { return { skipped: e.message }; } } };
 // Jarvis' playbook: what staff teach it by email ("TRAINING: …")
-const playbook = initPlaybook(app, { requireAuth: requireDispatch, db, env: process.env });
+const playbook = initPlaybook(app, { requireAuth: requireDispatch, db, env: process.env, onLearned: (...a) => jarvisAsks.tellOwner(...a) });
+const jarvisAsks = initJarvisAsks(app, { requireAuth: requireDispatch, db, secret: JWT_SECRET, playbook, env: process.env, readAudit: (q) => db.readAudit(q), sendMail: (m) => sendMail(m, { env: process.env, direct: true, noCopy: true }) });
 // load follow-through: rate-con instructions to dispatch, Jarvis' offers (reply YES), revised rate cons after delivery
 const follow = initFollowThrough(app, { groupEmail: (n) => directory.groupEmail(n), playbook, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), etaWatch, driver: driverHooks, docs, getBoard: (site) => truckmate.buildBoard(site) });
 // meetups ("meet in Fort Pierce"): track the truck to the place, reply on the chain, text the driver to verify

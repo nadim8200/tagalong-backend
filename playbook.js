@@ -65,14 +65,14 @@ export function readLessonsJson(raw) {
   return { lessons, questions: [] };
 }
 
-export function initPlaybook(app, { requireAuth, db, env = process.env, fetchFn = globalThis.fetch }) {
+export function initPlaybook(app, { requireAuth, db, env = process.env, fetchFn = globalThis.fetch, onLearned = async () => {} }) {
   const enabled = !!(db && db.enabled);
   let cache = { at: 0, list: [] };
   const all = async () => { if (!enabled) return []; if (Date.now() - cache.at < 60000) return cache.list; const l = (await db.get(KEY, [])) || []; cache = { at: Date.now(), list: l }; return l; };
   const save = async (fn) => { const l = await db.update(KEY, (cur) => fn(Array.isArray(cur) ? cur : []), []); cache = { at: Date.now(), list: l }; return l; };
 
   // read a training email → lessons + questions
-  async function learn({ from, subject, text, threadLessons = [], files = [], maxLessons = 15 }) {
+  async function learn({ from, subject, text, threadLessons = [], files = [], maxLessons = 15, quiet = false }) {
     if (!env.ANTHROPIC_API_KEY) throw new Error('AI is not configured.');
     const known = (await all()).filter((l) => l.active !== false).map((l, i) => `${i + 1}. ${l.when ? `When ${l.when}: ` : ''}${l.do}`).join('\n').slice(0, 3000);
     const prompt = `A Florida Beauty Flora staff member (${from.name || ''} <${from.address}>) is TRAINING you, Jarvis the AI dispatcher, by email. Read it as teaching — not as a live request.
@@ -92,6 +92,7 @@ Return ONLY JSON: {"lessons": [{"category": ${CATEGORIES.map((c) => `"${c}"`).jo
     const at = new Date().toISOString();
     const lessons = (Array.isArray(o.lessons) ? o.lessons : []).filter((l) => l && l.do).slice(0, maxLessons).map((l, i) => ({ id: `pb${Date.now().toString(36)}${i}`, category: CATEGORIES.includes(l.category) ? l.category : 'other', title: String(l.title || l.do).slice(0, 80), when: l.when ? String(l.when).slice(0, 200) : null, do: String(l.do).slice(0, 400), schedule: l.schedule ? String(l.schedule).slice(0, 80) : null, appliesTo: (Array.isArray(l.appliesTo) ? l.appliesTo : []).map(String).slice(0, 6), by: from.name || from.address, at, active: true }));
     if (lessons.length) await save((l) => [...l, ...lessons].slice(-200));
+    if (lessons.length && !quiet) await Promise.resolve(onLearned(lessons, { by: from.name || from.address })).catch((e) => console.warn('[playbook] lesson email:', e.message));   // the owner checks every lesson
     return { lessons, questions: (Array.isArray(o.questions) ? o.questions : []).map(String).slice(0, 3) };
   }
   // the office SOP, loaded once (staff can pause / delete lessons afterwards)
