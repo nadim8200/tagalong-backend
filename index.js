@@ -1210,11 +1210,23 @@ const staffOnly = (to) => to.length > 0 && to.every((e) => /@floridabeauty\.us$/
 const LOOK = 'Open the load in the console to see them.';
 // the photos as attachments, plus what the email says about any that didn't fit
 const breakdownPhotoFiles = async (photos = [], room = PHOTOS_BYTES) => {
-  if (!photos.length) return { attachments: [], note: null };
+  if (!photos.length) return { attachments: [], note: null, rest: [] };
   const files = await docs.readDocs({ site: 'florida-beauty', ids: photos.map((x) => x.docId) }).catch((e) => { console.warn('[breakdown-photos]', e.message); return []; });
-  const { attachments, skipped } = photoAttachments(files, room);
-  const left = skipped + photos.length - files.length;
-  return { attachments, note: left ? `${left} more photo${left === 1 ? '' : 's'} could not go in this email. ${LOOK}` : null };
+  const { attachments, rest } = photoAttachments(files, room);
+  const lost = photos.length - files.length;
+  const note = [rest.length ? `${rest.length} more photo${rest.length === 1 ? '' : 's'} in the next email${rest.length > 6 ? 's' : ''} on this chain.` : null, lost ? `${lost} photo${lost === 1 ? '' : 's'} could not be read. ${LOOK}` : null].filter(Boolean).join(' ') || null;
+  return { attachments, note, rest };
+};
+// photos that didn't fit: as many follow-up emails on the chain as it takes, each as full as Outlook allows
+const sendMorePhotos = async (report, item, to, rest, by, first, start) => {
+  let left = rest; let n = start;
+  while (left.length) {
+    const { attachments, rest: next } = photoAttachments(left, EMAIL_BYTES, n);
+    if (!attachments.length) { console.warn(`[breakdown-photos] trip ${report.trip}: ${left.length} photo(s) too big for an email`); break; }
+    const m = renderBreakdownPhotosEmail({ report, item, by, count: attachments.length, subject: `Re: ${first}`, photoCids: attachments.map((a) => a.cid), photosNote: next.length ? `${next.length} more in the next email.` : null });
+    await sendInThread({ to, ...m, attachments }, first, { env: process.env, direct: staffOnly(to) }); // eslint-disable-line no-await-in-loop
+    n += attachments.length; left = next;
+  }
 };
 const total = (list) => list.reduce((n, a) => n + a.bytes.length, 0);
 const sendBreakdown = async (report, item, to, { update = null, photos: newPhotos = null, threadOf = null } = {}) => {
@@ -1232,7 +1244,9 @@ const sendBreakdown = async (report, item, to, { update = null, photos: newPhoto
     if (!photos.attachments.length) throw e;
     console.warn('[breakdown] sent without photos:', e.message);
     await sendMail({ to, ...build([], `Photos could not go in this email. ${LOOK}`), subject: m.subject, attachments: [...attachments, ...sheet.attachments] }, { env: process.env, direct: staffOnly(to) });
+    return m.subject;
   }
+  if (photos.rest.length) await sendMorePhotos(report, item, to, photos.rest, (update && update.by) || report.by, threadOf || m.subject, photos.attachments.length + 1).catch((e) => console.warn('[breakdown] more photos:', e.message));
   return m.subject;
 };
 const sendBreakdownPhotos = async (report, item, fresh, by, message = null) => {
@@ -1243,6 +1257,7 @@ const sendBreakdownPhotos = async (report, item, fresh, by, message = null) => {
   const photos = await breakdownPhotoFiles(fresh, EMAIL_BYTES);
   const m = renderBreakdownPhotosEmail({ report, item, by, count: fresh.length, subject: `Re: ${first}`, photoCids: photos.attachments.map((a) => a.cid), photosNote: photos.note });
   await sendInThread({ to, ...m, attachments: photos.attachments }, first, { env: process.env, direct: staffOnly(to) });
+  if (photos.rest.length) await sendMorePhotos(report, item, to, photos.rest, by, first, photos.attachments.length + 1);
 };
 // what drivers texted on this load in the last few hours, so a report made after the text has the picture
 const textedPhotos = async (trip) => (((await db.get('taTripComms:florida-beauty', {})) || {})[trip] || []).filter((e) => e.type === 'reply' && (e.photos || []).length && Date.now() - Date.parse(e.at) < 12 * 3600000).flatMap((e) => e.photos);

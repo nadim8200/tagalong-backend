@@ -7,14 +7,13 @@
 import crypto from 'node:crypto';
 import { brokerLoad } from './watchtower.js';
 import { teamStopFacts, emailParts } from './teamstopmail.js';
-import { MAX_PHOTOS } from './breakdownphotos.js';
 import { stopsLeft } from './loadstops.js';
 import { snapshotLoad, crewOf, renderFixedReportedEmail } from './handoffmail.js';
 
 const KEY = (site) => `taBreakdownReports:${site}`;    // alert id → { atMs, by, reason, subject, trip, unit, clearedAt }
 const DAY = 86400000;
 const LINK_DAYS = 7;
-const MAX_REASON = 500;
+const MAX_REASON = 20000;   // no practical limit: dispatch pastes towing info, notes, whole messages
 const RECOVERY_DAYS = 3;          // reported fixed and never seen moving: stop waiting for it
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const b64 = (x) => Buffer.from(x).toString('base64url');
@@ -55,6 +54,8 @@ export function loadType(item) {
   return [...new Set(letters.map((l) => (l === 'B' ? 'BROKER' : l === 'H' ? 'TENNESSEE HUB' : 'FLOWERS')))].join(' + ');
 }
 const oneLine = (s, n) => String(s || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
+// what dispatch wrote, line breaks kept (towing company, phone, address on their own lines). Pure.
+export const keepLines = (s, n = MAX_REASON) => String(s || '').replace(/\r\n?/g, '\n').split('\n').map((l) => l.replace(/[\t ]+/g, ' ').trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, n);
 
 // Same shape dispatch writes: "BREAKDOWN TRAILER 2029 // TK 2008 TL 2029 TO 626143", with the kind of load in front. What broke and the numbers
 // only: the story goes in the email. Names the truck or the trailer when the reason says which, otherwise both. Pure.
@@ -82,6 +83,8 @@ export function loadRows(item, now = Date.now()) {
 }
 
 // The photos, full width, one under the other. Pure.
+// what dispatch wrote, in the email: big when it's a short line, normal size when it's long; line breaks kept
+const said = (t) => { const short = String(t || '').length <= 140 && !/\n/.test(String(t || '')); return `<div style="font-size:${short ? 24 : 17}px;line-height:${short ? 1.25 : 1.45};font-weight:${short ? 'bold' : 'normal'};padding:4px 0 8px;word-break:break-word;white-space:pre-line;">${esc(t)}</div>`; };
 const photoBlock = (cids, note) => {
   const { heading, FONT, MUTED } = emailParts;
   if (!cids.length && !note) return '';
@@ -98,7 +101,7 @@ export function renderBreakdownPhotosEmail({ report, item = null, by, count, sub
 ${TRAINING_SLOT}
 <tr><td bgcolor="${color}" style="padding:18px 24px;background:${color};font-family:${FONT};font-size:26px;font-weight:bold;color:#FFFFFF;">${title}<div style="padding-top:4px;font-size:15px;font-weight:normal;color:#FFFFFF;">${esc(line)}</div></td></tr>
 <tr><td style="padding:14px 24px 0;font-family:${FONT};font-size:24px;font-weight:bold;color:${NAVY};">Truck ${esc(report.unit || 'not recorded')}<div style="font-size:15px;font-weight:normal;color:${MUTED};">Trip ${esc(report.trip)}</div></td></tr>
-<tr><td style="padding:14px 24px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Reason on file</b><br>${esc(report.reason)}<div style="font-size:13px;color:${MUTED};">Received ${esc(et(now) || '')}</div></td></tr>
+<tr><td style="padding:14px 24px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Reason on file</b><div style="white-space:pre-line;word-break:break-word;">${esc(report.reason)}</div><div style="font-size:13px;color:${MUTED};">Received ${esc(et(now) || '')}</div></td></tr>
 ${photoBlock(photoCids, photosNote)}
 ${heading('Load')}
 <tr><td style="padding:0 24px 20px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${rows.map(([k, v]) => kv(k, v)).join('')}</table></td></tr>
@@ -142,8 +145,8 @@ ${TRAINING_SLOT}
 <tr><td style="padding:16px 24px 0;font-family:${FONT};font-size:30px;font-weight:bold;color:${NAVY};">Truck ${esc(f.unit || 'not recorded')}</td></tr>
 <tr><td style="padding:0 24px 14px;font-family:${FONT};font-size:15px;color:${MUTED};">Trip ${esc(f.trip || 'not recorded')}${f.trailer ? ` · Trailer ${esc(f.trailer)}` : ''}</td></tr>
 ${sheetAttached ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NAVY}" style="background:${NAVY};border-radius:8px;"><tr><td style="padding:12px 16px;font-family:${FONT};font-size:17px;font-weight:bold;color:#FFFFFF;">&#128206; ${esc(sheetNote)}</td></tr></table></td></tr>` : ''}
-${update ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF7E7" style="background:#FFF7E7;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:#92400E;">Update</b><div style="font-size:24px;line-height:1.25;font-weight:bold;padding:4px 0 8px;word-break:break-word;">${esc(update.message)}</div>From: <b>${esc(update.by)} · ${esc(et(now) || '')}</b>${earlier.length ? `<div style="padding-top:10px;font-size:13px;color:${MUTED};"><b>Earlier updates</b>${earlier.map((u) => `<div style="padding-top:4px;word-break:break-word;">${esc(u.message)} (${esc(u.by)} · ${esc(et(u.atMs) || '')})</div>`).join('')}</div>` : ''}</td></tr></table></td></tr>` : ''}
-<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b><div style="font-size:24px;line-height:1.25;font-weight:bold;padding:4px 0 8px;word-break:break-word;">${esc(report.reason)}</div>${report.driverSays ? `<div style="padding:0 0 8px;"><b style="color:${RED};">What the driver says</b><br>${esc(report.driverSays)}</div>` : ''}Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
+${update ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF7E7" style="background:#FFF7E7;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:#92400E;">Update</b>${said(update.message)}From: <b>${esc(update.by)} · ${esc(et(now) || '')}</b>${earlier.length ? `<div style="padding-top:10px;font-size:13px;color:${MUTED};"><b>Earlier updates</b>${earlier.map((u) => `<div style="padding-top:4px;word-break:break-word;white-space:pre-line;">${esc(u.message)} (${esc(u.by)} · ${esc(et(u.atMs) || '')})</div>`).join('')}</div>` : ''}</td></tr></table></td></tr>` : ''}
+<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b>${said(report.reason)}${report.driverSays ? `<div style="padding:0 0 8px;"><b style="color:${RED};">What the driver says</b><div style="white-space:pre-line;word-break:break-word;">${esc(report.driverSays)}</div></div>` : ''}Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
 ${update ? '' : `<tr><td style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Next step for dispatch</b><br>${esc(rc)}<br>${esc(next)}<div>${button(consoleUrl, 'Open the load')}</div></td></tr></table></td></tr>`}
 ${photoBlock(photoCids, photosNote)}
 ${heading('Load')}
@@ -197,7 +200,7 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
   // Staff emailed Jarvis that a truck broke down: same breakdown email, to everyone of ours on their email plus the usual list.
   // One per load until Breakdown is turned off; the first report stands, later ones just say so.
   async function fromEmail({ trip, reason, by, emailId, to = [], photos = [], driverSays = null, part = null, truck = null, trailer = null }) {
-    const clean = oneLine(reason, MAX_REASON);
+    const clean = keepLines(reason);
     if (clean.length < 3) return { ok: false, error: 'What happened? Reply with the reason.' };
     const open = await forTrip(trip);
     if (open && !open.clearedAt && now() - open.atMs < DAY) { if (photos.length) await addPhotos({ trip, photos, by }); return { ok: false, duplicate: true, error: `Already reported by ${open.by}.` }; }
@@ -207,7 +210,7 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
     const item = correctedLoad(onLoad, board, { truck, trailer });
     const unit = (item.trip || {}).powerUnit || null;
     const texted = await textedPhotos(trip).catch(() => []);
-    const report = { atMs: now(), by: oneLine(by, 80) || 'Dispatch', reason: clean, trip: String(trip), unit, ...(driverSays ? { driverSays: oneLine(driverSays, MAX_REASON) } : {}), ...(part ? { part } : {}), photos: [...photos, ...texted.filter((x) => !photos.some((y) => y.docId === x.docId))] };
+    const report = { atMs: now(), by: oneLine(by, 80) || 'Dispatch', reason: clean, trip: String(trip), unit, ...(driverSays ? { driverSays: keepLines(driverSays) } : {}), ...(part ? { part } : {}), photos: [...photos, ...texted.filter((x) => !photos.some((y) => y.docId === x.docId))] };
     const subject = breakdownSubject(item, clean, { unit, trip, part });
     const before = { before: snapshotLoad(item, await etasFor(trip).catch(() => null), report.atMs), crew: crewOf(item, report.atMs) };
     await db.update(KEY(site), (cur) => ({ ...(cur || {}), [`email:${emailId}`]: { ...report, ...before, subject } }), {});
@@ -229,7 +232,7 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
 
   // A dispatcher's update on an open breakdown: where the repair stands, what the tech or driver said. It stays on the record and goes out on the chain.
   async function addUpdate({ trip, message, by, photos = [] }) {
-    const text = oneLine(message, MAX_REASON); const who = oneLine(by, 80) || 'Dispatch';
+    const text = keepLines(message); const who = oneLine(by, 80) || 'Dispatch';
     if (text.length < 3) return { ok: false, error: 'Write the update.' };
     const k = await keyFor(trip);
     if (!k) return { ok: false, error: `No open breakdown on trip ${trip}.` };
@@ -317,7 +320,7 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
     if (requireAuth) app.post('/truckmate/breakdown/report', requireAuth, async (req, res) => {
       const b = req.body || {}; const by = (req.user && (req.user.name || req.user.email)) || 'Dispatch';
       if (oneLine(b.problem, MAX_REASON).length < 3) return res.status(400).json({ error: 'Write what the breakdown is.' });
-      const files = (Array.isArray(b.photos) ? b.photos : []).filter((f) => f && f.dataBase64 && /^image\//i.test(f.mediaType || '')).slice(0, MAX_PHOTOS);
+      const files = (Array.isArray(b.photos) ? b.photos : []).filter((f) => f && f.dataBase64 && /^image\//i.test(f.mediaType || ''));
       let photos = []; let photosFailed = false;
       try { photos = files.length ? await storePhotos(String(b.trip), files, by) : []; } catch (e) { console.warn('[breakdown-report] photos:', e.message); photosFailed = true; }
       try {
@@ -328,10 +331,21 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
     });
     if (requireAuth) {
       app.get('/truckmate/breakdown/open/:trip', requireAuth, async (req, res) => { try { res.json({ open: await openFor(req.params.trip) }); } catch (e) { res.status(500).json({ error: e.message }); } });
+      // the rest of the photos when there are too many for one upload: they go out on the breakdown's email chain
+      app.post('/truckmate/breakdown/photos', requireAuth, async (req, res) => {
+        const b = req.body || {}; const by = (req.user && (req.user.name || req.user.email)) || 'Dispatch';
+        const files = (Array.isArray(b.photos) ? b.photos : []).filter((f) => f && f.dataBase64 && /^image\//i.test(f.mediaType || ''));
+        if (!files.length) return res.status(400).json({ error: 'No photos.' });
+        try {
+          const photos = await storePhotos(String(b.trip), files, by);
+          const r = await addPhotos({ trip: String(b.trip), photos, by });
+          return r.ok ? res.json({ ok: true, added: r.added }) : res.status(409).json({ error: `No open breakdown on trip ${b.trip}.` });
+        } catch (e) { console.warn('[breakdown-report] photos:', e.message); return res.status(502).json({ error: 'Those photos did not go out. Reply on the email with them.' }); }
+      });
       app.post('/truckmate/breakdown/update', requireAuth, async (req, res) => {
         const b = req.body || {}; const by = (req.user && (req.user.name || req.user.email)) || 'Dispatch';
         if (oneLine(b.message, MAX_REASON).length < 3) return res.status(400).json({ error: 'Write the update.' });
-        const files = (Array.isArray(b.photos) ? b.photos : []).filter((f) => f && f.dataBase64 && /^image\//i.test(f.mediaType || '')).slice(0, MAX_PHOTOS);
+        const files = (Array.isArray(b.photos) ? b.photos : []).filter((f) => f && f.dataBase64 && /^image\//i.test(f.mediaType || ''));
         let photos = []; let photosFailed = false;
         try { photos = files.length ? await storePhotos(String(b.trip), files, by) : []; } catch (e) { console.warn('[breakdown-report] photos:', e.message); photosFailed = true; }
         try {

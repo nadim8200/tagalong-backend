@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import jpeg from 'jpeg-js';
-import { photosOf, exifOrientation, shrinkPixels, shrinkPhoto, photoAttachments, MAX_PHOTOS } from '../breakdownphotos.js';
+import { photosOf, exifOrientation, shrinkPixels, shrinkPhoto, photoAttachments } from '../breakdownphotos.js';
 import { correctedLoad, renderBreakdownEmail, renderBreakdownPhotosEmail, initBreakdownReport, loadType, loadRows, breakdownSubject } from '../breakdownreport.js';
 import { mmsImages } from '../ringcentral.js';
 
@@ -11,7 +11,7 @@ const mem = () => { const s = {}; return { get: async (k, d) => (k in s ? s[k] :
 
 test('only stored pictures from an email count as photos', () => {
   assert.deepEqual(photosOf({ attachments: [{ docId: 7, name: 'a.jpg', contentType: 'image/jpeg' }, { docId: 8, name: 'b.pdf', contentType: 'application/pdf' }, { docId: null, contentType: 'image/png' }] }), [{ docId: '7', name: 'a.jpg' }]);
-  assert.equal(photosOf({ attachments: Array.from({ length: 9 }, (_, i) => ({ docId: i + 1, contentType: 'image/png' })) }).length, MAX_PHOTOS);
+  assert.equal(photosOf({ attachments: Array.from({ length: 9 }, (_, i) => ({ docId: i + 1, contentType: 'image/png' })) }).length, 9, 'every picture, no limit');
   assert.deepEqual(photosOf(null), []);
 });
 
@@ -137,4 +137,12 @@ test('an update is a real reply on the first email, and a plain email if it cann
   assert.ok(calls.some((c) => /d1\/send/.test(c))); assert.ok(calls.some((c) => /d1\/attachments/.test(c)));
   found = false;
   assert.equal((await sendInThread(msg, 'X', { env, fetchFn, direct: true })).threaded, undefined, 'falls back');
+});
+
+test('no photo count limit: what doesn\'t fit in one email comes back for the next one, numbered on', () => {
+  const big = { data: Buffer.alloc(1000, 1), mediaType: 'image/png' };
+  const r = photoAttachments(Array.from({ length: 9 }, () => big), 2500);
+  assert.equal(r.attachments.length, 2); assert.equal(r.rest.length, 7);
+  const r2 = photoAttachments(r.rest, 2500, 3);
+  assert.deepEqual(r2.attachments.map((a) => a.cid), ['bkphoto3', 'bkphoto4']);
 });

@@ -170,3 +170,14 @@ test('a truck on two trips, or none named: nothing goes out until they say which
   await h.inbox.poll(); await settle();
   assert.equal(h.calls.length, 0);
 });
+
+test('what dispatch writes has no practical limit and keeps its lines (towing company, phone, ETA); long text is normal size in the email', async () => {
+  const { keepLines } = await import('../breakdownreport.js');
+  const towing = 'Trailer tire blew out on I-81.\r\nThe Towing Service gave us a ETA @30 - 40 mins\nPlease see the Towing Service Info:\nDrigger   Towing\n\n\n\n(555) 010-0000';
+  assert.equal(keepLines(towing), 'Trailer tire blew out on I-81.\nThe Towing Service gave us a ETA @30 - 40 mins\nPlease see the Towing Service Info:\nDrigger Towing\n\n(555) 010-0000');
+  assert.equal(keepLines('x'.repeat(5000)).length, 5000, 'way past the old 500');
+  const m = renderBreakdownEmail({ item: { trip: { tripNumber: '1', powerUnit: '2' } }, report: { atMs: NOW, by: 'A', reason: keepLines(towing), trip: '1', unit: '2' }, now: NOW });
+  assert.match(m.html, /font-size:17px[^"]*white-space:pre-line;">Trailer tire blew out/);
+  assert.match(m.text, /Please see the Towing Service Info:\nDrigger Towing/);
+  assert.match(renderBreakdownEmail({ item: { trip: { tripNumber: '1', powerUnit: '2' } }, report: { atMs: NOW, by: 'A', reason: 'air leak', trip: '1', unit: '2' }, now: NOW }).html, /font-size:24px[^"]*">air leak/);
+});
