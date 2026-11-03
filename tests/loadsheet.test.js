@@ -191,13 +191,25 @@ test('the rate con fills the driver\'s load when dispatch hasn\'t sent a message
   assert.deepEqual([s.stops[0].street, s.stops[0].dateIso, s.stops[0].time], ['1100 EAST 3RD STREET', '2026-11-04', 'ASAP'], 'handwritten P/U fills the pickup');
   assert.equal(s.stops[1].street, '7598 NW 6TH AVENUE', 'a street in refs is the street');
   assert.deepEqual(s.notes, ['No release', '$75 bonus for short trip'], 'truck number, part, temp, pickup time and tiny marks are not notes');
-  assert.ok(!/3032|555-010|penalty/.test(JSON.stringify(s)));
+  assert.ok(!/3032|555-010/.test(JSON.stringify(s)), 'never the rate or the broker\'s phone');
+  assert.deepEqual(s.instructions, ['$200 penalty'], 'the rate con\'s instructions are the driver\'s to read');
   assert.equal(sheetFromRateCon({ pickups: [], deliveries: [] }), null);
+  // with the load in TruckMate: TruckMate's stops and times; the rate con adds the name, street and instructions
+  const tmItem = { trip: { tripNumber: '900776' }, freightBills: [{ billNumber: 'B180776', startZoneDescription: 'SILER CITY, NC, 27344', endZoneDescription: 'BOCA RATON, FL, 33487', pickUpBy: '2026-11-04T13:00:00', deliveryAppt: '2026-11-06T08:00:00' }] };
+  const t = sheetFromRateCon({ ...rc, specialInstructions: ['Driver must have a pallet jack'], pickups: [{ ...rc.pickups[0], instructions: ['Check in at the guard shack'] }] }, { trip: '900776', item: tmItem });
+  assert.deepEqual(t.stops.map((x) => [x.kind, x.name, x.city, x.dateIso, x.time]), [['pickup', 'SILER CITY', 'SILER CITY', '2026-11-04', '1:00 PM'], ['delivery', 'US FOODS BOCA RATON', 'BOCA RATON', '2026-11-06', '8:00 AM']], 'TruckMate\'s times');
+  assert.deepEqual(t.stops[0].other, ['Check in at the guard shack']); assert.deepEqual(t.instructions, ['Driver must have a pallet jack']);
+  const only = sheetFromRateCon(rc, { trip: '1', item: { trip: { tripNumber: '1' }, freightBills: [{ billNumber: 'B1', startZoneDescription: 'MIAMI, FL, 33166', endZoneDescription: 'ATLANTA, GA, 30301', pickUpBy: '2026-11-04T00:00:00' }] } });
+  assert.deepEqual(only.stops.map((x) => [x.kind, x.city, x.name]), [['pickup', 'MIAMI', null], ['pickup', 'SILER CITY', 'SILER CITY'], ['delivery', 'ATLANTA', null], ['delivery', 'BOCA RATON', 'US FOODS BOCA RATON']], 'TruckMate first, then a rate con stop TruckMate doesn\'t have');
+  assert.equal(only.stops[0].time, null, 'midnight in TruckMate means a date only');
   // on the board: filled once, a message from dispatch replaces it
   const db = mem(); const app = { get() {}, post() {}, put() {} };
   const ls = initLoadSheets(app, { requireAuth: () => {}, db, getBoard: async () => ({ trips: [] }) });
   const item = { trip: { tripNumber: '900776' }, _ratecon: { data: rc } };
   assert.equal((await ls.ensureFromRateCon(item)).by, 'Jarvis (from the rate con)');
   assert.equal((await ls.ensureFromRateCon(item)).by, 'Jarvis (from the rate con)', 'once');
+  await ls.confirm('900776', 'Frank U');
+  const moved = await ls.ensureFromRateCon({ ...item, freightBills: [{ billNumber: 'B180776', startZoneDescription: 'SILER CITY, NC, 27344', endZoneDescription: 'BOCA RATON, FL, 33487', deliveryAppt: '2026-11-06T10:00:00' }] });
+  assert.equal(moved.stops[1].time, '10:00 AM', 'kept current with TruckMate'); assert.equal(moved.confirmedBy, 'Frank U', 'the OK stays');
   assert.equal(await ls.ensureFromRateCon({ trip: { tripNumber: '1' } }), null, 'no rate con, nothing');
 });

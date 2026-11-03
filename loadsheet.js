@@ -127,25 +127,45 @@ export const yardLabel = (n) => (n ? `${clean(n).replace(/\s+yard$/i, '')} yard`
 // cheap check before reading an email as a load message
 export const looksLikeDispatchMessage = (text) => /\bTRIP\s*#\s*:/i.test(text) && /\bPICK\s*-?\s*UP\b/i.test(text) && /\bDELIVERY\b/i.test(text);
 
-// A rate con's load as the driver's load info, when dispatch hasn't sent a message: the stops (name, street, town, date and time),
-// pickup numbers, the temperature and mode, and the handwritten notes for the driver ("No release", "$75 bonus"). Never the rate, the
-// broker's contacts or penalties. Pure → a sheet, or null when the rate con has no stops.
+// TruckMate's stops for a load: pickups from each bill's start zone, deliveries from its end zone, with TruckMate's times. Pure.
+const up = (x) => String(x || '').trim().toUpperCase();
+const zoneOf = (z) => { const [city, state, zip] = String(z || '').split(',').map((x) => x.trim()); return { city: city || null, state: state ? state.toUpperCase() : null, zip: /^\d{5}$/.test(zip || '') ? zip : null }; };
+const tmWhen = (v) => { const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/); if (!m) return { date: null, dateIso: null, time: null }; const h = Number(m[4]); const time = m[4] === '00' && m[5] === '00' ? null : `${((h + 11) % 12) + 1}:${m[5]} ${h < 12 ? 'AM' : 'PM'}`; return { date: `${Number(m[2])}/${Number(m[3])}/${m[1].slice(2)}`, dateIso: `${m[1]}-${m[2]}-${m[3]}`, time }; };
+export function truckMateStops(item) {
+  const bills = (item && (item.freightBills || item.orders)) || [];
+  const out = []; const seen = new Set();
+  const add = (kind, zone, when) => { const z = zoneOf(zone); const k = `${kind}|${z.zip || z.city}`; if (!z.city || seen.has(k)) return; seen.add(k); out.push({ kind, n: null, name: null, street: null, ...z, ...tmWhen(when) }); };
+  for (const b of bills) add('pickup', b.startZoneDescription, b.pickUpAppt || b.pickUpBy);
+  for (const b of bills) add('delivery', b.endZoneDescription, b.deliveryAppt || b.deliverBy);
+  return out;
+}
+// A load for the driver when dispatch hasn't sent a message: the stops, dates and times from TruckMate; from the rate con only the pickup
+// numbers, each stop's instructions, the load instructions and the temperature and mode (and, since TruckMate has no names or street
+// addresses, the stop's name and street). Never the rate, the broker's contacts or anything else on it. Pure → a sheet, or null.
 const isoFrom = (d) => { const m = String(d || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/) || String(d || '').match(/(\d{4})-(\d{2})-(\d{2})/); if (!m) return null; if (m[1].length === 4) return `${m[1]}-${m[2]}-${m[3]}`; const y = m[3].length === 2 ? `20${m[3]}` : m[3]; return `${y}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`; };
 const looksStreet = (x) => /^\d+\s+\S/.test(String(x || '').trim());
 const OWN_NOTE = /^(tr(uck)?\.?\s*#?\s*)?\d{3,4}$|^part\s*#?\s*\d+$|^p\s*\/\s*u\b|^-?\d+\s*°?\s*f\b/i;   // truck number, "Part 2", pickup time, the temperature: shown elsewhere
-export function sheetFromRateCon(rc, { trip = null } = {}) {
-  if (!rc || !((rc.pickups || []).length || (rc.deliveries || []).length)) return null;
+export function sheetFromRateCon(rc, { trip = null, item = null } = {}) {
+  if (!rc) return null;
   const hand = (rc.handwrittenNotes || []).map((x) => clean(x)).filter(Boolean);
   const tempText = rc.tempSetting || hand.find((x) => /-?\d+\s*°?\s*F\b/i.test(x)) || null;
   const temp = tempText ? readTemp(`${tempText}${!/cont|cyc/i.test(tempText) && hand.some((x) => /\bcont/i.test(x)) ? ' CONTINUOUS' : ''}`) : null;
-  const stop = (kind) => (x) => {
+  const rcStop = (kind) => (x) => {
     const street = x.address || (looksStreet(x.refs) ? x.refs : null);
-    const date = x.date || null;
-    return { kind, n: null, name: clean(x.name) || null, street: street ? clean(street) : null, city: clean(x.city) || null, state: clean(x.state).toUpperCase() || null, zip: clean(x.zip) || null,
-      date, dateIso: isoFrom(date), time: cleanTime(x.appointment || x.time) || null, ...(x.refs && !looksStreet(x.refs) ? { other: [clean(x.refs)] } : {}) };
+    return { kind, name: clean(x.name) || null, street: street ? clean(street) : null, city: clean(x.city) || null, state: clean(x.state).toUpperCase() || null, zip: clean(x.zip) || null,
+      date: x.date || null, dateIso: isoFrom(x.date), time: cleanTime(x.appointment || x.time) || null,
+      other: [...(x.instructions || []).map((y) => clean(y)).filter(Boolean), ...(x.refs && !looksStreet(x.refs) ? [clean(x.refs)] : [])] };
   };
-  const stops = [...(rc.pickups || []).map(stop('pickup')), ...(rc.deliveries || []).map(stop('delivery'))];
-  // "P/U 11/4 ASAP" written by hand: the pickup's date and time when the rate con doesn't print one
+  const rcStops = [...(rc.pickups || []).map(rcStop('pickup')), ...(rc.deliveries || []).map(rcStop('delivery'))];
+  const tm = truckMateStops(item);
+  // TruckMate's stops, each matched to the rate con's stop of the same kind and town for its name, street and instructions
+  const used = new Set();
+  const match = (s0) => rcStops.find((r) => !used.has(r) && r.kind === s0.kind && ((s0.zip && r.zip === s0.zip) || (r.city && s0.city && up(r.city) === up(s0.city))));
+  let stops = tm.map((s0) => { const r = match(s0); if (r) used.add(r); return { ...s0, name: r ? r.name : null, street: r ? r.street : null, ...(!s0.dateIso && r ? { date: r.date, dateIso: r.dateIso } : {}), ...(!s0.time && r && r.time ? { time: r.time } : {}), other: r && r.other.length ? r.other : undefined }; });
+  for (const r of rcStops) if (!used.has(r)) stops.push({ ...r, other: r.other.length ? r.other : undefined });   // a stop TruckMate doesn't have yet
+  stops = [...stops.filter((x) => x.kind === 'pickup'), ...stops.filter((x) => x.kind === 'delivery')];
+  if (!stops.length) return null;
+  // "P/U 11/4 ASAP" written by hand: the pickup's date and time when neither TruckMate nor the rate con has one
   const puNote = hand.map((x) => x.match(/^p\s*\/\s*u\b\s*:?\s*(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)?\s*@?\s*(.*)$/i)).find(Boolean);
   const firstPu = stops.find((x) => x.kind === 'pickup');
   if (puNote && firstPu && !firstPu.dateIso) {
@@ -157,8 +177,9 @@ export function sheetFromRateCon(rc, { trip = null } = {}) {
   const rel = hand.map(readRelease).find(Boolean) || null;
   const notes = hand.filter((x) => x.length > 3 && !OWN_NOTE.test(x) && !readRelease(x) && !/cont(inuous)?\.?$/i.test(x));
   const pu = [...new Set([rc.loadNumber, ...(rc.pickups || []).map((x) => x.refs).filter((r) => r && !looksStreet(r))].filter(Boolean).map((x) => clean(x)))];
-  return { bill: rc.fbfBillNumber ? String(rc.fbfBillNumber).toUpperCase() : null, trip: trip ? String(trip) : null, temp, pickupNumbers: pu, refs: [], notes, stops,
-    from: 'the rate con', release: rel ? { ...rel, stops: [] } : null, fromRateCon: true };
+  const bills = (item && (item.freightBills || item.orders)) || [];
+  return { bill: (bills[0] && bills[0].billNumber) || (rc.fbfBillNumber ? String(rc.fbfBillNumber).toUpperCase() : null), trip: trip ? String(trip) : null, temp, pickupNumbers: pu, refs: [], notes,
+    instructions: (rc.specialInstructions || []).map((x) => clean(x)).filter(Boolean), stops, from: 'the rate con', release: rel ? { ...rel, stops: [] } : null, fromRateCon: true };
 }
 
 // Google Maps search link for a stop's address. Pure.
@@ -259,10 +280,15 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     if (!enabled || !item) return null;
     const trip = String(tripOf(item).tripNumber);
     const have = await get(trip);
-    if (have) return have;
+    if (have && !have.fromRateCon) return have;            // dispatch's own message stands
     const rc = item._ratecon && (item._ratecon.data || item._ratecon);
-    const sheet = sheetFromRateCon(rc, { trip });
-    return sheet ? save(sheet, '(read from the rate con)', 'Jarvis (from the rate con)', trip) : null;
+    const sheet = sheetFromRateCon(rc, { trip, item });
+    if (!sheet) return have;
+    if (!have) return save(sheet, '(read from the rate con)', 'Jarvis (from the rate con)', trip);
+    // kept current with TruckMate (a new time, a stop added); the driver's OK and a trailer drop stay
+    const next = { ...have, ...sheet, confirmedAt: have.confirmedAt, confirmedBy: have.confirmedBy, dropped: have.dropped || null };
+    if (JSON.stringify(next.stops) !== JSON.stringify(have.stops) || JSON.stringify(next.temp) !== JSON.stringify(have.temp) || JSON.stringify(next.instructions) !== JSON.stringify(have.instructions)) await db.update(KEY, (c) => ({ ...(c || {}), [trip]: next }), {});
+    return next;
   }
   // the driver tapped OK
   async function confirm(trip, by) {
