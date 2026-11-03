@@ -39,7 +39,7 @@ export function loadsFor(code, items = []) {
   return { current: mine.filter((it) => ROLLING.test(String(tripOf(it).status || ''))).map(brief), next: mine.filter((it) => BOOKED.test(String(tripOf(it).status || ''))).map(brief) };
 }
 
-export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign, secret, roster, getBoard, docsLink = null, now = () => Date.now() }) {
+export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign, secret, roster, getBoard, docsLink = null, sheets = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const tripsKey = (code) => `taDriverTrips:${SITE}:${norm(code)}`;
   const byCode = async (code) => (await roster()).find((d) => norm(d.code) === norm(code)) || null;
@@ -89,6 +89,8 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     try {
       const loads = loadsFor(req.driver.code, await board());
       const trips = [...loads.current, ...loads.next].map((l) => l.trip);
+      // the load message dispatch sent (names, addresses, PU#, times, notes): what TruckMate doesn't have
+      if (sheets) for (const l of [...loads.current, ...loads.next]) l.sheet = sheets.forDriver(await sheets.get(l.trip)); // eslint-disable-line no-await-in-loop
       if (trips.length) await db.update(tripsKey(req.driver.code), (cur) => [...new Set([...trips, ...(Array.isArray(cur) ? cur : [])])].slice(0, 300), []);
       res.json({ name: req.driver.name, driverId: req.driver.code, ...loads });
     } catch (e) { res.status(502).json({ error: 'Could not load your loads. Try again.' }); }
@@ -101,6 +103,14 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     if (!docsLink) return res.status(503).json({ error: 'Not available right now.' });
     const url = await docsLink(SITE, trip, `${req.driver.name} (driver profile)`);
     return url ? res.json({ token: url.split('/t/')[1] }) : res.status(503).json({ error: 'Not available right now.' });
+  });
+  // the driver got the load info: "OK" (instead of texting it back)
+  app.post('/driver/me/loads/:trip/ok', requireDriver, async (req, res) => {
+    const trip = String(req.params.trip);
+    const loads = loadsFor(req.driver.code, await board());
+    if (![...loads.current, ...loads.next].some((l) => l.trip === trip)) return res.status(404).json({ error: 'That load is not yours.' });
+    const s = sheets ? await sheets.confirm(trip, req.driver.name) : null;
+    return s ? res.json({ ok: true, confirmedAt: s.confirmedAt }) : res.status(404).json({ error: 'Dispatch hasn\'t sent the load info yet.' });
   });
   app.get('/driver/me/paperwork', requireDriver, async (req, res) => {
     const mine = new Set((await db.get(tripsKey(req.driver.code), [])) || []);

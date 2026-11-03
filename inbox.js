@@ -35,6 +35,7 @@ import { fmtLocal } from './localtime.js';
 import { readableFile } from './heic.js';
 import { createHash } from 'node:crypto';
 import { PDFDocument } from 'pdf-lib';
+import { looksLikeDispatchMessage } from './loadsheet.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const OK_ATTACH = /^(application\/pdf|image\/(png|jpe?g|webp|gif|heic|heif))$/i;
@@ -363,7 +364,7 @@ export function keepEmails(all) {
 // "Flowers report") is part of the message — not a scanned trip-sheet page. Pure.
 export const pastedPicture = (a) => !!a && /^image\//i.test(a.contentType || '') && !!a.bytes && Math.floor(String(a.bytes).length * 0.75) <= 1.5 * 1024 * 1024;
 
-export function initInbox(app, { requireAuth, db, stopReview = null, transferDone = null, breakdownFixed = null, rescuePlan = null, breakdownEmail = null, breakdownPhotos = null, rateConFlow = null, brokerFollow = null, dispatchLog = null, stopTasks = null, roadCalls = null, brokerWatch = null, paperwork = null, meetWatch = null, nextLoads = null, groupEmail = null, groupAddresses = null, planSheet = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initInbox(app, { requireAuth, db, stopReview = null, transferDone = null, breakdownFixed = null, rescuePlan = null, breakdownEmail = null, breakdownPhotos = null, rateConFlow = null, brokerFollow = null, dispatchLog = null, stopTasks = null, roadCalls = null, brokerWatch = null, paperwork = null, meetWatch = null, nextLoads = null, groupEmail = null, groupAddresses = null, planSheet = null, docs = null, comms = null, playbook = null, follow = null, etaWatch = null, training = null, askJarvis = null, getBoard = null, rateCons = null, tripSheets = null, packets = null, driver = null, help = null, loadSheets = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const key = (site) => `taEmails:${site}`;          // { list: [email…], status }
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
@@ -544,6 +545,17 @@ export function initInbox(app, { requireAuth, db, stopReview = null, transferDon
           console.warn('[inbox] blocked, failed sender checks:', from.address);
           await g(`/messages/${encodeURIComponent(m.id)}`, { method: 'PATCH', body: { isRead: true } }).catch(() => {}); // eslint-disable-line no-await-in-loop
           if (db.appendAudit) await db.appendAudit({ at: new Date(), actor: from.address, company: null, trip: null, role: 'email', action: 'Blocked an email that failed sender checks', method: 'EMAIL', path: 'inbox', status: 403, detail: { subject: String(m.subject || '').slice(0, 200) } }).catch(() => {}); // eslint-disable-line no-await-in-loop
+          continue;
+        }
+      }
+      // a dispatcher's load message for the driver (FB#, TRIP#, PICK UP, DELIVERY): saved on the trip for the driver app, nothing else
+      if (loadSheets && isInternal(from.address, env) && looksLikeDispatchMessage(text)) {
+        let saved = null;
+        try { saved = await loadSheets.fromEmail(site, { text, from }); } catch (e) { console.warn('[inbox] load message:', e.message); } // eslint-disable-line no-await-in-loop
+        if (saved) {
+          fresh.push({ id: m.id, conversationId: m.conversationId || null, from, subject: String(m.subject || '').slice(0, 300), at: m.receivedDateTime, text: text.slice(0, FILED_TEXT), attachments: [], trips: [saved.trip], why: ['load message (TRIP# / FB#)'], status: 'handled', auto: 'load-sheet', reply: { needed: false, kind: 'none', documents: [] }, replies: [],
+            summary: `Load info for the driver on trip ${saved.trip} (${saved.stops.length} stop${saved.stops.length === 1 ? '' : 's'}) — saved for the driver app.`, handledBy: 'Jarvis (load message — saved for the driver)' });
+          try { await g(`/messages/${encodeURIComponent(m.id)}`, { method: 'PATCH', body: { isRead: true } }); } catch { /* still remembered */ } // eslint-disable-line no-await-in-loop
           continue;
         }
       }
