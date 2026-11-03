@@ -90,7 +90,7 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       const loads = loadsFor(req.driver.code, await board());
       const trips = [...loads.current, ...loads.next].map((l) => l.trip);
       // the load message dispatch sent (names, addresses, PU#, times, notes): what TruckMate doesn't have
-      if (sheets) for (const l of [...loads.current, ...loads.next]) l.sheet = sheets.forDriver(await sheets.get(l.trip)); // eslint-disable-line no-await-in-loop
+      if (sheets) for (const l of [...loads.current, ...loads.next]) l.sheet = await sheets.forDriver(await sheets.get(l.trip)); // eslint-disable-line no-await-in-loop
       if (trips.length) await db.update(tripsKey(req.driver.code), (cur) => [...new Set([...trips, ...(Array.isArray(cur) ? cur : [])])].slice(0, 300), []);
       res.json({ name: req.driver.name, driverId: req.driver.code, ...loads });
     } catch (e) { res.status(502).json({ error: 'Could not load your loads. Try again.' }); }
@@ -111,6 +111,17 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     if (![...loads.current, ...loads.next].some((l) => l.trip === trip)) return res.status(404).json({ error: 'That load is not yours.' });
     const s = sheets ? await sheets.confirm(trip, req.driver.name) : null;
     return s ? res.json({ ok: true, confirmedAt: s.confirmedAt }) : res.status(404).json({ error: 'Dispatch hasn\'t sent the load info yet.' });
+  });
+  // the driver dropped the trailer at the yard dispatch released them to: the team gets an email (and the trailer they picked up, if any)
+  app.post('/driver/me/loads/:trip/dropped', requireDriver, async (req, res) => {
+    const trip = String(req.params.trip);
+    const loads = loadsFor(req.driver.code, await board());
+    const l = [...loads.current, ...loads.next].find((x) => x.trip === trip);
+    if (!l) return res.status(404).json({ error: 'That load is not yours.' });
+    try {
+      const d = sheets ? await sheets.dropped(trip, req.driver.name, { pickedUp: (req.body || {}).pickedUp, truck: l.truck, trailer: l.trailer }) : null;
+      return d ? res.json({ ok: true, dropped: d }) : res.status(404).json({ error: 'Dispatch hasn\'t set a yard for this load.' });
+    } catch (e) { return res.status(502).json({ error: 'Could not send. Call dispatch.' }); }
   });
   app.get('/driver/me/paperwork', requireDriver, async (req, res) => {
     const mine = new Set((await db.get(tripsKey(req.driver.code), [])) || []);

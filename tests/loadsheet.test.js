@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDispatchMessage, looksLikeDispatchMessage, initLoadSheets, cleanTime, readTemp, tripForSheet, forDriver } from '../loadsheet.js';
+import { parseDispatchMessage, looksLikeDispatchMessage, initLoadSheets, cleanTime, readTemp, tripForSheet, forDriver, readRelease } from '../loadsheet.js';
 
 const ONE = `--------------------------------------------
 FB#: B180747
@@ -110,12 +110,13 @@ test('extra pay up top, several PU numbers, "3P M", and a note between pickup an
   assert.equal(s.from, 'PRISCYLA');
 });
 
-test('FB# on the next line, ASAP, two numbered deliveries and the release note after the first one', () => {
+test('FB# on the next line, ASAP, two numbered deliveries, and a free release at Bartow yard after the first one', () => {
   const s = parseDispatchMessage(THREE);
   assert.equal(s.bill, 'B180764'); assert.equal(s.trip, '626282'); assert.equal(s.pickupNumbers.length, 6);
   assert.deepEqual(s.stops.map((x) => [x.kind, x.n, x.name]), [['pickup', 1, 'CARL BUDDIG & CO'], ['delivery', 1, 'WALMART DC# 6055'], ['delivery', 2, 'WALMART DC# 8851']]);
   assert.equal(s.stops[0].time, 'ASAP');
-  assert.deepEqual(s.stops[1].notesAfter, ['FREE RELEASE BARTOW YARD']);
+  assert.equal(s.stops[1].notesAfter, undefined, 'the release is not a note');
+  assert.deepEqual(s.release, { type: 'free', yard: 'Bartow', stops: [2] }, 'delivery #2 goes from the yard');
   assert.equal(s.stops[2].street, '4505 FL-524'); assert.equal(s.stops[2].city, 'COCOA'); assert.equal(s.stops[2].time, '1:00 PM');
   assert.equal(s.from, null);
 });
@@ -133,7 +134,7 @@ const mem = () => { const s = {}; return { enabled: true, s, get: async (k, d) =
 
 test('saved on the trip, sent by app and / or text, read from an email, the driver\'s OK, and on the board', async () => {
   const db = mem(); const routes = {}; const sent = [];
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; } };
   const ls = initLoadSheets(app, { requireAuth: (req, res, next) => next(), db, getBoard: async () => ({ trips: [{ trip: { tripNumber: '626282' }, freightBills: [{ billNumber: 'B180764' }] }] }), sendApp: async (site, trip, text) => { sent.push(['app', trip, text.slice(0, 5)]); return { sent: true }; }, sendText: async () => ({ skipped: 'texting not live yet' }) });
   const call = async (key, body) => { let out = {}; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; await routes[key][1]({ body, params: {}, user: { name: 'Haraft' } }, res); return out; };
   assert.equal((await call('POST /truckmate/loadsheet', { text: 'hello' })).status, 400);
@@ -147,4 +148,34 @@ test('saved on the trip, sent by app and / or text, read from an email, the driv
   await ls.confirm('626282', 'Frank U');
   const items = [{ trip: { tripNumber: '626282' } }]; await ls.overlay('x', items);
   assert.equal(items[0]._loadSheet.confirmedBy, 'Frank U');
+});
+
+test('a yard drop: the driver only sees the stops they deliver, then the release with the yard; dispatch can change it; the drop emails the team', async () => {
+  assert.deepEqual(readRelease('***PAID RELEASE @ MIAMI YARD***'), { type: 'paid', yard: 'Miami' });
+  assert.equal(readRelease('*** NO RELEASE ***'), null);
+  assert.equal(parseDispatchMessage(TWO).release, null, 'NO RELEASE stays a note');
+  const db = mem(); const routes = {}; const mails = [];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; } };
+  const ls = initLoadSheets(app, { requireAuth: (req, res, next) => next(), db, getBoard: async () => ({ trips: [] }), sendMail: async (m) => { mails.push(m); }, recipients: async () => ['ntellez@floridabeauty.us'] });
+  const call = async (key, body, params = {}) => { let out = {}; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; await routes[key][1]({ body, params, user: { name: 'Haraft' } }, res); return out; };
+  await call('POST /truckmate/loadsheet', { text: THREE });
+  let d = await ls.forDriver(await ls.get('626282'));
+  assert.deepEqual(d.stops.map((x) => x.name), ['CARL BUDDIG & CO', 'WALMART DC# 6055'], 'Cocoa is delivered from the yard');
+  assert.equal(d.release.name, 'Bartow yard'); assert.equal(d.release.address, null); assert.deepEqual(d.release.hide, [{ zip: '32926', city: 'COCOA' }]);
+  // dispatch sets the yard's address and makes it paid
+  const put = await call('PUT /truckmate/loadsheet/:trip/release', { type: 'paid', yard: 'Bartow yard', address: '100 Example Rd, Bartow, FL', stops: [2, 0] }, { trip: '626282' });
+  assert.equal(put.body.sheet.release.type, 'paid'); assert.deepEqual(put.body.sheet.stops.map((x) => x.toYard), [false, false, true], 'a pickup can\'t go to the yard');
+  d = await ls.forDriver(await ls.get('626282'));
+  assert.equal(d.release.address, '100 Example Rd, Bartow, FL'); assert.match(d.release.map, /google\.com\/maps.*Bartow/);
+  assert.deepEqual((await call('GET /truckmate/yards', {})).body.yards, [{ name: 'Bartow yard', address: '100 Example Rd, Bartow, FL' }]);
+  // the driver drops it
+  const drop = await ls.dropped('626282', 'Frank U', { pickedUp: 'tl 7301', truck: '2401', trailer: '7136' });
+  assert.equal(drop.pickedUp, 'TL 7301'); assert.equal(mails.length, 1);
+  assert.match(mails[0].subject, /TRAILER DROPPED \/\/ BARTOW YARD \/\/ TK 2401 TL 7136 TO 626282 \/\/ PICKED UP TL 7301/);
+  assert.match(mails[0].text, /Still to deliver from the yard: WALMART DC# 8851 — COCOA, FL/);
+  assert.equal((await ls.forDriver(await ls.get('626282'))).release.dropped.by, 'Frank U');
+  // and it can be cleared
+  await call('PUT /truckmate/loadsheet/:trip/release', { release: null }, { trip: '626282' });
+  assert.equal((await ls.forDriver(await ls.get('626282'))).stops.length, 3);
+  assert.equal(await ls.dropped('626282', 'x'), null);
 });

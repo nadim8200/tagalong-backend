@@ -8,6 +8,7 @@
 
 const SITE = 'florida-beauty';
 const KEY = `taLoadSheets:${SITE}`;           // trip → sheet
+const YARDS = `taYards:${SITE}`;              // NAME → { name, address }: dispatch types a yard's address once
 const tripOf = (it) => (it && it.trip) || it || {};
 const billsOf = (it) => (it && (it.freightBills || it.orders)) || tripOf(it).freightBills || [];
 const clean = (s) => String(s || '').replace(/\*+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -44,7 +45,10 @@ export function parseDispatchMessage(text) {
   const sheet = { bill: null, trip: null, temp: null, pickupNumbers: [], refs: [], notes: [], stops: [], from: null };
   let stop = null; let pendingField = null; let seenStop = false;
   const endStop = () => { if (stop) { sheet.stops.push(stop); stop = null; } };
-  const noteOut = (n) => { const last = stop || sheet.stops[sheet.stops.length - 1]; if (last) (last.notesAfter = last.notesAfter || []).push(n); else sheet.notes.push(n); };
+  let releaseAt = null;
+  // a release: the trailer goes to a yard after the stops so far; the stops after it are delivered from the yard (not by this driver)
+  const isRelease = (n) => { const r = readRelease(n); if (!r) return false; sheet.release = r; releaseAt = sheet.stops.length + (stop ? 1 : 0); return true; };
+  const noteOut = (n) => { if (isRelease(n)) return; const last = stop || sheet.stops[sheet.stops.length - 1]; if (last) (last.notesAfter = last.notesAfter || []).push(n); else sheet.notes.push(n); };
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
@@ -74,7 +78,7 @@ export function parseDispatchMessage(text) {
         if (tm != null && cleanTime(tm)) stop.time = cleanTime(tm);
         continue;
       }
-      if (/^\s*\*{2,}/.test(line) || /\*{2,}\s*$/.test(line)) { stop.notesAfter.push(clean(line)); continue; }
+      if (/^\s*\*{2,}/.test(line) || /\*{2,}\s*$/.test(line)) { if (!isRelease(line)) stop.notesAfter.push(clean(line)); continue; }
       const c = line.match(CITY);
       if (!stop.name) stop.name = clean(line);
       else if (c && !stop.city) { stop.city = clean(c[1]).replace(/,$/, ''); stop.state = c[2].toUpperCase(); stop.zip = c[3]; }
@@ -97,10 +101,22 @@ export function parseDispatchMessage(text) {
   let p = 0; let d = 0;
   for (const s of sheet.stops) { if (s.kind === 'pickup') { p += 1; s.n = s.n || p; } else { d += 1; s.n = s.n || d; } s.street = s.street.join(', ') || null; s.other = s.other.length ? s.other : undefined; if (!s.notesAfter.length) delete s.notesAfter; }
   sheet.pickupNumbers = [...new Set(sheet.pickupNumbers)];
+  if (sheet.release) sheet.release.stops = sheet.stops.map((x, i) => (i >= releaseAt && x.kind === 'delivery' ? i : null)).filter((i) => i != null);
+  else sheet.release = null;
   if (!seenStop && !sheet.trip && !sheet.bill) return null;
   if (!(sheet.trip || sheet.bill) || !sheet.stops.length) return null;
   return sheet;
 }
+// "FREE RELEASE BARTOW YARD", "PAID RELEASE @ MIAMI YARD" → { type, yard }. "NO RELEASE" isn't one. Pure.
+export function readRelease(line) {
+  const m = clean(line).match(/\b(FREE|PAID)\s+RELEASE\b\s*(?:AT|@|IN|TO|-|:)?\s*(.*)$/i);
+  if (!m) return null;
+  const yard = clean(m[2]).replace(/\byard\b\.?/i, '').trim();
+  return { type: m[1].toLowerCase(), yard: yard ? yard.replace(/\w\S*/g, (w) => w[0].toUpperCase() + w.slice(1).toLowerCase()) : null };
+}
+const yardKey = (n) => clean(n).toUpperCase().replace(/\s+YARD$/, '');
+export const yardLabel = (n) => (n ? `${clean(n).replace(/\s+yard$/i, '')} yard` : 'the yard');
+
 // cheap check before reading an email as a load message
 export const looksLikeDispatchMessage = (text) => /\bTRIP\s*#\s*:/i.test(text) && /\bPICK\s*-?\s*UP\b/i.test(text) && /\bDELIVERY\b/i.test(text);
 
@@ -114,16 +130,33 @@ export function tripForSheet(sheet, items = []) {
   const it = items.find((x) => billsOf(x).some((b) => String(b.billNumber || '').toUpperCase() === sheet.bill));
   return it ? String(tripOf(it).tripNumber) : null;
 }
-// What the driver sees: the sheet with the map links (stored sheets stay plain). Pure.
-export const forDriver = (s) => (s ? { ...s, raw: undefined, stops: (s.stops || []).map((x) => ({ ...x, map: mapsLink(x) })) } : null);
+// The yard a release goes to, with its address when dispatch gave one. Pure.
+const yardOf = (r, yards = {}) => { const y = yards[yardKey(r.yard)] || null; const q = y && y.address ? `${yardLabel(r.yard)}, ${y.address}` : null; return { name: yardLabel(r.yard), address: (y && y.address) || null, map: q ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}` : null }; };
+// Dispatch's view: every stop with its map link, the ones going to the yard marked. Pure.
+export const forConsole = (s, yards = {}) => (s ? { ...s, raw: undefined, stops: (s.stops || []).map((x, i) => ({ ...x, map: mapsLink(x), toYard: !!(s.release && (s.release.stops || []).includes(i)) })), release: s.release ? { ...s.release, ...yardOf(s.release, yards), yard: s.release.yard } : null } : null);
+// What the driver sees: only the stops they deliver (the ones going to the yard are someone else's), and the release with the yard. Pure.
+export const forDriver = (s, yards = {}) => {
+  if (!s) return null;
+  const hidden = new Set((s.release && s.release.stops) || []);
+  return { ...s, raw: undefined, stops: (s.stops || []).filter((_, i) => !hidden.has(i)).map((x) => ({ ...x, map: mapsLink(x) })),
+    release: s.release ? { type: s.release.type, ...yardOf(s.release, yards), hide: (s.stops || []).filter((_, i) => hidden.has(i)).map((x) => ({ zip: x.zip || null, city: x.city || null })), dropped: s.dropped || null } : null };
+};
 
-export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp = null, sendText = null, log = null, now = () => Date.now() }) {
+export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp = null, sendText = null, log = null, sendMail = null, recipients = async () => [], now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const all = async () => (enabled ? (await db.get(KEY, {})) || {} : {});
   const board = async () => (getBoard ? (((await getBoard(SITE)) || {}).trips || []) : []);
   const get = async (trip) => (await all())[String(trip)] || null;
+  const yards = async () => (enabled ? (await db.get(YARDS, {})) || {} : {});
+  const rememberYard = async (name, address) => { if (!name || !clean(address)) return; await db.update(YARDS, (cur) => ({ ...(cur || {}), [yardKey(name)]: { name: yardLabel(name), address: clean(address).slice(0, 200) } }), {}); };
+  // dispatch's pick: which yard, free or paid, and which stops go there (null clears it). → the release as stored
+  const releaseFrom = (r, stops) => {
+    if (!r || !['free', 'paid'].includes(r.type)) return null;
+    const ok = (Array.isArray(r.stops) ? r.stops : []).map(Number).filter((i) => Number.isInteger(i) && stops[i] && stops[i].kind === 'delivery');
+    return { type: r.type, yard: clean(r.yard).replace(/\s+yard$/i, '').slice(0, 60) || null, stops: [...new Set(ok)].sort((a, b) => a - b) };
+  };
   async function save(sheet, raw, by, trip) {
-    const rec = { ...sheet, trip: String(trip), raw: String(raw).slice(0, 4000), by, at: new Date(now()).toISOString(), confirmedAt: null, confirmedBy: null };
+    const rec = { ...sheet, trip: String(trip), raw: String(raw).slice(0, 4000), by, at: new Date(now()).toISOString(), confirmedAt: null, confirmedBy: null, dropped: null };
     await db.update(KEY, (cur) => {
       const next = { ...(cur || {}), [rec.trip]: rec };
       const keep = Object.values(next).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 600);   // the newest 600 loads
@@ -139,7 +172,7 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const sheet = parseDispatchMessage((req.body || {}).text);
     if (!sheet) return res.status(400).json({ error: 'That doesn\'t look like a load message. It needs TRIP# or FB#, a PICK UP and a DELIVERY.' });
     const trip = (req.body || {}).trip ? String(req.body.trip) : tripForSheet(sheet, await board());
-    res.json({ sheet: forDriver(sheet), trip, onBoard: !!trip && (await board()).some((it) => String(tripOf(it).tripNumber) === trip) });
+    res.json({ sheet: forConsole(sheet, await yards()), trip, onBoard: !!trip && (await board()).some((it) => String(tripOf(it).tripNumber) === trip) });
   });
   // save it on the trip, and send it: app (the driver's load chat, a push when the app is installed) and / or a text
   app.post('/truckmate/loadsheet', requireAuth, async (req, res) => {
@@ -149,15 +182,29 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     if (!sheet) return res.status(400).json({ error: 'That doesn\'t look like a load message. It needs TRIP# or FB#, a PICK UP and a DELIVERY.' });
     const trip = b.trip ? String(b.trip) : tripForSheet(sheet, await board());
     if (!trip) return res.status(400).json({ error: 'Which trip is it? Add TRIP# to the message.' });
+    if (b.release !== undefined) { sheet.release = releaseFrom(b.release, sheet.stops); if (b.release) await rememberYard(b.release.yard, b.release.address); }
     const rec = await save(sheet, b.text, who(req), trip);
     const via = Array.isArray(b.via) ? b.via : [];
     const sent = {};
     const body = String(b.text).trim();
     if (via.includes('app')) sent.app = sendApp ? await sendApp(SITE, trip, body, who(req)).catch((e) => ({ skipped: e.message })) : { skipped: 'not available' };
     if (via.includes('text')) sent.text = sendText ? await sendText(SITE, trip, body, who(req)).catch((e) => ({ skipped: e.message })) : { skipped: 'not available' };
-    res.json({ ok: true, trip, sheet: forDriver(rec), sent });
+    res.json({ ok: true, trip, sheet: forConsole(rec, await yards()), sent });
   });
-  app.get('/truckmate/loadsheet/:trip', requireAuth, async (req, res) => res.json({ sheet: forDriver(await get(req.params.trip)) }));
+  app.get('/truckmate/loadsheet/:trip', requireAuth, async (req, res) => res.json({ sheet: forConsole(await get(req.params.trip), await yards()) }));
+  // change the yard drop on a saved sheet: { type: 'free'|'paid', yard, address, stops: [stop indexes] } or { release: null }
+  app.put('/truckmate/loadsheet/:trip/release', requireAuth, async (req, res) => {
+    const trip = String(req.params.trip); const b = req.body || {};
+    const cur = await get(trip);
+    if (!cur) return res.status(404).json({ error: 'Send the load info first.' });
+    const r = b.release === null ? null : releaseFrom(b, cur.stops || []);
+    if (b.release !== null && !r) return res.status(400).json({ error: 'Pick free or paid release.' });
+    if (r) await rememberYard(b.yard, b.address);
+    await db.update(KEY, (c) => ({ ...(c || {}), [trip]: { ...(c || {})[trip], release: r } }), {});
+    if (log) await log(SITE, trip, { type: 'note', kind: 'load-sheet', text: r ? `Yard drop set: ${r.type} release at ${yardLabel(r.yard)}${r.stops.length ? ` (${r.stops.length} stop${r.stops.length === 1 ? '' : 's'} from the yard)` : ''}` : 'Yard drop removed', by: who(req), noThread: true }).catch(() => {});
+    res.json({ ok: true, sheet: forConsole(await get(trip), await yards()) });
+  });
+  app.get('/truckmate/yards', requireAuth, async (req, res) => res.json({ yards: Object.values(await yards()).sort((a, b) => a.name.localeCompare(b.name)) }));
 
   // a dispatcher emailed the load message to Jarvis → saved on the trip (nothing is sent). → the saved sheet or null
   async function fromEmail(site, { text, from }) {
@@ -174,10 +221,30 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     if (out && log) await log(SITE, String(trip), { type: 'reply', from: 'driver app', text: `OK — ${by} confirmed the load info`, noThread: true }).catch(() => {});
     return out;
   }
+  // the driver dropped the trailer at the yard (and maybe picked up another): saved on the sheet, and an email to the team
+  async function dropped(trip, by, { pickedUp = null, truck = null, trailer = null } = {}) {
+    const cur = await get(trip);
+    if (!cur || !cur.release) return null;
+    const d = { at: new Date(now()).toISOString(), by, yard: yardLabel(cur.release.yard), type: cur.release.type, pickedUp: clean(pickedUp).toUpperCase().slice(0, 20) || null };
+    await db.update(KEY, (c) => ({ ...(c || {}), [trip]: { ...(c || {})[trip], dropped: d } }), {});
+    const what = `Trailer ${trailer || '?'} dropped at ${d.yard}`;
+    if (log) await log(SITE, String(trip), { type: 'reply', from: 'driver app', text: `${what}${d.pickedUp ? `, picked up trailer ${d.pickedUp}` : ''} (${by})`, noThread: true }).catch(() => {});
+    const to = await recipients();
+    if (sendMail && to.length) {
+      const esc = (x) => String(x == null ? '' : x).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+      const rows = [['Driver', by], ['Trip', trip], ['Truck', truck || 'not on file'], ['Trailer dropped', trailer || 'not on file'], ['Yard', d.yard], ['Release', d.type === 'paid' ? 'Paid release' : 'Free release'], ['Trailer picked up', d.pickedUp || 'None said'], ['Time', new Date(d.at).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET']];
+      const hidden = (cur.release.stops || []).map((i) => cur.stops[i]).filter(Boolean);
+      const left = hidden.length ? `Still to deliver from the yard: ${hidden.map((x) => [x.name, [x.city, x.state].filter(Boolean).join(', ')].filter(Boolean).join(' — ')).join('; ')}` : null;
+      await sendMail({ to, subject: `TRAILER DROPPED // ${d.yard.toUpperCase()} // TK ${truck || 'N/A'} TL ${trailer || 'N/A'} TO ${trip}${d.pickedUp ? ` // PICKED UP ${d.pickedUp}` : ''}`,
+        html: `<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1F2937;max-width:600px"><p style="font-size:22px;font-weight:bold;margin:0 0 10px">${esc(what)}</p><table cellpadding="6" style="border-collapse:collapse">${rows.map(([k, v]) => `<tr><td style="color:#6B7280">${esc(k)}</td><td><b>${esc(v)}</b></td></tr>`).join('')}</table>${left ? `<p>${esc(left)}</p>` : ''}<p style="color:#6B7280;font-size:13px">Sent from the driver app · Jarvis · AI Dispatcher</p></div>`,
+        text: [what, ...rows.map(([k, v]) => `${k}: ${v}`), ...(left ? ['', left] : [])].join('\n') }).catch((e) => console.warn('[loadsheet] drop email:', e.message));
+    }
+    return d;
+  }
   // on the board for the console: has a sheet, and whether the driver said OK
   async function overlay(site, trips) {
     const s = await all();
-    for (const it of trips || []) { const r = s[String(tripOf(it).tripNumber)]; if (r) it._loadSheet = { at: r.at, by: r.by, confirmedAt: r.confirmedAt, confirmedBy: r.confirmedBy }; }
+    for (const it of trips || []) { const r = s[String(tripOf(it).tripNumber)]; if (r) it._loadSheet = { at: r.at, by: r.by, confirmedAt: r.confirmedAt, confirmedBy: r.confirmedBy, release: r.release ? { type: r.release.type, yard: yardLabel(r.release.yard) } : null, dropped: r.dropped || null }; }
   }
-  return { get, fromEmail, confirm, overlay, forDriver };
+  return { get, fromEmail, confirm, dropped, overlay, forDriver: async (s) => forDriver(s, await yards()) };
 }

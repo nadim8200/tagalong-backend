@@ -122,7 +122,7 @@ test('a driver sees the load message dispatch sent on each load and taps OK', as
   const { initDriverAuth: init } = await import('../driverauth.js');
   const db = mem(); const routes = {}; const okd = [];
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
-  const sheets = { get: async (t) => (t === '626265' ? { trip: t, bill: 'B1', stops: [{ kind: 'pickup', name: 'QUIRCH FOODS', city: 'MIAMI', state: 'FL' }] } : null), forDriver: (x) => (x ? { ...x, stops: x.stops.map((s) => ({ ...s, map: 'm' })) } : null), confirm: async (t, by) => { okd.push([t, by]); return t === '626265' ? { confirmedAt: 'now' } : null; } };
+  const sheets = { get: async (t) => (t === '626265' ? { trip: t, bill: 'B1', stops: [{ kind: 'pickup', name: 'QUIRCH FOODS', city: 'MIAMI', state: 'FL' }] } : null), forDriver: async (x) => (x ? { ...x, stops: x.stops.map((s) => ({ ...s, map: 'm' })) } : null), dropped: async (t, by, o) => (t === '626265' ? { by, ...o } : null), confirm: async (t, by) => { okd.push([t, by]); return t === '626265' ? { confirmedAt: 'now' } : null; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
   init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: BOARD }), sheets });
   const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
@@ -134,4 +134,7 @@ test('a driver sees the load message dispatch sent on each load and taps OK', as
   assert.deepEqual(okd, [['626265', 'Frank U']]);
   assert.equal((await call('POST /driver/me/loads/:trip/ok', { token, params: { trip: '626301' } })).status, 404, 'not theirs');
   assert.equal((await call('POST /driver/me/loads/:trip/ok', { token, params: { trip: '626300' } })).status, 404, 'no sheet yet');
+  const drop = await call('POST /driver/me/loads/:trip/dropped', { token, params: { trip: '626265' }, body: { pickedUp: '7301' } });
+  assert.deepEqual(drop.body.dropped, { by: 'Frank U', pickedUp: '7301', truck: '4504', trailer: '7136' });
+  assert.equal((await call('POST /driver/me/loads/:trip/dropped', { token, params: { trip: '626300' } })).status, 404, 'no yard set');
 });
