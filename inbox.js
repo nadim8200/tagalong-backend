@@ -211,7 +211,7 @@ export function isInternal(address, env = process.env) {
 // The nightly trip-sheet email ("OUTBOUND 10 TRIP SHEETS…", "Trip sheets 10/07"). Pure.
 // A batch of rate cons from our dispatch GM (or any staff email with several rate-con files):
 // read like a packet — every page, several rate cons per PDF — as NEXT loads. Pure.
-export const NEXT_LOAD_SENDERS = (env = process.env) => String(env.NEXT_LOAD_SENDERS || 'gus@floridabeauty.us').toLowerCase().split(/[,;\s]+/).filter(Boolean);
+export const NEXT_LOAD_SENDERS = (env = process.env) => [...new Set(`gus@floridabeauty.us vcabarcas@floridabeauty.us ${env.NEXT_LOAD_SENDERS || ''}`.toLowerCase().split(/[,;\s]+/).filter(Boolean))];   // who sends rate cons and batches: Gus, Valeria, and any added in Render
 export const isRateConBatch = (from, subject, text, attachments = [], env = process.env) => {
   const files = attachments.filter((a) => /pdf|image/i.test(a.contentType || '')).length;
   if (!files || !isInternal(from, env)) return false;
