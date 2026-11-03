@@ -60,6 +60,7 @@ import { initOutreach } from './outreach.js';
 import { initMeetWatch } from './meetwatch.js';
 import { initBrokerTrack } from './brokertrack.js';
 import { initNextLoads } from './nextloads.js';
+import { initDriverAuth } from './driverauth.js';
 import { initRateConFlow } from './rateconflow.js';
 import { initPlanSheet } from './plansheet.js';
 import { initPaperwork } from './paperwork.js';
@@ -171,6 +172,7 @@ app.use((req, res, next) => {
   if (!token) return next();
   let u = null;
   try { u = jwt.verify(token, JWT_SECRET); } catch { return next(); }
+  if (u && u.role === 'driver') return /^\/driver\//.test(req.path) ? next() : res.status(403).json({ error: 'Driver sign-in only works in the driver app.' });   // driverauth.js
   if (!u || u.role !== 'dispatcher') return next();
   const why = dispatcherMayUse(req.method, req.path, u);
   if (why === 'outside') return res.status(403).json({ error: 'Dispatcher logins can only use the AI dispatcher console.' });
@@ -1397,6 +1399,9 @@ app.post('/admin/breakdown-report/example', requireCompanyAdmin, async (req, res
     res.json({ ok: true, subject });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+// company drivers sign in with their driver ID and cell; the roster is Samsara's drivers (driverauth.js)
+initDriverAuth(app, { requireAuth, db, sign: (u, exp) => jwt.sign(u, JWT_SECRET, { expiresIn: exp }), getBoard: (site) => truckmate.buildBoard(site), docsLink: (site, trip, by) => driverLinks.ensureDocsLink(site, trip, by),
+  roster: async () => { const token = samsaraTokenFrom(process.env); const idx = token ? await getLiveIndex(token) : null; return Object.entries((idx && idx.driversByCode) || {}).map(([code, d]) => ({ code, name: d.name, phone: d.info && d.info.phone })).filter((d) => d.phone); } });
 initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules, atStopNow: async () => (waiting ? waiting.openTrips() : new Set()),
   // trucks and trips reported down, or with a road call still open in the last 5 days: a wrecker moves them, they aren't rolling
   openRoadCalls: async () => [...await breakdownReport.held(), ...((roadCalls && await roadCalls.list()) || []).filter((rc) => !['completed', 'cancelled'].includes(rc.status) && Date.now() - Date.parse(rc.at) < 5 * 86400000).flatMap((rc) => [rc.trip, String(rc.truck || '').trim().toLowerCase().replace(/^0+(?=\d)/, '')].filter(Boolean).map(String))],
