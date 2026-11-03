@@ -134,9 +134,11 @@ const tmWhen = (v) => { const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2}
 export function truckMateStops(item) {
   const bills = (item && (item.freightBills || item.orders)) || [];
   const out = []; const seen = new Set();
-  const add = (kind, zone, when) => { const z = zoneOf(zone); const k = `${kind}|${z.zip || z.city}`; if (!z.city || seen.has(k)) return; seen.add(k); out.push({ kind, n: null, name: null, street: null, ...z, ...tmWhen(when) }); };
-  for (const b of bills) add('pickup', b.startZoneDescription, b.pickUpAppt || b.pickUpBy);
-  for (const b of bills) add('delivery', b.endZoneDescription, b.deliveryAppt || b.deliverBy);
+  // the shipper (pickup) and consignee (receiver) records, when TruckMate sends them (connector expand=shipper,consignee)
+  const party = (o) => (o && typeof o === 'object' ? { name: clean(o.name || o.clientName || o.customerName) || null, street: clean([o.address1 || o.address || o.street, o.address2].filter(Boolean).join(', ')) || null } : { name: null, street: null });
+  const add = (kind, zone, when, who) => { const z = zoneOf(zone); const p0 = party(who); const k = `${kind}|${z.zip || z.city}|${p0.name || ''}`; if (!z.city || seen.has(k)) return; seen.add(k); out.push({ kind, n: null, ...p0, ...z, ...tmWhen(when) }); };
+  for (const b of bills) add('pickup', b.startZoneDescription, b.pickUpAppt || b.pickUpBy, b.shipper);
+  for (const b of bills) add('delivery', b.endZoneDescription, b.deliveryAppt || b.deliverBy, b.consignee);   // every receiver on the load, one stop each
   return out;
 }
 // A load for the driver when dispatch hasn't sent a message: the stops, dates and times from TruckMate; from the rate con only the pickup
@@ -161,7 +163,7 @@ export function sheetFromRateCon(rc, { trip = null, item = null } = {}) {
   // TruckMate's stops, each matched to the rate con's stop of the same kind and town for its name, street and instructions
   const used = new Set();
   const match = (s0) => rcStops.find((r) => !used.has(r) && r.kind === s0.kind && ((s0.zip && r.zip === s0.zip) || (r.city && s0.city && up(r.city) === up(s0.city))));
-  let stops = tm.map((s0) => { const r = match(s0); if (r) used.add(r); return { ...s0, name: r ? r.name : null, street: r ? r.street : null, ...(!s0.dateIso && r ? { date: r.date, dateIso: r.dateIso } : {}), ...(!s0.time && r && r.time ? { time: r.time } : {}), other: r && r.other.length ? r.other : undefined }; });
+  let stops = tm.map((s0) => { const r = match(s0); if (r) used.add(r); return { ...s0, name: s0.name || (r ? r.name : null), street: s0.street || (r ? r.street : null), ...(!s0.dateIso && r ? { date: r.date, dateIso: r.dateIso } : {}), ...(!s0.time && r && r.time ? { time: r.time } : {}), other: r && r.other.length ? r.other : undefined }; });
   for (const r of rcStops) if (!used.has(r)) stops.push({ ...r, other: r.other.length ? r.other : undefined });   // a stop TruckMate doesn't have yet
   stops = [...stops.filter((x) => x.kind === 'pickup'), ...stops.filter((x) => x.kind === 'delivery')];
   if (!stops.length) return null;

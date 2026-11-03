@@ -213,3 +213,15 @@ test('the rate con fills the driver\'s load when dispatch hasn\'t sent a message
   assert.equal(moved.stops[1].time, '10:00 AM', 'kept current with TruckMate'); assert.equal(moved.confirmedBy, 'Frank U', 'the OK stays');
   assert.equal(await ls.ensureFromRateCon({ trip: { tripNumber: '1' } }), null, 'no rate con, nothing');
 });
+
+test('TruckMate first: the shipper and each consignee (several receivers) when TruckMate sends them; the rate con only fills what\'s missing', async () => {
+  const { truckMateStops, sheetFromRateCon } = await import('../loadsheet.js');
+  const item = { trip: { tripNumber: '626282' }, freightBills: [
+    { billNumber: 'B180764', startZoneDescription: 'MUNSTER, IN, 46321', endZoneDescription: 'MONROE, GA, 30655', shipper: { name: 'CARL BUDDIG & CO', address1: '215 45TH ST' }, consignee: { name: 'WALMART DC# 6055', address1: '6055 UNISIA DRIVE' }, deliveryAppt: '2026-11-03T12:00:00' },
+    { billNumber: 'B180764', startZoneDescription: 'MUNSTER, IN, 46321', endZoneDescription: 'COCOA, FL, 32926', shipper: { name: 'CARL BUDDIG & CO' }, consignee: { name: 'WALMART DC# 8851', address1: '4505 FL-524' }, deliveryAppt: '2026-11-04T13:00:00' },
+  ] };
+  assert.deepEqual(truckMateStops(item).map((x) => [x.kind, x.name, x.street, x.city, x.time]), [['pickup', 'CARL BUDDIG & CO', '215 45TH ST', 'MUNSTER', null], ['delivery', 'WALMART DC# 6055', '6055 UNISIA DRIVE', 'MONROE', '12:00 PM'], ['delivery', 'WALMART DC# 8851', '4505 FL-524', 'COCOA', '1:00 PM']]);
+  const s = sheetFromRateCon({ loadNumber: 'L1', pickups: [{ name: 'BUDDIG (RATE CON NAME)', city: 'MUNSTER', state: 'IN', instructions: ['Check in at gate 2'] }], deliveries: [] }, { trip: '626282', item });
+  assert.equal(s.stops[0].name, 'CARL BUDDIG & CO', 'TruckMate\'s name wins'); assert.deepEqual(s.stops[0].other, ['Check in at gate 2'], 'the rate con\'s instructions still come');
+  assert.equal(s.stops.filter((x) => x.kind === 'delivery').length, 2, 'both receivers');
+});
