@@ -55,7 +55,9 @@ test('stop by stop: boxes against the trip sheet (mismatch email), signed paperw
   assert.match(done.html, /Receiver closed/);
   assert.equal(done.attachments.length, 1, 'the signed paperwork goes with it');
   assert.equal((await flow.complete('900500', { by: 'Frank U' })).already, true, 'only once');
-  const items = [{ trip: { tripNumber: '900500' } }]; await flow.overlay('x', items);
-  assert.deepEqual([items[0]._stopFlow.done, items[0]._stopFlow.issues, !!items[0]._stopFlow.completedAt], [4, 1, true]);
+  const items2 = [LTL]; await flow.overlay('x', items2);
+  const sf = items2[0]._stopFlow;
+  assert.deepEqual([sf.total, sf.done, sf.mismatches, sf.issues, !!sf.completedAt, sf.completedBy], [4, 4, 1, 1, true, 'Frank U']);
+  assert.deepEqual(sf.stops.map((x) => [x.n, x.boxes, x.expected, x.diff, x.paperwork, x.issues.length]), [[2, 10, 10, 0, 1, 0], [3, 22, 24, -2, 0, 0], [4, 20, 20, 0, 0, 1], [null, 7, 7, 0, 0, 0]]);
   assert.ok(logged.some((e) => /Stop 3 done .*22 boxes, trip sheet 24/.test(e.text)));
 });

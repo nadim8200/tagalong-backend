@@ -153,7 +153,12 @@ export function initStopFlow({ db, docs = null, getBoard, sendMail = null, recip
   // on the board for the console: how far the driver is
   async function overlay(site, trips) {
     const s = await all();
-    for (const it of trips || []) { const r = s[String(tripOf(it).tripNumber)]; if (r) it._stopFlow = { done: Object.values(r.stops || {}).filter((x) => x.doneAt).length, issues: Object.values(r.stops || {}).reduce((n, x) => n + (x.issues || []).length, 0), completedAt: r.completedAt || null }; }
+    for (const it of trips || []) {
+      const r = s[String(tripOf(it).tripNumber)]; const stops = r && ltlStops(it);
+      if (!r || !stops) continue;
+      const rows = stops.map((x) => { const d = r.stops[x.key] || {}; const c = boxCheck(d.boxes, x.boxes); return { n: x.n, customer: x.customer, city: x.city, doneAt: d.doneAt || null, boxes: d.boxes != null ? d.boxes : null, expected: x.boxes, diff: c ? c.diff : null, paperwork: (d.docIds || []).length, issues: (d.issues || []).map((i) => ({ at: i.at, text: i.text, photos: (i.docIds || []).length })) }; });
+      it._stopFlow = { total: rows.length, done: rows.filter((x) => x.doneAt).length, mismatches: rows.filter((x) => x.diff).length, issues: rows.reduce((n, x) => n + x.issues.length, 0), completedAt: r.completedAt || null, completedBy: r.completedBy || null, stops: rows };
+    }
   }
   // which stops the driver marked done on a trip → { [stop key]: true }
   const done = async (trip) => Object.fromEntries(Object.entries(((await all())[String(trip)] || { stops: {} }).stops || {}).filter(([, r]) => r && r.doneAt).map(([k]) => [k, true]));
