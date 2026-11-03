@@ -320,3 +320,19 @@ test('dispatch erases a wrong customer email and adds the right one: saved for t
   const cfg = await db.get('taStatusMailCfg', {});
   assert.deepEqual(cfg.contactFixes[companyKey('Arrow Lines Services')].remove, []);
 });
+
+test('dispatch can rewrite the breakdown email: their subject and their message go out as written', async () => {
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
+  const mails = [];
+  const fetchFn = async (url, opts) => (url.includes('oauth2') ? { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) } : (mails.push(JSON.parse(opts.body)), { ok: true, status: 202, json: async () => ({}) }));
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, put: (p, ...h) => { routes[`PUT ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); } };
+  const sm = initStatusMail(app, { requireAuth: () => {}, db: memDb(), env, fetchFn, comms: { log: async () => {} } });
+  const item = load({ trip: { status: 'DEPSHIP' }, extra: { _manifest: { contacts: [{ role: 'broker', company: 'Rose', email: 'ana@rose.com' }] } } });
+  await sm.process('florida-beauty', { trips: [item] }, { geo, now: NOW });
+  let out; const res = { json: (j) => { out = j; }, status() { return this; } };
+  await routes['POST /truckmate/breakdown/:trip']({ params: { trip: '900200' }, body: { on: true, subject: '  Load 900200 — delay  ', body: 'Hi Ana,\nThe truck had a tire blowout <today>.\nNew ETA tomorrow 8 AM.' }, query: {}, user: { name: 'Gio' } }, res);
+  assert.equal(out.emailStatus, 'sent');
+  assert.equal(mails[0].message.subject, 'Load 900200 — delay');
+  assert.match(mails[0].message.body.content, /white-space:pre-line">Hi Ana,\nThe truck had a tire blowout &lt;today&gt;\.\nNew ETA tomorrow 8 AM\.<\/div>/);
+});

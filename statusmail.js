@@ -41,6 +41,8 @@ export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, lo
 const MAX_PER_DAY = 15;
 
 const tripOf = (item) => (item && item.trip) || item || {};
+// a message dispatch wrote, as a simple email: their words, their line breaks. Pure.
+export const plainEmailHtml = (text) => `<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5;color:#1F2937;max-width:640px;white-space:pre-line">${String(text || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))}</div>`;
 export const custKey = (name) => String(name || '').trim().toUpperCase().replace(/\s+/g, ' ');
 // a company the same however it's written: "Arrow Lines Services" = "ARROW LINES SERVICES, INC." Pure.
 export const companyKey = (name) => String(name || '').toUpperCase().replace(/[^A-Z0-9 ]+/g, ' ').replace(/\b(INC|LLC|L L C|CORP|CORPORATION|CO|COMPANY|LTD)\b/g, ' ').replace(/\s+/g, ' ').trim();
@@ -820,6 +822,11 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
       if (b.notify !== false) {
         const all = await everyone(item);
         const m = breakdownMessages(item, on ? 'breakdown' : 'resumed', note, { geo: lastBoard.geo, now: Date.now() });
+        // dispatch rewrote the subject and / or the message: theirs goes out as they wrote it
+        const subj = String(b.subject || '').replace(/\s+/g, ' ').trim().slice(0, 250);
+        const body = String(b.body || '').replace(/\r\n?/g, '\n').trim().slice(0, 10000);
+        if (subj) m.mail = { ...m.mail, subject: subj };
+        if (body) m.mail = { ...m.mail, text: body, html: plainEmailHtml(body) };
         if (!all.emails.length) result.emailStatus = 'no customer emails on file';
         else if (!mailConfig(env).ready) result.emailStatus = 'Outlook not connected yet';
         else {
