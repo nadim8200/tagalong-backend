@@ -11,7 +11,7 @@ const FRANK = { code: '0986', name: 'Frank U', phone: '(305) 555-0100' };
 
 function setup({ roster = [FRANK] } = {}) {
   const db = mem(); const routes = {}; let clock = 1e12; let list = roster;
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const requireAdmin = (req, res, next) => requireAuth(req, res, () => (req.user.admin || req.user.companyAdmin ? next() : res.status(403).json({ error: 'Admins only.' })));
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
   initDriverAuth(app, { requireAuth, requireAdmin, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => list, getBoard: async () => ({ trips: BOARD }), docsLink: async (site, t) => `https://x/t/tok-${t}`, now: () => clock });
@@ -121,7 +121,7 @@ test('their paperwork history: loads they had, nobody else\'s', async () => {
 test('a driver sees the load message dispatch sent on each load and taps OK', async () => {
   const { initDriverAuth: init } = await import('../driverauth.js');
   const db = mem(); const routes = {}; const okd = [];
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const sheets = { visible: (x) => !!x, get: async (t) => (t === '626265' ? { trip: t, bill: 'B1', stops: [{ kind: 'pickup', name: 'QUIRCH FOODS', city: 'MIAMI', state: 'FL' }] } : null), forDriver: async (x) => (x ? { ...x, stops: x.stops.map((s) => ({ ...s, map: 'm' })) } : null), dropped: async (t, by, o) => (t === '626265' ? { by, ...o } : null), confirm: async (t, by) => { okd.push([t, by]); return t === '626265' ? { confirmedAt: 'now' } : null; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
   init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: BOARD }), sheets });
@@ -143,7 +143,7 @@ test('driver phones: registered on the profile, dispatch messages reach both dri
   const { initDriverAuth: init } = await import('../driverauth.js');
   const db = mem(); const routes = {}; const sent = []; let board = [trip('626265', 'DEPSHIP', '0986')];
   board[0].trip.driver2 = '2473';
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
   const push = { sendToTokens: async (tokens, m) => { sent.push({ to: tokens.map((t) => t.token), ...m }); return []; } };
   const d = init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK, { code: '2473', name: 'Ana B', phone: '3055550200' }], getBoard: async () => ({ trips: board }), push, unreadFor: async (site, t) => (t === '626265' ? 2 : 0) });
@@ -155,7 +155,7 @@ test('driver phones: registered on the profile, dispatch messages reach both dri
   assert.equal((await call('GET /driver/me', { token })).body.current[0].unread, 2);
   await d.notifyTrip('626265', 'Call the receiver 1 hour before', 'Haraft J Sierra (console)');
   assert.equal(sent.length, 1, 'only 0986 has a phone signed in; 2473 has none'); assert.equal(sent[0].title, 'Haraft J Sierra · trip 626265'); assert.equal(sent[0].data.tab, 'chat');
-  const held = init({ get() {}, post() {} }, { requireAuth, secret: 'k', db, sign: () => 'x', roster: async () => [], getBoard: async () => ({ trips: board }), push, training: { hold: async () => ({ held: true }) } });
+  const held = init({ get() {}, post() {}, put() {}, delete() {} }, { requireAuth, secret: 'k', db, sign: () => 'x', roster: async () => [], getBoard: async () => ({ trips: board }), push, training: { hold: async () => ({ held: true }) } });
   assert.deepEqual(await held.notify('0986', { title: 't', body: 'b' }), { held: true }, 'training mode holds it');
 });
 
@@ -164,7 +164,7 @@ test('the Next load tab shows only loads a dispatcher sent; the load they are on
   const db = mem(); const routes = {};
   const store = { '626300': { trip: '626300', fromRateCon: true, stops: [] } };   // Jarvis's draft, not sent
   const sheets = { get: async (t) => store[t] || null, visible: (x) => !!x && !(x.fromRateCon && !x.sentAt), forDriver: async (x) => x };
-  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
   init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: BOARD }), sheets });
   const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
@@ -176,4 +176,92 @@ test('the Next load tab shows only loads a dispatcher sent; the load they are on
   store['626300'] = { ...store['626300'], sentAt: '2026-11-03T22:00:00Z' };
   me = (await call('GET /driver/me', { token })).body;
   assert.deepEqual(me.next.map((l) => l.trip), ['626300'], 'sent: it shows');
+});
+
+test('the console\'s Driver app section: each driver signed in or not, notifications, last in the app; the load sent, notified, opened, confirmed', async () => {
+  const { initDriverAuth: init, driverAppView } = await import('../driverauth.js');
+  const db = mem(); const routes = {}; let clock = Date.parse('2026-11-03T20:00:00Z');
+  const board = [trip('626265', 'DEPSHIP', '0986'), trip('626300', 'DISP', '0986')]; board[0].trip.driver2 = '5555';
+  const store = { '626300': { trip: '626300', by: 'Geo', sentAt: '2026-11-03T19:00:00Z', stops: [] }, '626265': { trip: '626265', fromRateCon: true, stops: [] } };
+  const sheets = { all: async () => store, get: async (t) => store[t] || null, visible: (x) => !!x && !(x.fromRateCon && !x.sentAt), forDriver: async (x) => x };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
+  const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
+  const push = { sendToTokens: async () => [] };
+  const d = init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: board }), sheets, push, now: () => clock });
+  const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
+  const staff = jwt.sign({ id: 1, name: 'Geo', role: 'dispatcher' }, SECRET);
+  let v = (await call('GET /truckmate/driver-app', { token: staff })).body.trips;
+  assert.deepEqual(v['626265'].drivers.map((x) => [x.code, x.onList, x.hasCell, x.signedIn]), [['986', true, true, false], ['5555', false, false, false]], '5555 isn\'t on the driver list: they can\'t sign in');
+  assert.equal(v['626265'].sent, null, 'Jarvis\'s unsent draft isn\'t sent');
+  assert.deepEqual(v['626300'].sent, { at: '2026-11-03T19:00:00Z', by: 'Geo' });
+  await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', newPin: '2580' } });
+  const token = (await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', pin: '2580' } })).body.token;
+  await call('POST /driver/me/push', { token, body: { token: 'a'.repeat(64) } });
+  await call('GET /driver/me', { token });
+  assert.equal(await d.notifyTrip('626300', 'New load: trip 626300', 'Geo'), 'sent');
+  assert.equal((await call('POST /driver/me/loads/:trip/opened', { token, params: { trip: '626201' } })).status, 404, 'not their load');
+  await call('POST /driver/me/loads/:trip/opened', { token, params: { trip: '626300' }, body: { sentAt: '2026-11-03T19:00:00Z' } });
+  v = (await call('GET /truckmate/driver-app', { token: staff })).body.trips['626300'];
+  assert.deepEqual([v.drivers[0].signedIn, v.drivers[0].notifications, v.drivers[0].lastSeenAt], [true, true, '2026-11-03T20:00:00.000Z']);
+  assert.equal(v.pushed.result, 'sent'); assert.equal(v.opened.by, 'Frank U');
+  // dispatch sends it again: it isn't "opened" until the driver looks at the new one
+  store['626300'] = { ...store['626300'], sentAt: '2026-11-03T21:00:00Z', confirmedAt: '2026-11-03T21:05:00Z', confirmedBy: 'Frank U' };
+  v = (await call('GET /truckmate/driver-app', { token: staff })).body.trips['626300'];
+  assert.equal(v.opened, null); assert.equal(v.confirmed.by, 'Frank U');
+  assert.equal(driverAppView({ trip: { tripNumber: '1', driver: null } }).drivers.length, 0, 'no driver on the load');
+});
+
+test('driver profiles: dispatch adds a driver Samsara doesn\'t have, more cells, a name; any of their cells signs them in; outsiders can\'t see it', async () => {
+  const { initDriverAuth: init, mergeRoster } = await import('../driverauth.js');
+  const db = mem(); const routes = {};
+  const board = [trip('626265', 'DEPSHIP', '0986'), trip('626300', 'DISP', '7777')];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
+  const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
+  init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: board }) });
+  const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
+  const staff = jwt.sign({ id: 1, name: 'Geo', role: 'dispatcher' }, SECRET);
+  const outsider = jwt.sign({ id: 9, name: 'Broker', role: 'customer', company: 'other' }, SECRET);
+  assert.equal((await call('GET /truckmate/driver-profiles', { token: outsider })).status, 403);
+  let list = (await call('GET /truckmate/driver-profiles', { token: staff })).body.drivers;
+  assert.deepEqual(list.map((d) => [d.code, d.onList, d.truck, d.current && d.current.trip, d.next && d.next.trip]), [['0986', true, '4504', '626265', null], ['7777', false, '4504', null, '626300']], 'on a load first; 7777 is only in TruckMate');
+  assert.equal((await call('PUT /truckmate/driver-profiles/:code', { token: staff, params: { code: '7777' }, body: { name: 'New Driver', phones: [] } })).status, 400, 'a new driver needs a cell');
+  assert.equal((await call('PUT /truckmate/driver-profiles/:code', { token: staff, params: { code: '7777' }, body: { name: 'New Driver', phones: [{ number: '12345' }] } })).status, 400);
+  assert.equal((await call('PUT /truckmate/driver-profiles/:code', { token: outsider, params: { code: '7777' }, body: { name: 'X', phones: [{ number: '3055550300' }] } })).status, 403);
+  await call('PUT /truckmate/driver-profiles/:code', { token: staff, params: { code: '7777' }, body: { name: 'New Driver', phones: [{ number: '(305) 555-0300', label: 'Cell' }] } });
+  await call('PUT /truckmate/driver-profiles/:code', { token: staff, params: { code: '0986' }, body: { name: '', phones: [{ number: '305-555-0101', label: 'Wife' }, { number: '3055550100' }] } });
+  list = (await call('GET /truckmate/driver-profiles', { token: staff })).body.drivers;
+  const frank = list.find((d) => d.code === '0986'); const nd = list.find((d) => d.code === '7777');
+  assert.deepEqual(frank.phones.map((x) => [x.number, x.from]), [['3055550100', 'samsara'], ['3055550101', 'console']], 'Samsara\'s cell stays first; the same number isn\'t added twice');
+  assert.equal(frank.name, 'Frank U', 'no name given: Samsara\'s stays');
+  assert.deepEqual([nd.name, nd.onList, nd.updatedBy], ['New Driver', true, 'Geo']);
+  // the new driver signs in with their cell; Frank with his second one
+  assert.equal((await call('POST /driver/auth/login', { body: { driverId: '7777', phone: '3055550300', newPin: '2580' } })).status, 200);
+  assert.equal((await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550101', newPin: '2580' } })).status, 200);
+  const t = (await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550101', pin: '2580' } })).body.token;
+  assert.equal((await call('GET /driver/me', { token: t })).status, 200);
+  // dispatch removes that cell: that phone is signed out
+  await call('PUT /truckmate/driver-profiles/:code', { token: staff, params: { code: '0986' }, body: { phones: [] } });
+  assert.equal((await call('GET /driver/me', { token: t })).status, 401);
+  assert.deepEqual(mergeRoster([{ code: '0986', name: 'A', phone: null }], {}).map((d) => d.phone), [null]);
+});
+
+test('every Samsara driver is saved the first time we see them; one who leaves Samsara keeps their profile and signs in until dispatch removes them', async () => {
+  const { initDriverAuth: init } = await import('../driverauth.js');
+  const db = mem(); const routes = {}; let samsara = [FRANK];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
+  const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
+  init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => samsara, getBoard: async () => ({ trips: [] }) });
+  const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
+  const staff = jwt.sign({ id: 1, name: 'Geo', role: 'dispatcher' }, SECRET);
+  await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', newPin: '2580' } });
+  const t = (await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', pin: '2580' } })).body.token;
+  assert.equal(Object.keys(db.s['taDriverSamsara:florida-beauty']).length, 1, 'saved the first time we saw them');
+  assert.equal((await call('DELETE /truckmate/driver-profiles/:code', { token: staff, params: { code: '0986' } })).status, 409, 'Samsara still has them');
+  samsara = [];   // gone from Samsara
+  assert.equal((await call('GET /driver/me', { token: t })).status, 200, 'they still sign in');
+  const d = (await call('GET /truckmate/driver-profiles', { token: staff })).body.drivers.find((x) => x.code === '0986');
+  assert.deepEqual([d.name, d.saved, d.samsara, d.onList, d.phones[0].label], ['Frank U', true, false, true, 'Samsara (saved)']);
+  assert.equal((await call('DELETE /truckmate/driver-profiles/:code', { token: staff, params: { code: '0986' } })).status, 200);
+  assert.equal((await call('GET /driver/me', { token: t })).status, 401, 'removed: signed out');
+  assert.equal((await call('GET /truckmate/driver-profiles', { token: staff })).body.drivers.length, 0);
 });

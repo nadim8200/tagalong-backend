@@ -345,5 +345,5 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const s = await all();
     for (const it of trips || []) { const r = s[String(tripOf(it).tripNumber)]; if (r) it._loadSheet = { sent: visible(r), at: r.at, by: r.by, confirmedAt: r.confirmedAt, confirmedBy: r.confirmedBy, release: r.release ? { type: r.release.type, yard: yardLabel(r.release.yard) } : null, dropped: r.dropped || null }; }
   }
-  return { get, fromEmail, confirm, dropped, overlay, visible, forDriver: async (s) => forDriver(s, await yards()) };
+  return { get, all, fromEmail, confirm, dropped, overlay, visible, forDriver: async (s) => forDriver(s, await yards()) };
 }
