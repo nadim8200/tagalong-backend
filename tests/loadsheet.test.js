@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDispatchMessage, looksLikeDispatchMessage, initLoadSheets, cleanTime, readTemp, tripForSheet, forDriver, readRelease } from '../loadsheet.js';
+import { parseDispatchMessage, looksLikeDispatchMessage, initLoadSheets, cleanTime, readTemp, tripForSheet, forDriver, readRelease, visible } from '../loadsheet.js';
 
 const ONE = `--------------------------------------------
 FB#: B180747
@@ -202,16 +202,23 @@ test('the rate con fills the driver\'s load when dispatch hasn\'t sent a message
   const only = sheetFromRateCon(rc, { trip: '1', item: { trip: { tripNumber: '1' }, freightBills: [{ billNumber: 'B1', startZoneDescription: 'MIAMI, FL, 33166', endZoneDescription: 'ATLANTA, GA, 30301', pickUpBy: '2026-11-04T00:00:00' }] } });
   assert.deepEqual(only.stops.map((x) => [x.kind, x.city, x.name]), [['pickup', 'MIAMI', null], ['pickup', 'SILER CITY', 'SILER CITY'], ['delivery', 'ATLANTA', null], ['delivery', 'BOCA RATON', 'US FOODS BOCA RATON']], 'TruckMate first, then a rate con stop TruckMate doesn\'t have');
   assert.equal(only.stops[0].time, null, 'midnight in TruckMate means a date only');
-  // on the board: filled once, a message from dispatch replaces it
-  const db = mem(); const app = { get() {}, post() {}, put() {} };
-  const ls = initLoadSheets(app, { requireAuth: () => {}, db, getBoard: async () => ({ trips: [] }) });
-  const item = { trip: { tripNumber: '900776' }, _ratecon: { data: rc } };
-  assert.equal((await ls.ensureFromRateCon(item)).by, 'Jarvis (from the rate con)');
-  assert.equal((await ls.ensureFromRateCon(item)).by, 'Jarvis (from the rate con)', 'once');
-  await ls.confirm('900776', 'Frank U');
-  const moved = await ls.ensureFromRateCon({ ...item, freightBills: [{ billNumber: 'B180776', startZoneDescription: 'SILER CITY, NC, 27344', endZoneDescription: 'BOCA RATON, FL, 33487', deliveryAppt: '2026-11-06T10:00:00' }] });
-  assert.equal(moved.stops[1].time, '10:00 AM', 'kept current with TruckMate'); assert.equal(moved.confirmedBy, 'Frank U', 'the OK stays');
-  assert.equal(await ls.ensureFromRateCon({ trip: { tripNumber: '1' } }), null, 'no rate con, nothing');
+  // in the console: a draft for dispatch to check; the driver sees it only once dispatch sends it
+  const db = mem(); const routes = {}; const told = [];
+  const app = { get: (p0, ...h) => { routes[`GET ${p0}`] = h; }, post: (p0, ...h) => { routes[`POST ${p0}`] = h; }, put() {} };
+  const item = { trip: { tripNumber: '900776' }, _ratecon: { data: rc }, freightBills: [{ billNumber: 'B180776', startZoneDescription: 'SILER CITY, NC, 27344', endZoneDescription: 'BOCA RATON, FL, 33487' }] };
+  const ls = initLoadSheets(app, { requireAuth: (req, res, next) => next(), db, getBoard: async () => ({ trips: [item, { trip: { tripNumber: '1' } }] }), notify: async (...a) => told.push(a) });
+  const call = async (key, body, params) => { let out = {}; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; await routes[key][1]({ body, params, user: { name: 'Haraft' } }, res); return out; };
+  const draft = await call('GET /truckmate/loadsheet/:trip/ratecon-draft', {}, { trip: '900776' });
+  assert.equal(draft.body.sheet.stops[0].name, 'SILER CITY'); assert.equal(await ls.get('900776'), null, 'a draft is not saved');
+  assert.equal((await call('GET /truckmate/loadsheet/:trip/ratecon-draft', {}, { trip: '1' })).status, 404, 'no rate con');
+  const sent = await call('POST /truckmate/loadsheet/:trip/ratecon-send', { via: ['app'] }, { trip: '900776' });
+  assert.equal(sent.body.ok, true);
+  const saved = await ls.get('900776');
+  assert.equal(saved.by, 'Haraft'); assert.ok(saved.sentAt); assert.equal(visible(saved), true);
+  assert.deepEqual(told.map((t) => [t[0], t[1]]), [['900776', 'New load from dispatch']], 'no driver link: the profile\'s phones still hear it');
+  assert.match(told[0][2], /^New load: trip 900776 · pick up SILER CITY/);
+  assert.equal(visible({ fromRateCon: true }), false, 'Jarvis\'s own rate con draft (before this change) stays hidden');
+  assert.equal(visible({ by: 'Haraft' }), true, 'a message dispatch pasted');
 });
 
 test('TruckMate first: the shipper and each consignee (several receivers) when TruckMate sends them; the rate con only fills what\'s missing', async () => {

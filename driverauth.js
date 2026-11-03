@@ -42,7 +42,6 @@ export function loadsFor(code, items = []) {
 export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign, secret, roster, getBoard, docsLink = null, sheets = null, stopFlow = null, push = null, training = null, unreadFor = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const PUSH = `taDriverPush:${SITE}`;            // driver ID → [{ token, platform, env, at }] (the phones signed in to the profile)
-  const NOTIFIED = `taDriverNotified:${SITE}`;    // driver ID → trips they were told about
   const tripsKey = (code) => `taDriverTrips:${SITE}:${norm(code)}`;
   const byCode = async (code) => (await roster()).find((d) => norm(d.code) === norm(code)) || null;
   const misses = new Map();   // phone or connection → wrong tries in the last 15 minutes
@@ -91,11 +90,11 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     try {
       const loads = loadsFor(req.driver.code, await board());
       const trips = [...loads.current, ...loads.next].map((l) => l.trip);
-      // the load message dispatch sent (names, addresses, PU#, times, notes): what TruckMate doesn't have
-      const items0 = await board();
-      // no message from dispatch yet: the rate con on the load fills it in (loadsheet.js)
-      if (sheets && sheets.ensureFromRateCon) for (const l of [...loads.current, ...loads.next]) await sheets.ensureFromRateCon(items0.find((it) => tripNo(it) === l.trip)).catch(() => null); // eslint-disable-line no-await-in-loop
-      if (sheets) for (const l of [...loads.current, ...loads.next]) l.sheet = await sheets.forDriver(await sheets.get(l.trip)); // eslint-disable-line no-await-in-loop
+      // what dispatch sent the driver for each load: a message, or a rate con they checked and sent. A draft Jarvis made from a
+      // rate con stays in the console until a dispatcher sends it
+      if (sheets) for (const l of [...loads.current, ...loads.next]) { const sh = await sheets.get(l.trip); l.sheet = sheets.visible(sh) ? await sheets.forDriver(sh) : null; } // eslint-disable-line no-await-in-loop
+      // the next loads: only the ones a dispatcher sent (the load they're on always shows)
+      if (sheets) loads.next = loads.next.filter((l) => l.sheet);
       // dispatch messages the driver hasn't opened yet, per load (the Chats tab shows them)
       if (unreadFor) for (const l of [...loads.current, ...loads.next]) l.unread = await unreadFor(SITE, l.trip).catch(() => 0); // eslint-disable-line no-await-in-loop
       // an LTL load: the trip sheet's stops, each marked done with boxes and signed paperwork (stopflow.js)
@@ -219,23 +218,5 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     const codes = [t.driver, t.driver2].filter(Boolean);
     for (const c of codes) await notify(c, { title: `${by.replace(/ \(.*\)$/, '')} · trip ${trip}`, body: String(text || '').slice(0, 180), data: { tab: 'chat', trip: String(trip) } }); // eslint-disable-line no-await-in-loop
   }
-  // every board run: a load that shows up for a driver with the app → "New load assigned" once. A driver's first run only learns
-  // what they already have (no burst of old loads).
-  async function processAssignments(items = null) {
-    if (!enabled || !push) return;
-    const phones = (await db.get(PUSH, {})) || {};
-    const codes = Object.keys(phones).filter((c) => (phones[c] || []).length);
-    if (!codes.length) return;
-    const all = items || await board();
-    const told = (await db.get(NOTIFIED, {})) || {};
-    for (const code of codes) {
-      const l = loadsFor(code, all);
-      const trips = [...l.current, ...l.next];
-      const before = told[code];
-      const fresh = before ? trips.filter((x) => !before.includes(x.trip)) : [];
-      for (const x of fresh) await notify(code, { title: 'New load assigned', body: `Trip ${x.trip}${x.from || x.to ? ` · ${x.from || '?'} → ${x.to || '?'}` : ''}`, data: { tab: l.current.some((c) => c.trip === x.trip) ? 'now' : 'next', trip: x.trip } }); // eslint-disable-line no-await-in-loop
-      if (!before || fresh.length) await db.update(NOTIFIED, (cur) => ({ ...(cur || {}), [code]: [...new Set([...trips.map((x) => x.trip), ...((cur || {})[code] || [])])].slice(0, 300) }), {}); // eslint-disable-line no-await-in-loop
-    }
-  }
-  return { requireDriver, notify, notifyTrip, processAssignments };
+  return { requireDriver, notify, notifyTrip };
 }

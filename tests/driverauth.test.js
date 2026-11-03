@@ -122,14 +122,14 @@ test('a driver sees the load message dispatch sent on each load and taps OK', as
   const { initDriverAuth: init } = await import('../driverauth.js');
   const db = mem(); const routes = {}; const okd = [];
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
-  const sheets = { get: async (t) => (t === '626265' ? { trip: t, bill: 'B1', stops: [{ kind: 'pickup', name: 'QUIRCH FOODS', city: 'MIAMI', state: 'FL' }] } : null), forDriver: async (x) => (x ? { ...x, stops: x.stops.map((s) => ({ ...s, map: 'm' })) } : null), dropped: async (t, by, o) => (t === '626265' ? { by, ...o } : null), confirm: async (t, by) => { okd.push([t, by]); return t === '626265' ? { confirmedAt: 'now' } : null; } };
+  const sheets = { visible: (x) => !!x, get: async (t) => (t === '626265' ? { trip: t, bill: 'B1', stops: [{ kind: 'pickup', name: 'QUIRCH FOODS', city: 'MIAMI', state: 'FL' }] } : null), forDriver: async (x) => (x ? { ...x, stops: x.stops.map((s) => ({ ...s, map: 'm' })) } : null), dropped: async (t, by, o) => (t === '626265' ? { by, ...o } : null), confirm: async (t, by) => { okd.push([t, by]); return t === '626265' ? { confirmedAt: 'now' } : null; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
   init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: BOARD }), sheets });
   const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
   await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', newPin: '2580' } });
   const token = (await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', pin: '2580' } })).body.token;
   const me = await call('GET /driver/me', { token });
-  assert.equal(me.body.current[0].sheet.stops[0].map, 'm'); assert.equal(me.body.next[0].sheet, null);
+  assert.equal(me.body.current[0].sheet.stops[0].map, 'm'); assert.deepEqual(me.body.next, [], 'a next load dispatch hasn\'t sent stays off the tab');
   assert.equal((await call('POST /driver/me/loads/:trip/ok', { token, params: { trip: '626265' } })).body.ok, true);
   assert.deepEqual(okd, [['626265', 'Frank U']]);
   assert.equal((await call('POST /driver/me/loads/:trip/ok', { token, params: { trip: '626301' } })).status, 404, 'not theirs');
@@ -139,7 +139,7 @@ test('a driver sees the load message dispatch sent on each load and taps OK', as
   assert.equal((await call('POST /driver/me/loads/:trip/dropped', { token, params: { trip: '626300' } })).status, 404, 'no yard set');
 });
 
-test('driver phones: registered on the profile, told once about a new load (no burst on the first run), dispatch messages reach both drivers, unread counts per load', async () => {
+test('driver phones: registered on the profile, dispatch messages reach both drivers, unread counts per load', async () => {
   const { initDriverAuth: init } = await import('../driverauth.js');
   const db = mem(); const routes = {}; const sent = []; let board = [trip('626265', 'DEPSHIP', '0986')];
   board[0].trip.driver2 = '2473';
@@ -153,13 +153,27 @@ test('driver phones: registered on the profile, told once about a new load (no b
   assert.equal((await call('POST /driver/me/push', { token, body: { token: 'short' } })).status, 400);
   await call('POST /driver/me/push', { token, body: { token: 'a'.repeat(64), platform: 'ios' } });
   assert.equal((await call('GET /driver/me', { token })).body.current[0].unread, 2);
-  await d.processAssignments();
-  assert.equal(sent.length, 0, 'the first run only learns the loads they already have');
-  board = [...board, trip('626900', 'DISP', '0986')];
-  await d.processAssignments(); await d.processAssignments();
-  assert.equal(sent.length, 1, 'once'); assert.equal(sent[0].title, 'New load assigned'); assert.match(sent[0].body, /^Trip 626900 · MIAMI, FL → ATLANTA, GA$/); assert.equal(sent[0].data.tab, 'next');
   await d.notifyTrip('626265', 'Call the receiver 1 hour before', 'Haraft J Sierra (console)');
-  assert.equal(sent.length, 2, 'only 0986 has a phone signed in; 2473 has none'); assert.equal(sent[1].title, 'Haraft J Sierra · trip 626265'); assert.equal(sent[1].data.tab, 'chat');
+  assert.equal(sent.length, 1, 'only 0986 has a phone signed in; 2473 has none'); assert.equal(sent[0].title, 'Haraft J Sierra · trip 626265'); assert.equal(sent[0].data.tab, 'chat');
   const held = init({ get() {}, post() {} }, { requireAuth, secret: 'k', db, sign: () => 'x', roster: async () => [], getBoard: async () => ({ trips: board }), push, training: { hold: async () => ({ held: true }) } });
   assert.deepEqual(await held.notify('0986', { title: 't', body: 'b' }), { held: true }, 'training mode holds it');
+});
+
+test('the Next load tab shows only loads a dispatcher sent; the load they are on always shows', async () => {
+  const { initDriverAuth: init } = await import('../driverauth.js');
+  const db = mem(); const routes = {};
+  const store = { '626300': { trip: '626300', fromRateCon: true, stops: [] } };   // Jarvis's draft, not sent
+  const sheets = { get: async (t) => store[t] || null, visible: (x) => !!x && !(x.fromRateCon && !x.sentAt), forDriver: async (x) => x };
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
+  init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: BOARD }), sheets });
+  const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
+  await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', newPin: '2580' } });
+  const token = (await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', pin: '2580' } })).body.token;
+  let me = (await call('GET /driver/me', { token })).body;
+  assert.deepEqual([me.current.map((l) => l.trip), me.next.map((l) => l.trip)], [['626265'], []], 'not sent yet: no next load');
+  assert.equal(me.current[0].sheet, null);
+  store['626300'] = { ...store['626300'], sentAt: '2026-11-03T22:00:00Z' };
+  me = (await call('GET /driver/me', { token })).body;
+  assert.deepEqual(me.next.map((l) => l.trip), ['626300'], 'sent: it shows');
 });

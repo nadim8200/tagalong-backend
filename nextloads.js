@@ -254,6 +254,14 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
     if (finished.length) await db.update(key, (cur) => ({ list: ((cur && cur.list) || []).map((x) => (finished.includes(x.id) ? { ...x, doneAt: new Date(now()).toISOString() } : x)) }), { list: [] });
   }
 
+  // the full rate con behind a next load (the card keeps only the short version)
+  async function rateConOf(site, n) {
+    if (!enabled || !n) return null;
+    if (n.pendingId) { const p = ((await db.get(`taRateConPending:${site}`, [])) || []).find((x) => x.id === n.pendingId); if (p && p.record) return p.record.data || p.record; }
+    if (n.trip) { const r = ((await db.get(`taTruckMateRateCon:${site}`, {})) || {})[n.trip]; if (r) return r.data || r; }
+    return null;
+  }
+
   // For Ask Jarvis: every waiting next load (also the ones Jarvis couldn't tie to a truck).
   async function list() { return (((await db.get(key, { list: [] })) || {}).list || []).filter((x) => !x.doneAt); }
 
@@ -266,7 +274,7 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
     return hit;
   }
 
-  return { consider, overlay, list, assign };
+  return { consider, overlay, list, assign, rateConOf };
 }
 
 // The reply to whoever sent the batch: one block per rate con — which truck, verified or not,

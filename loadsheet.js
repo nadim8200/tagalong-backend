@@ -206,7 +206,10 @@ export const forDriver = (s, yards = {}) => {
     release: s.release ? { type: s.release.type, ...yardOf(s.release, yards), hide: (s.stops || []).filter((_, i) => hidden.has(i)).map((x) => ({ zip: x.zip || null, city: x.city || null })), dropped: s.dropped || null } : null };
 };
 
-export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp = null, sendText = null, log = null, sendMail = null, recipients = async () => [], now = () => Date.now() }) {
+// Does the driver see it? Everything dispatch sent; a draft Jarvis made from a rate con only once a dispatcher sends it. Pure.
+export const visible = (s) => !!s && !(s.fromRateCon && !s.sentAt);
+
+export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp = null, sendText = null, log = null, sendMail = null, recipients = async () => [], nextRateCon = null, notify = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const all = async () => (enabled ? (await db.get(KEY, {})) || {} : {});
   const board = async () => (getBoard ? (((await getBoard(SITE)) || {}).trips || []) : []);
@@ -220,7 +223,7 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     return { type: r.type, yard: clean(r.yard).replace(/\s+yard$/i, '').slice(0, 60) || null, stops: [...new Set(ok)].sort((a, b) => a - b) };
   };
   async function save(sheet, raw, by, trip) {
-    const rec = { ...sheet, trip: String(trip), raw: String(raw).slice(0, 4000), by, at: new Date(now()).toISOString(), confirmedAt: null, confirmedBy: null, dropped: null };
+    const rec = { ...sheet, trip: String(trip), raw: String(raw).slice(0, 4000), by, at: new Date(now()).toISOString(), sentAt: new Date(now()).toISOString(), confirmedAt: null, confirmedBy: null, dropped: null };
     await db.update(KEY, (cur) => {
       const next = { ...(cur || {}), [rec.trip]: rec };
       const keep = Object.values(next).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 600);   // the newest 600 loads
@@ -253,9 +256,41 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const body = String(b.text).trim();
     if (via.includes('app')) sent.app = sendApp ? await sendApp(SITE, trip, body, who(req)).catch((e) => ({ skipped: e.message })) : { skipped: 'not available' };
     if (via.includes('text')) sent.text = sendText ? await sendText(SITE, trip, body, who(req)).catch((e) => ({ skipped: e.message })) : { skipped: 'not available' };
+    if (notify && via.includes('app') && !(sent.app && sent.app.sent)) await notify(trip, 'Load info from dispatch', `Trip ${trip}: open TagAlong for the pickup, delivery and instructions.`).catch(() => {});
     res.json({ ok: true, trip, sheet: forConsole(rec, await yards()), sent });
   });
   app.get('/truckmate/loadsheet/:trip', requireAuth, async (req, res) => res.json({ sheet: forConsole(await get(req.params.trip), await yards()) }));
+  // the rate con made into the driver's load (TruckMate's stops and times + the rate con's pickup numbers, instructions, temperature):
+  // a draft for dispatch to check. The rate con on the trip, else the one Jarvis queued for this trip as a truck's next load
+  const draftFor = async (trip) => {
+    const item = (await board()).find((it) => String(tripOf(it).tripNumber) === String(trip));
+    if (!item) return { error: 'That load is not on the board.', code: 404 };
+    const rc = (item._ratecon && (item._ratecon.data || item._ratecon)) || (nextRateCon ? await nextRateCon(item).catch(() => null) : null);
+    const sheet = rc ? sheetFromRateCon(rc, { trip, item }) : null;
+    return sheet ? { sheet, item } : { error: 'No rate con on this load yet.', code: 404 };
+  };
+  app.get('/truckmate/loadsheet/:trip/ratecon-draft', requireAuth, async (req, res) => {
+    const d = await draftFor(String(req.params.trip));
+    return d.error ? res.status(d.code).json({ error: d.error }) : res.json({ sheet: forConsole(d.sheet, await yards()) });
+  });
+  // dispatch checked it: the driver gets it now (the Next load tab, a notification), by app and / or text
+  app.post('/truckmate/loadsheet/:trip/ratecon-send', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
+    const trip = String(req.params.trip); const b = req.body || {};
+    const d = await draftFor(trip);
+    if (d.error) return res.status(d.code).json({ error: d.error });
+    if (b.release !== undefined) { d.sheet.release = releaseFrom(b.release, d.sheet.stops); if (b.release) await rememberYard(b.release.yard, b.release.address); }
+    const rec = await save(d.sheet, '(from the rate con, checked by dispatch)', who(req), trip);
+    const via = Array.isArray(b.via) ? b.via : ['app'];
+    const first = rec.stops[0]; const last = rec.stops[rec.stops.length - 1];
+    const body = `New load: trip ${trip}${first ? ` · pick up ${[first.name, first.city].filter(Boolean).join(', ')}${first.dateIso ? ` ${first.date || ''}` : ''}${first.time ? ` ${first.time}` : ''}` : ''}${last && last !== first ? ` · deliver ${[last.name, last.city].filter(Boolean).join(', ')}` : ''}. Open TagAlong for everything.`.replace(/\s+/g, ' ');
+    const sent = {};
+    if (via.includes('app')) sent.app = sendApp ? await sendApp(SITE, trip, body, who(req)).catch((e) => ({ skipped: e.message })) : { skipped: 'not available' };
+    if (via.includes('text')) sent.text = sendText ? await sendText(SITE, trip, body, who(req)).catch((e) => ({ skipped: e.message })) : { skipped: 'not available' };
+    // the driver profile's phones hear it even when the load has no driver link yet (an app message notifies them itself)
+    if (notify && !(sent.app && sent.app.sent)) await notify(trip, 'New load from dispatch', body).catch(() => {});
+    res.json({ ok: true, trip, sheet: forConsole(rec, await yards()), sent });
+  });
   // change the yard drop on a saved sheet: { type: 'free'|'paid', yard, address, stops: [stop indexes] } or { release: null }
   app.put('/truckmate/loadsheet/:trip/release', requireAuth, async (req, res) => {
     const trip = String(req.params.trip); const b = req.body || {};
@@ -276,21 +311,6 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const sheet = parseDispatchMessage(text);
     const trip = tripForSheet(sheet, await board());
     return trip ? save(sheet, text, `${(from && (from.name || from.address)) || 'dispatch'} (email)`, trip) : null;
-  }
-  // no message from dispatch yet but a rate con on the load: the driver gets the load from it (saved once; a message dispatch sends replaces it)
-  async function ensureFromRateCon(item) {
-    if (!enabled || !item) return null;
-    const trip = String(tripOf(item).tripNumber);
-    const have = await get(trip);
-    if (have && !have.fromRateCon) return have;            // dispatch's own message stands
-    const rc = item._ratecon && (item._ratecon.data || item._ratecon);
-    const sheet = sheetFromRateCon(rc, { trip, item });
-    if (!sheet) return have;
-    if (!have) return save(sheet, '(read from the rate con)', 'Jarvis (from the rate con)', trip);
-    // kept current with TruckMate (a new time, a stop added); the driver's OK and a trailer drop stay
-    const next = { ...have, ...sheet, confirmedAt: have.confirmedAt, confirmedBy: have.confirmedBy, dropped: have.dropped || null };
-    if (JSON.stringify(next.stops) !== JSON.stringify(have.stops) || JSON.stringify(next.temp) !== JSON.stringify(have.temp) || JSON.stringify(next.instructions) !== JSON.stringify(have.instructions)) await db.update(KEY, (c) => ({ ...(c || {}), [trip]: next }), {});
-    return next;
   }
   // the driver tapped OK
   async function confirm(trip, by) {
@@ -323,7 +343,7 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
   // on the board for the console: has a sheet, and whether the driver said OK
   async function overlay(site, trips) {
     const s = await all();
-    for (const it of trips || []) { const r = s[String(tripOf(it).tripNumber)]; if (r) it._loadSheet = { at: r.at, by: r.by, confirmedAt: r.confirmedAt, confirmedBy: r.confirmedBy, release: r.release ? { type: r.release.type, yard: yardLabel(r.release.yard) } : null, dropped: r.dropped || null }; }
+    for (const it of trips || []) { const r = s[String(tripOf(it).tripNumber)]; if (r) it._loadSheet = { sent: visible(r), at: r.at, by: r.by, confirmedAt: r.confirmedAt, confirmedBy: r.confirmedBy, release: r.release ? { type: r.release.type, yard: yardLabel(r.release.yard) } : null, dropped: r.dropped || null }; }
   }
-  return { get, fromEmail, confirm, dropped, overlay, ensureFromRateCon, forDriver: async (s) => forDriver(s, await yards()) };
+  return { get, fromEmail, confirm, dropped, overlay, visible, forDriver: async (s) => forDriver(s, await yards()) };
 }
