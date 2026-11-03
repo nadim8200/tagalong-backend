@@ -67,8 +67,27 @@ export function mailCopy(env = process.env, already = []) {
 let guard = null;
 export const setMailGuard = (fn) => { guard = fn; };
 
+// Every picture shown inside an email gets a name no other email has. Outlook keeps a chain together and, when two emails on it both
+// say "bkphoto1" or "truckmap", shows the first email's picture in the later one (the 1:18 PM tire photo instead of the update's axle
+// photo). Pure: → { html, attachments } with each cid made unique and the body pointing at the new names.
+let cidSeq = 0;
+export function uniqueCids(message, tag = `${Date.now().toString(36)}${(cidSeq += 1).toString(36)}`) {
+  const list = message.attachments || [];
+  if (!list.some((a) => a && a.cid)) return { html: message.html, attachments: list };
+  let html = String(message.html || '');
+  const attachments = list.map((a) => {
+    if (!a || !a.cid) return a;
+    const next = `${a.cid}.${tag}`;
+    html = html.replace(new RegExp(`cid:${String(a.cid).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=["'\\s>)])`, 'g'), `cid:${next}`);
+    return { ...a, cid: next };
+  });
+  return { html, attachments };
+}
+
 export async function sendMail(message, { env = process.env, fetchFn = globalThis.fetch, direct = false, noCopy = false } = {}) {
-  const { to, cc = [], subject, html, text = null, attachments = [] } = guard && !direct ? await guard(message) : message;
+  const guarded = guard && !direct ? await guard(message) : message;
+  const { to, cc = [], subject, text = null } = guarded;
+  const { html, attachments = [] } = uniqueCids(guarded);
   const cfg = mailConfig(env);
   if (!cfg.ready) throw new Error(`Outlook is not connected yet (missing ${cfg.missing.join(', ')} in Render).`);
   const list = (Array.isArray(to) ? to : String(to || '').split(/[,;\s]+/)).map((x) => String(x).trim()).filter((x) => /@/.test(x));
@@ -109,6 +128,7 @@ export async function sendMail(message, { env = process.env, fetchFn = globalThi
 // A real reply on an email Jarvis sent earlier, found by its subject in Sent Items, so Outlook keeps one thread. For our own people only
 // (direct: training mode has nothing to rewrite). If that email can't be found or the reply fails, it goes as a normal email: the news matters more.
 export async function sendInThread(message, originalSubject, { env = process.env, fetchFn = globalThis.fetch, direct = false } = {}) {
+  message = { ...message, ...uniqueCids(message) };   // eslint-disable-line no-param-reassign -- pictures named once, for the reply and the fallback alike
   const plain = () => sendMail(message, { env, fetchFn, direct });
   const cfg = mailConfig(env);
   if (!direct || !cfg.ready || !originalSubject) return plain();

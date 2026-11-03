@@ -181,3 +181,18 @@ test('what dispatch writes has no practical limit and keeps its lines (towing co
   assert.match(m.text, /Please see the Towing Service Info:\nDrigger Towing/);
   assert.match(renderBreakdownEmail({ item: { trip: { tripNumber: '1', powerUnit: '2' } }, report: { atMs: NOW, by: 'A', reason: 'air leak', trip: '1', unit: '2' }, now: NOW }).html, /font-size:24px[^"]*">air leak/);
 });
+
+test('line breaks dispatch typed survive Outlook: real <br>, not just CSS', () => {
+  const m = renderBreakdownEmail({ item: { trip: { tripNumber: '1', powerUnit: '2' } }, report: { atMs: NOW, by: 'A', reason: 'Axle\nbroke off', trip: '1', unit: '2', driverSays: 'Smoke\nthen stopped' }, now: NOW, update: { message: 'Still working on the unit\nNeeds an axle', by: 'Gio' }, earlier: [{ atMs: NOW, by: 'Gio', message: 'About to check\nWill keep you posted' }] });
+  for (const re of [/Axle<br>broke off/, /Smoke<br>then stopped/, /unit<br>Needs an axle/, /check<br>Will keep/]) assert.match(m.html, re);
+});
+
+test('an update\'s photos sit right under the update, not at the bottom after the whole reason', () => {
+  const report = { atMs: NOW, by: 'A', reason: 'Axle broke off. '.repeat(40), trip: '1', unit: '2' };
+  const up = renderBreakdownEmail({ item: { trip: { tripNumber: '1', powerUnit: '2' } }, report, now: NOW, photoCids: ['bkphoto1'], update: { message: 'Needs an axle', by: 'Gio' } });
+  const at = (s) => up.html.indexOf(s);
+  assert.ok(at('Needs an axle') < at('cid:bkphoto1') && at('cid:bkphoto1') < at('Axle broke off'), 'update, its photo, then the reason');
+  assert.match(up.html, /Photos with this update/); assert.equal(up.html.split('cid:bkphoto1').length, 2, 'once');
+  const first = renderBreakdownEmail({ item: { trip: { tripNumber: '1', powerUnit: '2' } }, report, now: NOW, photoCids: ['bkphoto1'] });
+  assert.ok(first.html.indexOf('Axle broke off') < first.html.indexOf('cid:bkphoto1'), 'the first report keeps them after the reason');
+});

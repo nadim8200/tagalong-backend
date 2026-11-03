@@ -16,6 +16,8 @@ const LINK_DAYS = 7;
 const MAX_REASON = 20000;   // no practical limit: dispatch pastes towing info, notes, whole messages
 const RECOVERY_DAYS = 3;          // reported fixed and never seen moving: stop waiting for it
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// what dispatch typed, line breaks kept as <br> (Outlook drops white-space: pre-line)
+const lines = (s) => esc(s).replace(/\r?\n/g, '<br>');
 const b64 = (x) => Buffer.from(x).toString('base64url');
 const sign = (body, secret, purpose) => crypto.createHmac('sha256', `${secret}:${purpose}`).update(body).digest('base64url');
 
@@ -84,11 +86,12 @@ export function loadRows(item, now = Date.now()) {
 
 // The photos, full width, one under the other. Pure.
 // what dispatch wrote, in the email: big when it's a short line, normal size when it's long; line breaks kept
-const said = (t) => { const short = String(t || '').length <= 140 && !/\n/.test(String(t || '')); return `<div style="font-size:${short ? 24 : 17}px;line-height:${short ? 1.25 : 1.45};font-weight:${short ? 'bold' : 'normal'};padding:4px 0 8px;word-break:break-word;white-space:pre-line;">${esc(t)}</div>`; };
-const photoBlock = (cids, note) => {
+const said = (t) => { const short = String(t || '').length <= 140 && !/\n/.test(String(t || '')); return `<div style="font-size:${short ? 24 : 17}px;line-height:${short ? 1.25 : 1.45};font-weight:${short ? 'bold' : 'normal'};padding:4px 0 8px;word-break:break-word;white-space:pre-line;">${lines(t)}</div>`; };
+// the photos sit right under what they belong to: an update's photos under the update, where people read first
+const photoBlock = (cids, note, title = 'Photos') => {
   const { heading, FONT, MUTED } = emailParts;
   if (!cids.length && !note) return '';
-  return `${heading('Photos')}${cids.map((c, i) => `<tr><td style="padding:0 24px 10px;"><img src="cid:${esc(c)}" width="592" alt="Breakdown photo ${i + 1}" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></td></tr>`).join('')}${note ? `<tr><td style="padding:0 24px 8px;font-family:${FONT};font-size:14px;color:${MUTED};">${esc(note)}</td></tr>` : ''}`;
+  return `${heading(title)}${cids.map((c, i) => `<tr><td style="padding:0 24px 10px;"><img src="cid:${esc(c)}" width="592" alt="Breakdown photo ${i + 1}" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></td></tr>`).join('')}${note ? `<tr><td style="padding:0 24px 8px;font-family:${FONT};font-size:14px;color:${MUTED};">${esc(note)}</td></tr>` : ''}`;
 };
 // More photos on an open breakdown. Pure.
 export function renderBreakdownPhotosEmail({ report, item = null, by, count, subject, photoCids = [], photosNote = null, now = Date.now() }) {
@@ -101,7 +104,7 @@ export function renderBreakdownPhotosEmail({ report, item = null, by, count, sub
 ${TRAINING_SLOT}
 <tr><td bgcolor="${color}" style="padding:18px 24px;background:${color};font-family:${FONT};font-size:26px;font-weight:bold;color:#FFFFFF;">${title}<div style="padding-top:4px;font-size:15px;font-weight:normal;color:#FFFFFF;">${esc(line)}</div></td></tr>
 <tr><td style="padding:14px 24px 0;font-family:${FONT};font-size:24px;font-weight:bold;color:${NAVY};">Truck ${esc(report.unit || 'not recorded')}<div style="font-size:15px;font-weight:normal;color:${MUTED};">Trip ${esc(report.trip)}</div></td></tr>
-<tr><td style="padding:14px 24px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Reason on file</b><div style="white-space:pre-line;word-break:break-word;">${esc(report.reason)}</div><div style="font-size:13px;color:${MUTED};">Received ${esc(et(now) || '')}</div></td></tr>
+<tr><td style="padding:14px 24px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Reason on file</b><div style="white-space:pre-line;word-break:break-word;">${lines(report.reason)}</div><div style="font-size:13px;color:${MUTED};">Received ${esc(et(now) || '')}</div></td></tr>
 ${photoBlock(photoCids, photosNote)}
 ${heading('Load')}
 <tr><td style="padding:0 24px 20px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${rows.map(([k, v]) => kv(k, v)).join('')}</table></td></tr>
@@ -145,10 +148,11 @@ ${TRAINING_SLOT}
 <tr><td style="padding:16px 24px 0;font-family:${FONT};font-size:30px;font-weight:bold;color:${NAVY};">Truck ${esc(f.unit || 'not recorded')}</td></tr>
 <tr><td style="padding:0 24px 14px;font-family:${FONT};font-size:15px;color:${MUTED};">Trip ${esc(f.trip || 'not recorded')}${f.trailer ? ` · Trailer ${esc(f.trailer)}` : ''}</td></tr>
 ${sheetAttached ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NAVY}" style="background:${NAVY};border-radius:8px;"><tr><td style="padding:12px 16px;font-family:${FONT};font-size:17px;font-weight:bold;color:#FFFFFF;">&#128206; ${esc(sheetNote)}</td></tr></table></td></tr>` : ''}
-${update ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF7E7" style="background:#FFF7E7;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:#92400E;">Update</b>${said(update.message)}From: <b>${esc(update.by)} · ${esc(et(now) || '')}</b>${earlier.length ? `<div style="padding-top:10px;font-size:13px;color:${MUTED};"><b>Earlier updates</b>${earlier.map((u) => `<div style="padding-top:4px;word-break:break-word;white-space:pre-line;">${esc(u.message)} (${esc(u.by)} · ${esc(et(u.atMs) || '')})</div>`).join('')}</div>` : ''}</td></tr></table></td></tr>` : ''}
-<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b>${said(report.reason)}${report.driverSays ? `<div style="padding:0 0 8px;"><b style="color:${RED};">What the driver says</b><div style="white-space:pre-line;word-break:break-word;">${esc(report.driverSays)}</div></div>` : ''}Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
+${update ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF7E7" style="background:#FFF7E7;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:#92400E;">Update</b>${said(update.message)}From: <b>${esc(update.by)} · ${esc(et(now) || '')}</b>${earlier.length ? `<div style="padding-top:10px;font-size:13px;color:${MUTED};"><b>Earlier updates</b>${earlier.map((u) => `<div style="padding-top:4px;word-break:break-word;white-space:pre-line;">${lines(u.message)} (${esc(u.by)} · ${esc(et(u.atMs) || '')})</div>`).join('')}</div>` : ''}</td></tr></table></td></tr>` : ''}
+${update ? photoBlock(photoCids, photosNote, 'Photos with this update') : ''}
+<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b>${said(report.reason)}${report.driverSays ? `<div style="padding:0 0 8px;"><b style="color:${RED};">What the driver says</b><div style="white-space:pre-line;word-break:break-word;">${lines(report.driverSays)}</div></div>` : ''}Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
 ${update ? '' : `<tr><td style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Next step for dispatch</b><br>${esc(rc)}<br>${esc(next)}<div>${button(consoleUrl, 'Open the load')}</div></td></tr></table></td></tr>`}
-${photoBlock(photoCids, photosNote)}
+${update ? '' : photoBlock(photoCids, photosNote)}
 ${heading('Load')}
 <tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${loadRows(item, now).map(([k, v]) => kv(k, v)).join('')}</table></td></tr>
 ${heading('Last reported location')}
