@@ -127,6 +127,40 @@ export const yardLabel = (n) => (n ? `${clean(n).replace(/\s+yard$/i, '')} yard`
 // cheap check before reading an email as a load message
 export const looksLikeDispatchMessage = (text) => /\bTRIP\s*#\s*:/i.test(text) && /\bPICK\s*-?\s*UP\b/i.test(text) && /\bDELIVERY\b/i.test(text);
 
+// A rate con's load as the driver's load info, when dispatch hasn't sent a message: the stops (name, street, town, date and time),
+// pickup numbers, the temperature and mode, and the handwritten notes for the driver ("No release", "$75 bonus"). Never the rate, the
+// broker's contacts or penalties. Pure → a sheet, or null when the rate con has no stops.
+const isoFrom = (d) => { const m = String(d || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/) || String(d || '').match(/(\d{4})-(\d{2})-(\d{2})/); if (!m) return null; if (m[1].length === 4) return `${m[1]}-${m[2]}-${m[3]}`; const y = m[3].length === 2 ? `20${m[3]}` : m[3]; return `${y}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`; };
+const looksStreet = (x) => /^\d+\s+\S/.test(String(x || '').trim());
+const OWN_NOTE = /^(tr(uck)?\.?\s*#?\s*)?\d{3,4}$|^part\s*#?\s*\d+$|^p\s*\/\s*u\b|^-?\d+\s*°?\s*f\b/i;   // truck number, "Part 2", pickup time, the temperature: shown elsewhere
+export function sheetFromRateCon(rc, { trip = null } = {}) {
+  if (!rc || !((rc.pickups || []).length || (rc.deliveries || []).length)) return null;
+  const hand = (rc.handwrittenNotes || []).map((x) => clean(x)).filter(Boolean);
+  const tempText = rc.tempSetting || hand.find((x) => /-?\d+\s*°?\s*F\b/i.test(x)) || null;
+  const temp = tempText ? readTemp(`${tempText}${!/cont|cyc/i.test(tempText) && hand.some((x) => /\bcont/i.test(x)) ? ' CONTINUOUS' : ''}`) : null;
+  const stop = (kind) => (x) => {
+    const street = x.address || (looksStreet(x.refs) ? x.refs : null);
+    const date = x.date || null;
+    return { kind, n: null, name: clean(x.name) || null, street: street ? clean(street) : null, city: clean(x.city) || null, state: clean(x.state).toUpperCase() || null, zip: clean(x.zip) || null,
+      date, dateIso: isoFrom(date), time: cleanTime(x.appointment || x.time) || null, ...(x.refs && !looksStreet(x.refs) ? { other: [clean(x.refs)] } : {}) };
+  };
+  const stops = [...(rc.pickups || []).map(stop('pickup')), ...(rc.deliveries || []).map(stop('delivery'))];
+  // "P/U 11/4 ASAP" written by hand: the pickup's date and time when the rate con doesn't print one
+  const puNote = hand.map((x) => x.match(/^p\s*\/\s*u\b\s*:?\s*(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)?\s*@?\s*(.*)$/i)).find(Boolean);
+  const firstPu = stops.find((x) => x.kind === 'pickup');
+  if (puNote && firstPu && !firstPu.dateIso) {
+    const year = ((stops.find((x) => x.dateIso) || {}).dateIso || new Date().toISOString()).slice(0, 4);
+    if (puNote[1]) { firstPu.date = puNote[1]; firstPu.dateIso = isoFrom(puNote[1].split('/').length === 2 ? `${puNote[1]}/${year}` : puNote[1]); }
+    if (!firstPu.time && clean(puNote[2])) firstPu.time = cleanTime(puNote[2]);
+  }
+  let p = 0; let d = 0; for (const s0 of stops) { if (s0.kind === 'pickup') { p += 1; s0.n = p; } else { d += 1; s0.n = d; } }
+  const rel = hand.map(readRelease).find(Boolean) || null;
+  const notes = hand.filter((x) => x.length > 3 && !OWN_NOTE.test(x) && !readRelease(x) && !/cont(inuous)?\.?$/i.test(x));
+  const pu = [...new Set([rc.loadNumber, ...(rc.pickups || []).map((x) => x.refs).filter((r) => r && !looksStreet(r))].filter(Boolean).map((x) => clean(x)))];
+  return { bill: rc.fbfBillNumber ? String(rc.fbfBillNumber).toUpperCase() : null, trip: trip ? String(trip) : null, temp, pickupNumbers: pu, refs: [], notes, stops,
+    from: 'the rate con', release: rel ? { ...rel, stops: [] } : null, fromRateCon: true };
+}
+
 // Google Maps search link for a stop's address. Pure.
 export const mapsLink = (s) => { const q = [s.name, s.street, [s.city, s.state, s.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '); return q ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}` : null; };
 
@@ -220,6 +254,16 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const trip = tripForSheet(sheet, await board());
     return trip ? save(sheet, text, `${(from && (from.name || from.address)) || 'dispatch'} (email)`, trip) : null;
   }
+  // no message from dispatch yet but a rate con on the load: the driver gets the load from it (saved once; a message dispatch sends replaces it)
+  async function ensureFromRateCon(item) {
+    if (!enabled || !item) return null;
+    const trip = String(tripOf(item).tripNumber);
+    const have = await get(trip);
+    if (have) return have;
+    const rc = item._ratecon && (item._ratecon.data || item._ratecon);
+    const sheet = sheetFromRateCon(rc, { trip });
+    return sheet ? save(sheet, '(read from the rate con)', 'Jarvis (from the rate con)', trip) : null;
+  }
   // the driver tapped OK
   async function confirm(trip, by) {
     const at = new Date(now()).toISOString();
@@ -253,5 +297,5 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const s = await all();
     for (const it of trips || []) { const r = s[String(tripOf(it).tripNumber)]; if (r) it._loadSheet = { at: r.at, by: r.by, confirmedAt: r.confirmedAt, confirmedBy: r.confirmedBy, release: r.release ? { type: r.release.type, yard: yardLabel(r.release.yard) } : null, dropped: r.dropped || null }; }
   }
-  return { get, fromEmail, confirm, dropped, overlay, forDriver: async (s) => forDriver(s, await yards()) };
+  return { get, fromEmail, confirm, dropped, overlay, ensureFromRateCon, forDriver: async (s) => forDriver(s, await yards()) };
 }

@@ -179,3 +179,25 @@ test('a yard drop: the driver only sees the stops they deliver, then the release
   assert.equal((await ls.forDriver(await ls.get('626282'))).stops.length, 3);
   assert.equal(await ls.dropped('626282', 'x'), null);
 });
+
+test('the rate con fills the driver\'s load when dispatch hasn\'t sent a message: stops, handwritten pickup time, temp, notes; never the rate or the broker', async () => {
+  const { sheetFromRateCon } = await import('../loadsheet.js');
+  const rc = { loadNumber: '3124003', fbfBillNumber: 'b180776', rate: 3032.82, tempSetting: null, contacts: [{ phone: '555-010-0000' }], specialInstructions: ['$200 penalty'],
+    pickups: [{ name: 'SILER CITY', address: '1100 EAST 3RD STREET', city: 'SILER CITY', state: 'NC', zip: '27344', date: null, time: null, refs: null }],
+    deliveries: [{ name: 'US FOODS BOCA RATON', address: null, city: 'BOCA RATON', state: 'FL', zip: '33487', date: '11/06/26', time: '08:00', refs: '7598 NW 6TH AVENUE' }],
+    handwrittenNotes: ['20F cont.', '2207', 'Part 2', 'P/U 11/4 ASAP', 'AM', 'No release', '$75 bonus for short trip'] };
+  const s = sheetFromRateCon(rc, { trip: '900776' });
+  assert.equal(s.bill, 'B180776'); assert.deepEqual([s.temp.degrees, s.temp.mode], [20, 'continuous']); assert.deepEqual(s.pickupNumbers, ['3124003']);
+  assert.deepEqual([s.stops[0].street, s.stops[0].dateIso, s.stops[0].time], ['1100 EAST 3RD STREET', '2026-11-04', 'ASAP'], 'handwritten P/U fills the pickup');
+  assert.equal(s.stops[1].street, '7598 NW 6TH AVENUE', 'a street in refs is the street');
+  assert.deepEqual(s.notes, ['No release', '$75 bonus for short trip'], 'truck number, part, temp, pickup time and tiny marks are not notes');
+  assert.ok(!/3032|555-010|penalty/.test(JSON.stringify(s)));
+  assert.equal(sheetFromRateCon({ pickups: [], deliveries: [] }), null);
+  // on the board: filled once, a message from dispatch replaces it
+  const db = mem(); const app = { get() {}, post() {}, put() {} };
+  const ls = initLoadSheets(app, { requireAuth: () => {}, db, getBoard: async () => ({ trips: [] }) });
+  const item = { trip: { tripNumber: '900776' }, _ratecon: { data: rc } };
+  assert.equal((await ls.ensureFromRateCon(item)).by, 'Jarvis (from the rate con)');
+  assert.equal((await ls.ensureFromRateCon(item)).by, 'Jarvis (from the rate con)', 'once');
+  assert.equal(await ls.ensureFromRateCon({ trip: { tripNumber: '1' } }), null, 'no rate con, nothing');
+});

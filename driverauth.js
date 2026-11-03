@@ -39,8 +39,10 @@ export function loadsFor(code, items = []) {
   return { current: mine.filter((it) => ROLLING.test(String(tripOf(it).status || ''))).map(brief), next: mine.filter((it) => BOOKED.test(String(tripOf(it).status || ''))).map(brief) };
 }
 
-export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign, secret, roster, getBoard, docsLink = null, sheets = null, stopFlow = null, now = () => Date.now() }) {
+export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign, secret, roster, getBoard, docsLink = null, sheets = null, stopFlow = null, push = null, training = null, unreadFor = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
+  const PUSH = `taDriverPush:${SITE}`;            // driver ID → [{ token, platform, env, at }] (the phones signed in to the profile)
+  const NOTIFIED = `taDriverNotified:${SITE}`;    // driver ID → trips they were told about
   const tripsKey = (code) => `taDriverTrips:${SITE}:${norm(code)}`;
   const byCode = async (code) => (await roster()).find((d) => norm(d.code) === norm(code)) || null;
   const misses = new Map();   // phone or connection → wrong tries in the last 15 minutes
@@ -90,7 +92,12 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       const loads = loadsFor(req.driver.code, await board());
       const trips = [...loads.current, ...loads.next].map((l) => l.trip);
       // the load message dispatch sent (names, addresses, PU#, times, notes): what TruckMate doesn't have
+      const items0 = await board();
+      // no message from dispatch yet: the rate con on the load fills it in (loadsheet.js)
+      if (sheets && sheets.ensureFromRateCon) for (const l of [...loads.current, ...loads.next]) await sheets.ensureFromRateCon(items0.find((it) => tripNo(it) === l.trip)).catch(() => null); // eslint-disable-line no-await-in-loop
       if (sheets) for (const l of [...loads.current, ...loads.next]) l.sheet = await sheets.forDriver(await sheets.get(l.trip)); // eslint-disable-line no-await-in-loop
+      // dispatch messages the driver hasn't opened yet, per load (the Chats tab shows them)
+      if (unreadFor) for (const l of [...loads.current, ...loads.next]) l.unread = await unreadFor(SITE, l.trip).catch(() => 0); // eslint-disable-line no-await-in-loop
       // an LTL load: the trip sheet's stops, each marked done with boxes and signed paperwork (stopflow.js)
       if (stopFlow) { const items = await board(); for (const l of [...loads.current, ...loads.next]) l.ltl = await stopFlow.forDriver(items.find((it) => tripNo(it) === l.trip)); } // eslint-disable-line no-await-in-loop
       if (trips.length) await db.update(tripsKey(req.driver.code), (cur) => [...new Set([...trips, ...(Array.isArray(cur) ? cur : [])])].slice(0, 300), []);
@@ -143,6 +150,14 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     const trip = await mine(req, res); if (!trip) return null;
     try { return answer(res, await stopFlow.complete(trip, { by: req.driver.name })); } catch (e) { return res.status(400).json({ error: e.message || 'Could not complete.' }); }
   });
+  // this phone gets notifications: a new load, a message from dispatch
+  app.post('/driver/me/push', requireDriver, async (req, res) => {
+    const b = req.body || {}; const t = String(b.token || '').trim();
+    if (t.length < 32 || t.length > 400) return res.status(400).json({ error: 'Bad push token.' });
+    const rec = { token: t, platform: ['ios', 'android'].includes(b.platform) ? b.platform : 'ios', env: b.env === 'development' ? 'development' : 'production', at: new Date(now()).toISOString() };
+    await db.update(PUSH, (cur) => ({ ...(cur || {}), [norm(req.driver.code)]: [...((cur || {})[norm(req.driver.code)] || []).filter((x) => x.token !== t), rec].slice(-3) }), {});
+    return res.json({ ok: true });
+  });
   app.get('/driver/me/paperwork', requireDriver, async (req, res) => {
     const mine = new Set((await db.get(tripsKey(req.driver.code), [])) || []);
     const list = ((await db.get(`taDriverPaperwork:${SITE}`, [])) || []).filter((p) => mine.has(String(p.trip))).slice(0, 100).map(({ docIds, ...p }) => p);
@@ -187,5 +202,40 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       return res.json({ ok: true });
     });
   }
-  return { requireDriver };
+  // a notification to a driver's phones (training mode holds it, like every app message)
+  async function notify(code, { title, body, data = {} }) {
+    if (!push || !enabled) return { skipped: 'push not set up' };
+    const tokens = ((await db.get(PUSH, {})) || {})[norm(code)] || [];
+    if (!tokens.length) return { skipped: 'no phone signed in' };
+    if (training) { const held = await training.hold('app', { to: `driver ${code}`, text: `${title}: ${body}` }); if (held) return { held: true }; }
+    const dead = await push.sendToTokens(tokens, { title, body, data: { ...data, path: `/driver${data.tab ? `?tab=${data.tab}` : ''}` } });
+    if (dead.length) await db.update(PUSH, (cur) => ({ ...(cur || {}), [norm(code)]: ((cur || {})[norm(code)] || []).filter((x) => !dead.includes(x.token)) }), {});
+    return { sent: tokens.length - dead.length };
+  }
+  // dispatch (or Jarvis) wrote to the driver on a load: both drivers of the load hear it
+  async function notifyTrip(trip, text, by = 'Dispatch') {
+    const it = (await board()).find((x) => tripNo(x) === String(trip));
+    const t = tripOf(it);
+    const codes = [t.driver, t.driver2].filter(Boolean);
+    for (const c of codes) await notify(c, { title: `${by.replace(/ \(.*\)$/, '')} · trip ${trip}`, body: String(text || '').slice(0, 180), data: { tab: 'chat', trip: String(trip) } }); // eslint-disable-line no-await-in-loop
+  }
+  // every board run: a load that shows up for a driver with the app → "New load assigned" once. A driver's first run only learns
+  // what they already have (no burst of old loads).
+  async function processAssignments(items = null) {
+    if (!enabled || !push) return;
+    const phones = (await db.get(PUSH, {})) || {};
+    const codes = Object.keys(phones).filter((c) => (phones[c] || []).length);
+    if (!codes.length) return;
+    const all = items || await board();
+    const told = (await db.get(NOTIFIED, {})) || {};
+    for (const code of codes) {
+      const l = loadsFor(code, all);
+      const trips = [...l.current, ...l.next];
+      const before = told[code];
+      const fresh = before ? trips.filter((x) => !before.includes(x.trip)) : [];
+      for (const x of fresh) await notify(code, { title: 'New load assigned', body: `Trip ${x.trip}${x.from || x.to ? ` · ${x.from || '?'} → ${x.to || '?'}` : ''}`, data: { tab: l.current.some((c) => c.trip === x.trip) ? 'now' : 'next', trip: x.trip } }); // eslint-disable-line no-await-in-loop
+      if (!before || fresh.length) await db.update(NOTIFIED, (cur) => ({ ...(cur || {}), [code]: [...new Set([...trips.map((x) => x.trip), ...((cur || {})[code] || [])])].slice(0, 300) }), {}); // eslint-disable-line no-await-in-loop
+    }
+  }
+  return { requireDriver, notify, notifyTrip, processAssignments };
 }

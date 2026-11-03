@@ -138,3 +138,28 @@ test('a driver sees the load message dispatch sent on each load and taps OK', as
   assert.deepEqual(drop.body.dropped, { by: 'Frank U', pickedUp: '7301', truck: '4504', trailer: '7136' });
   assert.equal((await call('POST /driver/me/loads/:trip/dropped', { token, params: { trip: '626300' } })).status, 404, 'no yard set');
 });
+
+test('driver phones: registered on the profile, told once about a new load (no burst on the first run), dispatch messages reach both drivers, unread counts per load', async () => {
+  const { initDriverAuth: init } = await import('../driverauth.js');
+  const db = mem(); const routes = {}; const sent = []; let board = [trip('626265', 'DEPSHIP', '0986')];
+  board[0].trip.driver2 = '2473';
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
+  const push = { sendToTokens: async (tokens, m) => { sent.push({ to: tokens.map((t) => t.token), ...m }); return []; } };
+  const d = init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK, { code: '2473', name: 'Ana B', phone: '3055550200' }], getBoard: async () => ({ trips: board }), push, unreadFor: async (site, t) => (t === '626265' ? 2 : 0) });
+  const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
+  await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', newPin: '2580' } });
+  const token = (await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', pin: '2580' } })).body.token;
+  assert.equal((await call('POST /driver/me/push', { token, body: { token: 'short' } })).status, 400);
+  await call('POST /driver/me/push', { token, body: { token: 'a'.repeat(64), platform: 'ios' } });
+  assert.equal((await call('GET /driver/me', { token })).body.current[0].unread, 2);
+  await d.processAssignments();
+  assert.equal(sent.length, 0, 'the first run only learns the loads they already have');
+  board = [...board, trip('626900', 'DISP', '0986')];
+  await d.processAssignments(); await d.processAssignments();
+  assert.equal(sent.length, 1, 'once'); assert.equal(sent[0].title, 'New load assigned'); assert.match(sent[0].body, /^Trip 626900 · MIAMI, FL → ATLANTA, GA$/); assert.equal(sent[0].data.tab, 'next');
+  await d.notifyTrip('626265', 'Call the receiver 1 hour before', 'Haraft J Sierra (console)');
+  assert.equal(sent.length, 2, 'only 0986 has a phone signed in; 2473 has none'); assert.equal(sent[1].title, 'Haraft J Sierra · trip 626265'); assert.equal(sent[1].data.tab, 'chat');
+  const held = init({ get() {}, post() {} }, { requireAuth, secret: 'k', db, sign: () => 'x', roster: async () => [], getBoard: async () => ({ trips: board }), push, training: { hold: async () => ({ held: true }) } });
+  assert.deepEqual(await held.notify('0986', { title: 't', body: 'b' }), { held: true }, 'training mode holds it');
+});

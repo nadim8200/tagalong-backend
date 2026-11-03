@@ -622,6 +622,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
     if (!link || !isLive(linkStatus(link))) return { skipped: 'no active driver link on this load' };
     if (training) { const held = await training.hold('app', { to: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'the driver app', trip, text: body }); if (held) return { sent: true, via: 'held — training mode (copy emailed)', ...held }; }
     const m = await addMessage(site, String(trip), { from: 'dispatch', by, text: body });
+    if (onDispatchMessage) Promise.resolve(onDispatchMessage(site, String(trip), body, by)).catch(() => {});   // the driver profile's phones hear it too
     let pushed = false;
     if (push && push.enabled && (link.push || []).length) {
       const dead = await push.sendToTokens(link.push, { title: `${company} dispatch · load ${trip}`, body: body.slice(0, 180), data: { path: `/t/${link.token}`, kind: 'oc-message' } });
@@ -704,5 +705,8 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   });
 
   console.log(`[driverlink] OC driver tracking links ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, routeFor, ensureDocsLink, messageDriver, useComms, usePhotos, useRoadPhotos };
+  // dispatch messages the driver hasn't opened on a load
+  async function unread(site, trip) { return (((await db.get(chatKey(site), {})) || {})[String(trip)] || []).filter((m) => m.from === 'dispatch' && !m.readAt).length; }
+  let onDispatchMessage = null;
+  return { overlay, routeFor, ensureDocsLink, messageDriver, unread, useComms, usePhotos, useRoadPhotos, onDispatchMessage: (fn) => { onDispatchMessage = fn; } };
 }
