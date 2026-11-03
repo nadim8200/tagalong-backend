@@ -161,13 +161,13 @@ test('a yard drop: the driver only sees the stops they deliver, then the release
   await call('POST /truckmate/loadsheet', { text: THREE });
   let d = await ls.forDriver(await ls.get('626282'));
   assert.deepEqual(d.stops.map((x) => x.name), ['CARL BUDDIG & CO', 'WALMART DC# 6055'], 'Cocoa is delivered from the yard');
-  assert.equal(d.release.name, 'Bartow yard'); assert.equal(d.release.address, null); assert.deepEqual(d.release.hide, [{ zip: '32926', city: 'COCOA' }]);
+  assert.equal(d.release.name, 'Bartow yard'); assert.equal(d.release.address, '5361 Rifle Range Rd, Bartow, FL 33830', 'our yards are known'); assert.deepEqual(d.release.hide, [{ zip: '32926', city: 'COCOA' }]);
   // dispatch sets the yard's address and makes it paid
   const put = await call('PUT /truckmate/loadsheet/:trip/release', { type: 'paid', yard: 'Bartow yard', address: '100 Example Rd, Bartow, FL', stops: [2, 0] }, { trip: '626282' });
   assert.equal(put.body.sheet.release.type, 'paid'); assert.deepEqual(put.body.sheet.stops.map((x) => x.toYard), [false, false, true], 'a pickup can\'t go to the yard');
   d = await ls.forDriver(await ls.get('626282'));
   assert.equal(d.release.address, '100 Example Rd, Bartow, FL'); assert.match(d.release.map, /google\.com\/maps.*Bartow/);
-  assert.deepEqual((await call('GET /truckmate/yards', {})).body.yards, [{ name: 'Bartow yard', address: '100 Example Rd, Bartow, FL' }]);
+  assert.deepEqual((await call('GET /truckmate/yards', {})).body.yards.map((y) => `${y.name}: ${y.address}`), ['Bartow yard: 100 Example Rd, Bartow, FL', 'Memphis yard: 11153 HWY 178, Olive Branch, MS 38654', 'Miami yard: 2355 NW 70th Ave, Miami, FL 33122', 'Ventura yard: 6205 Ventura Blvd, Ventura, CA 93003'], 'a saved address wins');
   // the driver drops it
   const drop = await ls.dropped('626282', 'Frank U', { pickedUp: 'tl 7301', truck: '2401', trailer: '7136' });
   assert.equal(drop.pickedUp, 'TL 7301'); assert.equal(mails.length, 1);

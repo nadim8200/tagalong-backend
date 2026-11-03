@@ -9,6 +9,13 @@
 const SITE = 'florida-beauty';
 const KEY = `taLoadSheets:${SITE}`;           // trip → sheet
 const YARDS = `taYards:${SITE}`;              // NAME → { name, address }: dispatch types a yard's address once
+// Florida Beauty's own yards (Nov 3, 2026). An address dispatch saves for one of these wins.
+export const KNOWN_YARDS = {
+  MIAMI: { name: 'Miami yard', address: '2355 NW 70th Ave, Miami, FL 33122' },
+  VENTURA: { name: 'Ventura yard', address: '6205 Ventura Blvd, Ventura, CA 93003' },
+  MEMPHIS: { name: 'Memphis yard', address: '11153 HWY 178, Olive Branch, MS 38654' },
+  BARTOW: { name: 'Bartow yard', address: '5361 Rifle Range Rd, Bartow, FL 33830' },
+};
 const tripOf = (it) => (it && it.trip) || it || {};
 const billsOf = (it) => (it && (it.freightBills || it.orders)) || tripOf(it).freightBills || [];
 const clean = (s) => String(s || '').replace(/\*+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -147,7 +154,7 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
   const all = async () => (enabled ? (await db.get(KEY, {})) || {} : {});
   const board = async () => (getBoard ? (((await getBoard(SITE)) || {}).trips || []) : []);
   const get = async (trip) => (await all())[String(trip)] || null;
-  const yards = async () => (enabled ? (await db.get(YARDS, {})) || {} : {});
+  const yards = async () => ({ ...KNOWN_YARDS, ...(enabled ? (await db.get(YARDS, {})) || {} : {}) });
   const rememberYard = async (name, address) => { if (!name || !clean(address)) return; await db.update(YARDS, (cur) => ({ ...(cur || {}), [yardKey(name)]: { name: yardLabel(name), address: clean(address).slice(0, 200) } }), {}); };
   // dispatch's pick: which yard, free or paid, and which stops go there (null clears it). → the release as stored
   const releaseFrom = (r, stops) => {
