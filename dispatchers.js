@@ -48,7 +48,7 @@ const ADMIN_ONLY = [
 ];
 // A company admin (Florida Beauty: Nadim, Ronen) also changes their company's settings and manages their
 // company's logins (/admin/dispatchers — only their own company's, see below).
-const COMPANY_ADMIN = /^\/admin\/(dispatchers|directory|push-rules|training|audit)(\/|$)/;
+const COMPANY_ADMIN = /^\/admin\/(dispatchers|directory|push-rules|training|audit|driver-pins)(\/|$)/;
 // An employee manager (staffAdmin) adds and erases employees and gives them a plain login. Nothing else under /admin.
 const STAFF_MANAGER = /^\/admin\/(dispatchers|directory\/people(\/[^/]+(\/erase)?)?)\/?$/;
 const OWNERS = new Set(['ntellez@floridabeauty.us']);   // the platform admin signs in another way, so no login here says what they are

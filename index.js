@@ -1400,7 +1400,7 @@ app.post('/admin/breakdown-report/example', requireCompanyAdmin, async (req, res
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 // company drivers sign in with their driver ID and cell; the roster is Samsara's drivers (driverauth.js)
-initDriverAuth(app, { requireAuth, db, sign: (u, exp) => jwt.sign(u, JWT_SECRET, { expiresIn: exp }), getBoard: (site) => truckmate.buildBoard(site), docsLink: (site, trip, by) => driverLinks.ensureDocsLink(site, trip, by),
+initDriverAuth(app, { requireAuth, requireAdmin: requireCompanyAdmin, secret: JWT_SECRET, db, sign: (u, exp) => jwt.sign(u, JWT_SECRET, { expiresIn: exp }), getBoard: (site) => truckmate.buildBoard(site), docsLink: (site, trip, by) => driverLinks.ensureDocsLink(site, trip, by),
   roster: async () => { const token = samsaraTokenFrom(process.env); const idx = token ? await getLiveIndex(token) : null; return Object.entries((idx && idx.driversByCode) || {}).map(([code, d]) => ({ code, name: d.name, phone: d.info && d.info.phone })).filter((d) => d.phone); } });
 initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules, atStopNow: async () => (waiting ? waiting.openTrips() : new Set()),
   // trucks and trips reported down, or with a road call still open in the last 5 days: a wrecker moves them, they aren't rolling

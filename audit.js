@@ -3,7 +3,7 @@
 // link is written here with who, when and what. It sits in front of all the routes, so a new feature is covered without anyone
 // remembering to log it. Rows are only ever added: no route edits or deletes them. Passwords, tokens and files are never stored.
 // ---------------------------------------------------------------
-const SECRET = /pass|pwd|token|secret|api.?key|authorization|credential|ssn|card|cvv|bytes|base64|signature|^next$|^current$/i;
+const SECRET = /pass|pwd|token|secret|api.?key|authorization|credential|ssn|card|cvv|bytes|base64|signature|^next$|^current$|^pin$|^newpin$/i;
 const MAX_TEXT = 200;
 const SKIP = /^\/(jarvis\/transcribe|push\/|retell\/)/;
 const LINK = /^\/(br|dc|sr|lesson|wt)\/[^/]+/;
@@ -50,6 +50,9 @@ const LABELS = [
   [/^POST \/truckmate\/asks\//, 'Answered a Jarvis question'],
   [/^POST \/truckmate\/requests\/[^/]+\/done/, 'Sent a Teach Jarvis request'],
   [/^POST \/truckmate\/requests/, 'Wrote in Teach Jarvis'],
+  [/^POST \/admin\/driver-pins\/[^/]+\/show/, 'Looked at a driver PIN'],
+  [/^POST \/admin\/driver-pins\/[^/]+\/new/, 'Gave a driver a new PIN'],
+  [/^POST \/admin\/driver-pins\/[^/]+\/clear/, 'Cleared a driver PIN'],
 ];
 const VERB = { POST: 'Did', PUT: 'Changed', PATCH: 'Changed', DELETE: 'Deleted' };
 // What happened, in plain words. Pure.
