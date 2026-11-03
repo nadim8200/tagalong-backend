@@ -8,6 +8,8 @@ import { findStaff } from './directory.js';
 const KEY = 'taAlertRecipients';
 const TEXT_KEY = 'taAlertTexts';   // who gets a TEXT for alerts that send one (phone numbers or employees)
 export const ALERTS = [
+  { key: 'driver_paperwork', label: 'Paperwork from a driver', when: 'A driver sends paperwork from the driver page (POD, BOL, lumper receipt, receipts): what it is, the freight bill number and box count, and the load\'s information, with the files.', defaults: ['POD Accounting'] },
+  { key: 'load_report', label: 'Load report when a load finishes', when: 'A load is delivered or closed, LTL or broker: the whole report of the load with the rate con, the driver\'s paperwork and box counts, the emails, calls and texts, and the alerts.', defaults: ['outbound@floridabeauty.us', 'POD Accounting'] },
   { key: 'ratecon_inbound', label: 'New rate con to enter', when: 'Gus sends a rate con to Jarvis: forwarded right away with his instructions, so the load can be entered in the system.', defaults: ['inbound-dispatch@floridabeauty.us'] },
   { key: 'ratecon_accounting', label: 'Rate con for Accounting (and revised rate cons, TONU)', when: 'A rate con from Gus shows up in TruckMate with a trip and a truck: the load information and the rate con. A revised rate con or a TONU goes right away with what changed.', defaults: ['POD Accounting', 'Rafael Romero'] },
   { key: 'artis_left_short', label: 'Truck left — boxes not received from the shipper', when: 'A truck departed while ARTIS shows boxes for its customers never received at our terminal (once per trip): verify if rejected or contact the shipper.', defaults: ['ntellez@floridabeauty.us'] },

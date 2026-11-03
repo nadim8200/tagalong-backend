@@ -17,6 +17,7 @@ import { tripTimes } from './triptimes.js';
 import { tripHistory } from './driverlink.js';
 import { ocFor } from './carriers.js';
 import { sendMail, mailConfig } from './mailer.js';
+import { loadType } from './breakdownreport.js';
 
 const TZ = 'America/New_York';
 const MAX_MAIL_BYTES = 2.8 * 1024 * 1024;   // Outlook sendMail limit is ~3 MB per attachment
@@ -66,6 +67,8 @@ export function buildRundown({ trip, rec, stores, finishedAt = null, reason = nu
     track,
     alerts,
     docs: s.docs || [],
+    paperwork: (s.paperwork || []).filter((p) => p.trip === String(trip)).sort((a, b) => String(a.at).localeCompare(String(b.at))),
+    loadType: loadType(item),
   };
 }
 
@@ -189,6 +192,10 @@ export async function renderRundownPdf(r, { originals = [] } = {}) {
     });
   } else none('No alerts were raised on this load.');
 
+  h2('Driver paperwork & box counts');
+  if ((r.paperwork || []).length) r.paperwork.forEach((p) => { const b = r.bills.find((x) => String(x.number || '').toUpperCase() === String(p.bill || '').toUpperCase()); bullet(`${fmt(p.at)} - ${String(p.kind).toUpperCase()}${p.bill ? ` for bill ${p.bill}` : ''}${p.boxes != null ? ` - ${p.boxes} boxes${b && b.pieces != null ? (Number(b.pieces) === p.boxes ? ' (matches TruckMate)' : ` (TruckMate has ${b.pieces})`) : ''}` : ''}${p.bill && !b ? ' - bill not on this load' : ''} - ${p.pages} file(s) - confirmation ${p.confirmation || '-'}${p.by ? ` - ${p.by}` : ''}`); });
+  else none('No paperwork from the driver page.');
+
   h2('Check-ins & driver updates');
   if (r.checkins.length) r.checkins.slice().reverse().forEach((c) => bullet(`${fmt(c.at)} - ${c.source}${c.by ? ` (${c.by})` : ''}${c.from ? ` from ${c.from}` : ''}: ${c.location ? `${c.location} - ` : ''}${c.text}${c.issue ? ' [PROBLEM]' : ''}`, { size: 9.5 }));
   else none('No check-ins.');
@@ -229,7 +236,7 @@ export async function renderRundownPdf(r, { originals = [] } = {}) {
   return pdf.save();
 }
 
-export function initRundowns(app, { requireAuth, db, docs = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initRundowns(app, { requireAuth, db, docs = null, recipients = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
@@ -244,6 +251,7 @@ export function initRundowns(app, { requireAuth, db, docs = null, env = process.
       g(`taTripComms:${site}`, {}), g(`taStopConfirm:${site}`, {}), g(`taDriverLinks:${site}`, { byTrip: {} }),
       g(`taWatch:${site}`, { alerts: {} }), g(`taWatchArchive:${site}`, {}),
     ]);
+    const paperwork = (await g(`taDriverPaperwork:${site}`, [])) || [];
     const tok = (links.byTrip || {})[trip];
     const link = tok ? await g(`taDriverLink:${tok}`, null) : null;
     const track = await g(`taDriverPos:${site}:${trip}`, []);
@@ -253,7 +261,7 @@ export function initRundowns(app, { requireAuth, db, docs = null, env = process.
     if (rec && rec.item && manifest) rec.item._manifest = manifest;
     return {
       manifest, ratecon: rcs[trip] || null, rcChecks: checks[trip] || {}, visits: visits[trip] || {}, carriers, checkins: checkins[trip] || [],
-      comms: comms[trip] || [], stopConfirm: confirms[trip] || {}, link, track, watch, watchArchive: archive[trip] || [], docs: docList.filter((d) => d.kind !== 'rundown'),
+      comms: comms[trip] || [], stopConfirm: confirms[trip] || {}, link, track, watch, watchArchive: archive[trip] || [], docs: docList.filter((d) => d.kind !== 'rundown'), paperwork: paperwork.filter((p) => p.trip === String(trip)),
     };
   }
 
@@ -285,7 +293,8 @@ export function initRundowns(app, { requireAuth, db, docs = null, env = process.
 
   async function deliver(site, trip, { to = null, by = 'AI Dispatcher' } = {}) {
     const cfg = await settings();
-    const rcpts = to || cfg.to || [];
+    // the people on Employees → Alert emails "Load report", unless someone set a list here
+    const rcpts = to || ((cfg.to || []).length ? cfg.to : recipients ? await recipients('load_report').catch(() => []) : []);
     let made = await makePdf(site, trip);
     if (!made) throw new Error('No record of that load.');
     let note = '';
@@ -303,9 +312,10 @@ export function initRundowns(app, { requireAuth, db, docs = null, env = process.
       try {
         const r = await sendMail({
           to: rcpts,
-          subject: `Load ${trip} ${d.reason === 'delivered' ? 'delivered' : 'finished'} — rundown${d.truck ? ` (Truck ${d.truck}` : ''}${d.destination ? ` → ${d.destination})` : d.truck ? ')' : ''}`,
+          subject: ['LOAD REPORT', [d.truck && `TK ${d.truck}`, d.trailer && `TL ${d.trailer}`, `TO ${trip}`].filter(Boolean).join(' '), d.loadType ? String(d.loadType).toUpperCase() : null].filter(Boolean).join(' // '),
           html: `<p><b>Trip ${trip}</b>${d.truck ? ` · Truck ${d.truck}` : ''}${d.oc ? ` · Outside carrier ${(d.oc.carrier && d.oc.carrier.name) || ''}` : ''}<br>${d.origin || ''} → ${d.destination || ''}<br>Finished ${fmt(d.finishedAt)}</p>
-<p>${d.bills.length} bill(s) · ${d.alerts.length} alert(s) · ${d.comms.length} call/text/email(s) · ${d.checkins.length} check-in(s)</p>
+<p>${d.loadType ? `${d.loadType} · ` : ''}${d.bills.length} bill(s) · ${(d.paperwork || []).length} paperwork from the driver · ${d.alerts.length} alert(s) · ${d.comms.length} call/text/email(s) · ${d.checkins.length} check-in(s)</p>
+${(d.paperwork || []).length ? `<ul>${d.paperwork.map((p) => `<li>${String(p.kind).toUpperCase()}${p.bill ? ` for bill ${p.bill}` : ''}${p.boxes != null ? ` — ${p.boxes} boxes` : ''} — confirmation ${p.confirmation || '—'}</li>`).join('')}</ul>` : ''}
 <p>The full rundown — timeline, stops, alerts and who handled them, every call and text, and the original paperwork — is attached as a PDF.${note ? ` ${note}` : ''}</p>
 <p style="color:#667">Sent automatically by AI Dispatcher.</p>`,
           attachments: [{ name: `Rundown ${trip}.pdf`, contentType: 'application/pdf', bytes: made.bytes }],

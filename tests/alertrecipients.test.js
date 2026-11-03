@@ -22,7 +22,7 @@ test('admins change the lists in the console; the alert uses the saved list', as
   await routes['PUT /truckmate/alert-recipients'].at(-1)({ body: { alerts: { artis_left_short: ['Dispatch', 'Frank Ducassi'] } } }, { json: () => {}, status: () => ({ json: () => {} }) });
   assert.deepEqual(await ar.resolve('artis_left_short'), ['dispatches@floridabeauty.us', 'fducassi@floridabeauty.us']);
   let out; await routes['GET /truckmate/alert-recipients'].at(-1)({}, { json: (j) => { out = j; } });
-  assert.equal(out.alerts.length, 17); assert.deepEqual(out.groups, ['Dispatch']);
+  assert.equal(out.alerts.length, 19); assert.deepEqual(out.groups, ['Dispatch']);
 });
 
 test('loading-temperature emails have their own list: warehouse + outbound, separate from the reefer list', () => {

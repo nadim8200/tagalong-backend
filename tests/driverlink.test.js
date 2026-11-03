@@ -214,14 +214,31 @@ test('driver uploads POD photos from the link: stored on the load, marked POD, l
   const stored = []; const marked = []; const checkins = [];
   const docs = { enabled: true, storeDocs: async (a) => { stored.push(a); return a.files.map((f, i) => ({ id: String(100 + i) })); }, markDocs: async (a) => { marked.push(a); } };
   const carriers = { addCheckins: async (site, trip, list) => checkins.push({ trip, list }), setDriverInfo: async () => {} };
-  const dl = initDriverLinks(app, { requireAuth: () => {}, db, docs, carriers, env: {}, fetchFn: null });
-  await dl.overlay('florida-beauty', [{ trip: { tripNumber: '9', powerUnit: 'OC9' } }]);
+  const sentOn = [];
+  const dl = initDriverLinks(app, { requireAuth: () => {}, db, docs, carriers, onPaperwork: async (...x) => sentOn.push(x), env: {}, fetchFn: null });
+  await dl.overlay('florida-beauty', [{ trip: { tripNumber: '9', powerUnit: 'OC9' }, freightBills: [{ billNumber: 'M5055135' }, { billNumber: 'M5055079' }] }]);
   const made = await app.call('POST', '/truckmate/oc/:trip/link', { trip: '9' });
-  const r = await app.call('POST', '/driver/link/:token/docs', { token: made.body.token }, { kind: 'pod', files: [{ mediaType: 'image/jpeg', dataBase64: 'AAAA' }, { mediaType: 'image/jpeg', dataBase64: 'BBBB' }] });
-  assert.equal(r.status, 200);
-  assert.equal(stored[0].kind, 'driverdoc'); assert.equal(stored[0].trip, '9');
+  const two = [{ mediaType: 'image/jpeg', dataBase64: 'AAAA' }, { mediaType: 'image/jpeg', dataBase64: 'BBBB' }];
+  assert.deepEqual((await app.call('GET', '/driver/link/:token', { token: made.body.token })).body.bills, ['M5055135', 'M5055079'], 'the driver picks from the load\'s bills');
+  assert.equal((await app.call('POST', '/driver/link/:token/docs', { token: made.body.token }, { kind: 'pod', bill: 'M50', files: two })).status, 400, '6 to 10 characters');
+  assert.equal((await app.call('POST', '/driver/link/:token/docs', { token: made.body.token }, { kind: 'pod', bill: 'M5055135', boxes: '2.5', files: two })).status, 400, 'a whole box count');
+  const r = await app.call('POST', '/driver/link/:token/docs', { token: made.body.token }, { kind: 'pod', bill: ' m5055135 ', boxes: '12', files: two });
+  await new Promise((ok) => { setTimeout(ok, 5); });
+  assert.deepEqual(sentOn[0].slice(0, 2), ['florida-beauty', '9']); assert.equal(sentOn[0][2].boxes, 12); assert.equal(sentOn[0][2].label, 'POD'); assert.equal(sentOn[0][2].confirmation, r.body.confirmation);
+  assert.equal(r.status, 200); assert.match(r.body.confirmation, /^FB-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/); assert.equal(r.body.bill, 'M5055135');
+  assert.equal(stored[0].kind, 'driverdoc'); assert.equal(stored[0].trip, '9'); assert.equal(stored[0].files[0].filename, 'POD-M5055135-9-1.jpg');
   assert.equal(marked[0].docType, 'proof_of_delivery');
-  assert.match(checkins[0].list[0].text, /POD \(2 pages\)/);
+  assert.match(checkins[0].list[0].text, /POD for bill M5055135, 12 boxes \(2 files\) · confirmation FB-/);
+  const rec = (await db.get('taDriverPaperwork:florida-beauty', []))[0];
+  assert.equal(rec.onLoad, true); assert.equal(rec.confirmation, r.body.confirmation);
+  const lumper = await app.call('POST', '/driver/link/:token/docs', { token: made.body.token }, { kind: 'lumper', bill: 'X1234567', files: two });
+  assert.equal(lumper.status, 200); assert.equal(marked[1].docType, 'lumper_receipt');
+  assert.equal((await db.get('taDriverPaperwork:florida-beauty', []))[0].onLoad, false, 'a bill not on this load is kept, and marked');
+  const old = await app.call('POST', '/driver/link/:token/docs', { token: made.body.token }, { kind: 'pod', files: two });
+  assert.equal(old.status, 200, 'a phone still on the old page sends no bill: it still lands'); assert.equal(stored.at(-1).files[0].filename, 'POD-NOBILL-9-1.jpg');
+  const temp = await app.call('POST', '/driver/link/:token/docs', { token: made.body.token }, { kind: 'temp', files: two });
+  assert.equal(temp.status, 200); assert.equal(temp.body.confirmation, undefined, 'photos need no bill number');
+  assert.equal(sentOn.length, 3, 'photos never go to Accounting');
 });
 
 test('upload-only link for a company driver: no location sharing, no info form', async () => {

@@ -37,6 +37,11 @@ import crypto from 'crypto';
 import { wantsContact } from './helpdesk.js';
 import { scanPdf } from './scanpdf.js';
 
+// What a driver can send as paperwork, like Transflo's document types. Each needs the freight bill number on the paper.
+export const PAPER_KINDS = { pod: { label: 'POD', file: 'POD', docType: 'proof_of_delivery' }, bol: { label: 'BOL', file: 'BOL', docType: 'bill_of_lading' }, lumper: { label: 'lumper receipt', file: 'LUMPER', docType: 'lumper_receipt' }, receipt: { label: 'receipt', file: 'RECEIPT', docType: 'receipt' }, other: { label: 'paperwork', file: 'DOC', docType: 'other_paperwork' } };
+// A receipt number the driver can quote, like Transflo's confirmation: no 0/O or 1/I. Pure-ish.
+export const confirmationCode = () => { const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; const pick = () => c[Math.floor(Math.random() * c.length)]; return `FB-${[0, 0, 0].map(() => Array.from({ length: 4 }, pick).join('')).join('-')}`; };
+
 const LINK_DAYS = 5;
 const MIN_STORE_GAP_MS = 25 * 1000;   // keep at most one stored point per ~25s
 const MAX_POINTS = 6000;              // per trip; parked time folds into one point
@@ -180,7 +185,7 @@ export function cleanFixes(list, now = Date.now()) {
   }).filter(Boolean).sort((a, b) => a.at.localeCompare(b.at));
 }
 
-export function initDriverLinks(app, { requireAuth, db, training = null, carriers = null, ringcentral = null, docs = null, getBoard = null, push = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initDriverLinks(app, { requireAuth, db, training = null, carriers = null, ringcentral = null, docs = null, getBoard = null, push = null, help = null, onPaperwork = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const base = String(env.DRIVER_LINK_BASE || 'https://mytagalong.app').replace(/\/+$/, '');
   const company = env.DRIVER_LINK_COMPANY || 'Florida Beauty Flora';
@@ -426,12 +431,14 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
     return { drivers: [{ name: oc.driverName || '', phone: oc.driverPhone || '' }, { name: oc.driver2Name || '', phone: oc.driver2Phone || '' }], truck: oc.truck || '', trailer: oc.trailer || '' };
   };
   const needInfo = (link) => link.purpose !== 'docs' && (!link.infoAt || infoMissing(link.info, crewOf(link)).length > 0);
+  // the load's bill numbers, so the driver picks the one on the paper instead of typing it
+  const billsNow = (link) => { const item = (boardTrips.get(link.site) || []).find((it) => String(tripOf(it).tripNumber || '') === link.trip); return [...new Set(((item && (item.freightBills || item.orders)) || tripOf(item).freightBills || []).map((b) => String(b.billNumber || '').trim()).filter(Boolean))].slice(0, 30); };
   const publicView = (link, status) => ({
     crew: crewOf(link), info: infoOf(link), needInfo: needInfo(link), purpose: link.purpose || 'track',
     active: isLive(status), status, company, trip: link.trip,
     carrierName: link.carrierName || null, origin: link.origin || null, destination: link.destination || null,
     sharing: !!link.sharing && status === 'sharing', lastPingAt: link.lastPingAt || null,
-    expiresAt: link.expiresAt, pingEverySec: 60,
+    expiresAt: link.expiresAt, pingEverySec: 60, bills: billsNow(link),
   });
 
   app.get('/driver/link/:token', async (req, res) => {
@@ -564,18 +571,27 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
       if (!isLive(status) && status !== 'completed') return res.status(410).json({ active: false, status });
       const b = req.body || {};
-      const kind = b.kind === 'bol' ? 'bol' : b.kind === 'temp' ? 'temp' : b.kind === 'breakdown' ? 'breakdown' : 'pod';
+      const kind = PAPER_KINDS[b.kind] || b.kind === 'temp' || b.kind === 'breakdown' ? b.kind : 'pod';
       const files = (Array.isArray(b.files) ? b.files : []).slice(0, 8);
       if (!files.length) return res.status(400).json({ error: 'Add at least one photo.' });
+      // paperwork carries the freight bill number off the paper, like Transflo asks for it
+      const bill = PAPER_KINDS[kind] ? String(b.bill || '').trim().toUpperCase().replace(/\s+/g, '') : null;
+      // the page asks for it; a phone still on the old page sends none, and its paperwork still has to land
+      if (PAPER_KINDS[kind] && bill && !/^[A-Z0-9-]{6,10}$/.test(bill)) return res.status(400).json({ error: 'Add the freight bill number on the paper (6 to 10 letters and numbers).' });
+      const confirmation = PAPER_KINDS[kind] ? confirmationCode() : null;
+      const boxes = PAPER_KINDS[kind] && b.boxes != null && String(b.boxes).trim() !== '' ? Number(b.boxes) : null;
+      if (boxes != null && !(Number.isInteger(boxes) && boxes >= 0 && boxes <= 9999)) return res.status(400).json({ error: 'The box count has to be a whole number.' });
       const by = `${(link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'Driver'} (tracking link)`;
       // pages from the page scanner become one PDF for the load
-      const scanned = b.scan && (kind === 'pod' || kind === 'bol') ? [{ filename: `${kind.toUpperCase()}-${link.trip}.pdf`, mediaType: 'application/pdf', dataBase64: (await scanPdf(files.map((f) => Buffer.from(String(f.dataBase64 || ''), 'base64')))).toString('base64') }] : null;
-      const stored = await docs.storeDocs({ site: link.site, kind: 'driverdoc', trip: link.trip, files: (scanned || files).map((f, i) => ({ ...f, filename: f.filename || `${kind.toUpperCase()}-${link.trip}-${i + 1}.jpg`, page: i + 1 })), by });
-      await docs.markDocs({ site: link.site, ids: stored.map((d) => d.id), docType: kind === 'bol' ? 'bill_of_lading' : kind === 'temp' ? 'reefer_temp' : kind === 'breakdown' ? 'breakdown_photo' : 'proof_of_delivery' });
+      const scanned = b.scan && PAPER_KINDS[kind] ? [{ filename: `${PAPER_KINDS[kind].file}-${bill || 'NOBILL'}-${link.trip}.pdf`, mediaType: 'application/pdf', dataBase64: (await scanPdf(files.map((f) => Buffer.from(String(f.dataBase64 || ''), 'base64')))).toString('base64') }] : null;
+      const stored = await docs.storeDocs({ site: link.site, kind: 'driverdoc', trip: link.trip, files: (scanned || files).map((f, i) => ({ ...f, filename: PAPER_KINDS[kind] && !scanned ? `${PAPER_KINDS[kind].file}-${bill || 'NOBILL'}-${link.trip}-${i + 1}.${/pdf/i.test(f.mediaType || '') ? 'pdf' : 'jpg'}` : f.filename || `${kind.toUpperCase()}-${link.trip}-${i + 1}.jpg`, page: i + 1 })), by });
+      await docs.markDocs({ site: link.site, ids: stored.map((d) => d.id), docType: PAPER_KINDS[kind] ? PAPER_KINDS[kind].docType : kind === 'temp' ? 'reefer_temp' : 'breakdown_photo' });
+      if (PAPER_KINDS[kind]) await db.update(`taDriverPaperwork:${link.site}`, (cur) => [{ at: new Date().toISOString(), trip: String(link.trip), kind, bill, boxes, onLoad: !!bill && billsNow(link).map((x) => x.toUpperCase()).includes(bill), pages: stored.length, docIds: stored.map((d) => d.id), confirmation, by }, ...(Array.isArray(cur) ? cur : [])].slice(0, 2000), []);
+      if (PAPER_KINDS[kind] && onPaperwork) Promise.resolve(onPaperwork(link.site, String(link.trip), { kind, label: PAPER_KINDS[kind].label, bill, boxes, confirmation, by, docIds: stored.map((d) => d.id) })).catch((e) => console.warn('[driver paperwork]', e.message));
       if (kind === 'breakdown' && roadHook) Promise.resolve(roadHook(link.site, String(link.trip), { docIds: stored.map((d) => d.id), via: 'upload link', by })).catch(() => {});
       if (kind === 'temp' && photoHook) Promise.resolve(photoHook(link.site, String(link.trip), { docIds: stored.map((d) => d.id), via: 'upload link', by, forced: true })).catch(() => {});
-      if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: new Date().toISOString(), source: 'driver app', text: `Driver sent the ${kind === 'temp' ? 'reefer temp photo' : kind === 'breakdown' ? 'breakdown photos' : kind.toUpperCase()} (${stored.length} ${stored.length === 1 ? 'page' : 'pages'})`, by }]);
-      res.json({ ok: true, count: stored.length });
+      if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: new Date().toISOString(), source: 'driver app', text: `Driver sent the ${kind === 'temp' ? 'reefer temp photo' : kind === 'breakdown' ? 'breakdown photos' : PAPER_KINDS[kind].label}${bill ? ` for bill ${bill}` : ''}${boxes != null ? `, ${boxes} boxes` : ''} (${stored.length} ${stored.length === 1 ? 'file' : 'files'})${confirmation ? ` · confirmation ${confirmation}` : ''}`, by }]);
+      res.json({ ok: true, count: stored.length, ...(confirmation ? { confirmation, bill } : {}) });
     } catch (e) { res.status(400).json({ error: e.message || 'Could not upload.' }); }
   });
 

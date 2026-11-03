@@ -978,7 +978,7 @@ const stopVisits = initStopVisits({ db, env: process.env, listAddresses: async (
 const carriers = initCarriers(app, { requireAuth: requireDispatch, db });
 // OC driver tracking links (TagAlong app / browser) — positions overlay the board.
 // load rundown PDF + Outlook email when a load finishes
-const rundowns = initRundowns(app, { requireAuth: requireDispatch, db, docs, env: process.env });
+const rundowns = initRundowns(app, { requireAuth: requireDispatch, db, docs, recipients: (k) => alertRecipients.resolve(k), env: process.env });
 let truckmate;
 // Calls & texts log by day (who called / was texted, both numbers, what was said)
 // the client list (flowers + produce customers): who's calling / emailing, real business names, their loads
@@ -995,7 +995,16 @@ directory.setCallLog(async (phone) => {
 // "someone needs us to reach out" (calls, emails, texts, driver app) → email + text the right people
 let helpdesk = null;
 const help = { raise: (r) => (helpdesk ? helpdesk.raise(r) : Promise.resolve(null)) };
-const driverLinks = initDriverLinks(app, { training, help, requireAuth: requireDispatch, db, carriers, ringcentral: rc, docs, push, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
+const driverLinks = initDriverLinks(app, { training, help, onPaperwork: async (site, trip, p) => {
+  // the driver's paperwork, to Accounting right away with the load's information (paperworkmail.js)
+  const to = await alertRecipients.resolve('driver_paperwork');
+  if (!to.length) return;
+  const item = (((await truckmate.buildBoard(site).catch(() => ({}))) || {}).trips || []).find((it) => String(((it && it.trip) || it || {}).tripNumber || '') === trip) || null;
+  let room = 2.8 * 1024 * 1024;
+  const files = (await docs.readDocs({ site, ids: p.docIds })).filter((f) => { const ok = f.data && f.data.length <= room; if (ok) room -= f.data.length; return ok; });
+  const { renderPaperworkEmail } = await import('./paperworkmail.js');
+  await sendMail({ to, ...renderPaperworkEmail({ ...p, trip, item, files: p.docIds.length }), attachments: files.map((f, i) => ({ name: `${String(p.kind).toUpperCase()}-${p.bill || trip}-${i + 1}.${/pdf/i.test(f.mediaType || '') ? 'pdf' : 'jpg'}`, contentType: f.mediaType || 'application/pdf', bytes: f.data })) }, { env: process.env });
+}, requireAuth: requireDispatch, db, carriers, ringcentral: rc, docs, push, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 // driver calls / texts on a load, and their replies (RingCentral)
 // an employee texting Jarvis (phone on the Employees list) → the same answers as Ask Jarvis, as a short text
 // a picture in a text, saved on the load (or waiting for one)
