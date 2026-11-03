@@ -872,8 +872,13 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     let ok = false;
     try { ok = !!(key() && sig && (await Retell.verify(raw, key(), sig))); } catch { ok = false; }
     if (!ok) return res.status(401).json({ error: 'bad signature' });
+    // Jarvis's ETA call to a customer: only their own stop. The lookup answers with their ETA and box count, and they can leave a
+    // message for dispatch; every other tool refuses here, whatever the conversation asks for
+    const c = (req.body && req.body.call) || {};
+    if (c.metadata && c.metadata.purpose === 'customer-eta' && !CUSTOMER_ETA_TOOLS.has(String(req.path || req.originalUrl || '').split('?')[0].split('/').pop())) return res.json({ ok: false, found: false, say: 'On this call give only the delivery ETA and, if asked, the box count. For anything else, say dispatch will call them back.' });
     return next();
   }
+  const CUSTOMER_ETA_TOOLS = new Set(['lookup_load', 'take_message']);
   const argsOf = (req) => ((req.body && req.body.args) || req.body || {});
   const callOf = (req) => (req.body && req.body.call) || {};
   const callerPhone = (call) => (call.direction === 'outbound' ? call.to_number : call.from_number);
@@ -987,6 +992,8 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     };
     try {
       const meta = call.metadata || {};
+      // Jarvis's courtesy ETA call to a customer: their ETA and box count only, never the route or anyone else's stop
+      if (meta.purpose === 'customer-eta') return reply({ found: true, caller_is: 'the customer at this stop (Jarvis called them)', speaking_with: meta.customer || null, eta: meta.eta || null, boxes: meta.boxes != null ? Number(meta.boxes) : null, say: 'Give only the ETA, and the box count if they ask. Nothing else: no driver, route, other customers, rates or internal notes. For anything more, dispatch will call them back.' });
       // a business name put in any box is still a name (e.g. "Springfield Florist" as bill_number)
       const isName = (v) => v && /[A-Za-z]{3,}/.test(String(v)) && !/\d{3,}/.test(String(v));
       const said = a.customer_name || [a.bill_number, a.broker_load_number, a.trip_number, a.truck_number, a.trailer_number].find(isName) || null;
@@ -1129,7 +1136,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
         if (st.length) return reply({ found: true, matched_by: `${hit.by} + customer name`, caller_is: STAFF_IS, speaking_about: spokenName(st[0].customer), loads: [customerView(hit.item, eta, st)], say: `${STAFF_RULE} They asked about ${spokenName(st[0].customer)} on this load: give THAT customer's stop and ETA (the truck may stop elsewhere first — say how many stops before theirs only if asked).` });
         return reply({ found: true, matched_by: hit.by, caller_is: STAFF_IS, ...voiceFacts(hit.item, eta), say: `${STAFF_RULE}${asked ? ` "${asked}" is not a customer on this load as heard — say so, read the customers in stops_ahead, and ask which one.` : ''} If they name a customer, answer from stops_ahead (that customer's place and ETA) — next_stop is only the truck's next stop and may be someone else's.` });
       }
-      if (hit.role === 'driver' || (meta.trip && call.direction === 'outbound') || (profiles && profiles.anyLoad && await profiles.anyLoad(callerPhone(call)))) {
+      if (hit.role === 'driver' || (meta.trip && call.direction === 'outbound' && meta.purpose !== 'customer-eta') || (profiles && profiles.anyLoad && await profiles.anyLoad(callerPhone(call)))) {
         return reply({ found: true, matched_by: hit.by, caller_is: 'the driver of this load', ...voiceFacts(hit.item, eta) });
       }
       // a broker load (rate con on file) asked about by its number or the broker's name → the broker gets the whole load
@@ -1475,7 +1482,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
           from: call.from_number || null, to: call.to_number || null, ourLine: call.direction === 'outbound' ? call.from_number : call.to_number,
           minutes: rec.minutes, trip, summary: rec.summary, transcript: String(call.transcript || '').slice(0, 60000), recording: call.recording_url || null,
           ended: call.disconnection_reason || null, by: rec.by, purpose: purpose || null,
-          ...(consoleCall(call) ? { role: 'team', name: rec.by || null } : purpose === 'staff-alert' ? { role: 'team' } : purpose && call.direction === 'outbound' ? { role: 'driver' } : said ? { role: 'customer', name: spokenName(said) } : {}),
+          ...(consoleCall(call) ? { role: 'team', name: rec.by || null } : purpose === 'staff-alert' ? { role: 'team' } : purpose === 'customer-eta' ? { role: 'customer', name: (call.metadata && call.metadata.customer) || null } : purpose && call.direction === 'outbound' ? { role: 'driver' } : said ? { role: 'customer', name: spokenName(said) } : {}),
         }).catch(() => {});
       }
       // the whole conversation by email (Calls, texts & email → Jarvis call transcripts)
@@ -1722,6 +1729,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     'stop-instruction': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) about a change for {{customer}}: {{instruction}} The place is {{place}} ({{boxes}}). Tell them the change clearly, ask them to repeat it back, and ask them to say OK that they got it. Answer in their language (English or Spanish).',
     'stop-verify': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to confirm a stop: did they deliver {{boxes}} for {{customer}} at {{place}} ({{instruction}})? Ask yes or no; if no, ask what happened. Repeat their answer back briefly.',
     'transfer-check': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) about the planned trailer transfer: trailer {{trailer}} moves from truck {{from_truck}} to truck {{to_truck}}. Ask whether the transfer is done — is the trailer hooked to truck {{to_truck}} and rolling? If not, ask what is holding it up and when it will be done. Repeat their answer back briefly.',
+    'customer-eta': 'This is an outgoing courtesy call to {{customer}}{{contact_part}}. They asked on the trip sheet to be told before their Florida Beauty Flora delivery arrives. Tell them only that the truck is on the way and arrives around {{eta}}. Only if they ask how many boxes: {{boxes}}. Nothing else: no driver names or phone numbers, no other customers or stops, no route, no rates, no internal notes. If they need anything more, say dispatch will call them back, and end the call politely.',
     pod: 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to ask for the signed POD and BOL. Ask them to upload photos through the link we texted, or reply to our text with pictures.',
   };
   // Jarvis calls a driver — only with recorded consent, never after STOP, at most once per 30 minutes.
@@ -1755,6 +1763,32 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
       retell_llm_dynamic_variables: { greeting: `Hi${d.name ? ` ${String(d.name).split(' ')[0]}` : ''}, this is Jarvis, the automated assistant from Florida Beauty Flora dispatch, calling about trip ${digitByDigit(trip)}. This call may be recorded.`, call_context: context },
     } });
     await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: to, trip, purpose: why, by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
+    told();
+    return { ok: true, callId: call.call_id, to };
+  }
+  // Jarvis calls a customer who asked (on the trip sheet) to be told before the delivery: the truck is on the way and the ETA, and the
+  // box count if they ask. Nothing else. Never after STOP, at most once per number in 2 hours. Throws {status, message}.
+  async function callCustomer(trip, { phone, contact = null, customer = null, eta, boxes = null, by = 'Jarvis (call-ahead)' }) {
+    const fail = (status, message) => Object.assign(new Error(message), { status });
+    if (!key() || !env.RETELL_FROM_NUMBER) throw fail(503, 'Jarvis voice is not set up yet (Retell key and number in Render).');
+    const cfg = await db.get(cfgKey, {});
+    if (!cfg.agentId) throw fail(503, 'Set up the Jarvis agent first (Calls, texts & email → Jarvis voice).');
+    const to = e164(phone);
+    if (!to) throw fail(400, 'No phone number for this customer.');
+    const k = last10(to);
+    const [optOut, recent] = await Promise.all([db.get('taSmsOptOut', {}), db.get(callsKey, [])]);
+    if (optOut[k]) throw fail(409, 'This number replied STOP — no automated calls.');
+    if ((Array.isArray(recent) ? recent : []).some((c) => c.phone && last10(c.phone) === k && Date.now() - Date.parse(c.at) < 2 * 3600000)) throw fail(429, 'Jarvis called this number in the last 2 hours.');
+    const vars = { customer: customer || 'the customer', contact_part: contact ? ` (${contact})` : '', eta: eta || 'soon', boxes: boxes != null ? `${boxes} boxes on the trip sheet for them` : 'not on file, say dispatch will confirm' };
+    const context = PURPOSE['customer-eta'].replace(/\{\{(\w+)\}\}/g, (m, v) => vars[v] || '');
+    const told = () => (outreach ? Promise.resolve(outreach({ site, trip, channel: 'call', to, text: context, by, kind: 'customer-eta' })).catch(() => {}) : null);
+    if (training) { const held = await training.hold('call', { to, trip, purpose: `ETA call to ${customer || 'a customer'}`, text: context }); if (held) { told(); return { ok: true, callId: null, to, ...held }; } }
+    const call = await retell('/v2/create-phone-call', { body: {
+      from_number: e164(env.RETELL_FROM_NUMBER), to_number: to, override_agent_id: cfg.agentId,
+      metadata: { trip, purpose: 'customer-eta', by, customer: customer || null, eta: eta || null, boxes: boxes != null ? String(boxes) : null },
+      retell_llm_dynamic_variables: { greeting: `Hi${contact ? ` ${String(contact).split(' ')[0]}` : ''}, this is Jarvis, the automated assistant from Florida Beauty Flora dispatch. You asked to be told before your delivery arrives. This call may be recorded.`, call_context: context },
+    } });
+    await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'outbound', phone: to, trip, purpose: 'customer-eta', by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
     told();
     return { ok: true, callId: call.call_id, to };
   }
@@ -1894,5 +1928,5 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     if (!logged && directory && directory.logContact) await directory.logContact({ phone: num, to: name, by, message, result: { call: 'calling' }, source: trip ? `Jarvis — trip ${trip}` : 'Jarvis' }).catch(() => {});
     return { called: true, callId: call.call_id };
   }
-  return { findLoad, live, placeCall, callsFor, callStaff, placeDueCallbacks, useOutreach: (fn) => { outreach = fn; } };
+  return { findLoad, live, placeCall, callCustomer, callsFor, callStaff, placeDueCallbacks, useOutreach: (fn) => { outreach = fn; } };
 }

@@ -37,7 +37,7 @@ function setup(extraEnv = {}, opts = {}) {
     const sig = sign ? await Retell.sign(raw, KEY) : 'v=1,d=bad';
     let code = 200; let out;
     const res = { status(c) { code = c; return this; }, json(j) { out = j; }, end() {} };
-    const req = { body, rawBody: raw, params: body.params || {}, user, get: (h) => (h === 'x-retell-signature' ? sig : undefined) };
+    const req = { body, rawBody: raw, params: body.params || {}, user, path: route.split(' ')[1], get: (h) => (h === 'x-retell-signature' ? sig : undefined) };
     const hs = routes[route];
     let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); };
     await next();
@@ -1055,4 +1055,29 @@ test('dispatch notes on the phone: employees only, never a customer or broker', 
   assert.equal(staff.out.ok, true); assert.equal(staff.out.notes[0].why, 'driver out of hours');
   assert.equal(seen[0].status, 'open');
   assert.equal((await v.hit('POST /retell/fn/dispatch_log', { args: {}, call: { direction: 'inbound', from_number: '+13055550100' } }, { sign: false })).code, 401);
+});
+
+test('Jarvis calling a customer before their delivery: the lookup gives only their ETA and box count, never the route like a driver call', async () => {
+  const v = setup();
+  const call = { call_id: 'eta1', direction: 'outbound', to_number: '+15550100527', metadata: { trip: '624393', purpose: 'customer-eta', customer: 'AMLINGS', eta: '3:40 PM Eastern', boxes: '25' } };
+  const r = await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '624393' }, call });
+  assert.deepEqual(Object.keys(r.out).sort(), ['boxes', 'caller_is', 'eta', 'found', 'say', 'speaking_with'].sort());
+  assert.equal(r.out.speaking_with, 'AMLINGS'); assert.equal(r.out.boxes, 25);
+  assert.ok(!/stops|driver_name|4394668/.test(JSON.stringify(r.out)), 'no route, no driver');
+  // a plain outbound call on the trip is still the driver's
+  const d = await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '624393' }, call: { call_id: 'd1', direction: 'outbound', to_number: '+17864394668', metadata: { trip: '624393', purpose: 'check' } } });
+  assert.equal(d.out.caller_is, 'the driver of this load');
+});
+
+test('on a customer ETA call every tool but the lookup and take a message refuses, whatever the customer asks', async () => {
+  const v = setup();
+  const call = { call_id: 'eta2', direction: 'outbound', to_number: '+15550100527', metadata: { trip: '624393', purpose: 'customer-eta', customer: 'AMLINGS', eta: '3:40 PM Eastern', boxes: '25' } };
+  const tools = ['boxes_check', 'follow_up_load', 'dispatch_log', 'report_missing_boxes', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'road_call_details', 'report_problem', 'report_breakdown', 'breakdown_update', 'breakdown_fixed', 'answer_stop'];
+  for (const t of tools) {
+    const r = await v.hit(`POST /retell/fn/${t}`, { args: { trip_number: '624393', customer_name: 'Native Chicago', stop: 'Native Chicago' }, call }); // eslint-disable-line no-await-in-loop
+    assert.equal(r.out.ok, false, t); assert.match(r.out.say, /only the delivery ETA/, t);
+    assert.ok(!/Native|stops|driver/i.test(JSON.stringify(r.out).replace(/delivery ETA/, '')), `${t} said nothing else`);
+  }
+  assert.equal((await v.hit('POST /retell/fn/take_message', { args: { message: 'Please use the side door', caller_name: 'Brenda' }, call })).out.saved, true, 'they can leave a message for dispatch');
+  assert.equal((await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '624393' }, call })).out.boxes, 25);
 });

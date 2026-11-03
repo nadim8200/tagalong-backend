@@ -39,7 +39,7 @@ export function loadsFor(code, items = []) {
   return { current: mine.filter((it) => ROLLING.test(String(tripOf(it).status || ''))).map(brief), next: mine.filter((it) => BOOKED.test(String(tripOf(it).status || ''))).map(brief) };
 }
 
-export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign, secret, roster, getBoard, docsLink = null, sheets = null, now = () => Date.now() }) {
+export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign, secret, roster, getBoard, docsLink = null, sheets = null, stopFlow = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const tripsKey = (code) => `taDriverTrips:${SITE}:${norm(code)}`;
   const byCode = async (code) => (await roster()).find((d) => norm(d.code) === norm(code)) || null;
@@ -91,6 +91,8 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       const trips = [...loads.current, ...loads.next].map((l) => l.trip);
       // the load message dispatch sent (names, addresses, PU#, times, notes): what TruckMate doesn't have
       if (sheets) for (const l of [...loads.current, ...loads.next]) l.sheet = await sheets.forDriver(await sheets.get(l.trip)); // eslint-disable-line no-await-in-loop
+      // an LTL load: the trip sheet's stops, each marked done with boxes and signed paperwork (stopflow.js)
+      if (stopFlow) { const items = await board(); for (const l of [...loads.current, ...loads.next]) l.ltl = await stopFlow.forDriver(items.find((it) => tripNo(it) === l.trip)); } // eslint-disable-line no-await-in-loop
       if (trips.length) await db.update(tripsKey(req.driver.code), (cur) => [...new Set([...trips, ...(Array.isArray(cur) ? cur : [])])].slice(0, 300), []);
       res.json({ name: req.driver.name, driverId: req.driver.code, ...loads });
     } catch (e) { res.status(502).json({ error: 'Could not load your loads. Try again.' }); }
@@ -122,6 +124,24 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       const d = sheets ? await sheets.dropped(trip, req.driver.name, { pickedUp: (req.body || {}).pickedUp, truck: l.truck, trailer: l.trailer }) : null;
       return d ? res.json({ ok: true, dropped: d }) : res.status(404).json({ error: 'Dispatch hasn\'t set a yard for this load.' });
     } catch (e) { return res.status(502).json({ error: 'Could not send. Call dispatch.' }); }
+  });
+  // LTL stop by stop: done (boxes + signed paperwork), an issue (with photos), and the load completed at the last stop
+  const mine = async (req, res) => { const trip = String(req.params.trip); const loads = loadsFor(req.driver.code, await board()); if (![...loads.current, ...loads.next].some((l) => l.trip === trip)) { res.status(404).json({ error: 'That load is not yours.' }); return null; } if (!stopFlow) { res.status(503).json({ error: 'Not available right now.' }); return null; } return trip; };
+  const answer = (res, r) => (r.error ? res.status(r.code || 400).json({ error: r.error }) : res.json(r));
+  const files = (b) => (Array.isArray(b.files) ? b.files : []).filter((f) => f && f.dataBase64).slice(0, 30);
+  app.post('/driver/me/loads/:trip/stops/:n/done', requireDriver, async (req, res) => {
+    const trip = await mine(req, res); if (!trip) return null;
+    const b = req.body || {};
+    try { return answer(res, await stopFlow.stopDone(trip, req.params.n, { boxes: b.boxes, files: files(b), scan: b.scan !== false, by: req.driver.name })); } catch (e) { return res.status(400).json({ error: e.message || 'Could not save.' }); }
+  });
+  app.post('/driver/me/loads/:trip/stops/:n/issue', requireDriver, async (req, res) => {
+    const trip = await mine(req, res); if (!trip) return null;
+    const b = req.body || {};
+    try { return answer(res, await stopFlow.stopIssue(trip, req.params.n, { text: b.text, files: files(b), by: req.driver.name })); } catch (e) { return res.status(400).json({ error: e.message || 'Could not send.' }); }
+  });
+  app.post('/driver/me/loads/:trip/complete', requireDriver, async (req, res) => {
+    const trip = await mine(req, res); if (!trip) return null;
+    try { return answer(res, await stopFlow.complete(trip, { by: req.driver.name })); } catch (e) { return res.status(400).json({ error: e.message || 'Could not complete.' }); }
   });
   app.get('/driver/me/paperwork', requireDriver, async (req, res) => {
     const mine = new Set((await db.get(tripsKey(req.driver.code), [])) || []);
