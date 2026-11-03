@@ -291,3 +291,32 @@ test('the customer notice route leaves the breakdown team routes alone', async (
     assert.equal(passed, true, trip); assert.equal(answered, false, trip);
   }
 });
+
+test('dispatch erases a wrong customer email and adds the right one: saved for that broker, so their next loads use it too', async () => {
+  const { companyKey } = await import('../statusmail.js');
+  assert.equal(companyKey('ARROW LINES SERVICES, INC.'), companyKey('Arrow Lines Services'));
+  const env = { NODE_ENV: 'test' };
+  const routes = {}; const logged = [];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, put: (p, ...h) => { routes[`PUT ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); } };
+  const db = memDb();
+  const sm = initStatusMail(app, { requireAuth: () => {}, db, env, comms: { log: async (s, t, e) => logged.push(e) } });
+  const arrow = (trip, extra = {}) => load({ trip: { tripNumber: trip, status: 'DEPSHIP' }, bills: [{ billNumber: 'B180784', billToName: 'ARROW LINES SERVICES, INC.', endZoneDescription: 'WESTON, FL, 33326' }],
+    extra: { _ratecon: { data: { broker: 'Arrow Lines Services', brokerEmail: 'arrowfl@arrowlines.com', contacts: [{ role: 'billing', email: 'accounting@arrowlines.com' }, { role: 'dispatch', email: 'me2trans@yahoo.com' }] } }, ...extra } });
+  await sm.process('florida-beauty', { trips: [arrow('626384'), arrow('626999')] }, { geo, now: NOW });
+  const call = async (key, params, body = {}) => { let out; const res = { json: (j) => { out = j; }, status(c) { out = { status: c }; return { json: (j) => { out = { status: c, ...j }; } }; } }; await routes[key]({ params, body, query: {}, user: { name: 'Gio' } }, res); return out; };
+  let p = await call('GET /truckmate/breakdown/:trip/preview', { trip: '626384' });
+  assert.deepEqual(p.emails, ['arrowfl@arrowlines.com', 'accounting@arrowlines.com', 'me2trans@yahoo.com']); assert.equal(p.company, 'Arrow Lines Services');
+  assert.equal((await call('PUT /truckmate/contacts/:trip', { trip: '626384' }, { emails: ['nope'] })).status, 400);
+  const r = await call('PUT /truckmate/contacts/:trip', { trip: '626384' }, { emails: ['arrowfl@arrowlines.com', 'me2trans@yahoo.com', 'Dispatch@ArrowLines.com'] });
+  assert.deepEqual([r.removed, r.added], [['accounting@arrowlines.com'], ['dispatch@arrowlines.com']]);
+  assert.deepEqual(r.emails, ['arrowfl@arrowlines.com', 'me2trans@yahoo.com', 'dispatch@arrowlines.com']);
+  assert.match(logged.at(-1).text, /erased accounting@arrowlines\.com · added dispatch@arrowlines\.com/);
+  // another Arrow Lines load: same fix, no one typed anything
+  p = await call('GET /truckmate/breakdown/:trip/preview', { trip: '626999' });
+  assert.deepEqual(p.emails, ['arrowfl@arrowlines.com', 'me2trans@yahoo.com', 'dispatch@arrowlines.com']);
+  // changing their mind: add the erased one back
+  const back = await call('PUT /truckmate/contacts/:trip', { trip: '626999' }, { emails: [...p.emails, 'accounting@arrowlines.com'] });
+  assert.ok(back.emails.includes('accounting@arrowlines.com'));
+  const cfg = await db.get('taStatusMailCfg', {});
+  assert.deepEqual(cfg.contactFixes[companyKey('Arrow Lines Services')].remove, []);
+});

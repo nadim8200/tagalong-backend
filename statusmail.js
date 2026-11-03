@@ -42,6 +42,14 @@ const MAX_PER_DAY = 15;
 
 const tripOf = (item) => (item && item.trip) || item || {};
 export const custKey = (name) => String(name || '').trim().toUpperCase().replace(/\s+/g, ' ');
+// a company the same however it's written: "Arrow Lines Services" = "ARROW LINES SERVICES, INC." Pure.
+export const companyKey = (name) => String(name || '').toUpperCase().replace(/[^A-Z0-9 ]+/g, ' ').replace(/\b(INC|LLC|L L C|CORP|CORPORATION|CO|COMPANY|LTD)\b/g, ' ').replace(/\s+/g, ' ').trim();
+// the companies on a load whose saved contact changes apply: bill-to on every bill, the broker on the rate con. Pure.
+export function loadCompanies(item) {
+  const rc = (item && item._ratecon && (item._ratecon.data || item._ratecon)) || {};
+  const names = [rc.broker, ...billsOf(item).map((b) => b.billToName)].filter(Boolean);
+  const seen = new Set(); return names.filter((n) => { const k = companyKey(n); if (!k || seen.has(k)) return false; seen.add(k); return true; });
+}
 const zipOf = (s) => { const m = String(s || '').match(/\b(\d{5})(?:-\d{4})?\b/); return m ? m[1] : null; };
 const cityOf = (s) => String(s || '').replace(/,?\s*\d{5}(-\d{4})?\s*$/, '').trim();
 // Billing / invoice / accounts-payable mailboxes get invoices, not hourly location updates. Pure.
@@ -91,7 +99,7 @@ export function tmContact(rec) {
 // merged by email (or phone), with where each came from. "verified" = the trip
 // sheet and TruckMate agree; a company whose email differs between them is
 // flagged. A dispatcher's edit for the load replaces the whole list. Pure.
-export function contactsFor(item, { customers = {}, edit = null, prefixes = DEFAULTS.prefixes } = {}) {
+export function contactsFor(item, { customers = {}, edit = null, prefixes = DEFAULTS.prefixes, fixes = {} } = {}) {
   const list = [];
   const add = (c, source) => {
     const email = c.email && emailList(c.email)[0];
@@ -126,6 +134,12 @@ export function contactsFor(item, { customers = {}, edit = null, prefixes = DEFA
   for (const c of rc.contacts || []) if (c && (c.email || c.phone)) add({ role: RC_ROLE[c.role] || 'other', company: c.company || (RC_ROLE[c.role] === 'broker' ? rc.broker : null), name: c.name, email: c.email, phone: c.phone }, 'rate con');
   // customer / broker profiles (Customers tab): contacts marked "Status emails"
   for (const pr of (item && item._profiles) || []) for (const c of pr.contacts || []) if (c.statusEmails && (c.email || c.phone)) add({ role: pr.type === 'broker' ? 'broker' : 'customer', company: pr.name, name: c.name, email: c.email, phone: c.phone }, 'customer profile');
+  // dispatch fixed this company's emails before (wrong one erased, right one added): kept for every load of theirs
+  const mine = loadCompanies(item).map((n) => ({ n, f: fixes[companyKey(n)] })).filter((x) => x.f);
+  const gone = new Set(mine.flatMap((x) => (x.f.remove || []).map((e) => String(e).toLowerCase())));
+  for (let i = list.length - 1; i >= 0; i -= 1) if (list[i].email && gone.has(list[i].email.toLowerCase())) { if (list[i].phone) list[i].email = null; else list.splice(i, 1); }
+  const rcB = (item && item._ratecon && (item._ratecon.data || item._ratecon)) || {};
+  for (const x of mine) for (const e of x.f.add || []) add({ role: rcB.broker && companyKey(rcB.broker) === companyKey(x.n) ? 'broker' : 'customer', company: x.f.name || x.n, email: e }, 'saved by dispatch');
   // trip sheet vs TruckMate
   for (const c of list) {
     c.verified = c.sources.includes('trip sheet') && c.sources.includes('TruckMate');
@@ -505,7 +519,7 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
   async function settings() { return { ...DEFAULTS, ...(await db.get(cfgKey, {})) }; }
 
   const editFor = (cfg, trip) => { const e = (cfg.trips || {})[trip]; return Array.isArray(e) ? { emails: e, phones: [] } : (e || null); };
-  function contactsOf(item, cfg) { return contactsFor(item, { customers: cfg.customers, prefixes: cfg.prefixes, edit: editFor(cfg, String(tripOf(item).tripNumber)) }); }
+  function contactsOf(item, cfg) { return contactsFor(item, { customers: cfg.customers, prefixes: cfg.prefixes, fixes: cfg.contactFixes || {}, edit: editFor(cfg, String(tripOf(item).tripNumber)) }); }
   // status emails go to the customer / broker side (not every receiving dock)
   function recipients(item, cfg) {
     const r = contactsOf(item, cfg);
@@ -748,6 +762,32 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
     return { emails: emailList(c.contacts.map((x) => x.email).filter(Boolean)), phones: [...new Set(c.contacts.map((x) => x.phone).filter(Boolean))], contacts: c.contacts };
   }
 
+  // dispatch corrects who gets the customer emails for this load: the list they want. What they erased and added is saved for the
+  // broker (or bill-to) so their next loads use it too. → the new list
+  app.put('/truckmate/contacts/:trip', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const site = siteOf(req); const trip = String(req.params.trip);
+    const item = itemFor(site, trip);
+    if (!item) return res.status(404).json({ error: 'That load is not on the live board.' });
+    const want = emailList((req.body || {}).emails || []).map((e) => e.toLowerCase());
+    const bad = (Array.isArray((req.body || {}).emails) ? req.body.emails : []).filter((e) => String(e || '').trim() && !emailList(e).length);
+    if (bad.length) return res.status(400).json({ error: `Not an email: ${bad.join(', ')}` });
+    const names = loadCompanies(item);
+    if (!names.length) return res.status(409).json({ error: 'No broker or customer name on this load to save it under.' });
+    try {
+      const now0 = (await everyone(item)).emails.map((e) => e.toLowerCase());
+      const removed = now0.filter((e) => !want.includes(e)); const added = want.filter((e) => !now0.includes(e));
+      const k = companyKey(names[0]);
+      const cur = await settings();
+      const f = (cur.contactFixes || {})[k] || { name: names[0], add: [], remove: [] };
+      const next = { name: names[0], add: [...new Set([...(f.add || []).filter((e) => !removed.includes(e)), ...added])], remove: [...new Set([...(f.remove || []).filter((e) => !added.includes(e)), ...removed])], by: who(req), at: new Date().toISOString() };
+      const { seen, outlook, ...keep } = cur; // eslint-disable-line no-unused-vars
+      await db.set(cfgKey, { ...keep, contactFixes: { ...(cur.contactFixes || {}), [k]: next } });
+      if (comms && comms.log) await comms.log(site, trip, { type: 'note', kind: 'contacts', text: `Customer emails changed for ${names[0]}${removed.length ? ` · erased ${removed.join(', ')}` : ''}${added.length ? ` · added ${added.join(', ')}` : ''}`, by: who(req), noThread: true }).catch(() => {});
+      res.json({ ok: true, company: names[0], removed, added, ...(await everyone(item)) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.get('/truckmate/breakdown/:trip/preview', requireAuth, async (req, res) => {
     const site = siteOf(req); const trip = String(req.params.trip);
     const item = itemFor(site, trip);
@@ -757,7 +797,7 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
       const who2 = await everyone(item);
       const m = breakdownMessages(item, on ? 'breakdown' : 'resumed', null, { geo: lastBoard.geo, now: Date.now() });
       const rcCfg = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null;
-      res.json({ turningOn: on, ...who2, subject: m.mail.subject, text: m.mail.text, sms: m.sms, texting: !!(rcCfg && rcCfg.fromNumber), outlook: mailConfig(env).ready });
+      res.json({ turningOn: on, ...who2, company: loadCompanies(item)[0] || null, subject: m.mail.subject, text: m.mail.text, sms: m.sms, texting: !!(rcCfg && rcCfg.fromNumber), outlook: mailConfig(env).ready });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
