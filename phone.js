@@ -62,8 +62,18 @@ export function initPhone(app, { requireAuth, db, secret, clientId, activity = n
   });
   app.post('/ringcentral/phone/disconnect', requireAuth, async (req, res) => {
     if (!guard(req, res)) return undefined;
+    const rec = ((await db.get(KEY, {})) || {})[uid(req)];
     await db.update(KEY, (cur) => { const all = { ...(cur || {}) }; delete all[uid(req)]; return all; }, {});
-    return res.json({ ok: true });
+    // cancel the stored RingCentral sign-in at RingCentral too (the refresh token ends the whole sign-in), not only here
+    let revoked = false;
+    if (rec && rec.oauth && clientId) {
+      try {
+        const t = open(rec.oauth, secret);
+        const r = await fetchFn(`${server}/restapi/oauth/revoke`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: t.refresh || t.access, client_id: clientId }) });
+        revoked = !!(r && r.ok);
+      } catch { /* the line is disconnected here either way */ }
+    }
+    return res.json({ ok: true, revoked });
   });
   // Tokens never leave the server. Serialize refresh and conference actions per dispatcher.
   const locks = new Map();
