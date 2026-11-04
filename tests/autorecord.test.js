@@ -76,3 +76,15 @@ test('a call is recorded once both sides are connected, not when our side starts
   await send(evt([them('Answered')], 'x')); await send(evt([them('Answered')], 'x'));
   assert.deepEqual(asked, ['POST']); assert.equal(ar.status().started, 1);
 });
+
+test('live calls: connected and not hung up, with the dispatcher\'s extension and the other number', async () => {
+  const routes = {};
+  const ar = initAutoRecord({ post: (p, h) => { routes[p] = h; } }, { rc: { configFor: async () => ({}), accessToken: async () => 'tok' }, secret: 's', publicUrl: 'https://api.example', fetchFn: async () => ({ ok: true, status: 200, json: async () => ({}) }), start: false });
+  const send = async (body) => { const res = { set() { return this; }, status() { return this; }, end() { return this; } }; routes['/ringcentral/webhook/telephony']({ headers: { 'verification-token': hookToken('s') }, body }, res); await new Promise((r) => setTimeout(r, 5)); };
+  await send(evt([{ id: 'p-us', extensionId: 'e102', direction: 'Outbound', to: { phoneNumber: '+13055550100' }, status: { code: 'Setup' } }], 'L1'));
+  assert.equal(ar.liveCalls().length, 0, 'not connected yet');
+  await send(evt([{ id: 'p-us', extensionId: 'e102', direction: 'Outbound', to: { phoneNumber: '+13055550100' }, status: { code: 'Answered' } }], 'L1'));
+  assert.deepEqual(ar.liveCalls().map((c) => [c.session, c.extensionId, c.other, c.direction]), [['L1', 'e102', '+13055550100', 'outbound']]);
+  await send(evt([{ id: 'p-us', extensionId: 'e102', direction: 'Outbound', status: { code: 'Disconnected' } }], 'L1'));
+  assert.equal(ar.liveCalls().length, 0, 'hung up');
+});

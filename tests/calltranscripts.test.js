@@ -81,7 +81,8 @@ test('the Phone tab history: every RingCentral call (missed too) with its summar
   initCallTranscripts(app, { requireAuth: (q, r, n) => n(), db, rc: { configFor: async () => ({}), accessToken: async () => 'tok' }, activity: { lookup: async () => ({ role: 'customer', name: 'Native Flowers' }) }, secret: 's', publicUrl: 'https://api.example', env: { OPENAI_API_KEY: 'x', ANTHROPIC_API_KEY: 'y' }, fetchFn, start: false, now: () => t });
   const call = async (user) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const hs = routes['GET /truckmate/phone/history']; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h({ user, query: { days: '7' } }, res, next); }; await next(); return out; };
   assert.equal((await call({ role: 'customer' })).status, 403);
-  const { calls } = (await call({ id: 1, role: 'dispatcher' })).body;
+  const { calls, manager } = (await call({ id: 1, role: 'dispatcher', companyAdmin: true })).body;
+  assert.equal(manager, true);
   assert.deepEqual(calls.map((c) => [c.id, c.direction, c.missed, c.name, c.hasTranscript, !!c.recording]), [
     ['rc-2', 'inbound', true, 'Native Flowers', false, false],
     ['call:abc', 'inbound', false, null, true, true],
@@ -91,4 +92,19 @@ test('the Phone tab history: every RingCentral call (missed too) with its summar
   assert.equal(rc1.summary, 'Checked on the driver.'); assert.equal(rc1.trip, '626300'); assert.equal(rc1.callId, 'rc-1');
   assert.match(rc1.recording, /^https:\/\/api\.example\/truckmate\/call-recording\/r1\?exp=/, 'plays through a signed link');
   assert.equal(calls.find((c) => c.id === 'call:abc').by, 'Jarvis');
+});
+
+test('a dispatcher sees only their own line\'s calls; a manager (ticked on their login) sees everyone\'s; no line yet says so', async () => {
+  const db = mem(); const routes = {}; const t = Date.parse('2026-11-04T15:00:00Z');
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const mineRec = REC('1', { from: { phoneNumber: '+13053955415', name: 'Geo', extensionNumber: '102', extensionId: 'e102' } });
+  const otherRec = REC('2', { from: { phoneNumber: '+13053955415', name: 'Jenny', extensionNumber: '103', extensionId: 'e103' } });
+  const fetchFn = async (url) => (url.includes('/call-log') ? { ok: true, json: async () => ({ records: [mineRec, otherRec] }) } : { ok: true, json: async () => ({}) });
+  const ct = initCallTranscripts(app, { requireAuth: (q, r, n) => n(), db, rc: { configFor: async () => ({}), accessToken: async () => 'tok' }, secret: 's', publicUrl: 'https://api.example', env: { OPENAI_API_KEY: 'x', ANTHROPIC_API_KEY: 'y' }, fetchFn, start: false, now: () => t });
+  ct.useLineOf(async (id) => (id === 'geo' ? { ext: '102', extensionId: 'e102' } : null));
+  const call = async (user) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const hs = routes['GET /truckmate/phone/history']; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h({ user, query: {} }, res, next); }; await next(); return out.body; };
+  assert.deepEqual((await call({ id: 'geo', role: 'dispatcher' })).calls.map((c) => c.id), ['rc-1'], 'only Geo\'s own calls');
+  const none = await call({ id: 'val', role: 'dispatcher' });
+  assert.deepEqual([none.calls.length, none.needsLine], [0, true], 'no phone connected yet');
+  assert.deepEqual((await call({ id: 'boss', role: 'dispatcher', phoneManager: true })).calls.map((c) => c.id).sort(), ['rc-1', 'rc-2'], 'a manager sees everyone\'s');
 });

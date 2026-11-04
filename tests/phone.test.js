@@ -74,3 +74,25 @@ test('conference routes require a staff line and validate both call owners', asy
   const sip = await call('GET /ringcentral/phone/sip', { user: geo });
   assert.equal(sip.body.oauth, undefined);
 });
+
+test('shadow: managers only, never your own call, needs the reconnected phone; asks RingCentral to listen in', async () => {
+  const db = mem(); const routes = {}; const asked = [];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const live = [{ session: 's-9', extensionId: 'e103', direction: 'outbound', other: '+13055550100', since: '2026-11-04T15:00:00Z' }];
+  const fetchFn = async (url, init = {}) => { asked.push([init.method || 'GET', url.replace('https://platform.ringcentral.com', ''), init.body || null]); return { ok: true, status: 200, json: async () => ({}) }; };
+  initPhone(app, { requireAuth: (q, r, n) => n(), db, secret: 's', clientId: 'cid', autoRecord: { liveCalls: () => live }, activity: { lookup: async () => ({ name: 'Frank U', role: 'driver', trips: ['626265'] }) }, fetchFn, env: {}, now: () => 1e12 });
+  db.s.taPhoneSip = { boss: { extensionId: 'e101', ext: '101', name: 'Nadim Tellez', deviceId: 'dev-1', oauth: seal({ access: 'at', refresh: 'rt', expires: 1e12 + 3600000 }, 's') }, jen: { extensionId: 'e103', ext: '103', name: 'Jennifer Gonzalez' } };
+  const call = async (key, req) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
+  const boss = { id: 'boss', role: 'dispatcher', phoneManager: true };
+  assert.equal((await call('GET /truckmate/phone/live', { user: { id: 'jen', role: 'dispatcher' } })).status, 403);
+  const l = (await call('GET /truckmate/phone/live', { user: boss })).body.calls[0];
+  assert.deepEqual([l.dispatcher, l.ext, l.name, l.trips[0]], ['Jennifer Gonzalez', '103', 'Frank U', '626265']);
+  assert.equal((await call('POST /ringcentral/phone/shadow', { user: { id: 'jen', role: 'dispatcher' }, body: { session: 's-9' } })).status, 403);
+  const ok = await call('POST /ringcentral/phone/shadow', { user: boss, body: { session: 's-9' } });
+  assert.equal(ok.body.ok, true);
+  const sup = asked.find((a) => a[1].endsWith('/telephony/sessions/s-9/supervise'));
+  assert.deepEqual(JSON.parse(sup[2]), { mode: 'Listen', supervisorDeviceId: 'dev-1', agentExtensionId: 'e103' });
+  assert.equal((await call('POST /ringcentral/phone/shadow', { user: boss, body: { session: 'gone' } })).status, 404);
+  db.s.taPhoneSip.boss.deviceId = null;
+  assert.match((await call('POST /ringcentral/phone/shadow', { user: boss, body: { session: 's-9' } })).body.error, /Reconnect your phone/);
+});

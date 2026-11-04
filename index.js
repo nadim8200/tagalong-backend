@@ -1517,6 +1517,8 @@ const autoRecord = initAutoRecord(app, { rc, db, secret: JWT_SECRET, publicUrl: 
 const callTranscripts = initCallTranscripts(app, { requireAuth: requireDispatch, db, rc, autoRecord, activity, log: (...a) => comms.log(...a), secret: JWT_SECRET, publicUrl: process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_API_URL || 'https://tagalong-backend-fdzx.onrender.com', getBoard: (site) => truckmate.buildBoard(site) });
 activity.useRecordingLink((r) => callTranscripts.link(r));
 // the console's own phone: each dispatcher's RingCentral line, our call bar (phone.js)
-initPhone(app, { requireAuth: requireDispatch, db, secret: JWT_SECRET, clientId: process.env.RC_EMBEDDABLE_CLIENT_ID, activity });
+const phoneLines = initPhone(app, { requireAuth: requireDispatch, db, secret: JWT_SECRET, clientId: process.env.RC_EMBEDDABLE_CLIENT_ID, activity, autoRecord });
+// the Phone tab shows a dispatcher only their own line's calls (managers see everyone's)
+callTranscripts.useLineOf(phoneLines.lineOf);
 
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));

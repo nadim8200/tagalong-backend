@@ -28,7 +28,15 @@ export function step(call, evt) {
     if (!x || !x.status) continue;
     if ((x.recordings || []).some((r) => r && r.active)) c.recording = true;
     const up = x.status.code === 'Answered';
-    if (ext(x)) { if (!c.ourParty) { c.ourParty = String(x.id); c.ourDir = x.direction || null; } if (String(x.id) === c.ourParty && up) c.ourUp = true; } else if (up) c.theirUp = true;
+    if (ext(x)) {
+      if (!c.ourParty) { c.ourParty = String(x.id); c.ourDir = x.direction || null; c.ourExtId = String(ext(x)); }
+      if (String(x.id) === c.ourParty) {
+        if (up) c.ourUp = true;
+        // who's on the other end (the number the dispatcher is talking to)
+        const far = x.direction === 'Outbound' ? x.to : x.from;
+        if (far && far.phoneNumber && !c.other) c.other = String(far.phoneNumber);
+      }
+    } else if (up) c.theirUp = true;
     if (x.status.code === 'Disconnected') c.ended = true;
   }
   // a call coming in is connected once we pick up; one going out once they do
@@ -99,6 +107,7 @@ export function initAutoRecord(app, { rc = null, db = null, secret, publicUrl, e
       calls.set(sid, { ...c, at: now() });
       for (const [k, v] of calls) if (now() - v.at > 6 * 3600000) calls.delete(k);
       if (c.ready) press({ session: sid, party: c.ourParty, direction: c.ourDir }).catch(() => {});
+      if (c.ourUp && !c.ended && !calls.get(sid).liveSince) calls.set(sid, { ...calls.get(sid), liveSince: now() });
     }
     return undefined;
   });
@@ -122,5 +131,8 @@ export function initAutoRecord(app, { rc = null, db = null, secret, publicUrl, e
   }
 
   if (start && rc && !off()) { setTimeout(() => { ensure().catch(() => {}); }, 30000).unref(); setInterval(() => { ensure().catch(() => {}); }, 6 * 3600000).unref(); }
-  return { ensure, press, status: () => ({ on: !off() && !!rc, subscribed: !!state.subscription, expiresAt: state.expiresAt, lastEvent: state.lastEvent, started: state.started, lastError: state.lastError, recent: state.recent || [] }) };
+  // the calls going on right now on our lines (for a manager to shadow): connected, not hung up, seen in the last 4 hours
+  const liveCalls = () => [...calls.entries()].filter(([, c]) => c.ourUp && !c.ended && c.liveSince && now() - c.at < 4 * 3600000)
+    .map(([session, c]) => ({ session, extensionId: c.ourExtId || null, direction: c.ourDir === 'Inbound' ? 'inbound' : 'outbound', other: c.other || null, since: new Date(c.liveSince).toISOString() }));
+  return { ensure, press, liveCalls, status: () => ({ on: !off() && !!rc, subscribed: !!state.subscription, expiresAt: state.expiresAt, lastEvent: state.lastEvent, started: state.started, lastError: state.lastError, recent: state.recent || [] }) };
 }

@@ -21,11 +21,13 @@ export function pickCallerId(records = []) {
   return ((main || direct || ok[0]) || {}).phoneNumber || null;
 }
 
-export function initPhone(app, { requireAuth, db, secret, clientId, activity = null, env = process.env, fetchFn = fetch, now = () => Date.now() }) {
+export function initPhone(app, { requireAuth, db, secret, clientId, activity = null, autoRecord = null, env = process.env, fetchFn = fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const server = env.RC_SERVER || RC_SERVER;
   const isStaff = (u) => !!(u && (u.admin || u.role === 'admin' || u.companyAdmin || u.role === 'dispatcher'));
   const uid = (req) => String((req.user && (req.user.id || req.user.email)) || '');
+  // sees everyone's calls and can shadow: the master admin, company admins, logins ticked "Manager"
+  const isManager = (u) => !!(u && (u.admin || u.role === 'admin' || u.companyAdmin || u.phoneManager));
   const guard = (req, res) => { if (!isStaff(req.user)) { res.status(403).json({ error: 'Dispatch logins only.' }); return false; } if (!enabled) { res.status(503).json({ error: 'Not available right now.' }); return false; } return true; };
 
   // the dispatcher signed in to RingCentral in the window: code (+ the PKCE verifier their console made) → calling credentials
@@ -48,7 +50,7 @@ export function initPhone(app, { requireAuth, db, secret, clientId, activity = n
         fetchFn(`${server}/restapi/v1.0/account/~/extension/~`, { headers: auth }).then((r) => r.json()).catch(() => ({})),
         fetchFn(`${server}/restapi/v1.0/account/~/extension/~/phone-number?perPage=100`, { headers: auth }).then((r) => r.json()).catch(() => ({})),
       ]);
-      const rec = { enc: seal(sip.sipInfo[0], secret), oauth: seal({ access: tok.access_token, refresh: tok.refresh_token, expires: now() + (Number(tok.expires_in) || 3600) * 1000 }, secret), extensionId: String(me.id || ''), ext: me.extensionNumber || null, name: me.name || null, callerId: pickCallerId(nums.records || []), at: new Date(now()).toISOString() };
+      const rec = { enc: seal(sip.sipInfo[0], secret), oauth: seal({ access: tok.access_token, refresh: tok.refresh_token, expires: now() + (Number(tok.expires_in) || 3600) * 1000 }, secret), extensionId: String(me.id || ''), deviceId: sip.device && sip.device.id ? String(sip.device.id) : null, ext: me.extensionNumber || null, name: me.name || null, callerId: pickCallerId(nums.records || []), at: new Date(now()).toISOString() };
       await db.update(KEY, (cur) => ({ ...(cur || {}), [uid(req)]: rec }), {});
       return res.json({ ok: true, ext: rec.ext, name: rec.name, callerId: rec.callerId });
     } catch (e) { return res.status(502).json({ error: 'Could not reach RingCentral. Try again.' }); }
@@ -120,6 +122,39 @@ export function initPhone(app, { requireAuth, db, secret, clientId, activity = n
       return res.json({ ok: true });
     } catch (e) { return res.status(409).json({ error: e.message }); }
   });
+  // Managers: the calls going on right now on our lines, and listening in on one (RingCentral's Supervise, "Listen" mode: the
+  // dispatcher and the other side don't hear the manager). RingCentral rings the manager's own console phone, which answers it.
+  // In RingCentral the manager has to be a monitor of that dispatcher (Admin Portal → Call Monitoring groups).
+  const lines = async () => Object.values((await db.get(KEY, {})) || {});
+  app.get('/truckmate/phone/live', requireAuth, async (req, res) => {
+    if (!isManager(req.user)) return res.status(403).json({ error: 'Managers only.' });
+    const live = autoRecord && autoRecord.liveCalls ? autoRecord.liveCalls() : [];
+    const byExt = new Map((await lines()).filter((l) => l.extensionId).map((l) => [String(l.extensionId), l]));
+    const out = [];
+    for (const c of live) {
+      const l = byExt.get(String(c.extensionId)) || null;
+      const w = c.other && activity && activity.lookup ? await activity.lookup(c.other).catch(() => null) : null; // eslint-disable-line no-await-in-loop
+      out.push({ session: c.session, direction: c.direction, since: c.since, dispatcher: (l && l.name) || null, ext: (l && l.ext) || null, number: c.other, name: (w && w.name) || null, role: (w && w.role) || null, trips: (w && w.trips) || [] });
+    }
+    return res.json({ calls: out, watching: !!autoRecord });
+  });
+  app.post('/ringcentral/phone/shadow', requireAuth, async (req, res) => {
+    if (!guard(req, res)) return undefined;
+    if (!isManager(req.user)) return res.status(403).json({ error: 'Managers only.' });
+    const session = String((req.body || {}).session || '');
+    if (!validId(session)) return res.status(400).json({ error: 'Pick a live call to shadow.' });
+    const me = ((await db.get(KEY, {})) || {})[uid(req)];
+    if (!me || !me.deviceId) return res.status(409).json({ error: 'Reconnect your phone (Phone → Disconnect my line → Connect my phone) to shadow calls.' });
+    const c = (autoRecord && autoRecord.liveCalls ? autoRecord.liveCalls() : []).find((x) => x.session === session);
+    if (!c || !c.extensionId) return res.status(404).json({ error: 'That call has ended.' });
+    if (String(c.extensionId) === String(me.extensionId)) return res.status(400).json({ error: 'That\'s your own call.' });
+    try {
+      await serial(uid(req), () => api(uid(req), `/telephony/sessions/${session}/supervise`, 'POST', { mode: 'Listen', supervisorDeviceId: me.deviceId, agentExtensionId: String(c.extensionId) }));
+      req.body = { session, shadow: true };   // the activity log: who shadowed which call
+      return res.json({ ok: true });
+    } catch (e) { return res.status(409).json({ error: /Call Control|403/.test(e.message) ? 'RingCentral didn\'t allow it: in the Admin Portal, add yourself as a monitor of this dispatcher (Call Monitoring groups).' : e.message }); }
+  });
+
   // who's on the other end, for the call bar: name, what they are, and their load
   app.get('/truckmate/phone/who', requireAuth, async (req, res) => {
     if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });
@@ -127,5 +162,7 @@ export function initPhone(app, { requireAuth, db, secret, clientId, activity = n
     if (n.length < 10 || !activity || !activity.lookup) return res.json({ role: 'unknown' });
     try { const w = await activity.lookup(n); return res.json({ role: w.role || 'unknown', name: w.name || null, detail: w.detail || null, trips: w.trips || [] }); } catch { return res.json({ role: 'unknown' }); }
   });
-  return {};
+  // a staff login's own RingCentral line (the Phone tab shows a dispatcher only their own calls)
+  const lineOf = async (id) => { const r = ((await db.get(KEY, {})) || {})[String(id)]; return r ? { ext: r.ext || null, extensionId: r.extensionId || null } : null; };
+  return { lineOf, isManager };
 }

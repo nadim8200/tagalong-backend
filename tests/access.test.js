@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { proxyRule, holdsDevice, sneakyPath, allowRoles } from '../access.js';
-import { dispatcherMayUse } from '../dispatchers.js';
+import { dispatcherMayUse, isCallManager } from '../dispatchers.js';
 
 const owner = { id: 12, role: 'owner' }; const broker = { id: 'B1', role: 'broker' }; const member = { id: 'M1', role: 'member' }; const fleet = { id: 'F1', role: 'fleet' };
 
@@ -98,4 +98,12 @@ test('fleet claim on a customer car = a request the owner approves; approving mo
   const off = mergeDeviceUpdate(owner, inFleet, { ...inFleet, attributes: { ...inFleet.attributes, brokerLinks: [] } }, 'owner');
   assert.equal(off.device.attributes.taFleetId, undefined, 'owner removes it → out of the fleet');
   assert.equal(shareEntry(owner).entry.memberId, 'u12');
+});
+
+test('who manages calls: the master admin, company admins, logins ticked Manager; not a plain dispatcher', () => {
+  assert.equal(isCallManager({ admin: true }), true);
+  assert.equal(isCallManager({ role: 'dispatcher', companyAdmin: true }), true);
+  assert.equal(isCallManager({ role: 'dispatcher', phoneManager: true }), true);
+  assert.equal(isCallManager({ role: 'dispatcher' }), false);
+  assert.equal(isCallManager(null), false);
 });
