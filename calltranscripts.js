@@ -176,6 +176,57 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
 
   if (start && enabled) { setTimeout(() => { run().catch(() => {}); }, MIN).unref(); setInterval(() => { run().catch(() => {}); }, EVERY).unref(); }
   console.log(`[calls] RingCentral call transcripts ${enabled && !off() && !needs().length ? 'on' : `off${needs().length ? ` — needs ${needs().join(', ')}` : ''}`}`);
+  // The Phone tab: every call in the last days, like a phone's recent calls — RingCentral's call log (in, out, missed, voicemail)
+  // with what we know about each: who it was, the load, the summary, whether there's a transcript and a recording; plus Jarvis's
+  // own calls. Read-only: nothing here changes or deletes a call. The transcript itself opens per call (/truckmate/activity/call/:id).
+  app.get('/truckmate/phone/history', requireAuth, async (req, res) => {
+    if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });
+    const days = Math.min(30, Math.max(1, Number((req.query || {}).days) || 7));
+    const t = now(); const since = t - days * 86400000;
+    const entries = new Map();   // activity id → entry (the call's summary, transcript flag, load, who)
+    if (enabled) {
+      for (let d = 0; d <= days; d += 1) {
+        for (const e of (await db.get(`taActivity:${SITE}:${dayOf(t - d * 86400000)}`, [])) || []) if (e && e.kind === 'call') entries.set(String(e.id), e); // eslint-disable-line no-await-in-loop
+      }
+    }
+    const names = new Map();
+    const whoIs = async (n) => { const k = String(n || '').replace(/\D/g, '').slice(-10); if (!k || !activity || !activity.lookup) return null; if (!names.has(k)) names.set(k, await activity.lookup(k).catch(() => null)); return names.get(k); };
+    const rows = []; let warning = null;
+    if (rc && !needs().includes('RingCentral')) {
+      try {
+        const recs = [];
+        for (let page = 1; page <= 4; page += 1) {
+          const q = new URLSearchParams({ dateFrom: new Date(since).toISOString(), perPage: '250', page: String(page), view: 'Simple' });
+          const j = await rcGet(`/restapi/v1.0/account/~/call-log?${q}`); // eslint-disable-line no-await-in-loop
+          recs.push(...(j.records || []));
+          if (!(j.navigation && j.navigation.nextPage)) break;
+        }
+        const keep = {};
+        for (const r of recs) {
+          const c = callOf(r); const e = entries.get(`call:rc-${c.id}`); entries.delete(`call:rc-${c.id}`);
+          const w = e && e.name ? { name: e.name, role: e.role, detail: e.detail } : await whoIs(c.other); // eslint-disable-line no-await-in-loop
+          if (c.recordingId && c.contentUri) keep[c.recordingId] = c.contentUri;
+          rows.push({ id: `rc-${c.id}`, source: 'ringcentral', at: c.at, direction: c.direction, result: r.result || null, missed: c.direction === 'inbound' && !/connected|accepted/i.test(r.result || ''), seconds: c.seconds,
+            number: c.other, name: (w && w.name) || c.otherName || null, role: (w && w.role) || null, detail: (w && w.detail) || null, by: c.by, trip: (e && e.trip) || null,
+            summary: (e && e.summary) || null, followUp: (e && e.followUp) || null, callId: e ? String(e.id).replace(/^call:/, '') : null, hasTranscript: !!(e && e.transcript),
+            recording: c.recordingId && c.contentUri ? link(`rc:${c.recordingId}`) : null });
+        }
+        // every recording on the list can be played, transcribed or not yet
+        if (enabled && Object.keys(keep).length) await db.update(STATE, (cur) => ({ ...(cur || {}), recordings: { ...((cur || {}).recordings || {}), ...keep } }), {});
+      } catch (e) { warning = `RingCentral's call log didn't load (${e.message}). Showing the calls we already have.`; }
+    }
+    // Jarvis's own calls (and any recorded call RingCentral didn't list)
+    for (const e of entries.values()) {
+      if (Date.parse(e.at) < since) continue;
+      rows.push({ id: String(e.id), source: String(e.id).startsWith('call:rc-') ? 'ringcentral' : 'jarvis', at: e.at, direction: e.direction === 'outbound' ? 'outbound' : 'inbound', result: null, missed: false, seconds: e.minutes != null ? e.minutes * 60 : null,
+        number: e.direction === 'outbound' ? e.to : e.from, name: e.name || null, role: e.role || null, detail: e.detail || null, by: e.source === 'ringcentral' ? e.by : 'Jarvis', trip: e.trip || null,
+        summary: e.summary || null, followUp: e.followUp || null, callId: String(e.id).replace(/^call:/, ''), hasTranscript: !!e.transcript,
+        recording: typeof e.recording === 'string' && e.recording.startsWith('rc:') ? link(e.recording) : e.recording || null });
+    }
+    rows.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+    return res.json({ days, calls: rows.slice(0, 600), warning });
+  });
+
   return { run, link, search: async ({ trip = null, q = '', limit = 20 } = {}) => {
     const all = enabled ? (await db.get(INDEX, [])) || [] : [];
     const w = String(q || '').toLowerCase();

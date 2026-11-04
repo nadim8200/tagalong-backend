@@ -66,3 +66,29 @@ test('a missing permission stops the run and says what to fix; no keys, no run',
   const none = initCallTranscripts({ get() {}, post() {} }, { requireAuth: () => {}, db, rc: null, secret: 's', env: {}, fetchFn, start: false });
   assert.deepEqual(await none.run(), { skipped: true });
 });
+
+test('the Phone tab history: every RingCentral call (missed too) with its summary, transcript and recording; Jarvis\'s calls; dispatch only, read-only', async () => {
+  const db = mem(); const routes = {}; const t = Date.parse('2026-11-04T15:00:00Z');
+  const day = '2026-11-04';
+  db.s[`taActivity:florida-beauty:${day}`] = [
+    { id: 'call:rc-1', kind: 'call', source: 'ringcentral', at: '2026-11-04T14:00:00Z', direction: 'outbound', minutes: 3, trip: '626300', summary: 'Checked on the driver.', transcript: 'Hi…', name: 'Frank U', role: 'driver' },
+    { id: 'call:abc', kind: 'call', at: '2026-11-04T13:00:00Z', direction: 'inbound', from: '+13055550199', minutes: 2, summary: 'A customer asked for an ETA.', transcript: 'Hello…', recording: 'https://retell/rec.wav' },
+    { id: 'txt1', kind: 'text', at: '2026-11-04T12:00:00Z' },
+  ];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const recs = [REC('1'), { ...REC('2', { recording: null, direction: 'Inbound', from: { phoneNumber: '+17865550000' }, to: { phoneNumber: '+13053955415', name: 'Geo Dispatch' } }), result: 'Missed', startTime: '2026-11-04T14:30:00Z', duration: 0 }];
+  const fetchFn = async (url) => (url.includes('/call-log') ? { ok: true, json: async () => ({ records: recs }) } : { ok: true, json: async () => ({}) });
+  initCallTranscripts(app, { requireAuth: (q, r, n) => n(), db, rc: { configFor: async () => ({}), accessToken: async () => 'tok' }, activity: { lookup: async () => ({ role: 'customer', name: 'Native Flowers' }) }, secret: 's', publicUrl: 'https://api.example', env: { OPENAI_API_KEY: 'x', ANTHROPIC_API_KEY: 'y' }, fetchFn, start: false, now: () => t });
+  const call = async (user) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const hs = routes['GET /truckmate/phone/history']; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h({ user, query: { days: '7' } }, res, next); }; await next(); return out; };
+  assert.equal((await call({ role: 'customer' })).status, 403);
+  const { calls } = (await call({ id: 1, role: 'dispatcher' })).body;
+  assert.deepEqual(calls.map((c) => [c.id, c.direction, c.missed, c.name, c.hasTranscript, !!c.recording]), [
+    ['rc-2', 'inbound', true, 'Native Flowers', false, false],
+    ['call:abc', 'inbound', false, null, true, true],
+    ['rc-1', 'outbound', false, 'Frank U', true, true],
+  ], 'newest first');
+  const rc1 = calls.find((c) => c.id === 'rc-1');
+  assert.equal(rc1.summary, 'Checked on the driver.'); assert.equal(rc1.trip, '626300'); assert.equal(rc1.callId, 'rc-1');
+  assert.match(rc1.recording, /^https:\/\/api\.example\/truckmate\/call-recording\/r1\?exp=/, 'plays through a signed link');
+  assert.equal(calls.find((c) => c.id === 'call:abc').by, 'Jarvis');
+});
