@@ -615,13 +615,14 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   }
   const linkForTrip = async (site, trip) => { const tok = ((await db.get(siteKey(site), { byTrip: {} })).byTrip || {})[trip]; return tok ? db.get(linkKey(tok), null) : null; };
   // dispatch (or Jarvis) → driver: stored for the app + a push to the phone when the app is installed
-  async function messageDriver(site, trip, text, by = 'dispatcher') {
-    const body = String(text || '').trim();
+  async function messageDriver(site, trip, text, by = 'dispatcher', { docIds = [] } = {}) {
+    const files = (docIds || []).map(String).filter((x) => /^\d+$/.test(x)).slice(0, 6);
+    const body = String(text || '').trim() || (files.length ? `📎 ${files.length === 1 ? 'A file' : `${files.length} files`} from dispatch` : '');
     if (!body) throw new Error('Write a message first.');
     const link = await linkForTrip(site, String(trip));
     if (!link || !isLive(linkStatus(link))) return { skipped: 'no active driver link on this load' };
     if (training) { const held = await training.hold('app', { to: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'the driver app', trip, text: body }); if (held) return { sent: true, via: 'held — training mode (copy emailed)', ...held }; }
-    const m = await addMessage(site, String(trip), { from: 'dispatch', by, text: body });
+    const m = await addMessage(site, String(trip), { from: 'dispatch', by, text: body, docIds: files });
     if (onDispatchMessage) Promise.resolve(onDispatchMessage(site, String(trip), body, by)).catch(() => {});   // the driver profile's phones hear it too
     let pushed = false;
     if (push && push.enabled && (link.push || []).length) {
@@ -629,7 +630,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       pushed = (link.push || []).some((p) => !dead.includes(p.token));
       if (dead.length) await db.update(linkKey(link.token), (cur) => ({ ...cur, push: (cur.push || []).filter((p) => !dead.includes(p.token)) }), link);
     }
-    if (comms && comms.log) await comms.log(site, String(trip), { type: 'text', kind: 'app-message', to: 'driver app', text: body, by, noThread: true });
+    if (comms && comms.log) await comms.log(site, String(trip), { type: 'text', kind: 'app-message', to: 'driver app', text: body, by, noThread: true, ...(files.length ? { docIds: files } : {}) });
     return { sent: true, via: pushed ? 'app (push)' : 'app (shows when opened)', id: m.id };
   }
 
@@ -641,8 +642,24 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       const list = ((await db.get(chatKey(link.site), {}))[link.trip] || []);
       const now = new Date().toISOString();
       if (list.some((m) => m.from === 'dispatch' && !m.readAt)) await db.update(chatKey(link.site), (cur) => ({ ...(cur || {}), [link.trip]: ((cur || {})[link.trip] || []).map((m) => (m.from === 'dispatch' && !m.readAt ? { ...m, readAt: now } : m)) }), {});
-      res.json({ active: isLive(status), messages: list.map(({ docIds, ...m }) => ({ ...m, photos: (docIds || []).length })) });
+      res.json({ active: isLive(status), messages: list.map(({ docIds, ...m }) => ({ ...m, photos: (docIds || []).length, files: m.from === 'dispatch' ? (docIds || []).map(String) : [] })) });
     } catch (e) { res.status(500).json({ error: 'Could not load messages.' }); }
+  });
+  // a picture / PDF dispatch sent in this load's chat (only files that are in this chat)
+  app.get('/driver/link/:token/files/:id', async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
+    try {
+      const { link } = await activeLink(String(req.params.token));
+      if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
+      const id = String(req.params.id);
+      const inChat = ((await db.get(chatKey(link.site), {}))[link.trip] || []).some((m) => m.from === 'dispatch' && (m.docIds || []).map(String).includes(id));
+      if (!inChat || !docs || !docs.readDocs) return res.status(404).json({ error: 'File not found.' });
+      const [f] = await docs.readDocs({ site: link.site, ids: [id] });
+      if (!f) return res.status(404).json({ error: 'File not found.' });
+      res.set('content-type', f.mediaType || 'application/octet-stream');
+      res.set('cache-control', 'private, max-age=3600');
+      return res.send(f.data);
+    } catch (e) { return res.status(500).json({ error: 'Could not load the file.' }); }
   });
   app.post('/driver/link/:token/messages', async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
@@ -663,7 +680,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       const m = await addMessage(link.site, link.trip, { from: 'driver', by, text, docIds });
       if (docIds.length && photoHook) Promise.resolve(photoHook(link.site, String(link.trip), { docIds, via: 'TagAlong app', by })).catch(() => {});   // counts only while a temp check is open
       // on the load like a text reply (Jarvis' pickup follow-up and the rundown read it)
-      if (comms && comms.log) await comms.log(link.site, link.trip, { type: 'reply', from: 'driver app', by, extId: m.id, text: `${text}${docIds.length ? ` [${docIds.length} photo${docIds.length === 1 ? '' : 's'}]` : ''}`, noThread: true });
+      if (comms && comms.log) await comms.log(link.site, link.trip, { type: 'reply', from: 'driver app', by, extId: m.id, docIds, text: `${text}${docIds.length ? ` [${docIds.length} photo${docIds.length === 1 ? '' : 's'}]` : ''}`, noThread: true });
       if (help && help.raise && wantsContact(text)) help.raise({ source: 'app', ref: m.id, role: 'driver', from: { name: by.replace(/ \(app\)$/, ''), phone: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].phone) || null, company: link.carrierName || null }, trip: link.trip, need: text.slice(0, 400), said: text }).catch(() => {});
       if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: m.at, source: 'driver app message', text: text || `Sent ${docIds.length} photo${docIds.length === 1 ? '' : 's'}`, by }]);
       res.json({ ok: true, id: m.id });

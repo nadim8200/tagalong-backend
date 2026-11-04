@@ -1440,7 +1440,7 @@ const driverAuth = initDriverAuth(app, { requireAuth, requireAdmin: requireCompa
 // a dispatch message on a load reaches the driver profile's phones too (driverauth.js)
 driverLinks.onDispatchMessage((site, trip, text, by) => driverAuth.notifyTrip(trip, text, by));
 // Phone & Messages: one shared inbox for texts on the company line and driver-app messages
-const messagesInbox = initMessages(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), activity, ringcentral: rc, driverLinks, comms, staff: async () => (await directory.load()).people || [], drivers: () => driverAuth.roster() });
+const messagesInbox = initMessages(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), activity, ringcentral: rc, driverLinks, comms, staff: async () => (await directory.load()).people || [], drivers: () => driverAuth.roster(), docs });
 comms.useInbox(messagesInbox);
 initWatchtower(app, { requireAuth: requireDispatch, db, env: process.env, buildBoard: truckmate.buildBoard, push, pushRules, atStopNow: async () => (waiting ? waiting.openTrips() : new Set()),
   // trucks and trips reported down, or with a road call still open in the last 5 days: a wrecker moves them, they aren't rolling

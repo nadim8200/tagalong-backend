@@ -45,7 +45,7 @@ export const unreadOf = (thread, readAt) => (thread.inbound || []).filter((at) =
 // Same people? (a group is matched to a load's app chat only when its members are exactly that load's drivers) Pure.
 export const samePeople = (a, b) => { const k = (l) => l.map((m) => last10(m.phone) || String(m.name || '').toLowerCase()).filter(Boolean).sort().join('|'); return k(a) === k(b); };
 
-export function initMessages(app, { requireAuth, db, getBoard = null, activity = null, ringcentral = null, driverLinks = null, comms = null, staff = null, drivers = null, now = () => Date.now() }) {
+export function initMessages(app, { requireAuth, db, getBoard = null, activity = null, ringcentral = null, driverLinks = null, comms = null, staff = null, drivers = null, docs = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const iso = () => new Date(now()).toISOString();
   const board = async () => { try { return getBoard ? ((await getBoard(SITE)) || {}).trips || [] : []; } catch { return []; } };
@@ -68,7 +68,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     await db.update(THREADS, (cur) => {
       const all = { ...(cur || {}) }; const t = { ...(all[thread.id] || thread) };
       for (const k of ['name', 'role', 'trip', 'truck']) if (thread[k] && !t[k]) t[k] = thread[k];
-      if (!t.last || String(m.at) >= String(t.last.at)) t.last = { at: m.at, text: m.text.slice(0, 140), dir: m.dir, by: m.by || null, via: m.via };
+      if (!t.last || String(m.at) >= String(t.last.at)) t.last = { at: m.at, text: (m.text || ((m.files || []).length ? `📎 ${(m.files || []).length === 1 ? 'Attachment' : `${m.files.length} attachments`}` : '')).slice(0, 140), dir: m.dir, by: m.by || null, via: m.via };
       if (m.dir === 'in') t.inbound = [...(t.inbound || []), m.at].sort().slice(-100);
       all[thread.id] = t; return all;
     }, {});
@@ -105,7 +105,8 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     if (dir === 'out' && appSending.has(k) && now() - appSending.get(k) < 120000) { appSending.delete(k); return; }
     const t = await threadForLoad(trip);
     if (!t) return;
-    await add(t, { at: e.at, dir, via: 'app', text: e.text, by: dir === 'in' ? (e.by || 'Driver (app)') : (e.by || 'Dispatch'), trip: String(trip), status: dir === 'out' ? 'sent' : null },
+    const files = (e.docIds || []).map(String).filter((x) => /^\d+$/.test(x)).map((id) => ({ id }));
+    await add(t, { at: e.at, dir, via: 'app', text: String(e.text || '').replace(/ \[\d+ photos?\]$/, ''), by: dir === 'in' ? (e.by || 'Driver (app)') : (e.by || 'Dispatch'), trip: String(trip), status: dir === 'out' ? 'sent' : null, ...(files.length ? { files } : {}) },
       e.extId ? `app:${e.extId}` : `app:${dir}:${trip}:${e.at || ''}:${String(e.text || '').slice(0, 60)}`);
   }
 
@@ -198,7 +199,8 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       if (!guard(req, res)) return;
       const b = req.body || {};
       const text = String(b.text || '').trim().slice(0, 1000);
-      if (!text) return res.status(400).json({ error: 'Write a message first.' });
+      const upload = (Array.isArray(b.files) ? b.files : []).slice(0, 6);
+      if (!text && !upload.length) return res.status(400).json({ error: 'Write a message or attach a file.' });
       const clientId = String(b.clientId || '').replace(/[^\w-]/g, '').slice(0, 40);
       if (!clientId) return res.status(400).json({ error: 'Missing clientId.' });
       const all = (await db.get(THREADS, {})) || {};
@@ -213,12 +215,17 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       const can = await channels(t, loads, live, consent || {});
       const via = b.via === 'sms' ? 'sms' : 'app';
       if (!can[via].ok) return res.status(409).json({ error: can[via].why });
+      if (upload.length && via === 'sms') return res.status(409).json({ error: 'Pictures and files go through the app for now (picture texts aren\'t set up yet). Switch to App.' });
+      if (upload.length && !(docs && docs.storeDocs && docs.enabled !== false)) return res.status(503).json({ error: 'File storage isn\'t set up on the server.' });
       const by = nameOf(req.user);
       try {
         let status = 'sent'; let note = null;
+        // the attachments are stored first (PDF or pictures, 14 MB each); the message carries their ids
+        const stored = upload.length ? await docs.storeDocs({ site: SITE, kind: 'message', trip: null, files: upload.map((f) => ({ filename: String(f.filename || '').slice(0, 200), mediaType: String(f.mediaType || ''), dataBase64: String(f.dataBase64 || '') })), by }) : [];
+        const files = stored.map((d, i) => ({ id: String(d.id), name: String((upload[d.fileIndex != null ? d.fileIndex : i] || {}).filename || '').slice(0, 120) || null, type: String((upload[d.fileIndex != null ? d.fileIndex : i] || {}).mediaType || '') || null }));
         if (via === 'app') {
-          const k = `${can.app.trip}|${text}`; appSending.set(k, now());
-          const r = await driverLinks.messageDriver(SITE, can.app.trip, text, by);
+          const k = `${can.app.trip}|${text || `📎 ${files.length === 1 ? 'A file' : `${files.length} files`} from dispatch`}`; appSending.set(k, now());
+          const r = await driverLinks.messageDriver(SITE, can.app.trip, text, by, { docIds: files.map((f) => f.id) });
           if (r && r.skipped) { appSending.delete(k); return res.status(409).json({ error: `Not sent: ${r.skipped}.` }); }
           status = /held/.test(String((r && r.via) || '')) ? 'held' : 'sent';
           note = (r && r.via) || null;
@@ -228,7 +235,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
           note = r && r.status ? String(r.status) : null;
           if (comms && comms.log) { const l = loads.find((x) => x.drivers.some((d) => d.phone === t.phone)); await comms.log(SITE, l ? l.trip : null, { type: 'text', kind: 'custom', to: t.phone, text, by, inboxId: clientId }).catch(() => {}); }
         }
-        const m = await add(t, { dir: 'out', via, text, by, status, note, trip: (can[via] && can[via].trip) || t.trip || null }, `send:${clientId}`);
+        const m = await add(t, { dir: 'out', via, text, by, status, note, trip: (can[via] && can[via].trip) || t.trip || null, ...(files.length ? { files } : {}) }, `send:${clientId}`);
         res.json({ ok: true, message: m });
       } catch (e) {
         // a failed send is shown as failed (not retried silently); sending again uses a new clientId

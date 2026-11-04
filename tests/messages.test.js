@@ -11,12 +11,12 @@ const OUT = { id: 'x9', name: 'Broker Bob', role: 'customer' };
 const BOARD = [{ trip: { tripNumber: '626130', powerUnit: '4566', trailer: '7300' }, _samsara: { driver1: 'Carlos Rojas', driver1Info: { phone: '+1 (305) 555-0101' }, driver2: 'Miguel Lopez', driver2Info: { phone: '305-555-0102' } } },
   { trip: { tripNumber: '626200', powerUnit: '2403' }, _samsara: { driver1: 'Ana Diaz', driver1Info: { phone: '7865550199' } } }];
 
-const setup = ({ live = false, appResult = { sent: true, via: 'app (push)' } } = {}) => {
+const setup = ({ live = false, appResult = { sent: true, via: 'app (push)' }, docs = null } = {}) => {
   const db = mem(); const app = fakeApp(); const sent = []; let t = Date.parse('2026-11-04T15:00:00Z');
   const comms = { log: async () => {} };
-  const driverLinks = { messageDriver: async (site, trip, text, by) => { sent.push(['app', trip, text, by]); return appResult; } };
+  const driverLinks = { messageDriver: async (site, trip, text, by, opts = {}) => { sent.push(['app', trip, text, by, ...((opts.docIds || []).length ? [opts.docIds] : [])]); return appResult; } };
   const ringcentral = { configFor: async () => (live ? { fromNumber: '+17867233912' } : {}), sendSms: async (o, m) => { sent.push(['sms', m.to, m.text, m.by]); return { id: 'm1', status: 'Queued' }; } };
-  const inbox = initMessages(app, { requireAuth: () => {}, db, getBoard: async () => ({ trips: BOARD }), activity: { lookup: async (p) => (String(p).endsWith('0199') ? { role: 'driver', name: 'Ana Diaz' } : { role: 'unknown' }) }, ringcentral, driverLinks, comms, now: () => t });
+  const inbox = initMessages(app, { requireAuth: () => {}, db, getBoard: async () => ({ trips: BOARD }), activity: { lookup: async (p) => (String(p).endsWith('0199') ? { role: 'driver', name: 'Ana Diaz' } : { role: 'unknown' }) }, ringcentral, driverLinks, comms, docs, now: () => t });
   return { db, app, sent, inbox, at: (ms) => { t = ms; } };
 };
 
@@ -137,4 +137,25 @@ test('a truck search offers its team drivers as one group; the same group is reu
   const a = await call(h.app, 'POST /truckmate/messages/groups', GEO, { body: { members: r.teams[0].drivers.map((d) => ({ ...d, role: 'driver' })), trip: '626130' } });
   const b = await call(h.app, 'POST /truckmate/messages/groups', VAL, { body: { members: r.teams[0].drivers.map((d) => ({ ...d, role: 'driver' })), trip: '626130' } });
   assert.equal(b.body.existing, true); assert.equal(a.body.thread.id, b.body.thread.id);
+});
+
+test('pictures and PDFs: stored, sent with the app message, shown on the thread; never by text; a photo-only message is fine', async () => {
+  const stored = [];
+  const docs = { storeDocs: async ({ kind, files }) => { stored.push([kind, files.map((f) => f.filename)]); return files.map((f, i) => ({ id: 500 + i, fileIndex: i })); } };
+  const h = setup({ docs });
+  const files = [{ filename: 'door.jpg', mediaType: 'image/jpeg', dataBase64: 'AAAA' }, { filename: 'ratecon.pdf', mediaType: 'application/pdf', dataBase64: 'BBBB' }];
+  const r = await call(h.app, 'POST /truckmate/messages/send', GEO, { body: { thread: 'p:7865550199', text: '', files, via: 'app', clientId: 'f-1' } });
+  assert.equal(r.code, 200);
+  assert.deepEqual(stored, [['message', ['door.jpg', 'ratecon.pdf']]]);
+  assert.deepEqual(h.sent[0], ['app', '626200', '', 'Geo', ['500', '501']]);
+  assert.deepEqual(r.body.message.files, [{ id: '500', name: 'door.jpg', type: 'image/jpeg' }, { id: '501', name: 'ratecon.pdf', type: 'application/pdf' }]);
+  const list = (await call(h.app, 'GET /truckmate/messages', GEO)).body.threads;
+  assert.equal(list[0].last.text, '📎 2 attachments');
+  const live = setup({ live: true, docs });
+  const sms = await call(live.app, 'POST /truckmate/messages/send', GEO, { body: { phone: '7865551234', text: 'hi', files, via: 'sms', clientId: 'f-2' } });
+  assert.equal(sms.code, 409); assert.match(sms.body.error, /through the app/);
+  // a driver's photo from the app lands on the thread with its file
+  await h.inbox.fromApp('626200', { type: 'reply', from: 'driver app', by: 'Ana Diaz (app)', text: 'Seal [1 photo]', docIds: ['777'], extId: 'p1' });
+  const th = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' } })).body.messages;
+  assert.deepEqual([th[1].text, th[1].files], ['Seal', [{ id: '777' }]]);
 });
