@@ -14,7 +14,7 @@ function setup({ roster = [FRANK] } = {}) {
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const requireAdmin = (req, res, next) => requireAuth(req, res, () => (req.user.admin || req.user.companyAdmin ? next() : res.status(403).json({ error: 'Admins only.' })));
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
-  initDriverAuth(app, { requireAuth, requireAdmin, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => list, getBoard: async () => ({ trips: BOARD }), docsLink: async (site, t) => `https://x/t/tok-${t}`, now: () => clock });
+  initDriverAuth(app, { rosterCacheMs: 0, appCacheMs: 0, requireAuth, requireAdmin, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => list, getBoard: async () => ({ trips: BOARD }), docsLink: async (site, t) => `https://x/t/tok-${t}`, now: () => clock });
   const call = async (key, { body = {}, params = {}, token = null, ip = '1.1.1.1' } = {}) => {
     let out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } };
     const req = { body, params, ip, headers: token ? { authorization: `Bearer ${token}` } : {} };
@@ -124,7 +124,7 @@ test('a driver sees the load message dispatch sent on each load and taps OK', as
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const sheets = { visible: (x) => !!x, get: async (t) => (t === '626265' ? { trip: t, bill: 'B1', stops: [{ kind: 'pickup', name: 'QUIRCH FOODS', city: 'MIAMI', state: 'FL' }] } : null), forDriver: async (x) => (x ? { ...x, stops: x.stops.map((s) => ({ ...s, map: 'm' })) } : null), dropped: async (t, by, o) => (t === '626265' ? { by, ...o } : null), confirm: async (t, by) => { okd.push([t, by]); return t === '626265' ? { confirmedAt: 'now' } : null; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
-  init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: BOARD }), sheets });
+  init(app, { rosterCacheMs: 0, appCacheMs: 0, requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: BOARD }), sheets });
   const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
   await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', newPin: '2580' } });
   const token = (await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', pin: '2580' } })).body.token;
@@ -146,7 +146,7 @@ test('driver phones: registered on the profile, dispatch messages reach both dri
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
   const push = { sendToTokens: async (tokens, m) => { sent.push({ to: tokens.map((t) => t.token), ...m }); return []; } };
-  const d = init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK, { code: '2473', name: 'Ana B', phone: '3055550200' }], getBoard: async () => ({ trips: board }), push, unreadFor: async (site, t) => (t === '626265' ? 2 : 0) });
+  const d = init(app, { rosterCacheMs: 0, appCacheMs: 0, requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK, { code: '2473', name: 'Ana B', phone: '3055550200' }], getBoard: async () => ({ trips: board }), push, unreadFor: async (site, t) => (t === '626265' ? 2 : 0) });
   const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
   await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', newPin: '2580' } });
   const token = (await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', pin: '2580' } })).body.token;
@@ -166,7 +166,7 @@ test('the Next load tab shows only loads a dispatcher sent; the load they are on
   const sheets = { get: async (t) => store[t] || null, visible: (x) => !!x && !(x.fromRateCon && !x.sentAt), forDriver: async (x) => x };
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
-  init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: BOARD }), sheets });
+  init(app, { rosterCacheMs: 0, appCacheMs: 0, requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: BOARD }), sheets });
   const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
   await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', newPin: '2580' } });
   const token = (await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', pin: '2580' } })).body.token;
@@ -187,7 +187,7 @@ test('the console\'s Driver app section: each driver signed in or not, notificat
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
   const push = { sendToTokens: async () => [] };
-  const d = init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: board }), sheets, push, now: () => clock });
+  const d = init(app, { rosterCacheMs: 0, appCacheMs: 0, requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: board }), sheets, push, now: () => clock });
   const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
   const staff = jwt.sign({ id: 1, name: 'Geo', role: 'dispatcher' }, SECRET);
   let v = (await call('GET /truckmate/driver-app', { token: staff })).body.trips;
@@ -217,7 +217,7 @@ test('driver profiles: dispatch adds a driver Samsara doesn\'t have, more cells,
   const board = [trip('626265', 'DEPSHIP', '0986'), trip('626300', 'DISP', '7777')];
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
-  init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: board }) });
+  init(app, { rosterCacheMs: 0, appCacheMs: 0, requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => [FRANK], getBoard: async () => ({ trips: board }) });
   const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
   const staff = jwt.sign({ id: 1, name: 'Geo', role: 'dispatcher' }, SECRET);
   const outsider = jwt.sign({ id: 9, name: 'Broker', role: 'customer', company: 'other' }, SECRET);
@@ -250,7 +250,7 @@ test('every Samsara driver is saved the first time we see them; one who leaves S
   const db = mem(); const routes = {}; let samsara = [FRANK];
   const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
-  init(app, { requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => samsara, getBoard: async () => ({ trips: [] }) });
+  init(app, { rosterCacheMs: 0, appCacheMs: 0, requireAuth, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => samsara, getBoard: async () => ({ trips: [] }) });
   const call = async (key, { body = {}, params = {}, token = null } = {}) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const req = { body, params, ip: '1', headers: token ? { authorization: `Bearer ${token}` } : {} }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next(); return out; };
   const staff = jwt.sign({ id: 1, name: 'Geo', role: 'dispatcher' }, SECRET);
   await call('POST /driver/auth/login', { body: { driverId: '0986', phone: '3055550100', newPin: '2580' } });
@@ -264,4 +264,20 @@ test('every Samsara driver is saved the first time we see them; one who leaves S
   assert.equal((await call('DELETE /truckmate/driver-profiles/:code', { token: staff, params: { code: '0986' } })).status, 200);
   assert.equal((await call('GET /driver/me', { token: t })).status, 401, 'removed: signed out');
   assert.equal((await call('GET /truckmate/driver-profiles', { token: staff })).body.drivers.length, 0);
+});
+
+test('the driver list and the console\'s Driver app view are shared, not rebuilt on every request', async () => {
+  const { initDriverAuth: init } = await import('../driverauth.js');
+  const db = mem(); const routes = {}; let rosterReads = 0; let boardReads = 0; let t = 1e12;
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; }, delete: (p, ...h) => { routes[`DELETE ${p}`] = h; } };
+  const requireAuth = (req, res, next) => { req.user = { id: 1, role: 'dispatcher' }; return next(); };
+  init(app, { requireAuth, secret: 'k', db, sign: () => 'x', roster: async () => { rosterReads += 1; return [FRANK]; }, getBoard: async () => { boardReads += 1; return { trips: BOARD }; }, now: () => t });
+  const call = async (key) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h({ headers: {}, params: {}, query: {} }, res, next); }; await next(); return out; };
+  await Promise.all([call('GET /truckmate/driver-app'), call('GET /truckmate/driver-app'), call('GET /truckmate/driver-app')]);
+  assert.equal(boardReads, 1, 'three consoles at once: one board read');
+  assert.equal(rosterReads, 1);
+  t += 20000; await call('GET /truckmate/driver-app');
+  assert.equal(boardReads, 1, 'within 30 seconds: shared');
+  t += 70000; await call('GET /truckmate/driver-app');
+  assert.equal(boardReads, 2); assert.equal(rosterReads, 2, 'a minute later: fresh');
 });

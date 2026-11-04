@@ -82,13 +82,23 @@ export function loadsFor(code, items = []) {
   return { current: mine.filter((it) => ROLLING.test(String(tripOf(it).status || ''))).map(brief), next: mine.filter((it) => BOOKED.test(String(tripOf(it).status || ''))).map(brief) };
 }
 
-export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign, secret, roster, getBoard, docsLink = null, sheets = null, stopFlow = null, push = null, training = null, unreadFor = null, now = () => Date.now() }) {
+export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign, secret, roster, getBoard, docsLink = null, sheets = null, stopFlow = null, push = null, training = null, unreadFor = null, rosterCacheMs = 60000, appCacheMs = 30000, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const PUSH = `taDriverPush:${SITE}`;            // driver ID → [{ token, platform, env, at }] (the phones signed in to the profile)
   const tripsKey = (code) => `taDriverTrips:${SITE}:${norm(code)}`;
   const profiles = async () => (enabled ? (await db.get(PROFILES, {})) || {} : {});
   // Samsara's drivers, saved as we see them (new ones, a new name or cell): the console keeps every driver's profile for good
+  // the driver list, shared for a minute (every driver-app request and console card asks for it)
+  let crowd = null;
   const everyone = async () => {
+    if (crowd && crowd.list && now() - crowd.at < rosterCacheMs) return crowd.list;
+    if (crowd && crowd.wait) return crowd.wait;
+    const wait = everyoneNow().then((list) => { crowd = { at: now(), list }; return list; }, (e) => { crowd = null; throw e; });
+    crowd = { ...(crowd || {}), at: (crowd && crowd.at) || 0, wait };
+    return wait;
+  };
+  const forget = () => { crowd = null; };
+  const everyoneNow = async () => {
     const live = await roster().catch(() => []);
     const saved = enabled ? (await db.get(SAVED, {})) || {} : {};
     const at = new Date(now()).toISOString();
@@ -332,6 +342,7 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     const at = new Date(now()).toISOString();
     await db.update(PROFILES, (cur) => { const had = (cur || {})[code] || {}; return { ...(cur || {}), [code]: { code: String(req.params.code).trim().toUpperCase().slice(0, 12), name, phones, addedBy: had.addedBy || who(req), addedAt: had.addedAt || at, updatedBy: who(req), updatedAt: at } }; }, {});
     req.body = { driver: code, name, phones: phones.length };   // the activity log: who changed which driver (not the numbers)
+    forget();
     return res.json({ ok: true, driver: (await everyone()).find((d) => norm(d.code) === code) || null });
   });
   // dispatch removes a driver who left: their profile and the saved Samsara copy go, and every phone of theirs is signed out.
@@ -344,18 +355,25 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     await db.update(PROFILES, (cur) => { const all = { ...(cur || {}) }; delete all[code]; return all; }, {});
     await db.update(SAVED, (cur) => { const all = { ...(cur || {}) }; delete all[code]; return all; }, {});
     req.body = { driver: code };
+    forget();
     return res.json({ ok: true });
   });
   // the console: each load's Driver app section, for every load on the board in one read
+  let appView = null;   // the whole board's Driver app view, shared for 30 seconds (every open console asks every minute)
   app.get('/truckmate/driver-app', requireAuth, async (req, res) => {
     if (!enabled) return res.json({ trips: {} });
+    if (appView && appView.trips && now() - appView.at < appCacheMs) return res.json({ trips: appView.trips });
+    if (appView && appView.wait) { try { return res.json({ trips: await appView.wait }); } catch { return res.status(502).json({ error: 'Could not read the driver app status.' }); } }
+    let done; const wait = new Promise((ok, no) => { done = { ok, no }; }); wait.catch(() => {});
+    appView = { ...(appView || {}), wait };
     try {
       const [items, list, allPins, allPush, appRec, allSheets] = await Promise.all([board(), everyone(), pins(), db.get(PUSH, {}), db.get(APP, {}), sheets && sheets.all ? sheets.all().catch(() => ({})) : {}]);
       const trips = {};
       // a draft Jarvis made from a rate con isn't "sent" until a dispatcher sends it
       for (const it of items) { const sh = (allSheets || {})[tripNo(it)] || null; trips[tripNo(it)] = driverAppView(it, { roster: list, pins: allPins, push: allPush || {}, app: appRec || {}, sheet: sh && sheets.visible(sh) ? sh : null }); }
+      appView = { at: now(), trips }; done.ok(trips);
       return res.json({ trips });
-    } catch (e) { return res.status(502).json({ error: 'Could not read the driver app status.' }); }
+    } catch (e) { appView = null; done.no(e); return res.status(502).json({ error: 'Could not read the driver app status.' }); }
   });
   return { requireDriver, notify, notifyTrip };
 }

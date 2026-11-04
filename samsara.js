@@ -529,13 +529,19 @@ export function correlate(item, idx) {
 
 // Cached live index so /truckmate/active doesn't re-pull all of Samsara per hit.
 let _idxCache = { at: 0, token: '', idx: null };
+let _idxWait = null;   // one Samsara pull at a time: everyone asking while it runs shares it
 export async function getLiveIndex(token, ttlMs = 60000) {
   const now = Date.now();
   if (_idxCache.idx && _idxCache.token === token && (now - _idxCache.at) < ttlMs) return _idxCache.idx;
-  const idx = indexSnapshot(await snapshot(token));
-  await addRestSince(token, idx).catch((e) => console.warn('[samsara] rest since:', e.message));
-  _idxCache = { at: now, token, idx };
-  return idx;
+  if (_idxWait && _idxWait.token === token) return _idxWait.p;
+  const p = (async () => {
+    const idx = indexSnapshot(await snapshot(token));
+    await addRestSince(token, idx).catch((e) => console.warn('[samsara] rest since:', e.message));
+    _idxCache = { at: Date.now(), token, idx };
+    return idx;
+  })();
+  _idxWait = { token, p };
+  try { return await p; } finally { if (_idxWait && _idxWait.p === p) _idxWait = null; }
 }
 
 // When a driver's current rest began: walk back from their latest duty log while it's off duty / sleeper
