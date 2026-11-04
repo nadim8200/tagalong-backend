@@ -79,17 +79,20 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
   async function thread(site, phone, entry) {
     const k = last10(phone);
     if (!enabled || k.length !== 10) return;
+    if (inbox) Promise.resolve(inbox.fromSms(phone, entry)).catch((e) => console.warn('[comms] inbox:', e.message));   // Phone & Messages shows it too
     await db.update(threadKey(site), (cur) => {
       const all = { ...(cur || {}) };
       all[k] = [{ ...entry, at: entry.at || new Date().toISOString() }, ...(all[k] || [])].slice(0, 300);
       return all;
     }, {});
   }
+  let inbox = null;                                              // set by index.js — the shared Phone & Messages inbox
   let outreach = null;                                           // set by index.js — emails dispatch on every driver contact
   const useOutreach = (fn) => { outreach = fn; };
   async function log(site, trip, entry) {
     if (outreach && trip && entry.type === 'text' && !/^help/.test(String(entry.kind || ''))) Promise.resolve(outreach({ site, trip, channel: entry.kind === 'app-message' || entry.to === 'driver app' ? 'app' : 'text', to: entry.to, text: entry.text, by: entry.by, kind: entry.kind })).catch(() => {});
     const phone = entry.type === 'reply' ? entry.from : entry.to;
+    if (inbox && trip && (entry.kind === 'app-message' || entry.to === 'driver app' || entry.from === 'driver app')) Promise.resolve(inbox.fromApp(trip, entry)).catch((e) => console.warn('[comms] inbox:', e.message));
     // the Calls & texts log (by day): texts and driver-app messages, both numbers
     if (activity && (entry.type === 'text' || entry.type === 'reply')) {
       const app = entry.kind === 'app-message' || entry.from === 'driver app' || entry.to === 'driver app';
@@ -246,10 +249,10 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
       const kw = keyword(r.text);
       if (kw) { await handleKeyword(site, r, kw); } // eslint-disable-line no-await-in-loop
       const { trips, confirm } = kw ? { trips: [], confirm: null } : routeReply(r, { asks, driverPhones });
-      if (!trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: null }); // eslint-disable-line no-await-in-loop
+      if (!trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: null, extId: r.id }); // eslint-disable-line no-await-in-loop
       // a picture from a driver stays on the load, and goes on the breakdown if there is one
       const photos = !kw && trips.length === 1 && textPhotos && (r.media || []).length ? await textPhotos(r, trips[0]).catch((e) => { console.warn('[comms] text photos:', e.message); return []; }) : []; // eslint-disable-line no-await-in-loop
-      if (trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: trips.join(', '), ...(photos.length ? { photos } : {}) }); // eslint-disable-line no-await-in-loop
+      if (trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: trips.join(', '), extId: r.id, ...(photos.length ? { photos } : {}) }); // eslint-disable-line no-await-in-loop
       if (photos.length && onTextPhotos) await onTextPhotos(trips[0], photos, 'Driver (text)').catch((e) => console.warn('[comms] breakdown photos:', e.message)); // eslint-disable-line no-await-in-loop
       // an employee (phone on the Employees list) texting Jarvis a question → Jarvis texts the answer back
       if (!kw && staffAsk) {
@@ -335,5 +338,5 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
   }
 
   console.log(`[comms] driver calls/texts ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, pollReplies, log, sendConfirmations, handleKeyword, textDriverAuto, useOutreach };
+  return { overlay, pollReplies, log, sendConfirmations, handleKeyword, textDriverAuto, useOutreach, useInbox: (x) => { inbox = x; } };
 }

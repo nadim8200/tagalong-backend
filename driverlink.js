@@ -663,7 +663,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       const m = await addMessage(link.site, link.trip, { from: 'driver', by, text, docIds });
       if (docIds.length && photoHook) Promise.resolve(photoHook(link.site, String(link.trip), { docIds, via: 'TagAlong app', by })).catch(() => {});   // counts only while a temp check is open
       // on the load like a text reply (Jarvis' pickup follow-up and the rundown read it)
-      if (comms && comms.log) await comms.log(link.site, link.trip, { type: 'reply', from: 'driver app', text: `${text}${docIds.length ? ` [${docIds.length} photo${docIds.length === 1 ? '' : 's'}]` : ''}`, noThread: true });
+      if (comms && comms.log) await comms.log(link.site, link.trip, { type: 'reply', from: 'driver app', by, extId: m.id, text: `${text}${docIds.length ? ` [${docIds.length} photo${docIds.length === 1 ? '' : 's'}]` : ''}`, noThread: true });
       if (help && help.raise && wantsContact(text)) help.raise({ source: 'app', ref: m.id, role: 'driver', from: { name: by.replace(/ \(app\)$/, ''), phone: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].phone) || null, company: link.carrierName || null }, trip: link.trip, need: text.slice(0, 400), said: text }).catch(() => {});
       if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: m.at, source: 'driver app message', text: text || `Sent ${docIds.length} photo${docIds.length === 1 ? '' : 's'}`, by }]);
       res.json({ ok: true, id: m.id });
