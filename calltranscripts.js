@@ -156,7 +156,7 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
           const loads = loadsAt(board, trip ? [trip] : (who && who.role === 'driver' && who.trips) || []);
           if (activity) await activity.record({ id: `call:rc-${c.id}`, kind: 'call', source: 'ringcentral', at: c.at, direction: c.direction, from: c.from, to: c.to, ourLine: c.ourLine, minutes: mins, trip, loads, summary: s.summary, followUp: s.followUp, transcript: text.slice(0, 60000), recording: `rc:${c.recordingId}`, by: c.by, ended: 'ended', ...(who && who.role && who.role !== 'unknown' ? { role: who.role, name, detail: who.detail || null } : {}) }); // eslint-disable-line no-await-in-loop
           if (log && trip) await log(SITE, trip, { type: 'call', at: c.at, [c.direction === 'outbound' ? 'to' : 'from']: c.other, label: `${c.direction === 'outbound' ? `${c.by || 'Dispatch'} called ${name || c.other}` : `${name || c.other} called ${c.by || 'dispatch'}`} (${mins} min, recorded)`, by: c.by || null, text: s.summary, callId: `rc-${c.id}`, noThread: true }).catch(() => {}); // eslint-disable-line no-await-in-loop
-          await db.update(INDEX, (cur) => [{ id: `rc-${c.id}`, at: c.at, trip, by: c.by, other: c.other, name, direction: c.direction, minutes: mins, loads, summary: s.summary, followUp: s.followUp }, ...(Array.isArray(cur) ? cur : []).filter((x) => x.id !== `rc-${c.id}`)].slice(0, 3000), []); // eslint-disable-line no-await-in-loop
+          await db.update(INDEX, (cur) => [{ id: `rc-${c.id}`, at: c.at, trip, by: c.by, other: c.other, name, direction: c.direction, minutes: mins, loads, summary: s.summary, followUp: s.followUp, v: 2 }, ...(Array.isArray(cur) ? cur : []).filter((x) => x.id !== `rc-${c.id}`)].slice(0, 3000), []); // eslint-disable-line no-await-in-loop
           await db.update(STATE, (cur) => ({ ...(cur || {}), recordings: { ...((cur || {}).recordings || {}), [c.recordingId]: c.contentUri } }), {}); // eslint-disable-line no-await-in-loop
           await mark('done'); used += mins; done += 1; // eslint-disable-line no-await-in-loop
         } catch (e) { lastError = e.message; if (e.stop) break; }
@@ -169,6 +169,20 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
         const patch = { loads, ...(fix ? { summary: fix.summary, followUp: x.followUp || fix.followUp } : {}) };
         if (activity) await activity.record({ id: `call:${x.id}`, at: x.at, ...patch }); // eslint-disable-line no-await-in-loop
         await db.update(INDEX, (cur) => (Array.isArray(cur) ? cur : []).map((y) => (y.id === x.id ? { ...y, ...patch } : y)), []); // eslint-disable-line no-await-in-loop
+      }
+      // summaries written before the dispatcher/caller roles were spelled out (and cut off): written again from the saved transcript
+      for (const x of ((await db.get(INDEX, [])) || []).filter((y) => !y.v && t - Date.parse(y.at) < 48 * 3600000).slice(0, 10)) {
+        try {
+          const e = (((await db.get(`taActivity:${SITE}:${dayOf(Date.parse(x.at))}`, [])) || [])).find((y) => y.id === `call:${x.id}`); // eslint-disable-line no-await-in-loop
+          let patch = { v: 2 };
+          if (e && e.transcript) {
+            const who = activity && activity.lookup ? await activity.lookup(x.other).catch(() => null) : null; // eslint-disable-line no-await-in-loop
+            const s = await summarize({ direction: x.direction, by: x.by, other: x.other, seconds: (x.minutes || 0) * 60 }, e.transcript, x.name, who && who.role); // eslint-disable-line no-await-in-loop
+            if (s.summary) patch = { ...patch, summary: s.summary, followUp: s.followUp };
+            if (activity && s.summary) await activity.record({ id: `call:${x.id}`, at: x.at, summary: s.summary, followUp: s.followUp }); // eslint-disable-line no-await-in-loop
+          }
+          await db.update(INDEX, (cur) => (Array.isArray(cur) ? cur : []).map((y) => (y.id === x.id ? { ...y, ...patch } : y)), []); // eslint-disable-line no-await-in-loop
+        } catch (err) { lastError = lastError || err.message; }
       }
       await db.update(STATE, (cur) => ({ ...(cur || {}), since: new Date(t).toISOString(), lastRun: new Date(t).toISOString(), lastError, minutes: { [day]: used } }), {});
       return { done, waiting: Math.max(0, recs.length - done), lastError };

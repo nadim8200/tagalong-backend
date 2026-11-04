@@ -129,3 +129,22 @@ test('a summary cut off mid-way still reads as a summary, never raw JSON', () =>
   assert.equal(cut.trip, null);
   assert.equal(parseSummary('Plain words.').summary, 'Plain words.');
 });
+
+test('summaries from before the fix are written again from the saved transcript, once', async () => {
+  const db = mem(); const t = Date.parse('2026-11-04T20:00:00Z'); const asked = [];
+  db.s['taCallTranscripts:florida-beauty'] = [{ id: 'rc-9', at: '2026-11-04T17:16:00Z', by: 'Giovanni Di muro', other: '+17867683338', name: 'Jorge Rodriguez', direction: 'outbound', minutes: 8, loads: [], summary: 'Giovanni Di muro, a driver, called dispatcher Jorge' }];
+  db.s['taActivity:florida-beauty:2026-11-04'] = [{ id: 'call:rc-9', transcript: 'Jefe, el pin del trailer no engancha.' }];
+  const recorded = [];
+  const fetchFn = async (url, init = {}) => {
+    if (url.includes('/call-log')) return { ok: true, json: async () => ({ records: [] }) };
+    asked.push(JSON.parse(init.body).messages[0].content);
+    return { ok: true, json: async () => ({ content: [{ type: 'text', text: '{"summary":"Dispatcher Giovanni called driver Jorge about a trailer pin.","trip":null,"followUp":"Get the pin fixed."}' }] }) };
+  };
+  const ct = initCallTranscripts({ get() {}, post() {} }, { requireAuth: () => {}, db, rc: { configFor: async () => ({}), accessToken: async () => 't' }, activity: { lookup: async () => ({ role: 'driver', name: 'Jorge Rodriguez' }), record: async (e) => recorded.push(e) }, secret: 's', env: { OPENAI_API_KEY: 'x', ANTHROPIC_API_KEY: 'y' }, fetchFn, start: false, now: () => t });
+  await ct.run(); await ct.run();
+  const x = db.s['taCallTranscripts:florida-beauty'][0];
+  assert.equal(x.summary, 'Dispatcher Giovanni called driver Jorge about a trailer pin.'); assert.equal(x.v, 2);
+  assert.equal(asked.length, 1, 'once');
+  assert.match(asked[0], /The dispatcher \(our side\) is Giovanni Di muro; the other side is Jorge Rodriguez \(driver\)/);
+  assert.equal(recorded[0].summary, x.summary);
+});
