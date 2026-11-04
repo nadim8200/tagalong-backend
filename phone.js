@@ -155,6 +155,21 @@ export function initPhone(app, { requireAuth, db, secret, clientId, activity = n
     } catch (e) { return res.status(409).json({ error: /Call Control|403/.test(e.message) ? 'RingCentral didn\'t allow it: in the Admin Portal, add yourself as a monitor of this dispatcher (Call Monitoring groups).' : e.message }); }
   });
 
+  // Main-line calls (the call queue): ring this line or not. RingCentral's own presence setting, so the desk phone and the
+  // RingCentral app follow it too; direct calls to the line keep ringing either way.
+  const queueStatus = (dnd) => !['DoNotAcceptDepartmentCalls', 'DoNotAcceptAnyCalls'].includes(String(dnd || ''));
+  app.get('/ringcentral/phone/queue', requireAuth, async (req, res) => {
+    if (!guard(req, res)) return undefined;
+    try { const p = await api(uid(req), '/extension/~/presence'); return res.json({ queueCalls: queueStatus(p.dndStatus), status: p.dndStatus || null }); }
+    catch (e) { return res.status(409).json({ error: /Reconnect/.test(e.message) ? 'Connect your phone first.' : 'RingCentral didn\'t answer. Try again.' }); }
+  });
+  app.post('/ringcentral/phone/queue', requireAuth, async (req, res) => {
+    if (!guard(req, res)) return undefined;
+    const on = !!(req.body || {}).on;
+    try { const p = await api(uid(req), '/extension/~/presence', 'PUT', { dndStatus: on ? 'TakeAllCalls' : 'DoNotAcceptDepartmentCalls' }); return res.json({ queueCalls: queueStatus(p.dndStatus), status: p.dndStatus || null }); }
+    catch (e) { return res.status(409).json({ error: /Reconnect/.test(e.message) ? 'Connect your phone first.' : /permission/.test(e.message) ? 'Reconnect your phone (Phone → Disconnect my line → Connect my phone) so it can change this.' : 'RingCentral didn\'t answer. Try again.' }); }
+  });
+
   // who's on the other end, for the call bar: name, what they are, and their load
   app.get('/truckmate/phone/who', requireAuth, async (req, res) => {
     if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });

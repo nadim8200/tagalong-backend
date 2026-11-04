@@ -96,3 +96,22 @@ test('shadow: managers only, never your own call, needs the reconnected phone; a
   db.s.taPhoneSip.boss.deviceId = null;
   assert.match((await call('POST /ringcentral/phone/shadow', { user: boss, body: { session: 's-9' } })).body.error, /Reconnect your phone/);
 });
+
+test('main-line calls on/off: reads and sets RingCentral presence for your own line; direct calls keep ringing', async () => {
+  const db = mem(); const routes = {}; const asked = [];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  let dnd = 'TakeAllCalls';
+  const fetchFn = async (url, init = {}) => { asked.push([init.method || 'GET', url.replace('https://platform.ringcentral.com', ''), init.body || null]); if (init.method === 'PUT') dnd = JSON.parse(init.body).dndStatus; return { ok: true, status: 200, json: async () => ({ dndStatus: dnd }) }; };
+  initPhone(app, { requireAuth: (q, r, n) => n(), db, secret: 's', clientId: 'cid', fetchFn, env: {}, now: () => 1e12 });
+  db.s.taPhoneSip = { boss: { extensionId: 'e101', ext: '101', oauth: seal({ access: 'at', refresh: 'rt', expires: 1e12 + 3600000 }, 's') } };
+  const call = async (key, req) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; await routes[key][routes[key].length - 1](req, res); return out; };
+  const me = { id: 'boss', role: 'dispatcher' };
+  assert.equal((await call('GET /ringcentral/phone/queue', { user: me })).body.queueCalls, true);
+  const off = await call('POST /ringcentral/phone/queue', { user: me, body: { on: false } });
+  assert.deepEqual(off.body, { queueCalls: false, status: 'DoNotAcceptDepartmentCalls' });
+  assert.deepEqual(asked[1], ['PUT', '/restapi/v1.0/account/~/extension/~/presence', JSON.stringify({ dndStatus: 'DoNotAcceptDepartmentCalls' })]);
+  assert.equal((await call('POST /ringcentral/phone/queue', { user: me, body: { on: true } })).body.queueCalls, true);
+  const none = await call('GET /ringcentral/phone/queue', { user: { id: 'nobody', role: 'dispatcher' } });
+  assert.equal(none.status, 409); assert.match(none.body.error, /Connect your phone/);
+  assert.equal((await call('GET /ringcentral/phone/queue', { user: { id: 'x', role: 'customer' } })).status, 403);
+});
