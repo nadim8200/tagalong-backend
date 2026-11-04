@@ -49,6 +49,7 @@ import { initHelpdesk } from './helpdesk.js';
 import { initProfiles } from './profiles.js';
 import { initActivity } from './activity.js';
 import { initCallTranscripts } from './calltranscripts.js';
+import { initAutoRecord } from './autorecord.js';
 import { initDriverLinks } from './driverlink.js';
 import { initComms } from './comms.js';
 import { initRundowns } from './rundown.js';
@@ -1510,7 +1511,9 @@ initDbpo(app, { db, requireAuth: requireAdmin });
 
 app.get('/', (_req, res) => res.send('TagAlong backend is running.'));
 // dispatchers' RingCentral calls: recorded by RingCentral, transcribed and summarized here, filed in Calls & texts and on the load (calltranscripts.js)
-const callTranscripts = initCallTranscripts(app, { requireAuth: requireDispatch, db, rc, activity, log: (...a) => comms.log(...a), secret: JWT_SECRET, publicUrl: process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_API_URL || 'https://tagalong-backend-fdzx.onrender.com', getBoard: (site) => truckmate.buildBoard(site) });
+// Jarvis presses Record on every answered dispatch call (RingCentral's automatic recording isn't recording them) (autorecord.js)
+const autoRecord = initAutoRecord(app, { rc, db, secret: JWT_SECRET, publicUrl: process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_API_URL || 'https://tagalong-backend-fdzx.onrender.com' });
+const callTranscripts = initCallTranscripts(app, { requireAuth: requireDispatch, db, rc, autoRecord, activity, log: (...a) => comms.log(...a), secret: JWT_SECRET, publicUrl: process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_API_URL || 'https://tagalong-backend-fdzx.onrender.com', getBoard: (site) => truckmate.buildBoard(site) });
 activity.useRecordingLink((r) => callTranscripts.link(r));
 
 app.listen(PORT, () => console.log(`TagAlong backend on :${PORT} — origins: ${origins.join(', ')}`));
