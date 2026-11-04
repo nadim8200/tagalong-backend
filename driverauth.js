@@ -375,5 +375,5 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       return res.json({ trips });
     } catch (e) { appView = null; done.no(e); return res.status(502).json({ error: 'Could not read the driver app status.' }); }
   });
-  return { requireDriver, notify, notifyTrip };
+  return { requireDriver, notify, notifyTrip, roster: everyone };
 }

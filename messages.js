@@ -45,7 +45,7 @@ export const unreadOf = (thread, readAt) => (thread.inbound || []).filter((at) =
 // Same people? (a group is matched to a load's app chat only when its members are exactly that load's drivers) Pure.
 export const samePeople = (a, b) => { const k = (l) => l.map((m) => last10(m.phone) || String(m.name || '').toLowerCase()).filter(Boolean).sort().join('|'); return k(a) === k(b); };
 
-export function initMessages(app, { requireAuth, db, getBoard = null, activity = null, ringcentral = null, driverLinks = null, comms = null, staff = null, now = () => Date.now() }) {
+export function initMessages(app, { requireAuth, db, getBoard = null, activity = null, ringcentral = null, driverLinks = null, comms = null, staff = null, drivers = null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const iso = () => new Date(now()).toISOString();
   const board = async () => { try { return getBoard ? ((await getBoard(SITE)) || {}).trips || [] : []; } catch { return []; } };
@@ -230,6 +230,8 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       const out = new Map();
       const put = (c) => { if (!c.phone || c.phone.length !== 10) return; const had = out.get(c.phone); out.set(c.phone, had ? { ...c, ...had, trips: [...new Set([...(had.trips || []), ...(c.trips || [])])] } : c); };
       for (const l of loads) for (const d of l.drivers) put({ phone: d.phone, name: d.name, role: 'driver', truck: l.truck, trailer: l.trailer, trips: [l.trip] });
+      // every driver profile (Samsara + console-made), on a load or not
+      try { for (const d of (drivers ? await drivers() : []) || []) for (const ph of [d.phone, ...(d.phones || []).map((x) => (x && x.number) || x)]) put({ phone: last10(ph), name: d.name || null, role: 'driver', truck: d.truck || null, trailer: d.trailer || null, trips: [] }); } catch { /* roster unavailable */ }
       try { for (const p of (staff ? await staff() : []) || []) put({ phone: last10(p.phone), name: p.name || null, role: 'team', detail: p.department || null }); } catch { /* directory unavailable */ }
       try {
         for (const p of Object.values((await db.get(`taProfiles:${SITE}`, {})) || {})) {
@@ -237,7 +239,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
         }
       } catch { /* none */ }
       const list = [...out.values()].filter((c) => !q || JSON.stringify([c.name, c.detail, c.truck, c.trailer, c.trips]).toLowerCase().includes(q) || (qd.length >= 3 && c.phone.includes(qd)));
-      res.json({ contacts: list.slice(0, 300), newNumber: qd.length === 10 && !out.has(qd) ? qd : null });
+      res.json({ contacts: list.sort((a, b) => String(a.name || "~").localeCompare(String(b.name || "~"))).slice(0, 600), newNumber: qd.length === 10 && !out.has(qd) ? qd : null });
     });
   }
 

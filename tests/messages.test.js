@@ -111,6 +111,13 @@ test('only dispatch logins; outsiders get nothing', async () => {
   assert.equal((await call(h.app, 'GET /truckmate/messages/contacts', OUT)).code, 403);
 });
 
+test('contacts: every driver profile (on a load or not), with extra cells', async () => {
+  const db = mem(); const app = fakeApp();
+  initMessages(app, { requireAuth: () => {}, db, getBoard: async () => ({ trips: BOARD }), drivers: async () => [{ code: 'D9', name: 'Ferney Urrego', phone: '+1 786 555 0300', phones: [{ number: '7865550300', label: 'Samsara' }, { number: '305-555-0301', label: 'Wife' }], truck: '2619' }] });
+  const r = (await call(app, 'GET /truckmate/messages/contacts', GEO, { query: { q: 'ferne' } })).body;
+  assert.deepEqual(r.contacts.map((c) => [c.name, c.phone, c.truck]), [['Ferney Urrego', '7865550300', '2619'], ['Ferney Urrego', '3055550301', '2619']]);
+});
+
 test('contacts: drivers with truck and trip; a new 10-digit number can be texted', async () => {
   const h = setup();
   const r = (await call(h.app, 'GET /truckmate/messages/contacts', GEO, { query: { q: '4566' } })).body;
