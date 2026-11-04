@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initAutoRecord, toRecord, hookToken } from '../autorecord.js';
+import { initAutoRecord, toRecord, hookToken, step } from '../autorecord.js';
 
 const evt = (parties, sid = 's-1') => ({ event: '/restapi/v1.0/account/1/telephony/sessions', body: { telephonySessionId: sid, parties } });
 
@@ -23,7 +23,7 @@ test('the webhook: RingCentral checks the address, only RingCentral can post, an
   const v = await call({ 'validation-token': 'abc' }, {});
   assert.equal(v.headers['Validation-Token'], 'abc');
   assert.equal((await call({ 'verification-token': 'wrong' }, evt([]))).status, 403);
-  const ans = evt([{ id: 'p1', extensionId: '101', status: { code: 'Answered' } }]);
+  const ans = evt([{ id: 'p1', extensionId: '101', direction: 'Inbound', status: { code: 'Answered' } }]);   // a call coming in, picked up
   await call({ 'verification-token': hookToken('s') }, ans);
   await call({ 'verification-token': hookToken('s') }, ans);
   assert.deepEqual(asked, [['POST', '/restapi/v1.0/account/~/telephony/sessions/s-1/parties/p1/recordings']], 'pressed once');
@@ -53,4 +53,26 @@ test('the subscription is made, kept, renewed before it runs out; a missing perm
   await denied.ensure();
   assert.match(denied.status().lastError, /Webhook Subscriptions/);
   assert.equal(initAutoRecord({ post() {} }, { rc: null, secret: 's', publicUrl: 'x', start: false }).status().on, false);
+});
+
+test('a call is recorded once both sides are connected, not when our side starts it (the real event order from RingCentral)', async () => {
+  const ours = (code) => ({ id: 'p-us', extensionId: '101', direction: 'Outbound', status: { code } });
+  const them = (code) => ({ id: 'p-them', direction: 'Inbound', status: { code } });
+  let c = step(null, evt([ours('Setup')]));
+  c = step(c, evt([them('Proceeding')]));
+  c = step(c, evt([ours('Answered')]));
+  assert.equal(c.ready, false, 'our side connected, the person we called hasn\'t picked up');
+  c = step(c, evt([them('Answered')]));
+  assert.equal(c.ready, true); assert.equal(c.ourParty, 'p-us');
+  assert.equal(step(c, evt([ours('Disconnected')])).ready, false, 'hung up');
+  // a call coming in: ready as soon as we pick up
+  assert.equal(step(null, evt([{ id: 'p-in', extensionId: '104', direction: 'Inbound', status: { code: 'Answered' } }])).ready, true);
+  // through the webhook: pressed once, at the right moment
+  const routes = {}; const asked = [];
+  const ar = initAutoRecord({ post: (p, h) => { routes[p] = h; } }, { rc: { configFor: async () => ({}), accessToken: async () => 'tok' }, secret: 's', publicUrl: 'https://api.example', fetchFn: async (url, init = {}) => { asked.push(init.method || 'GET'); return { ok: true, status: 200, json: async () => ({}) }; }, start: false });
+  const send = async (body) => { const res = { set() { return this; }, status() { return this; }, end() { return this; } }; routes['/ringcentral/webhook/telephony']({ headers: { 'verification-token': hookToken('s') }, body }, res); await new Promise((r) => setTimeout(r, 5)); };
+  for (const e of [evt([ours('Setup')], 'x'), evt([them('Proceeding')], 'x'), evt([ours('Answered')], 'x')]) await send(e);
+  assert.equal(asked.length, 0, 'not yet');
+  await send(evt([them('Answered')], 'x')); await send(evt([them('Answered')], 'x'));
+  assert.deepEqual(asked, ['POST']); assert.equal(ar.status().started, 1);
 });

@@ -18,6 +18,24 @@ const MIN = 60000;
 export const hookToken = (secret) => createHmac('sha256', `${secret}:rc-telephony-webhook`).update('v1').digest('hex').slice(0, 32);
 const same = (a, b) => { const x = Buffer.from(String(a || '')); const y = Buffer.from(String(b || '')); return x.length === y.length && timingSafeEqual(x, y); };
 
+// One call, event by event: RingCentral sends each side's changes separately (our side "Answered" comes before the person we call
+// picks up). Remember both, and record only once the call is really connected. Pure. → the call's new state, with ready=true when it's time
+export function step(call, evt) {
+  const b = (evt && evt.body) || {};
+  const c = { ourParty: null, ourDir: null, ourUp: false, theirUp: false, ...(call || {}) };
+  const ext = (x) => x && (x.extensionId || (x.owner && x.owner.extensionId));
+  for (const x of Array.isArray(b.parties) ? b.parties : []) {
+    if (!x || !x.status) continue;
+    if ((x.recordings || []).some((r) => r && r.active)) c.recording = true;
+    const up = x.status.code === 'Answered';
+    if (ext(x)) { if (!c.ourParty) { c.ourParty = String(x.id); c.ourDir = x.direction || null; } if (String(x.id) === c.ourParty && up) c.ourUp = true; } else if (up) c.theirUp = true;
+    if (x.status.code === 'Disconnected') c.ended = true;
+  }
+  // a call coming in is connected once we pick up; one going out once they do
+  c.ready = !!(c.ourParty && c.ourUp && !c.recording && !c.ended && (c.theirUp || c.ourDir === 'Inbound'));
+  return c;
+}
+
 // From one telephony-session event: the party to record — one of our extensions, answered, not being recorded yet. Pure. → { session, party } or null
 export function toRecord(evt) {
   const b = (evt && evt.body) || {};
@@ -36,6 +54,7 @@ export function initAutoRecord(app, { rc = null, db = null, secret, publicUrl, e
   const address = `${publicUrl}${PATH}`;
   const token = hookToken(secret);
   const started = new Map();              // telephony session → when we pressed Record (one press per call)
+  const calls = new Map();                // telephony session → what we know so far (step())
   const state = { subscription: null, expiresAt: null, lastEvent: null, lastError: null, started: 0 };
 
   async function rcCall(path, init = {}) {
@@ -50,14 +69,14 @@ export function initAutoRecord(app, { rc = null, db = null, secret, publicUrl, e
   async function press(t) {
     if (started.has(t.session)) return;
     started.set(t.session, now());
+    const failed = () => { started.delete(t.session); };
     for (const [k, at] of started) if (now() - at > 6 * 3600000) started.delete(k);
     try {
       await rcCall(`/restapi/v1.0/account/~/telephony/sessions/${encodeURIComponent(t.session)}/parties/${encodeURIComponent(t.party)}/recordings`, { method: 'POST' });
       state.started += 1; state.lastError = null;
       await note({ at: new Date(now()).toISOString(), session: t.session, direction: t.direction, ok: true });
     } catch (e) {
-      // a call RingCentral is already recording isn't a problem
-      if (e.status === 409) return;
+      if (e.status !== 409) failed();   // a refusal (not "already recording"): a later event on the call can try again
       state.lastError = /403|permission|forbid/i.test(`${e.status} ${e.message}`) ? `RingCentral refused to start the recording (${e.message}). Check On-demand Call Recording is on and the app has Call Control.` : e.message;
       await note({ at: new Date(now()).toISOString(), session: t.session, ok: false, error: e.message });
     }
@@ -74,8 +93,13 @@ export function initAutoRecord(app, { rc = null, db = null, secret, publicUrl, e
     const b = (req.body && req.body.body) || {};
     state.recent = [{ at: state.lastEvent, session: !!b.telephonySessionId, parties: (Array.isArray(b.parties) ? b.parties : []).map((x) => ({ id: !!(x && x.id), ext: !!(x && (x.extensionId || (x.owner && x.owner.extensionId))), keys: Object.keys(x || {}).slice(0, 20), status: x && x.status && x.status.code, direction: x && x.direction })) }, ...(state.recent || [])].slice(0, 6);
     if (off() || !rc) return undefined;
-    const t = toRecord(req.body);
-    if (t) press(t).catch(() => {});
+    const sid = b.telephonySessionId ? String(b.telephonySessionId) : null;
+    if (sid) {
+      const c = step(calls.get(sid), req.body);
+      calls.set(sid, { ...c, at: now() });
+      for (const [k, v] of calls) if (now() - v.at > 6 * 3600000) calls.delete(k);
+      if (c.ready) press({ session: sid, party: c.ourParty, direction: c.ourDir }).catch(() => {});
+    }
     return undefined;
   });
 
