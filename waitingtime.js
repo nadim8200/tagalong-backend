@@ -6,7 +6,7 @@
 // reaches a customer, a broker or a driver, and it is never a bill by itself.
 // ---------------------------------------------------------------
 import { makeToken, readToken, page, loadRows } from './breakdownreport.js';
-import { brokerLoad } from './watchtower.js';
+import { brokerLoad, yardMiles } from './watchtower.js';
 import { stopsLeft } from './loadstops.js';
 import { plannedPickup } from './pickupfollow.js';
 
@@ -18,13 +18,22 @@ const MOVING_MPH = 10;
 const NEAR_MILES = 15;              // miles to the stop come from its ZIP, so this can't be tight
 const GONE_MS = 3 * 60000;          // moving this long means it left, not that it pulled to another door
 const STALE_MS = 24 * 3600000;      // a status left on "arrived" for a day says nothing about waiting now
-const QUICK_MS = 10 * 60000;        // arrived and departed this close together is someone clicking through, not a truck leaving
+const QUICK_MS = 10 * 60000;
+const YARD_MILES = 0.5;            // GPS this close to our Miami terminal, lot or cooler: the truck is home, not waiting at a customer        // arrived and departed this close together is someone clicking through, not a truck leaving
 const KEEP_DAYS = 30;
 const PURPOSE = 'waiting-time';
 const AT_STOP = { ARRSHIP: 'shipper', ARRCONS: 'receiver' };
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const oneLine = (s, n) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
 const tripNo = (it) => String(((it && it.trip) || {}).tripNumber || '');
+
+// The truck's fresh GPS has it at our own Miami yard (terminal, lot or cooler): never waiting time. Pure.
+export function atOurYard(item, now = Date.now()) {
+  const l = (item && item._samsara) || {};
+  const at = l.gpsAt ? Date.parse(l.gpsAt) : NaN;
+  if (l.lat == null || l.lng == null || Number.isNaN(at) || now - at > GPS_FRESH_MS) return false;
+  return yardMiles({ lat: Number(l.lat), lng: Number(l.lng) }) <= YARD_MILES;
+}
 
 // When the clock starts. Pure.
 export const clockStart = (arrivedMs, apptMs = null) => Math.max(arrivedMs, apptMs || 0) + FREE_MS;
@@ -102,7 +111,9 @@ export function initWaitingTime(app, { db, secret, send, recipients, getBoard = 
     const open = (r) => { if (!counting.has(r.trip)) { fresh[r.key] = r; counting.add(r.trip); } };
     for (const it of items) {
       const at = brokerLoad(it) ? atStop(it) : null;
-      if (!at || Number.isNaN(at.arrivedMs) || now() - at.arrivedMs > STALE_MS) continue;
+      if (!at || Number.isNaN(at.arrivedMs) || now() - at.arrivedMs > STALE_MS || atOurYard(it, now())) continue;
+      // arrived and departed a minute apart: someone clicking ahead in TruckMate. It only counts if the truck is really stopped there
+      if (at.quick && gpsSays(it, null, now()) !== 'parked') continue;
       const key = `${tripNo(it)}:${at.arrivedMs}`;
       if (!stored[key]) open(record(it, key, at.kind, at.arrivedMs, at.quick ? { quick: true } : {}));
     }
@@ -110,13 +121,13 @@ export function initWaitingTime(app, { db, secret, send, recipients, getBoard = 
     const units = ((await db.get(`taWatch:${SITE}`, {})) || {}).units || {};
     for (const ep of Object.values(units).map((u) => u && u.stopEpisode).filter((x) => x && x.review && x.review.status === 'authorized' && x.stoppedSinceMs)) {
       const kind = kindFromAnswer(ep.review.reason); const it = kind && items.find((x) => tripNo(x) === String(ep.trip));
-      if (!it || !brokerLoad(it)) continue;
+      if (!it || !brokerLoad(it) || atOurYard(it, now())) continue;
       const key = `${ep.trip}:a${ep.stoppedSinceMs}`;
       if (!stored[key]) open(record(it, key, kind, ep.stoppedSinceMs, { anchored: true, source: `${ep.review.by}: ${oneLine(ep.review.reason, 120)}` }));
     }
     // the GPS has it parked at the rate con's pickup, whatever the status says
     for (const it of items) {
-      if (!brokerLoad(it)) continue;
+      if (!brokerLoad(it) || atOurYard(it, now())) continue;
       const i = parkedAtPickup(it, gpsSays(it, null, now()));
       if (i == null) continue;
       const key = `${tripNo(it)}:p${i}`;
@@ -134,7 +145,10 @@ export function initWaitingTime(app, { db, secret, send, recipients, getBoard = 
       const movingAt = gps === 'moved' ? (r.movingAt || now()) : null;
       if ((movingAt || null) !== (r.movingAt || null)) await patch(r.key, { movingAt }); // eslint-disable-line no-await-in-loop
       const gone = !!movingAt && now() - movingAt >= GONE_MS;
-      const here = (r.anchored ? !!it : !!(a && a.arrivedMs === r.arrivedMs)) && !gone;
+      // back at our own yard: it isn't waiting at the customer. A clock nobody approved just closes (no total email)
+      const home = !!it && atOurYard(it, now());
+      if (home && r.status !== 'approved') { await patch(r.key, { closedAt: now(), closedWhy: 'truck at our yard' }); continue; } // eslint-disable-line no-await-in-loop
+      const here = (r.anchored ? !!it : !!(a && a.arrivedMs === r.arrivedMs)) && !gone && !home;
       // the appointment may not have been on file when the truck got there
       if (here && !r.askedAt && !r.apptMs && leg && leg.apptMs) { const startMs = clockStart(r.arrivedMs, leg.apptMs); await patch(r.key, { apptMs: leg.apptMs, startMs, stop: r.stop || leg.label }); Object.assign(r, { apptMs: leg.apptMs, startMs, stop: r.stop || leg.label }); } // eslint-disable-line no-await-in-loop
       const step = stepOf(r, { here, now: now(), gps });

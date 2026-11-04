@@ -262,3 +262,21 @@ test('a one-minute depart on a parked truck keeps the clock; rolling ends it', a
   q.at(T0 + 15 * 60000); await q.w.process({ trips: [it(60, T0 + 15 * 60000)] });
   assert.equal(q.sent.length, 0); assert.equal((await q.w.openTrips()).size, 0, 'never asked: it really left');
 });
+
+test('trip 626361: a one-minute arrive/depart while rolling opens no clock; parked at our yard closes it quietly', async () => {
+  const hist = [{ status: 'ARRSHIP', at: iso(T0) }, { status: 'DEPSHIP', at: iso(T0 + 60000) }];
+  const rolling = started();
+  await rolling.w.process({ trips: [truck2606({ _times: { statusHistory: hist }, _samsara: { speedMph: 62, gpsAt: iso(T0) } })] });
+  assert.equal(Object.keys(rolling.db.s['taWaiting:florida-beauty'] || {}).length, 0, 'rolling click-through: no clock');
+  const yard = { speedMph: 0, gpsAt: iso(T0), lat: 25.8026, lng: -80.3102 };
+  const home = started();
+  await home.w.process({ trips: [truck2606({ _times: { statusHistory: hist }, _samsara: yard })] });
+  assert.equal(Object.keys(home.db.s['taWaiting:florida-beauty'] || {}).length, 0, 'at our yard: no clock');
+  const later = started();
+  await later.w.process({ trips: [truck2606({ _times: { statusHistory: hist } })] });
+  const key = Object.keys(later.db.s['taWaiting:florida-beauty'])[0];
+  later.at(T0 + 3 * H); await later.w.process({ trips: [truck2606({ _times: { statusHistory: hist }, _samsara: { ...yard, gpsAt: iso(T0 + 3 * H) } })] });
+  const r = later.db.s['taWaiting:florida-beauty'][key];
+  assert.equal(r.closedWhy, 'truck at our yard');
+  assert.equal(later.sent.length, 0, 'no email');
+});
