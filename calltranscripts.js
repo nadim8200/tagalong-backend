@@ -217,6 +217,25 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
       return res.send(a.bytes);
     } catch (e) { return res.status(502).json({ error: e.message }); }
   });
+  // A short spoken clip (phone greeting, hold message) in a natural voice — admins only, a sentence or two. → audio/mpeg
+  const TTS_VOICES = ['ash', 'ballad', 'coral', 'echo', 'fable', 'onyx', 'sage', 'verse', 'alloy', 'nova', 'shimmer'];
+  app.post('/admin/voice-clip', requireAuth, async (req, res) => {
+    const u = req.user || {};
+    if (!(u.admin || u.role === 'admin' || u.companyAdmin)) return res.status(403).json({ error: 'Admins only.' });
+    if (!env.OPENAI_API_KEY) return res.status(503).json({ error: 'Add OPENAI_API_KEY in Render first.' });
+    const b = req.body || {};
+    const text = String(b.text || '').trim().slice(0, 300);
+    if (!text) return res.status(400).json({ error: 'Write what it should say.' });
+    const voice = TTS_VOICES.includes(b.voice) ? b.voice : 'ash';
+    try {
+      const r = await fetchFn('https://api.openai.com/v1/audio/speech', { method: 'POST', headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: env.TTS_MODEL || 'gpt-4o-mini-tts', voice, input: text, response_format: 'mp3', instructions: String(b.style || 'A warm, polished, confident AI assistant answering a business phone line: friendly, natural pace, clear.').slice(0, 300) }) });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); return res.status(502).json({ error: (j.error && j.error.message) || `Voice failed (${r.status})` }); }
+      res.set('content-type', 'audio/mpeg');
+      return res.send(Buffer.from(await r.arrayBuffer()));
+    } catch (e) { return res.status(502).json({ error: e.message }); }
+  });
+
   app.get('/truckmate/call-transcripts/status', requireAuth, async (req, res) => {
     const st = enabled ? (await db.get(STATE, {})) || {} : {};
     res.json({ on: enabled && !off() && !needs().length, off: off(), needs: needs(), lastRun: st.lastRun || null, lastError: st.lastError || null, minutesToday: ((st.minutes || {})[dayOf(now())]) || 0, dailyLimit: dailyCap(), embeddable: !!env.RC_EMBEDDABLE_CLIENT_ID, autoRecord: autoRecord ? autoRecord.status() : null });

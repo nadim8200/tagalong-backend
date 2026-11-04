@@ -148,3 +148,17 @@ test('summaries from before the fix are written again from the saved transcript,
   assert.match(asked[0], /The dispatcher \(our side\) is Giovanni Di muro; the other side is Jorge Rodriguez \(driver\)/);
   assert.equal(recorded[0].summary, x.summary);
 });
+
+test('a voice clip: admins only, short text, a known voice; OpenAI does the speaking', async () => {
+  const routes = {}; const app = { get() {}, post: (p, ...h) => { routes[p] = h[h.length - 1]; } };
+  const asked = [];
+  const fetchFn = async (url, init) => { asked.push([url, JSON.parse(init.body)]); return { ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }; };
+  initCallTranscripts(app, { requireAuth: (q, r, n) => n(), db: mem(), secret: 's', env: { OPENAI_API_KEY: 'x' }, fetchFn, start: false });
+  const call = async (user, body) => { const out = { code: 200 }; await routes['/admin/voice-clip']({ user, body }, { status(c) { out.code = c; return this; }, json(b) { out.body = b; }, set(k, v) { out.type = v; }, send(b) { out.sent = b; } }); return out; };
+  assert.equal((await call({ role: 'dispatcher' }, { text: 'hi' })).code, 403);
+  const ok = await call({ admin: true }, { text: 'Hi, thank you for calling Florida Beauty!', voice: 'fable' });
+  assert.equal(ok.type, 'audio/mpeg'); assert.equal(ok.sent.length, 3);
+  assert.equal(asked[0][0], 'https://api.openai.com/v1/audio/speech');
+  assert.deepEqual([asked[0][1].voice, asked[0][1].input, asked[0][1].response_format], ['fable', 'Hi, thank you for calling Florida Beauty!', 'mp3']);
+  assert.equal((await call({ admin: true }, { text: '', voice: 'x' })).code, 400);
+});
