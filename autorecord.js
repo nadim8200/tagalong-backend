@@ -25,7 +25,9 @@ export function toRecord(evt) {
   if (!session) return null;
   const parties = Array.isArray(b.parties) ? b.parties : [];
   if (parties.some((p) => (p.recordings || []).some((r) => r && r.active))) return null;
-  const p = parties.find((x) => x && x.id && x.extensionId && x.status && x.status.code === 'Answered');
+  // ours = a party on one of the account's extensions (RingCentral puts it on the party, or under its owner)
+  const ext = (x) => x.extensionId || (x.owner && x.owner.extensionId) || null;
+  const p = parties.find((x) => x && x.id && ext(x) && x.status && x.status.code === 'Answered');
   return p ? { session: String(session), party: String(p.id), direction: p.direction || null } : null;
 }
 
@@ -68,6 +70,9 @@ export function initAutoRecord(app, { rc = null, db = null, secret, publicUrl, e
     if (!same(req.headers && req.headers['verification-token'], token)) return res.status(403).end();
     res.status(200).end();
     state.lastEvent = new Date(now()).toISOString();
+    // the shape of the last few events (no numbers or names), to see why a call wasn't recorded
+    const b = (req.body && req.body.body) || {};
+    state.recent = [{ at: state.lastEvent, session: !!b.telephonySessionId, parties: (Array.isArray(b.parties) ? b.parties : []).map((x) => ({ id: !!(x && x.id), ext: !!(x && (x.extensionId || (x.owner && x.owner.extensionId))), keys: Object.keys(x || {}).slice(0, 20), status: x && x.status && x.status.code, direction: x && x.direction })) }, ...(state.recent || [])].slice(0, 6);
     if (off() || !rc) return undefined;
     const t = toRecord(req.body);
     if (t) press(t).catch(() => {});
@@ -93,5 +98,5 @@ export function initAutoRecord(app, { rc = null, db = null, secret, publicUrl, e
   }
 
   if (start && rc && !off()) { setTimeout(() => { ensure().catch(() => {}); }, 30000).unref(); setInterval(() => { ensure().catch(() => {}); }, 6 * 3600000).unref(); }
-  return { ensure, press, status: () => ({ on: !off() && !!rc, subscribed: !!state.subscription, expiresAt: state.expiresAt, lastEvent: state.lastEvent, started: state.started, lastError: state.lastError }) };
+  return { ensure, press, status: () => ({ on: !off() && !!rc, subscribed: !!state.subscription, expiresAt: state.expiresAt, lastEvent: state.lastEvent, started: state.started, lastError: state.lastError, recent: state.recent || [] }) };
 }

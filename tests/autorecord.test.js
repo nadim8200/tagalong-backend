@@ -10,6 +10,7 @@ test('which party to record: one of our extensions, answered, not already record
   assert.deepEqual(toRecord(evt([{ id: 'p0', status: { code: 'Answered' } }, { id: 'p1', extensionId: '101', direction: 'Outbound', status: { code: 'Answered' } }])), { session: 's-1', party: 'p1', direction: 'Outbound' });
   assert.equal(toRecord(evt([{ id: 'p1', extensionId: '101', status: { code: 'Answered' }, recordings: [{ id: 'r', active: true }] }])), null, 'already recording');
   assert.equal(toRecord({}), null);
+  assert.equal(toRecord(evt([{ id: 'p2', owner: { extensionId: '101' }, status: { code: 'Answered' } }])).party, 'p2', 'extension under the owner');
 });
 
 test('the webhook: RingCentral checks the address, only RingCentral can post, an answered call is recorded once', async () => {
