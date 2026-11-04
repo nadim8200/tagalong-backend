@@ -2,7 +2,7 @@
 // The console's own phone (our call bar, not RingCentral's). RingCentral is the line underneath: each dispatcher connects their
 // RingCentral login once (a sign-in window from RingCentral), the server trades it for that extension's calling credentials
 // (SIP registration for RingCentral's Web Phone SDK), keeps them encrypted, and hands them only to that dispatcher's console. The
-// RingCentral token itself is thrown away right after. Calls go out from the company number when the extension may use it.
+// RingCentral tokens stay encrypted on the server for conference control. Calls go out from the company number when the extension may use it.
 // Also: who a number is (driver and their load, customer, broker, our team) for the call bar.
 // ---------------------------------------------------------------
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
@@ -48,9 +48,7 @@ export function initPhone(app, { requireAuth, db, secret, clientId, activity = n
         fetchFn(`${server}/restapi/v1.0/account/~/extension/~`, { headers: auth }).then((r) => r.json()).catch(() => ({})),
         fetchFn(`${server}/restapi/v1.0/account/~/extension/~/phone-number?perPage=100`, { headers: auth }).then((r) => r.json()).catch(() => ({})),
       ]);
-      // the token isn't needed any more
-      fetchFn(`${server}/restapi/oauth/revoke`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: tok.access_token, client_id: clientId }) }).catch(() => {});
-      const rec = { enc: seal(sip.sipInfo[0], secret), ext: me.extensionNumber || null, name: me.name || null, callerId: pickCallerId(nums.records || []), at: new Date(now()).toISOString() };
+      const rec = { enc: seal(sip.sipInfo[0], secret), oauth: seal({ access: tok.access_token, refresh: tok.refresh_token, expires: now() + (Number(tok.expires_in) || 3600) * 1000 }, secret), extensionId: String(me.id || ''), ext: me.extensionNumber || null, name: me.name || null, callerId: pickCallerId(nums.records || []), at: new Date(now()).toISOString() };
       await db.update(KEY, (cur) => ({ ...(cur || {}), [uid(req)]: rec }), {});
       return res.json({ ok: true, ext: rec.ext, name: rec.name, callerId: rec.callerId });
     } catch (e) { return res.status(502).json({ error: 'Could not reach RingCentral. Try again.' }); }
@@ -60,12 +58,57 @@ export function initPhone(app, { requireAuth, db, secret, clientId, activity = n
     if (!guard(req, res)) return undefined;
     const rec = ((await db.get(KEY, {})) || {})[uid(req)];
     if (!rec) return res.json({ connected: false, clientId: clientId || null });
-    try { return res.json({ connected: true, sipInfo: open(rec.enc, secret), ext: rec.ext, name: rec.name, callerId: rec.callerId }); } catch { return res.json({ connected: false, clientId: clientId || null }); }
+    try { return res.json({ connected: true, sipInfo: open(rec.enc, secret), ext: rec.ext, name: rec.name, callerId: rec.callerId, conferenceReady: !!(rec.oauth && rec.extensionId) }); } catch { return res.json({ connected: false, clientId: clientId || null }); }
   });
   app.post('/ringcentral/phone/disconnect', requireAuth, async (req, res) => {
     if (!guard(req, res)) return undefined;
     await db.update(KEY, (cur) => { const all = { ...(cur || {}) }; delete all[uid(req)]; return all; }, {});
     return res.json({ ok: true });
+  });
+  // Tokens never leave the server. Serialize refresh and conference actions per dispatcher.
+  const locks = new Map();
+  const serial = (id, fn) => { const prev = locks.get(id) || Promise.resolve(); const next = prev.catch(() => {}).then(fn); locks.set(id, next); return next.finally(() => { if (locks.get(id) === next) locks.delete(id); }); };
+  const api = async (id, path, method = 'GET', body) => {
+    const rec = ((await db.get(KEY, {})) || {})[id];
+    if (!rec?.oauth || !rec.extensionId) throw new Error('Reconnect your phone line before using three-way calling.');
+    let token = open(rec.oauth, secret);
+    if (token.expires < now() + 60000) {
+      if (!token.refresh) throw new Error('Reconnect your phone line to use three-way calling.');
+      const r = await fetchFn(`${server}/restapi/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: token.refresh, client_id: clientId }) });
+      const t = await r.json();
+      if (!r.ok || !t.access_token) throw new Error('Reconnect your phone line to use three-way calling.');
+      token = { access: t.access_token, refresh: t.refresh_token || token.refresh, expires: now() + (Number(t.expires_in) || 3600) * 1000 };
+      await db.update(KEY, (cur) => cur?.[id] ? { ...cur, [id]: { ...cur[id], oauth: seal(token, secret) } } : cur, {});
+    }
+    const r = await fetchFn(`${server}/restapi/v1.0/account/~${path}`, { method, signal: AbortSignal.timeout(15000), headers: { Authorization: `Bearer ${token.access}`, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(r.status === 403 ? 'Your RingCentral line needs Call Control permission for three-way calls.' : 'RingCentral could not complete this conference action. Your remaining calls are still available.');
+    return data;
+  };
+  const validId = (v) => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,120}$/.test(v);
+  const owned = async (id, sessionId, partyId) => {
+    const rec = ((await db.get(KEY, {})) || {})[id];
+    const data = await api(id, `/telephony/sessions/${sessionId}`);
+    const party = (data.parties || []).find((p) => String(p.id) === partyId);
+    if (!party || String(party.extensionId) !== rec.extensionId) throw new Error('This call does not belong to your phone line.');
+  };
+  app.post('/ringcentral/phone/conference', requireAuth, async (req, res) => {
+    if (!guard(req, res)) return;
+    try { const data = await serial(uid(req), () => api(uid(req), '/telephony/conference', 'POST', {})); return res.json({ session: data.session }); }
+    catch (e) { return res.status(409).json({ error: e.message }); }
+  });
+  app.post('/ringcentral/phone/conference/merge', requireAuth, async (req, res) => {
+    if (!guard(req, res)) return;
+    const { conferenceId, conferencePartyId, sessionId, partyId } = req.body || {};
+    if (![conferenceId, conferencePartyId, sessionId, partyId].every(validId)) return res.status(400).json({ error: 'Missing call identifiers. Wait until both calls connect.' });
+    try {
+      await serial(uid(req), async () => {
+        await owned(uid(req), conferenceId, conferencePartyId);
+        await owned(uid(req), sessionId, partyId);
+        await api(uid(req), `/telephony/sessions/${conferenceId}/parties/bring-in`, 'POST', { sessionId, partyId });
+      });
+      return res.json({ ok: true });
+    } catch (e) { return res.status(409).json({ error: e.message }); }
   });
   // who's on the other end, for the call bar: name, what they are, and their load
   app.get('/truckmate/phone/who', requireAuth, async (req, res) => {
