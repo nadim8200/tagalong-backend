@@ -50,6 +50,7 @@ import { initProfiles } from './profiles.js';
 import { initActivity } from './activity.js';
 import { initCallTranscripts } from './calltranscripts.js';
 import { initMessages } from './messages.js';
+import { initBreakdownRead } from './breakdownread.js';
 import { initAutoRecord } from './autorecord.js';
 import { initPhone } from './phone.js';
 import { initDriverLinks } from './driverlink.js';
@@ -1087,7 +1088,9 @@ const rateConFlow = initRateConFlow({ db, docs, sendMail: (m) => sendMail(m, { e
   if (!((await db.get(`taTruckMateRateCon:${site}`, {})) || {})[trip]) await ratecon.save(site, trip, hit.record);
   await db.update(`taRateConPending:${site}`, (cur) => (Array.isArray(cur) ? cur : []).filter((x) => x.id !== entry.pendingId), []);
 } });
-const inbox = initInbox(app, { rateConFlow, breakdownPhotos: (...a) => breakdownReport.addPhotos(...a), stopReview: { decide: (...a) => stopReview.decide(...a) }, transferDone: { confirm: (...a) => transferDone.confirm(...a), cancel: (...a) => transferDone.cancel(...a) }, breakdownFixed: (...a) => breakdownReport.fixed('' + a[0], a[1], a[2]), rescuePlan: (...a) => breakdownReport.rescuePlan(...a), breakdownEmail: (...a) => breakdownReport.fromEmail(...a), brokerFollow: followProxy, dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
+// a new breakdown from pictures (the driver's texts + the damage): Road calls tab, and staff emails to Jarvis
+const breakdownRead = initBreakdownRead(app, { requireAuth: requireDispatch, getBoard: (site) => truckmate.buildBoard(site), env: process.env });
+const inbox = initInbox(app, { breakdownRead, rateConFlow, breakdownPhotos: (...a) => breakdownReport.addPhotos(...a), stopReview: { decide: (...a) => stopReview.decide(...a) }, transferDone: { confirm: (...a) => transferDone.confirm(...a), cancel: (...a) => transferDone.cancel(...a) }, breakdownFixed: (...a) => breakdownReport.fixed('' + a[0], a[1], a[2]), rescuePlan: (...a) => breakdownReport.rescuePlan(...a), breakdownEmail: (...a) => breakdownReport.fromEmail(...a), brokerFollow: followProxy, dispatchLog, stopTasks, roadCalls: { checkDriver: (...a) => (roadCalls ? roadCalls.checkDriver(...a) : null) }, brokerWatch: (site, trip, o) => statusMail.watch(site, trip, o), paperwork: { request: (...a) => paperwork.request(...a) }, planSheet, groupEmail: (n) => directory.groupEmail(n), groupAddresses: async () => (await directory.groups()).map((g) => g.email).filter(Boolean), meetWatch, nextLoads, playbook, follow, etaWatch, training, help,
   // a staff question emailed to Jarvis is answered by the Ask Jarvis brain (same tools, whole board)
   askJarvis: async ({ mode, threadId, from, subject, text, done }) => (jarvisChat ? jarvisChat.turn(mode === 'customer' ? {
     mode: 'customer', user: { id: `email:${String(from.address || '').toLowerCase()}`, name: `${from.name || ''} <${from.address}>`.trim(), email: from.address }, threadId,
