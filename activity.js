@@ -38,7 +38,8 @@ export function pushFor(e) {
   if (e.kind === 'call') {
     const out = e.direction === 'outbound';
     if (!e.ended && !e.summary) return null;
-    return { type: out ? 'call-out' : 'call-in', title: out ? `📞 Jarvis called ${who}` : `📞 ${who} called Jarvis`, body: `${e.trip ? `Load ${e.trip} · ` : ''}${e.summary || (e.minutes != null ? `${e.minutes} min call` : 'Call ended')}`.slice(0, 180) };
+    const us = e.source === 'ringcentral' ? (e.by || 'Dispatch') : 'Jarvis';
+    return { type: out ? 'call-out' : 'call-in', title: out ? `📞 ${us} called ${who}` : `📞 ${who} called ${us}`, body: `${e.trip ? `Load ${e.trip} · ` : ''}${e.summary || (e.minutes != null ? `${e.minutes} min call` : 'Call ended')}`.slice(0, 180) };
   }
   const inbound = e.dir === 'in';
   const label = e.kind === 'app' ? 'App message' : 'Text';
@@ -78,6 +79,9 @@ export function entriesFor(list = [], { phones = [], name = '' } = {}) {
 const fmt = (p) => { const d = last10(p); return d ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (p || 'unknown number'); };
 
 export function initActivity(app, { requireAuth, db, clients = null, getBoard = null, push = null, pushRules = null, staff = null }) {
+  // a RingCentral recording ("rc:<id>") plays through a short-lived signed link (calltranscripts.js)
+  let recordingLink = null;
+  const playable = (e) => (e && typeof e.recording === 'string' && e.recording.startsWith('rc:') ? { ...e, recording: recordingLink ? recordingLink(e.recording) : null } : e);
   const people = async () => { try { return (staff && (await staff())) || []; } catch { return []; } };
   const enabled = !!(db && db.enabled);
   const key = (day) => `taActivity:${SITE}:${day}`;
@@ -142,7 +146,7 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
       const w = staffOf(other, team) || (e.role && e.role !== 'unknown' ? { role: e.role, name: e.name || null, detail: e.detail || null } : whoIs(other, ctx));
       const callback = e.kind === 'call' ? callbackOf(String(e.id || '').replace(/^call:/, ''), requests) : null;
       const staffHit = w.role === 'team' && e.role !== 'team';
-      return { ...e, otherPhone: other || null, role: w.role, name: staffHit ? w.name : (e.name || w.name || null), detail: staffHit ? w.detail : (e.detail || w.detail || null), callback };
+      return { ...playable(e), otherPhone: other || null, role: w.role, name: staffHit ? w.name : (e.name || w.name || null), detail: staffHit ? w.detail : (e.detail || w.detail || null), callback };
     }).filter((e) => (type === 'all' || e.role === type || (type === 'callback' && e.callback && e.callback.status === 'open')) && (!q || JSON.stringify([e.name, e.detail, e.otherPhone, e.trip, e.summary, e.text, e.transcript]).toLowerCase().includes(q)));
     res.json({ day, entries: out.sort((a, b) => String(b.at).localeCompare(String(a.at))) });
   });
@@ -161,7 +165,7 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
       if (out.length >= 200) break;
     }
     // transcripts stay out of the list (they're up to 60 KB each) — the page loads one when it's opened
-    res.json({ phones: phones.length, entries: out.slice(0, 200).map(({ transcript, ...e }) => ({ ...e, hasTranscript: !!transcript, otherPhone: e.kind === 'call' ? (e.direction === 'outbound' ? e.to : e.from) : (e.dir === 'in' ? e.from : e.to) })) });
+    res.json({ phones: phones.length, entries: out.slice(0, 200).map(({ transcript, ...e }) => ({ ...playable(e), hasTranscript: !!transcript, otherPhone: e.kind === 'call' ? (e.direction === 'outbound' ? e.to : e.from) : (e.dir === 'in' ? e.from : e.to) })) });
   });
 
   // one call (for a callback request: "hear the call / read the transcript")
@@ -171,7 +175,7 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
     for (const d of [0, -1, 1]) {
       const list = (await db.get(key(dayOf(new Date(around + d * 86400000).toISOString())), [])) || []; // eslint-disable-line no-await-in-loop
       const e = list.find((x) => x.id === id);
-      if (e) return res.json(e);
+      if (e) return res.json(playable(e));
     }
     res.status(404).json({ error: 'That call is not in the log (calls are logged from Oct 8 on).' });
   });
@@ -189,12 +193,22 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
         const other = e.direction === 'outbound' ? e.to : e.from;
         if (!P.has(last10(other))) continue;
         const { transcript, ...rest } = e;
-        out.push({ ...rest, hasTranscript: !!transcript });
+        out.push({ ...playable(rest), hasTranscript: !!transcript });
       }
       if (out.length >= 150) break;
     }
     return out;
   }
 
-  return { record, callsWith };
+  // who a phone number is (team, a driver and their loads, a customer or broker), for a call that just happened
+  let ctxCache = null;
+  async function lookup(phone) {
+    if (!ctxCache || Date.now() - ctxCache.at > 5 * 60000) ctxCache = { at: Date.now(), ctx: await context() };
+    const mine = staffOf(phone, await people());
+    if (mine) return mine;
+    const w = whoIs(phone, ctxCache.ctx);
+    const d = ctxCache.ctx.drivers.get(last10(phone));
+    return { ...w, trips: w.role === 'driver' && d ? d.trips : [] };
+  }
+  return { record, callsWith, lookup, useRecordingLink: (fn) => { recordingLink = fn; } };
 }
