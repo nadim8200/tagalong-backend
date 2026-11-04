@@ -331,7 +331,7 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     }
     // one reply per email chain; loads without a chain go to the dispatch emails (settings), if set
     for (const [chainId, evs] of chains) {
-      if (!evs.length) continue;
+      if (!evs.length || cfg.emails === false) continue;   // departure emails switched off (the follow-up with the driver still runs)
       const n = chainNote(evs, now());
       try {
         if (chainId && replyInThread) await replyInThread(site, chainId, { text: n.text, html: n.html, asks: n.asks }); // eslint-disable-line no-await-in-loop
@@ -364,7 +364,7 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     const b = req.body || {};
     const to = [...new Set(String(Array.isArray(b.to) ? b.to.join(',') : b.to || '').split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)))].slice(0, 20);
     const tmFix = b.tmFixTo == null ? null : [...new Set(String(Array.isArray(b.tmFixTo) ? b.tmFixTo.join(',') : b.tmFixTo).split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter((x) => /^[^@\s]+@floridabeauty\.us$/.test(x)))].slice(0, 10);
-    res.json(await db.update(cfgKey, (cur) => ({ ...(cur || {}), to, ...(tmFix ? { tmFixTo: tmFix } : {}), on: b.on !== false, callWhenNoText: b.callWhenNoText !== false, updatedBy: who(req), updatedAt: new Date().toISOString() }), {}));
+    res.json(await db.update(cfgKey, (cur) => ({ ...(cur || {}), to, ...(tmFix ? { tmFixTo: tmFix } : {}), on: b.on !== false, ...(b.emails != null ? { emails: b.emails !== false } : {}), callWhenNoText: b.callWhenNoText !== false, updatedBy: who(req), updatedAt: new Date().toISOString() }), {}));
   });
   console.log(`[pickup-follow] driver pickup follow-up ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
   return { run, overlay };

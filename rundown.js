@@ -355,6 +355,7 @@ ${(d.paperwork || []).length ? `<ul>${d.paperwork.map((p) => `<li>${String(p.kin
   if (enabled && env.NODE_ENV !== 'test') {
     const tick = setInterval(async () => {
       try {
+        if ((await settings()).enabled === false) return;   // load reports switched off: nothing goes out, not even a retry
         const all = await db.get(finishedKey('florida-beauty'), {});
         for (const [trip, v] of Object.entries(all)) {
           if ((v.status === 'pending' || v.status === 'email failed') && (v.attempts || 0) < 3) await deliver('florida-beauty', trip); // eslint-disable-line no-await-in-loop
