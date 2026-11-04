@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initCallTranscripts, callOf, tripFor, signLink, linkOk } from '../calltranscripts.js';
+import { initCallTranscripts, callOf, tripFor, signLink, linkOk, loadsAt, parseSummary } from '../calltranscripts.js';
 
 const mem = () => { const s = {}; return { enabled: true, s, get: async (k, d) => (k in s ? JSON.parse(JSON.stringify(s[k])) : d), set: async (k, v) => { s[k] = v; }, update: async (k, f, d) => { s[k] = f(k in s ? JSON.parse(JSON.stringify(s[k])) : d); return s[k]; } }; };
 const REC = (id, extra = {}) => ({ id, startTime: '2026-11-03T20:00:00Z', duration: 180, direction: 'Outbound', from: { phoneNumber: '+13055550000', name: 'Geo Dispatch' }, to: { phoneNumber: '+17865550111' }, recording: { id: `r${id}`, contentUri: `https://media.ringcentral.com/restapi/v1.0/account/1/recording/r${id}/content` }, ...extra });
@@ -107,4 +107,25 @@ test('a dispatcher sees only their own line\'s calls; a manager (ticked on their
   const none = await call({ id: 'val', role: 'dispatcher' });
   assert.deepEqual([none.calls.length, none.needsLine], [0, true], 'no phone connected yet');
   assert.deepEqual((await call({ id: 'boss', role: 'dispatcher', phoneManager: true })).calls.map((c) => c.id).sort(), ['rc-1', 'rc-2'], 'a manager sees everyone\'s');
+});
+
+test('a call keeps what the driver was hauling: truck, trailer, trip, bills, broker load number', () => {
+  const board = [
+    { trip: { tripNumber: '626418', powerUnit: '2619', trailer: '7301' }, freightBills: [{ billNumber: 'B180900' }], _ratecon: { loadNumber: 'LD-55123' } },
+    { trip: { tripNumber: '626431', powerUnit: '2619', trailer: '7301' }, freightBills: [{ billNumber: 'B180911' }, { billNumber: 'B180912' }] },
+  ];
+  assert.deepEqual(loadsAt(board, ['626418', '626431', '626418']), [
+    { trip: '626418', truck: '2619', trailer: '7301', bills: ['B180900'], brokerLoad: 'LD-55123' },
+    { trip: '626431', truck: '2619', trailer: '7301', bills: ['B180911', 'B180912'], brokerLoad: null },
+  ]);
+  assert.deepEqual(loadsAt(board, ['999999']), [{ trip: '999999', truck: null, trailer: null, bills: [], brokerLoad: null }], 'off the board: the trip alone');
+  assert.deepEqual(loadsAt(board, []), []);
+});
+
+test('a summary cut off mid-way still reads as a summary, never raw JSON', () => {
+  assert.deepEqual(parseSummary('{"summary":"Geo checked the ETA.","trip":"626300","followUp":null}'), { summary: 'Geo checked the ETA.', trip: '626300', followUp: null });
+  const cut = parseSummary('{"summary":"Jorge called about a trailer pin that won\'t engage and an air leak. Giovanni agreed to');
+  assert.equal(cut.summary, 'Jorge called about a trailer pin that won\'t engage and an air leak. Giovanni agreed to');
+  assert.equal(cut.trip, null);
+  assert.equal(parseSummary('Plain words.').summary, 'Plain words.');
 });

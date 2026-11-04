@@ -44,6 +44,30 @@ export function tripFor(call, { intents = [], who = null, mentioned = null, onBo
   return trips.length === 1 ? String(trips[0]) : null;
 }
 
+// What the driver on the line was hauling when the call happened: truck, trailer, trip, bills and the broker's load number,
+// so the call can be found later by any of them. Pure. → [{ trip, truck, trailer, bills, brokerLoad }]
+export function loadsAt(board, trips) {
+  const out = [];
+  for (const t of [...new Set((trips || []).map(String))].slice(0, 4)) {
+    const it = (board || []).find((x) => String(((x && x.trip) || x || {}).tripNumber) === t);
+    const tr = (it && (it.trip || it)) || {};
+    const rc = (it && it._ratecon) || null;
+    out.push({ trip: t, truck: tr.powerUnit ? String(tr.powerUnit) : null, trailer: tr.trailer ? String(tr.trailer) : null,
+      bills: ((it && (it.freightBills || it.orders || tr.freightBills)) || []).map((b) => String(b.billNumber || '').trim()).filter(Boolean).slice(0, 12),
+      brokerLoad: (rc && (rc.loadNumber || (rc.data || {}).loadNumber)) || null });
+  }
+  return out;
+}
+
+// The model's JSON reply → { summary, trip, followUp }; a reply cut off mid-way still gives its summary, never raw JSON. Pure.
+export function parseSummary(raw) {
+  const txt = String(raw || '');
+  try { const o = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1)); return { summary: String(o.summary || '').slice(0, 600), trip: /^\d{6}$/.test(String(o.trip || '')) ? String(o.trip) : null, followUp: o.followUp ? String(o.followUp).slice(0, 300) : null }; } catch { /* cut off */ }
+  const field = (k) => { const m = txt.match(new RegExp(`"${k}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`)); if (!m) return null; try { return JSON.parse(`"${m[1].replace(/\\$/, '')}"`); } catch { return m[1]; } };
+  const sum = field('summary'); const trip = field('trip'); const fu = field('followUp');
+  return { summary: (sum != null ? sum : txt.trim().startsWith('{') ? '' : txt).slice(0, 600), trip: /^\d{6}$/.test(String(trip || '')) ? String(trip) : null, followUp: fu ? fu.slice(0, 300) : null };
+}
+
 // A recording link the browser can play for a while (no sign-in header on an <audio> tag). Pure.
 export const signLink = (id, exp, secret) => createHmac('sha256', `${secret}:call-recording`).update(`${id}.${exp}`).digest('base64url');
 export function linkOk(id, exp, sig, secret, now = Date.now()) {
@@ -92,14 +116,14 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
     if (!r.ok) throw new Error((j.error && j.error.message) || `Transcription failed (${r.status})`);
     return String(j.text || '').trim();
   }
-  async function summarize(call, text, name) {
+  async function summarize(call, text, name, role) {
     const r = await fetchFn(ANTHROPIC, { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: env.CALL_SUMMARY_MODEL || 'claude-haiku-5-5', max_tokens: 400, system: PROMPT,
-        messages: [{ role: 'user', content: `Call: ${call.direction === 'outbound' ? `${call.by || 'a dispatcher'} called ${name || call.other}` : `${name || call.other} called ${call.by || 'dispatch'}`}, ${Math.round(call.seconds / 60)} min.\n<transcript>\n${text.slice(0, 40000)}\n</transcript>` }] }) });
+      body: JSON.stringify({ model: env.CALL_SUMMARY_MODEL || 'claude-haiku-5-5', max_tokens: 900, system: PROMPT,
+        messages: [{ role: 'user', content: `Call: ${call.direction === 'outbound' ? `${call.by || 'a dispatcher'} called ${name || call.other}` : `${name || call.other} called ${call.by || 'dispatch'}`}, ${Math.round(call.seconds / 60)} min. The dispatcher (our side) is ${call.by || 'unknown'}; the other side is ${name || call.other}${role && role !== 'unknown' ? ` (${role})` : ''}.\n<transcript>\n${text.slice(0, 40000)}\n</transcript>` }] }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error((j.error && j.error.message) || `Summary failed (${r.status})`);
     const raw = ((j.content || []).find((c) => c.type === 'text') || {}).text || '';
-    try { const o = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)); return { summary: String(o.summary || '').slice(0, 600), trip: /^\d{6}$/.test(String(o.trip || '')) ? String(o.trip) : null, followUp: o.followUp ? String(o.followUp).slice(0, 300) : null }; } catch { return { summary: raw.slice(0, 600), trip: null, followUp: null }; }
+    return parseSummary(raw);
   }
 
   let running = false;
@@ -127,14 +151,24 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
           const text = await toText(await audio(c.contentUri)); // eslint-disable-line no-await-in-loop
           const who = activity && activity.lookup ? await activity.lookup(c.other).catch(() => null) : null; // eslint-disable-line no-await-in-loop
           const name = (who && who.name) || c.otherName || null;
-          const s = text ? await summarize(c, text, name) : { summary: 'No speech in the recording.', trip: null, followUp: null }; // eslint-disable-line no-await-in-loop
+          const s = text ? await summarize(c, text, name, who && who.role) : { summary: 'No speech in the recording.', trip: null, followUp: null }; // eslint-disable-line no-await-in-loop
           const trip = tripFor(c, { intents, who, mentioned: s.trip, onBoard });
-          if (activity) await activity.record({ id: `call:rc-${c.id}`, kind: 'call', source: 'ringcentral', at: c.at, direction: c.direction, from: c.from, to: c.to, ourLine: c.ourLine, minutes: mins, trip, summary: s.summary, followUp: s.followUp, transcript: text.slice(0, 60000), recording: `rc:${c.recordingId}`, by: c.by, ended: 'ended', ...(who && who.role && who.role !== 'unknown' ? { role: who.role, name, detail: who.detail || null } : {}) }); // eslint-disable-line no-await-in-loop
+          const loads = loadsAt(board, trip ? [trip] : (who && who.role === 'driver' && who.trips) || []);
+          if (activity) await activity.record({ id: `call:rc-${c.id}`, kind: 'call', source: 'ringcentral', at: c.at, direction: c.direction, from: c.from, to: c.to, ourLine: c.ourLine, minutes: mins, trip, loads, summary: s.summary, followUp: s.followUp, transcript: text.slice(0, 60000), recording: `rc:${c.recordingId}`, by: c.by, ended: 'ended', ...(who && who.role && who.role !== 'unknown' ? { role: who.role, name, detail: who.detail || null } : {}) }); // eslint-disable-line no-await-in-loop
           if (log && trip) await log(SITE, trip, { type: 'call', at: c.at, [c.direction === 'outbound' ? 'to' : 'from']: c.other, label: `${c.direction === 'outbound' ? `${c.by || 'Dispatch'} called ${name || c.other}` : `${name || c.other} called ${c.by || 'dispatch'}`} (${mins} min, recorded)`, by: c.by || null, text: s.summary, callId: `rc-${c.id}`, noThread: true }).catch(() => {}); // eslint-disable-line no-await-in-loop
-          await db.update(INDEX, (cur) => [{ id: `rc-${c.id}`, at: c.at, trip, by: c.by, other: c.other, name, direction: c.direction, minutes: mins, summary: s.summary, followUp: s.followUp }, ...(Array.isArray(cur) ? cur : []).filter((x) => x.id !== `rc-${c.id}`)].slice(0, 3000), []); // eslint-disable-line no-await-in-loop
+          await db.update(INDEX, (cur) => [{ id: `rc-${c.id}`, at: c.at, trip, by: c.by, other: c.other, name, direction: c.direction, minutes: mins, loads, summary: s.summary, followUp: s.followUp }, ...(Array.isArray(cur) ? cur : []).filter((x) => x.id !== `rc-${c.id}`)].slice(0, 3000), []); // eslint-disable-line no-await-in-loop
           await db.update(STATE, (cur) => ({ ...(cur || {}), recordings: { ...((cur || {}).recordings || {}), [c.recordingId]: c.contentUri } }), {}); // eslint-disable-line no-await-in-loop
           await mark('done'); used += mins; done += 1; // eslint-disable-line no-await-in-loop
         } catch (e) { lastError = e.message; if (e.stop) break; }
+      }
+      // calls recorded in the last day before loads were kept: take them from the board now (it's the same day's loads)
+      for (const x of ((await db.get(INDEX, [])) || []).filter((y) => !y.loads && t - Date.parse(y.at) < 24 * 3600000).slice(0, 20)) {
+        const who = activity && activity.lookup ? await activity.lookup(x.other).catch(() => null) : null; // eslint-disable-line no-await-in-loop
+        const loads = loadsAt(board, x.trip ? [x.trip] : (who && who.role === 'driver' && who.trips) || []);
+        const fix = /^\s*\{\s*"summary"/.test(String(x.summary || '')) ? parseSummary(x.summary) : null;
+        const patch = { loads, ...(fix ? { summary: fix.summary, followUp: x.followUp || fix.followUp } : {}) };
+        if (activity) await activity.record({ id: `call:${x.id}`, at: x.at, ...patch }); // eslint-disable-line no-await-in-loop
+        await db.update(INDEX, (cur) => (Array.isArray(cur) ? cur : []).map((y) => (y.id === x.id ? { ...y, ...patch } : y)), []); // eslint-disable-line no-await-in-loop
       }
       await db.update(STATE, (cur) => ({ ...(cur || {}), since: new Date(t).toISOString(), lastRun: new Date(t).toISOString(), lastError, minutes: { [day]: used } }), {});
       return { done, waiting: Math.max(0, recs.length - done), lastError };
@@ -213,7 +247,7 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
           if (c.recordingId && c.contentUri) keep[c.recordingId] = c.contentUri;
           if (!manager && !ownCall(c.ourExt, c.ourExtId)) continue;
           rows.push({ id: `rc-${c.id}`, source: 'ringcentral', ext: c.ourExt, at: c.at, direction: c.direction, result: r.result || null, missed: c.direction === 'inbound' && !/connected|accepted/i.test(r.result || ''), seconds: c.seconds,
-            number: c.other, name: (w && w.name) || c.otherName || null, role: (w && w.role) || null, detail: (w && w.detail) || null, by: c.by, trip: (e && e.trip) || null,
+            number: c.other, name: (w && w.name) || c.otherName || null, role: (w && w.role) || null, detail: (w && w.detail) || null, by: c.by, trip: (e && e.trip) || null, loads: (e && e.loads) || null,
             summary: (e && e.summary) || null, followUp: (e && e.followUp) || null, callId: e ? String(e.id).replace(/^call:/, '') : null, hasTranscript: !!(e && e.transcript),
             recording: c.recordingId && c.contentUri ? link(`rc:${c.recordingId}`) : null });
         }
@@ -226,7 +260,7 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
       if (Date.parse(e.at) < since) continue;
       if (!manager) continue;   // Jarvis's calls and unmatched recordings: managers only
       rows.push({ id: String(e.id), source: String(e.id).startsWith('call:rc-') ? 'ringcentral' : 'jarvis', at: e.at, direction: e.direction === 'outbound' ? 'outbound' : 'inbound', result: null, missed: false, seconds: e.minutes != null ? e.minutes * 60 : null,
-        number: e.direction === 'outbound' ? e.to : e.from, name: e.name || null, role: e.role || null, detail: e.detail || null, by: e.source === 'ringcentral' ? e.by : 'Jarvis', trip: e.trip || null,
+        number: e.direction === 'outbound' ? e.to : e.from, name: e.name || null, role: e.role || null, detail: e.detail || null, by: e.source === 'ringcentral' ? e.by : 'Jarvis', trip: e.trip || null, loads: e.loads || null,
         summary: e.summary || null, followUp: e.followUp || null, callId: String(e.id).replace(/^call:/, ''), hasTranscript: !!e.transcript,
         recording: typeof e.recording === 'string' && e.recording.startsWith('rc:') ? link(e.recording) : e.recording || null });
     }
@@ -238,6 +272,6 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
   return { useLineOf: (fn) => { lineRef.fn = fn; }, run, link, search: async ({ trip = null, q = '', limit = 20 } = {}) => {
     const all = enabled ? (await db.get(INDEX, [])) || [] : [];
     const w = String(q || '').toLowerCase();
-    return all.filter((x) => (!trip || x.trip === String(trip)) && (!w || JSON.stringify([x.by, x.name, x.other, x.summary, x.followUp]).toLowerCase().includes(w))).slice(0, limit);
+    return all.filter((x) => (!trip || x.trip === String(trip) || (x.loads || []).some((l) => l.trip === String(trip))) && (!w || JSON.stringify([x.by, x.name, x.other, x.summary, x.followUp, x.loads]).toLowerCase().includes(w))).slice(0, limit);
   } };
 }
