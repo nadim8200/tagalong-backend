@@ -159,3 +159,16 @@ test('pictures and PDFs: stored, sent with the app message, shown on the thread;
   const th = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' } })).body.messages;
   assert.deepEqual([th[1].text, th[1].files], ['Seal', [{ id: '777' }]]);
 });
+
+test('a load without a driver-app chat: it is opened on the first send, then the message goes', async () => {
+  const db = { enabled: true }; const h = setup();
+  let linked = false; const sent = [];
+  const app = fakeApp();
+  initMessages(app, { requireAuth: () => {}, db: h.db, getBoard: async () => ({ trips: BOARD }), activity: { lookup: async () => ({ role: 'driver', name: 'Ana Diaz' }) }, ringcentral: { configFor: async () => ({}) },
+    driverLinks: { messageDriver: async (site, trip, text) => { if (!linked) return { skipped: 'no active driver link on this load' }; sent.push([trip, text]); return { sent: true, via: 'app (shows when opened)' }; }, ensureDocsLink: async (site, trip) => { linked = trip; return 'https://x/t/abc'; } },
+    now: () => Date.now() });
+  const r = await call(app, 'POST /truckmate/messages/send', GEO, { body: { thread: 'p:7865550199', text: 'test', via: 'app', clientId: 'l-1' } });
+  assert.equal(r.code, 200); assert.equal(linked, '626200'); assert.deepEqual(sent, [['626200', 'test']]);
+  assert.equal(r.body.message.note, 'app (shows when opened)');
+  void db;
+});

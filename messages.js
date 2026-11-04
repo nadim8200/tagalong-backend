@@ -225,7 +225,12 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
         const files = stored.map((d, i) => ({ id: String(d.id), name: String((upload[d.fileIndex != null ? d.fileIndex : i] || {}).filename || '').slice(0, 120) || null, type: String((upload[d.fileIndex != null ? d.fileIndex : i] || {}).mediaType || '') || null }));
         if (via === 'app') {
           const k = `${can.app.trip}|${text || `📎 ${files.length === 1 ? 'A file' : `${files.length} files`} from dispatch`}`; appSending.set(k, now());
-          const r = await driverLinks.messageDriver(SITE, can.app.trip, text, by, { docIds: files.map((f) => f.id) });
+          let r = await driverLinks.messageDriver(SITE, can.app.trip, text, by, { docIds: files.map((f) => f.id) });
+          // the load has no driver-app chat yet: open it (nothing is sent to set it up — it's what the driver app does too) and send again
+          if (r && /no active driver link/.test(String(r.skipped || '')) && driverLinks.ensureDocsLink) {
+            await driverLinks.ensureDocsLink(SITE, can.app.trip, by);
+            r = await driverLinks.messageDriver(SITE, can.app.trip, text, by, { docIds: files.map((f) => f.id) });
+          }
           if (r && r.skipped) { appSending.delete(k); return res.status(409).json({ error: `Not sent: ${r.skipped}.` }); }
           status = /held/.test(String((r && r.via) || '')) ? 'held' : 'sent';
           note = (r && r.via) || null;
