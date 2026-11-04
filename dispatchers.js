@@ -37,7 +37,7 @@ export function passwordProblem(next, { current = null, email = '' } = {}) {
 // read settings but never change them, and can't reach anything outside the console
 // (TagAlong accounts, the loads page, devices…). Pure.
 //   → null (allowed) | 'outside' | 'settings'
-const CONSOLE = /^\/(truckmate|watchtower|voice|jarvis)(\/|$)|^\/ringcentral\/(call|calls|sms|my-phone|numbers)(\/|$)|^\/auth\/(me|logout|dispatcher)(\/|$)|^\/push\/(register|unregister)$/;
+const CONSOLE = /^\/(truckmate|watchtower|voice|jarvis)(\/|$)|^\/ringcentral\/(call|calls|sms|my-phone|numbers|phone|embeddable)(\/|$)|^\/auth\/(me|logout|dispatcher)(\/|$)|^\/push\/(register|unregister)$/;
 const ADMIN_ONLY = [
   /\/settings\/?$/, /\/config\/?$/,                    // every settings / config screen
   /^\/voice\/setup/, /^\/voice\/voice/,                                      // Jarvis voice agent in Retell

@@ -47,6 +47,9 @@ test('module gates: RingCentral for dispatch, Samsara / loads for fleet — cust
 
 test('dispatcher logins: upper-case paths do not slip past the settings lock', () => {
   assert.equal(dispatcherMayUse('PUT', '/Truckmate/Profiles/5'), 'settings');
+  // the console's own phone: every dispatcher connects and uses their line
+  for (const [m, p] of [['GET', '/ringcentral/phone/sip'], ['POST', '/ringcentral/phone/connect'], ['POST', '/ringcentral/phone/disconnect'], ['GET', '/truckmate/phone/who']]) assert.equal(dispatcherMayUse(m, p), null, p);
+  assert.equal(dispatcherMayUse('PUT', '/ringcentral/config'), 'outside', 'RingCentral setup stays off-limits');
   assert.equal(dispatcherMayUse('POST', '/VOICE/setup'), 'settings');
   assert.equal(dispatcherMayUse('GET', '/truckmate/active'), null);
 });
