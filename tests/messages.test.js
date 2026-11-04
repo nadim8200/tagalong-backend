@@ -78,6 +78,8 @@ test('a group is made only after confirming members; truck/trip only when verifi
   assert.equal(mixed.body.thread.trip, null, 'not the drivers of one load: no truck/trip');
   // the load's drivers change: the group keeps its members and can't use that load's app chat any more
   BOARD[0]._samsara.driver2Info = { phone: '3055550999' };
+  h.at(Date.parse('2026-11-04T15:01:00Z'));   // past the 30-second load cache: one read starts the refresh
+  await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: r.body.thread.id } }); await new Promise((ok) => setImmediate(ok));
   const th = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: r.body.thread.id } })).body;
   assert.equal(th.thread.members.length, 2); assert.equal(th.can.app.ok, false);
   BOARD[0]._samsara.driver2Info = { phone: '305-555-0102' };
@@ -125,4 +127,14 @@ test('contacts: drivers with truck and trip; a new 10-digit number can be texted
   assert.equal((await call(h.app, 'GET /truckmate/messages/contacts', GEO, { query: { q: '(954) 555-0000' } })).body.newNumber, '9545550000');
   const pins = await call(h.app, 'PUT /truckmate/messages/pins', GEO, { body: { pins: ['p:3055550101', 'junk', 'g:abcdef0123'] } });
   assert.deepEqual(pins.body.pins, ['p:3055550101', 'g:abcdef0123']);
+});
+
+test('a truck search offers its team drivers as one group; the same group is reused', async () => {
+  const h = setup();
+  const r = (await call(h.app, 'GET /truckmate/messages/contacts', GEO, { query: { q: '4566' } })).body;
+  assert.deepEqual(r.teams.map((t) => [t.truck, t.trip, t.drivers.map((d) => d.name)]), [['4566', '626130', ['Carlos Rojas', 'Miguel Lopez']]]);
+  assert.deepEqual((await call(h.app, 'GET /truckmate/messages/contacts', GEO, { query: { q: '2403' } })).body.teams, [], 'one driver: no team');
+  const a = await call(h.app, 'POST /truckmate/messages/groups', GEO, { body: { members: r.teams[0].drivers.map((d) => ({ ...d, role: 'driver' })), trip: '626130' } });
+  const b = await call(h.app, 'POST /truckmate/messages/groups', VAL, { body: { members: r.teams[0].drivers.map((d) => ({ ...d, role: 'driver' })), trip: '626130' } });
+  assert.equal(b.body.existing, true); assert.equal(a.body.thread.id, b.body.thread.id);
 });

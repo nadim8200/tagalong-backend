@@ -51,6 +51,9 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
   const board = async () => { try { return getBoard ? ((await getBoard(SITE)) || {}).trips || [] : []; } catch { return []; } };
   const guard = (req, res) => { if (!enabled) { res.status(503).json({ error: 'Needs the database.' }); return false; } if (!isStaff(req.user)) { res.status(403).json({ error: 'Dispatch logins only.' }); return false; } return true; };
   const textingLive = async () => { try { const c = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } };
+  const keep = (ms, fn) => { let c = null; return () => { if (c && c.v !== undefined && now() - c.at < ms) return Promise.resolve(c.v); if (c && c.wait) return c.v !== undefined ? Promise.resolve(c.v) : c.wait; const wait = fn().then((v) => { c = { at: now(), v }; return v; }, (e) => { c = c && c.v !== undefined ? { at: c.at, v: c.v } : null; throw e; }); c = { ...(c || {}), wait }; return c.v !== undefined ? Promise.resolve(c.v) : wait; }; };
+  const loadsNow = keep(30000, async () => loadsOf(await board()));   // who drives what: kept 30 s so opening a conversation is quick
+  const textingLiveNow = keep(60000, textingLive);
   const appSending = new Map();   // trip|text → at: our own app sends, so the load-log echo isn't stored twice
 
   // one message into a conversation (made if new); a repeated provider event or a retried send is stored once
@@ -84,7 +87,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
   }
   // a driver-app message on a load: one driver → their conversation; team drivers → the load's group
   async function threadForLoad(trip) {
-    const l = loadsOf(await board()).find((x) => x.trip === String(trip));
+    const l = (await loadsNow()).find((x) => x.trip === String(trip));
     if (!l || !l.drivers.length) return null;
     if (l.drivers.length === 1) return l.drivers[0].phone ? personThread(l.drivers[0].phone, { name: l.drivers[0].name, role: 'driver' }) : null;
     const all = (await db.get(THREADS, {})) || {};
@@ -123,13 +126,50 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     return out;
   }
 
+  // everyone to call or text: drivers on loads (with truck / trip), every driver profile, our team, customers & brokers.
+  // Built in parallel and kept for a minute (one build at a time), so a search answers right away.
+  let dirCache = null;
+  async function directoryNow() {
+    const [loads, roster, people, profiles] = await Promise.all([
+      loadsNow(),
+      (drivers ? drivers() : Promise.resolve([])).catch(() => []),
+      (staff ? staff() : Promise.resolve([])).catch(() => []),
+      db.get(`taProfiles:${SITE}`, {}).catch(() => ({})),
+    ]);
+    const out = new Map();
+    const put = (c) => { if (!c.phone || c.phone.length !== 10) return; const had = out.get(c.phone); out.set(c.phone, had ? { ...c, ...had, trips: [...new Set([...(had.trips || []), ...(c.trips || [])])] } : c); };
+    for (const l of loads) for (const d of l.drivers) put({ phone: d.phone, name: d.name, role: 'driver', truck: l.truck, trailer: l.trailer, trips: [l.trip] });
+    for (const d of roster || []) for (const ph of [d.phone, ...(d.phones || []).map((x) => (x && x.number) || x)]) put({ phone: last10(ph), name: d.name || null, role: 'driver', truck: d.truck || null, trailer: d.trailer || null, trips: [] });
+    for (const p of people || []) put({ phone: last10(p.phone), name: p.name || null, role: 'team', detail: p.department || null });
+    for (const p of Object.values(profiles || {})) for (const c of p.contacts || []) put({ phone: last10(c.phone), name: c.name || p.name || null, role: p.type === 'broker' ? 'broker' : 'customer', detail: p.name || null });
+    return [...out.values()].sort((a, b) => String(a.name || '~').localeCompare(String(b.name || '~')));
+  }
+  function directory() {
+    if (dirCache && dirCache.list && now() - dirCache.at < 60000) return Promise.resolve(dirCache.list);
+    if (dirCache && dirCache.wait) return dirCache.list ? Promise.resolve(dirCache.list) : dirCache.wait;   // a stale list answers while the new one builds
+    const wait = directoryNow().then((list) => { dirCache = { at: now(), list }; return list; }, (e) => { dirCache = dirCache && dirCache.list ? { at: dirCache.at, list: dirCache.list } : null; throw e; });
+    dirCache = { ...(dirCache || {}), wait };
+    return dirCache.list ? Promise.resolve(dirCache.list) : wait;
+  }
+
+  // who a number is: the contact list first (already built), else the slower who-is lookup
+  async function whoFast(phone) {
+    const k = last10(phone);
+    const c = dirCache && dirCache.list ? dirCache.list.find((x) => x.phone === k) : null;
+    if (c) return { name: c.name, role: c.role };
+    return activity && activity.lookup ? activity.lookup(k).catch(() => null) : null;
+  }
+  // team drivers by truck, for "group text both drivers" from a search. Pure. → [{ truck, trailer, trip, drivers }]
+  const teamsFor = (loads, q) => { const w = String(q || '').toLowerCase().trim(); if (w.length < 2) return []; const seen = new Set(); return loads.filter((l) => l.drivers.length >= 2 && l.drivers.every((d) => d.phone) && JSON.stringify([l.truck, l.trailer, l.trip, l.drivers.map((d) => d.name)]).toLowerCase().includes(w)).filter((l) => { const k = l.drivers.map((d) => d.phone).sort().join('|'); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 5); };
+
   const view = (t, me, reads, pins) => ({ ...t, inbound: undefined, unread: unreadOf(t, (reads[me] || {})[t.id]), pinned: (pins[me] || []).includes(t.id) });
 
   if (app) {
     app.get('/truckmate/messages', requireAuth, async (req, res) => {
       if (!guard(req, res)) return;
       const me = userKey(req.user);
-      const [all, reads, pins, live] = await Promise.all([db.get(THREADS, {}), db.get(READ, {}), db.get(PINS, {}), textingLive()]);
+      directory().catch(() => {});   // warm the contact list, so the first search is quick
+      const [all, reads, pins, live] = await Promise.all([db.get(THREADS, {}), db.get(READ, {}), db.get(PINS, {}), textingLiveNow()]);
       const threads = Object.values(all || {}).sort((a, b) => String((b.last || {}).at || b.createdAt).localeCompare(String((a.last || {}).at || a.createdAt))).slice(0, 400).map((t) => view(t, me, reads || {}, pins || {}));
       res.json({ me: nameOf(req.user), threads, pins: (pins || {})[me] || [], texting: { live, groupSms: false } });
     });
@@ -138,10 +178,10 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       if (!guard(req, res)) return;
       const id = String(req.params.id);
       const all = (await db.get(THREADS, {})) || {};
-      const t = all[id] || (/^p:\d{10}$/.test(id) ? personThread(id.slice(2), (activity && activity.lookup ? await activity.lookup(id.slice(2)).catch(() => null) : null) || {}) : null);
+      const t = all[id] || (/^p:\d{10}$/.test(id) ? personThread(id.slice(2), (await whoFast(id.slice(2))) || {}) : null);
       if (!t) return res.status(404).json({ error: 'No such conversation.' });
       const me = userKey(req.user);
-      const [messages, loads, live, consent, pins] = await Promise.all([db.get(logKey(id), []), board().then(loadsOf), textingLive(), db.get(CONSENT, {}), db.get(PINS, {})]);
+      const [messages, loads, live, consent, pins] = await Promise.all([db.get(logKey(id), []), loadsNow(), textingLiveNow(), db.get(CONSENT, {}), db.get(PINS, {})]);
       const reads = await db.update(READ, (cur) => ({ ...(cur || {}), [me]: { ...((cur || {})[me] || {}), [id]: iso() } }), {});
       const ctx = t.kind === 'person' ? loads.find((l) => l.drivers.some((d) => d.phone === t.phone)) : loads.find((l) => l.trip === t.trip);
       res.json({ thread: { ...view(t, me, reads || {}, pins || {}), now: ctx ? { trip: ctx.trip, truck: ctx.truck, trailer: ctx.trailer } : null }, messages: messages || [], can: await channels(t, loads, live, consent || {}) });
@@ -164,12 +204,12 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       const all = (await db.get(THREADS, {})) || {};
       const id = b.thread ? String(b.thread) : last10(b.phone).length === 10 ? personId(b.phone) : null;
       if (!id) return res.status(400).json({ error: 'Pick a contact or enter a 10-digit number.' });
-      const t = all[id] || (id.startsWith('p:') ? personThread(id.slice(2), (activity && activity.lookup ? await activity.lookup(id.slice(2)).catch(() => null) : null) || {}) : null);
+      const t = all[id] || (id.startsWith('p:') ? personThread(id.slice(2), (await whoFast(id.slice(2))) || {}) : null);
       if (!t) return res.status(404).json({ error: 'No such conversation.' });
       // a retried send (same clientId) returns what the first one did
       const seen = ((await db.get(SEEN, {})) || {})[`send:${clientId}`];
       if (seen) return res.json({ ok: true, duplicate: true });
-      const [loads, live, consent] = await Promise.all([board().then(loadsOf), textingLive(), db.get(CONSENT, {})]);
+      const [loads, live, consent] = await Promise.all([loadsNow(), textingLiveNow(), db.get(CONSENT, {})]);
       const can = await channels(t, loads, live, consent || {});
       const via = b.via === 'sms' ? 'sms' : 'app';
       if (!can[via].ok) return res.status(409).json({ error: can[via].why });
@@ -205,7 +245,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       if (uniq.length < 2) return res.status(400).json({ error: 'A group needs at least two people with phone numbers.' });
       if (uniq.length > 9) return res.status(400).json({ error: 'Groups are up to 9 people.' });
       // the truck / trip only when it's verified: those exact people are the drivers on that load now
-      const loads = loadsOf(await board());
+      const loads = await loadsNow();
       const l = b.trip ? loads.find((x) => x.trip === String(b.trip)) : loads.find((x) => samePeople(x.drivers, uniq));
       const verified = l && samePeople(l.drivers, uniq) ? l : null;
       const all = (await db.get(THREADS, {})) || {};
@@ -226,20 +266,9 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     app.get('/truckmate/messages/contacts', requireAuth, async (req, res) => {
       if (!guard(req, res)) return;
       const q = String(req.query.q || '').toLowerCase().trim(); const qd = q.replace(/\D/g, '');
-      const loads = loadsOf(await board());
-      const out = new Map();
-      const put = (c) => { if (!c.phone || c.phone.length !== 10) return; const had = out.get(c.phone); out.set(c.phone, had ? { ...c, ...had, trips: [...new Set([...(had.trips || []), ...(c.trips || [])])] } : c); };
-      for (const l of loads) for (const d of l.drivers) put({ phone: d.phone, name: d.name, role: 'driver', truck: l.truck, trailer: l.trailer, trips: [l.trip] });
-      // every driver profile (Samsara + console-made), on a load or not
-      try { for (const d of (drivers ? await drivers() : []) || []) for (const ph of [d.phone, ...(d.phones || []).map((x) => (x && x.number) || x)]) put({ phone: last10(ph), name: d.name || null, role: 'driver', truck: d.truck || null, trailer: d.trailer || null, trips: [] }); } catch { /* roster unavailable */ }
-      try { for (const p of (staff ? await staff() : []) || []) put({ phone: last10(p.phone), name: p.name || null, role: 'team', detail: p.department || null }); } catch { /* directory unavailable */ }
-      try {
-        for (const p of Object.values((await db.get(`taProfiles:${SITE}`, {})) || {})) {
-          for (const c of p.contacts || []) put({ phone: last10(c.phone), name: c.name || p.name || null, role: p.type === 'broker' ? 'broker' : 'customer', detail: p.name || null });
-        }
-      } catch { /* none */ }
-      const list = [...out.values()].filter((c) => !q || JSON.stringify([c.name, c.detail, c.truck, c.trailer, c.trips]).toLowerCase().includes(q) || (qd.length >= 3 && c.phone.includes(qd)));
-      res.json({ contacts: list.sort((a, b) => String(a.name || "~").localeCompare(String(b.name || "~"))).slice(0, 600), newNumber: qd.length === 10 && !out.has(qd) ? qd : null });
+      const all = await directory();
+      const list = all.filter((c) => !q || JSON.stringify([c.name, c.detail, c.truck, c.trailer, c.trips]).toLowerCase().includes(q) || (qd.length >= 3 && c.phone.includes(qd)));
+      res.json({ contacts: list.slice(0, 600), teams: teamsFor(await loadsNow(), q), newNumber: qd.length === 10 && !all.some((c) => c.phone === qd) ? qd : null });
     });
   }
 
