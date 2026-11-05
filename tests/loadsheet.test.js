@@ -171,7 +171,7 @@ test('a yard drop: the driver only sees the stops they deliver, then the release
   // the driver drops it
   const drop = await ls.dropped('626282', 'Frank U', { pickedUp: 'tl 7301', truck: '2401', trailer: '7136' });
   assert.equal(drop.pickedUp, 'TL 7301'); assert.equal(mails.length, 1);
-  assert.match(mails[0].subject, /TRAILER DROPPED \/\/ BARTOW YARD \/\/ TK 2401 TL 7136 TO 626282 \/\/ PICKED UP TL 7301/);
+  assert.match(mails[0].subject, /TRAILER DROPPED \/\/ BARTOW YARD \/\/ TK 2401 TL 7136 TRIP 626282 \/\/ PICKED UP TL 7301/);
   assert.match(mails[0].text, /Still to deliver from the yard: WALMART DC# 8851 — COCOA, FL/);
   assert.equal((await ls.forDriver(await ls.get('626282'))).release.dropped.by, 'Frank U');
   // and it can be cleared

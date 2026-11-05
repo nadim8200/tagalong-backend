@@ -43,7 +43,7 @@ test('the emails carry the load and never hide what they are', () => {
   assert.equal(m.subject, 'NEW RATE CON // Trinity // LOAD 9953899 // TK 2207');
   assert.match(m.html, /PU 3PM - TEMP 28 &lt;b&gt;/); assert.doesNotMatch(m.html, /1,500/, 'the rate stays out of the dispatch copy');
   const a = renderForAccounting({ kind: 'new', rc: { broker: 'Trinity', loadNumber: '9953899', rate: 1500 } }, board().trips[0]);
-  assert.equal(a.subject, 'RATE CON // TK 2207 TL 3010 TO 626300 // Trinity LOAD 9953899');
+  assert.equal(a.subject, 'RATE CON // TK 2207 TL 3010 TRIP 626300 // Trinity LOAD 9953899');
   for (const x of ['626300', 'B180900', '2207', '3010', 'Jose Aguila', '$1,500.00']) assert.ok(a.html.includes(x), x);
   assert.match(renderForAccounting({ kind: 'tonu', rc: { rate: 250 } }).subject, /^TONU/);
 });
@@ -58,7 +58,7 @@ test('a new rate con: to the team now, to Accounting once, when the load is in t
   assert.equal(h.mails.length, 1, 'nothing until it is in the system');
   await h.f.process('s', board());
   assert.equal(h.mails.length, 2); assert.deepEqual(h.mails[1].to, ['ratecon_accounting@floridabeauty.us']);
-  assert.match(h.mails[1].subject, /TO 626300/); assert.equal(h.mails[1].attachments.length, 1); assert.deepEqual(h.saved, ['626300']);
+  assert.match(h.mails[1].subject, /TRIP 626300/); assert.equal(h.mails[1].attachments.length, 1); assert.deepEqual(h.saved, ['626300']);
   await h.f.process('s', board());
   assert.equal(h.mails.length, 2, 'once');
 });
@@ -85,7 +85,7 @@ test('a revised rate con or TONU goes to Billing right away, with what changed',
   await h.f.process('s', board());
   await h.f.received('s', { email: { ...email, id: 'e2' }, entries: [{ pendingId: 'p2' }], items: board().trips });
   const m = h.mails.at(-1);
-  assert.deepEqual(m.to, ['ratecon_accounting@floridabeauty.us']); assert.match(m.subject, /^REVISED RATE CON \/\/ TK 2207 TL 3010 TO 626300/); assert.match(m.html, /\+\$250\.00/);
+  assert.deepEqual(m.to, ['ratecon_accounting@floridabeauty.us']); assert.match(m.subject, /^REVISED RATE CON \/\/ TK 2207 TL 3010 TRIP 626300/); assert.match(m.html, /\+\$250\.00/);
   await h.f.received('s', { email: { ...email, id: 'e3' }, entries: [{ pendingId: 'p3' }] });
   assert.match(h.mails.at(-1).subject, /^TONU/); assert.match(h.mails.at(-1).html, /not in TruckMate yet/);
 });

@@ -118,7 +118,7 @@ export function renderForInbound({ entries, from = 'Gus', text = '' }) {
 export function renderForAccounting(entry, it = null, earlier = null) {
   const rows = loadFacts(entry, it); const t = tripOf(it);
   const label = entry.kind === 'tonu' ? 'TONU' : entry.kind === 'revised' ? 'REVISED RATE CON' : 'RATE CON';
-  const ids = [(t.powerUnit || entry.rc.truck) && `TK ${t.powerUnit || entry.rc.truck}`, t.trailer && `TL ${t.trailer}`, it && `TO ${tripNo(it)}`].filter(Boolean).join(' ');
+  const ids = [(t.powerUnit || entry.rc.truck) && `TK ${t.powerUnit || entry.rc.truck}`, t.trailer && `TL ${t.trailer}`, it && `TRIP ${tripNo(it)}`].filter(Boolean).join(' ');
   const subject = [label, ids, [entry.rc.broker, entry.rc.loadNumber && `LOAD ${entry.rc.loadNumber}`].filter(Boolean).join(' ')].filter(Boolean).join(' // ');
   const changes = entry.kind === 'new' ? [] : whatChanged(entry.rc, earlier);
   const lead = entry.kind === 'new' ? 'This load is in TruckMate. The rate con is attached.' : `${entry.kind === 'tonu' ? 'Truck ordered, not used.' : 'The rate con changed.'} ${it ? '' : 'The load is not in TruckMate yet. '}Details below, rate con attached.`.replace('  ', ' ');

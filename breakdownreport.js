@@ -59,7 +59,7 @@ const oneLine = (s, n) => String(s || '').replace(/[\r\n\t]+/g, ' ').replace(/\s
 // what dispatch wrote, line breaks kept (towing company, phone, address on their own lines). Pure.
 export const keepLines = (s, n = MAX_REASON) => String(s || '').replace(/\r\n?/g, '\n').split('\n').map((l) => l.replace(/[\t ]+/g, ' ').trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, n);
 
-// Same shape dispatch writes: "BREAKDOWN TRAILER 2029 // TK 2008 TL 2029 TO 626143", with the kind of load in front. What broke and the numbers
+// Same shape dispatch writes: "BREAKDOWN TRAILER 2029 // TK 2008 TL 2029 TRIP 626143", with the kind of load in front. What broke and the numbers
 // only: the story goes in the email. Names the truck or the trailer when the reason says which, otherwise both. Pure.
 export function breakdownSubject(item, reason, { unit = null, trip = null, part = null } = {}) {
   const t = (item && item.trip) || {};
@@ -70,7 +70,7 @@ export function breakdownSubject(item, reason, { unit = null, trip = null, part 
   const says = part === 'truck' || part === 'trailer' ? part : trailer === truck ? null : trailer ? 'trailer' : 'truck';
   const what = !says ? `TRUCK ${tk} TRAILER ${tl}` : says === 'trailer' ? `TRAILER ${tl}` : `TRUCK ${tk}`;
   const kind = loadType(item);
-  return `${kind ? `${kind} ` : ''}BREAKDOWN ${what} // TK ${tk} TL ${tl} TO ${trip || t.tripNumber || 'N/A'}`;
+  return `${kind ? `${kind} ` : ''}BREAKDOWN ${what} // TK ${tk} TL ${tl} TRIP ${trip || t.tripNumber || 'N/A'}`;
 }
 
 // "2 of 3: Bristol Farms, Carson, CA; Sample Co, Reno, NV". Pure.

@@ -10,22 +10,22 @@ const broker = { trip: { tripNumber: '625932', powerUnit: '2202', trailer: 'DV80
 const mem = () => { const s = {}; return { get: async (k, d) => (k in s ? s[k] : d), set: async (k, v) => { s[k] = v; }, update: async (k, fn, d) => { s[k] = fn(k in s ? s[k] : d); return s[k]; }, s }; };
 
 test('the subject follows the way dispatch writes it, and says flowers or broker', () => {
-  assert.equal(breakdownSubject(flowers, 'truck air leak'), 'FLOWERS BREAKDOWN TRUCK 2602 // TK 2602 TL 7323 TO 625878');
-  assert.equal(breakdownSubject(flowers, 'The driver KENYADA HILL (6982) called us to report that the tire and wheel hub on the trailer are damaged.'), 'FLOWERS BREAKDOWN TRAILER 7323 // TK 2602 TL 7323 TO 625878', 'the story stays in the email');
-  assert.equal(breakdownSubject(flowers, 'flat tire'), 'FLOWERS BREAKDOWN TRUCK 2602 TRAILER 7323 // TK 2602 TL 7323 TO 625878', 'not clear which: names both');
-  assert.equal(breakdownSubject(flowers, 'truck hit the trailer'), 'FLOWERS BREAKDOWN TRUCK 2602 TRAILER 7323 // TK 2602 TL 7323 TO 625878', 'both named: names both');
-  assert.equal(breakdownSubject(broker, 'Flat\ntire\r\nBcc: x@y.com'), 'BROKER BREAKDOWN TRUCK 2202 TRAILER DV8009 // TK 2202 TL DV8009 TO 625932', 'nothing typed reaches the subject');
+  assert.equal(breakdownSubject(flowers, 'truck air leak'), 'FLOWERS BREAKDOWN TRUCK 2602 // TK 2602 TL 7323 TRIP 625878');
+  assert.equal(breakdownSubject(flowers, 'The driver KENYADA HILL (6982) called us to report that the tire and wheel hub on the trailer are damaged.'), 'FLOWERS BREAKDOWN TRAILER 7323 // TK 2602 TL 7323 TRIP 625878', 'the story stays in the email');
+  assert.equal(breakdownSubject(flowers, 'flat tire'), 'FLOWERS BREAKDOWN TRUCK 2602 TRAILER 7323 // TK 2602 TL 7323 TRIP 625878', 'not clear which: names both');
+  assert.equal(breakdownSubject(flowers, 'truck hit the trailer'), 'FLOWERS BREAKDOWN TRUCK 2602 TRAILER 7323 // TK 2602 TL 7323 TRIP 625878', 'both named: names both');
+  assert.equal(breakdownSubject(broker, 'Flat\ntire\r\nBcc: x@y.com'), 'BROKER BREAKDOWN TRUCK 2202 TRAILER DV8009 // TK 2202 TL DV8009 TRIP 625932', 'nothing typed reaches the subject');
   assert.equal(loadLabel(flowers), 'FLOWERS'); assert.equal(loadLabel(broker), 'BROKER');
   const bills = (...b) => ({ freightBills: b.map((billNumber) => ({ billNumber })) });
   assert.equal(loadLabel({ ...bills('C1', 'N2') }), 'FLOWERS'); assert.equal(loadLabel(bills('N1')), 'FLOWERS');
   assert.equal(loadLabel(bills('T85286')), 'FLOWERS'); assert.equal(loadLabel(bills('T1', 'N2', 'Y3')), 'FLOWERS', 'any letter but B and H');
   assert.equal(loadLabel(bills('H5035887')), 'TENNESSEE HUB');
   assert.equal(loadLabel({ _plan: { kind: 'flowers' }, ...bills('B1') }), 'BROKER', 'broker bills win');
-  assert.equal(breakdownSubject({ trip: { tripNumber: '1', powerUnit: '2', trailer: '3' }, ...bills('H1') }, 'air leak'), 'TENNESSEE HUB BREAKDOWN TRUCK 2 TRAILER 3 // TK 2 TL 3 TO 1');
+  assert.equal(breakdownSubject({ trip: { tripNumber: '1', powerUnit: '2', trailer: '3' }, ...bills('H1') }, 'air leak'), 'TENNESSEE HUB BREAKDOWN TRUCK 2 TRAILER 3 // TK 2 TL 3 TRIP 1');
   const unknown = { trip: { tripNumber: '1', powerUnit: '2', trailer: '3' }, _plan: { kind: 'flowers' }, ...bills('H1', 'T2') };
   assert.equal(loadLabel(unknown), null, 'no proof, no label');
   assert.equal(loadLabel({ trip: {} }), null);
-  assert.equal(breakdownSubject(unknown, 'air leak'), 'TENNESSEE HUB + FLOWERS BREAKDOWN TRUCK 2 TRAILER 3 // TK 2 TL 3 TO 1');
+  assert.equal(breakdownSubject(unknown, 'air leak'), 'TENNESSEE HUB + FLOWERS BREAKDOWN TRUCK 2 TRAILER 3 // TK 2 TL 3 TRIP 1');
   assert.match(renderBreakdownEmail({ item: { trip: unknown.trip }, report: { atMs: NOW, by: 'A', reason: 'air leak', trip: '1', unit: '2' }, now: NOW }).html, /Load type not confirmed/);
 });
 
@@ -52,7 +52,7 @@ test('submitting sends one email and opens no road call; a second press does not
   assert.equal(v.sent.length, 1); assert.equal(v.sent[0].by, 'Ana'); assert.equal('roadCall' in v.sent[0], false);
   assert.equal((await v.r.submit(p, { reason: 'Again', name: 'Bob' })).code, 409);
   assert.equal(v.sent.length, 1);
-  assert.equal((await v.r.forTrip('625878')).subject, 'FLOWERS BREAKDOWN TRUCK 2602 // TK 2602 TL 7323 TO 625878');
+  assert.equal((await v.r.forTrip('625878')).subject, 'FLOWERS BREAKDOWN TRUCK 2602 // TK 2602 TL 7323 TRIP 625878');
 });
 
 test('a reason and a name are required', async () => {
@@ -82,7 +82,7 @@ test('rescue: the plan feeds the transfer watch; TruckMate on the new truck clos
   await r.submit(p, { reason: 'Air leak', name: 'Ana' });
   assert.equal((await r.rescuePlan('625878', { to: '4504', by: 'Gio' })).ok, true);
   const it = { ...flowers }; await r.overlay('fb', [it]);
-  assert.deepEqual(it._rescue, { from: '2602', to: '4504', subject: 'FLOWERS BREAKDOWN TRUCK 2602 TRAILER 7323 // TK 2602 TL 7323 TO 625878' });
+  assert.deepEqual(it._rescue, { from: '2602', to: '4504', subject: 'FLOWERS BREAKDOWN TRUCK 2602 TRAILER 7323 // TK 2602 TL 7323 TRIP 625878' });
   assert.deepEqual(transferPlan(it), { trip: '625878', from: '2602', to: '4504', trailer: '7323', rescue: { subject: it._rescue.subject } });
   await r.process('fb', { trips: [flowers] }); assert.equal(moves.length, 0, 'still on the broken truck');
   const moved = { ...flowers, trip: { ...flowers.trip, powerUnit: '4504' } };
@@ -94,7 +94,7 @@ test('rescue: the plan feeds the transfer watch; TruckMate on the new truck clos
 
 test('the breakdown email: what, who, next step, nobody is told customers were contacted', () => {
   const m = renderBreakdownEmail({ item: flowers, report: { atMs: NOW, by: 'Ana <x>', reason: 'Air <leak>', trip: '625878', unit: '2602' }, now: NOW, sheetNote: 'Trip sheet attached', sheetAttached: true });
-  assert.equal(m.subject, 'FLOWERS BREAKDOWN TRUCK 2602 TRAILER 7323 // TK 2602 TL 7323 TO 625878');
+  assert.equal(m.subject, 'FLOWERS BREAKDOWN TRUCK 2602 TRAILER 7323 // TK 2602 TL 7323 TRIP 625878');
   assert.match(m.html, /FLOWER BREAKDOWN/); assert.match(renderBreakdownEmail({ item: broker, report: { atMs: NOW, by: 'A', reason: 'x y', trip: '1', unit: '2' }, now: NOW }).html, /BROKER BREAKDOWN/); assert.match(m.html, /Air &lt;leak&gt;/); assert.match(m.html, /Ana &lt;x&gt;/); assert.match(m.html, /Road service has NOT been called/); assert.doesNotMatch(m.html, /provider|road call/i); assert.match(m.html, /Trip sheet attached/);
   assert.match(m.html, /jarvis:training-slot/);
   assert.match(m.html, /truckmate\?admin&amp;tab=active&amp;trip=625878/);
@@ -116,7 +116,7 @@ test('a staff email: same template, once per load, the people on it passed along
   const db = mem(); const sent = [];
   const r = initBreakdownReport(null, { db, secret: 's', now: () => NOW, getBoard: async () => ({ trips: [flowers] }), send: async (rep, item, to) => { sent.push(rep); extra = to; } });
   const out = await r.fromEmail({ trip: '625878', reason: 'Truck air leak', by: 'Gio', emailId: 'm1', to: ['gio@floridabeauty.us', 'carlos@floridabeauty.us'] });
-  assert.equal(out.subject, 'FLOWERS BREAKDOWN TRUCK 2602 // TK 2602 TL 7323 TO 625878');
+  assert.equal(out.subject, 'FLOWERS BREAKDOWN TRUCK 2602 // TK 2602 TL 7323 TRIP 625878');
   assert.deepEqual(extra, ['gio@floridabeauty.us', 'carlos@floridabeauty.us']);
   assert.equal(sent[0].by, 'Gio');
   assert.deepEqual(await r.held(), ['625878', '2602'], 'the rolling email waits too');
@@ -212,7 +212,7 @@ test('the customer copy (broker / LTL): the same email without the driver, stops
   assert.match(m.html, /BROKER BREAKDOWN/); assert.match(m.html, /Breakdown reported/); assert.match(m.html, /cid:bkphoto1/); assert.match(m.html, /cid:truckmap/); assert.match(m.html, /Reported by: <b>Gio/);
   assert.match(m.html, /The driver called to report a blown tire\./);
   assert.match(m.html, /<b style="color:#[0-9A-F]+;">Update<\/b><div[^>]*>Road service is on the way\./i);
-  assert.equal(m.subject, 'BROKER BREAKDOWN TRUCK 713 TRAILER 2054 // TK 713 TL 2054 TO 626456');
+  assert.equal(m.subject, 'BROKER BREAKDOWN TRUCK 713 TRAILER 2054 // TK 713 TL 2054 TRIP 626456');
   assert.deepEqual(customerLoadRows(item), [['Truck', '713'], ['Trailer', '2054'], ['Trip', '626456'], ['Load number', 'L-88123'], ['B number', 'B180615']]);
   assert.match(m.html, /Delivery impact/, 'a broker still hears the delivery impact');
   // LTL customer: their own bill, no next stop (may be someone else's)

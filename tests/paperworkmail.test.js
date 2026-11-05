@@ -12,7 +12,7 @@ test('the bill the driver gave, against TruckMate', () => {
 
 test('Accounting gets the paper, the bill, the box count against TruckMate, and the load', () => {
   const m = renderPaperworkEmail({ label: 'POD', bill: 'M5055135', boxes: 11, confirmation: 'FB-AAAA-BBBB-CCCC', by: 'Driver', files: 1, item, trip: '626265' });
-  assert.equal(m.subject, 'POD // TK 4504 TL 7136 TO 626265 // BILL M5055135');
+  assert.equal(m.subject, 'POD // TK 4504 TL 7136 TRIP 626265 // BILL M5055135');
   for (const x of ['11, TruckMate has 12', 'does not match TruckMate', 'FB-AAAA-BBBB-CCCC', 'EAST POINT, GA', 'ATLANTA FLOWER DELIVERY']) assert.ok(m.html.includes(x), x);
   assert.match(renderPaperworkEmail({ label: 'POD', bill: 'M5055135', boxes: 12, by: 'D', item, trip: '626265' }).html, /12, matches TruckMate/);
   assert.match(renderPaperworkEmail({ label: 'BOL', bill: 'X1234567', by: 'D', item, trip: '626265' }).html, /not on this load/);

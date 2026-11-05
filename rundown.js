@@ -312,7 +312,7 @@ export function initRundowns(app, { requireAuth, db, docs = null, recipients = n
       try {
         const r = await sendMail({
           to: rcpts,
-          subject: ['LOAD REPORT', [d.truck && `TK ${d.truck}`, d.trailer && `TL ${d.trailer}`, `TO ${trip}`].filter(Boolean).join(' '), d.loadType ? String(d.loadType).toUpperCase() : null].filter(Boolean).join(' // '),
+          subject: ['LOAD REPORT', [d.truck && `TK ${d.truck}`, d.trailer && `TL ${d.trailer}`, `TRIP ${trip}`].filter(Boolean).join(' '), d.loadType ? String(d.loadType).toUpperCase() : null].filter(Boolean).join(' // '),
           html: `<p><b>Trip ${trip}</b>${d.truck ? ` · Truck ${d.truck}` : ''}${d.oc ? ` · Outside carrier ${(d.oc.carrier && d.oc.carrier.name) || ''}` : ''}<br>${d.origin || ''} → ${d.destination || ''}<br>Finished ${fmt(d.finishedAt)}</p>
 <p>${d.loadType ? `${d.loadType} · ` : ''}${d.bills.length} bill(s) · ${(d.paperwork || []).length} paperwork from the driver · ${d.alerts.length} alert(s) · ${d.comms.length} call/text/email(s) · ${d.checkins.length} check-in(s)</p>
 ${(d.paperwork || []).length ? `<ul>${d.paperwork.map((p) => `<li>${String(p.kind).toUpperCase()}${p.bill ? ` for bill ${p.bill}` : ''}${p.boxes != null ? ` — ${p.boxes} boxes` : ''} — confirmation ${p.confirmation || '—'}</li>`).join('')}</ul>` : ''}

@@ -51,7 +51,7 @@ function mail(title, line, rows, extra = '') {
   const text = [title, line, ...rows.filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k}: ${v}`)].filter(Boolean).join('\n');
   return { html, text };
 }
-const ids = (item, trip) => { const t = tripOf(item); return `TK ${t.powerUnit || 'N/A'} TL ${t.trailer || 'N/A'} TO ${trip}`; };
+const ids = (item, trip) => { const t = tripOf(item); return `TK ${t.powerUnit || 'N/A'} TL ${t.trailer || 'N/A'} TRIP ${trip}`; };
 const place = (s) => [s.customer, [s.city, s.state].filter(Boolean).join(', ')].filter(Boolean).join(' — ');
 const num = (s) => (s.n != null ? s.n : '—');
 

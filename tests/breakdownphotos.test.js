@@ -52,7 +52,7 @@ test('the email shows the photos and the whole load', () => {
 test('the load type is always said when there are bills, even a mix', () => {
   const bills = (...n) => ({ trip: { tripNumber: '1', powerUnit: '2', trailer: '3' }, freightBills: n.map((billNumber) => ({ billNumber })) });
   assert.equal(loadType(bills('B1', 'M2')), 'BROKER + FLOWERS');
-  assert.equal(breakdownSubject(bills('B1', 'M2'), 'flat tire'), 'BROKER + FLOWERS BREAKDOWN TRUCK 2 TRAILER 3 // TK 2 TL 3 TO 1');
+  assert.equal(breakdownSubject(bills('B1', 'M2'), 'flat tire'), 'BROKER + FLOWERS BREAKDOWN TRUCK 2 TRAILER 3 // TK 2 TL 3 TRIP 1');
   assert.equal(loadType({ trip: {} }), null);
   assert.deepEqual(loadRows({ trip: {} })[0], ['Load type', 'Not on file']);
 });
@@ -82,7 +82,7 @@ test('reporting from the card: the choice sets the subject, the driver line and 
   assert.equal((await call({ trip: '626143', problem: ' ' })).code, 400);
   const photo = { dataBase64: 'eA==', mediaType: 'image/jpeg', filename: 'a.jpg' };
   const ok = await call({ trip: '626143', part: 'trailer', problem: 'light came off', driverSays: 'it fell off on the highway', photos: [photo, { dataBase64: 'eA==', mediaType: 'application/pdf', filename: 'x.pdf' }] });
-  assert.equal(ok.subject, 'BROKER BREAKDOWN TRAILER 2029 // TK 2008 TL 2029 TO 626143');
+  assert.equal(ok.subject, 'BROKER BREAKDOWN TRAILER 2029 // TK 2008 TL 2029 TRIP 626143');
   assert.equal(sent[0].by, 'Example Dispatcher'); assert.equal(sent[0].driverSays, 'it fell off on the highway'); assert.equal(sent[0].photos.length, 1, 'pictures only');
   const again = await call({ trip: '626143', problem: 'more pictures', photos: [photo, { ...photo, filename: 'b.jpg' }] });
   assert.equal(again.code, 409); assert.match(again.error, /photos went out/); assert.deepEqual(extra, [1], 'only the new one');
@@ -122,7 +122,7 @@ test('a corrected truck or trailer goes on the email, with the right location or
   const r = initBreakdownReport(null, { db: mem(), secret: 's', getBoard: async () => ({ trips: [here, other] }), send: async (rep, item) => sent.push([rep, item]), now: () => 1000 });
   assert.equal((await r.fromEmail({ trip: '999', reason: 'flat tire', by: 'A', emailId: 'x' })).ok, false, 'a trip not on the board is refused');
   const ok = await r.fromEmail({ trip: '626143', reason: 'trailer light', by: 'A', emailId: 'y', truck: '2010', trailer: '3000' });
-  assert.equal(ok.subject, 'BROKER BREAKDOWN TRAILER 3000 // TK 2010 TL 3000 TO 626143');
+  assert.equal(ok.subject, 'BROKER BREAKDOWN TRAILER 3000 // TK 2010 TL 3000 TRIP 626143');
   assert.equal(sent[0][0].unit, '2010'); assert.equal(sent[0][1].trip.trailer, '3000');
 });
 

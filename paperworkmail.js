@@ -18,7 +18,7 @@ export function billOnLoad(item, bill) {
 // Pure. → { subject, html, text }
 export function renderPaperworkEmail({ label, bill = null, boxes = null, confirmation = null, by, files = 0, item = null, trip, at = Date.now() }) {
   const t = tripOf(item); const tm = billOnLoad(item, bill);
-  const ids = [t.powerUnit && `TK ${t.powerUnit}`, t.trailer && `TL ${t.trailer}`, `TO ${trip}`].filter(Boolean).join(' ');
+  const ids = [t.powerUnit && `TK ${t.powerUnit}`, t.trailer && `TL ${t.trailer}`, `TRIP ${trip}`].filter(Boolean).join(' ');
   const subject = [String(label).toUpperCase(), ids, bill && `BILL ${bill}`].filter(Boolean).join(' // ');
   const count = boxes == null ? null : tm.pieces == null ? `${boxes}` : boxes === tm.pieces ? `${boxes}, matches TruckMate` : `${boxes}, TruckMate has ${tm.pieces}`;
   const paper = [['Paper', label], ['Freight bill', bill ? `${bill}${tm.onLoad ? '' : ' (not on this load in TruckMate)'}` : 'Not given'], ['Box count', count], ['Delivered to', tm.to], ['Bill to', tm.billTo], ['Sent by', by], ['Sent', new Date(at).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })], ['Confirmation', confirmation], ['Files', files ? String(files) : null]].filter(([, v]) => v);

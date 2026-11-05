@@ -30,7 +30,7 @@ test('stop by stop: boxes against the trip sheet (mismatch email), signed paperw
   // stop 2: right count, a photo of the signed paper (not a scan)
   assert.deepEqual((await flow.stopDone('900500', 's2', { boxes: 10, files: [{ dataBase64: 'eA==', mediaType: 'image/jpeg' }], scan: false, by: 'Frank U' })).check.diff, 0);
   assert.deepEqual(mails.map((m) => m.to[0]), ['stop_pod@test'], 'matches: no mismatch email, the paperwork goes to customer service');
-  assert.match(mails[0].subject, /^SIGNED PAPERWORK \/\/ SAMPLE FLORIST \/\/ TK 4550 TL 7328 TO 900500 \/\/ STOP 2$/);
+  assert.match(mails[0].subject, /^SIGNED PAPERWORK \/\/ SAMPLE FLORIST \/\/ TK 4550 TL 7328 TRIP 900500 \/\/ STOP 2$/);
   assert.equal(mails[0].attachments.length, 1);
   // stop 3: two short, no paperwork
   await flow.stopDone('900500', 's3', { boxes: 22, by: 'Frank U' });
@@ -50,7 +50,7 @@ test('stop by stop: boxes against the trip sheet (mismatch email), signed paperw
   assert.equal((await flow.complete('900500', { by: 'Frank U' })).ok, true);
   const done = mails.at(-1);
   assert.equal(done.to[0], 'trip_completed@test');
-  assert.match(done.subject, /^TRIP COMPLETED \/\/ TK 4550 TL 7328 TO 900500 \/\/ 4 STOPS \/\/ 1 BOX MISMATCH$/);
+  assert.match(done.subject, /^TRIP COMPLETED \/\/ TK 4550 TL 7328 TRIP 900500 \/\/ 4 STOPS \/\/ 1 BOX MISMATCH$/);
   assert.match(done.text, /59 boxes delivered of 61 on the trip sheet/); assert.match(done.text, /stop 3 −2/);
   assert.match(done.html, /Receiver closed/);
   assert.equal(done.attachments.length, 1, 'the signed paperwork goes with it');
