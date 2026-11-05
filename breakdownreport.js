@@ -84,6 +84,32 @@ export function loadRows(item, now = Date.now()) {
   return [['Load type', loadType(item) || 'Not on file'], ['Truck', s.unit || 'Not on file'], ['Trailer', s.trailer || 'Not on file'], ['Trip', s.trip || 'Not on file'], ['Broker', s.broker], ['Customers', names], ['Stops left', stopsText(item)], ['Freight bills', s.bills.length ? String(s.bills.length) : null], ['Boxes', s.pieces != null ? s.pieces.toLocaleString('en-US') : null], ['Temperature', temps.length ? temps.map((v) => `${v}°F`).join(', ') : null], ['Commodity', s.commodity], ['From', t.origZoneDesc], ['To', t.destZoneDesc]].filter(([, v]) => v);
 }
 
+// The driver out of what dispatch wrote, for the customer copy: "The driver, Jorge Rodriguez (3338), called" → "The driver called";
+// their names, driver numbers in brackets and phone numbers go. Pure.
+export function withoutDriver(text, item) {
+  const s = (item && item._samsara) || {}; const oc = (item && item._oc) || {};
+  const names = [s.driver1, s.driver2, s.driver1Info && s.driver1Info.name, s.driver2Info && s.driver2Info.name, oc.driverName, oc.driver2Name].filter((n) => n && String(n).trim().length > 2);
+  let out = String(text || '');
+  for (const n of [...new Set(names)].sort((a, b) => b.length - a.length)) {
+    const re = String(n).trim().split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
+    const id = '(\\s*\\(\\s*#?\\d{2,6}\\s*\\))?';
+    out = out.replace(new RegExp(`\\b(the driver)\\s*,?\\s*${re}\\b${id}\\s*,?`, 'gi'), '$1')
+      .replace(new RegExp(`\\b${re}\\b${id}`, 'gi'), 'the driver');
+  }
+  out = out.replace(/(^|[.!?]\s+|\n)the driver/g, (m0, pre) => `${pre}The driver`);
+  return out.replace(/\(?\+?1?[\s.-]*\(?\d{3}\)?[\s.-]*\d{3}[\s.-]*\d{4}\)?/g, '').replace(/[ \t]{2,}/g, ' ').replace(/ +([,.])/g, '$1').replace(/^ +| +$/gm, '');
+}
+
+// The load for a broker / LTL customer: the numbers only — no driver, stops, customers or temperature. billNo: the freight bill(s)
+// to show (an LTL stop's own); otherwise the broker's B / R bills. Pure.
+export function customerLoadRows(item, { billNo = null } = {}) {
+  const t = (item && item.trip) || {};
+  const bills = (item && (item.freightBills || item.orders)) || t.freightBills || [];
+  const rc = (item && item._ratecon && (item._ratecon.data || item._ratecon)) || {};
+  const bNos = billNo ? [].concat(billNo) : bills.map((b) => String(b.billNumber || '')).filter((n) => /^[BR]/i.test(n));
+  return [['Truck', t.powerUnit || 'Not on file'], ['Trailer', t.trailer || 'Not on file'], ['Trip', t.tripNumber || 'Not on file'], ['Load number', rc.loadNumber || null], ['B number', bNos.length ? [...new Set(bNos)].join(', ') : null]].filter(([, v]) => v != null && v !== '');
+}
+
 // The photos, full width, one under the other. Pure.
 // what dispatch wrote, in the email: big when it's a short line, normal size when it's long; line breaks kept
 const said = (t) => { const short = String(t || '').length <= 140 && !/\n/.test(String(t || '')); return `<div style="font-size:${short ? 24 : 17}px;line-height:${short ? 1.25 : 1.45};font-weight:${short ? 'bold' : 'normal'};padding:4px 0 8px;word-break:break-word;white-space:pre-line;">${lines(t)}</div>`; };
@@ -125,13 +151,19 @@ export function correctedLoad(item, board = [], { truck = null, trailer = null }
 }
 
 // The email that opens the chain. Pure.
-export function renderBreakdownEmail({ item, report, etas = null, now = Date.now(), showPhones = true, mapCid = null, sheetNote = null, sheetAttached = false, photoCids = [], photosNote = null, update = null, earlier = [] }) {
+export function renderBreakdownEmail({ item, report, etas = null, now = Date.now(), showPhones = true, mapCid = null, sheetNote = null, sheetAttached = false, photoCids = [], photosNote = null, update = null, earlier = [], customer = false, intro = null, billNo = null }) {
+  // customer: the broker / LTL customer copy — the same email without the driver (card, name and number in the reason), stops left,
+  // temperature or dispatch's own steps; the load as truck, trailer, trip and load / B number. intro: a line dispatch added for them
+  if (customer) { showPhones = false; sheetNote = null; sheetAttached = false; update = null; report = { ...report, reason: withoutDriver(report.reason, item) }; }
   const a = { unit: report.unit, trip: report.trip, ack: null };
   const f = teamStopFacts(a, item, { etas, now, showPhones, mapCid });
   const { liveUrl, heading, button, kv, driverCard, FONT, NAVY, TEXT, MUTED, LINE, RED, et, TRAINING_SLOT } = emailParts;
   const kind = loadType(item);
   const title = `${kind === 'FLOWERS' ? 'FLOWER ' : kind ? `${kind} ` : ''}BREAKDOWN${update ? ' UPDATE' : kind ? '' : ' REPORTED'}`;
   const label = update ? `Update from ${update.by}` : kind ? 'Breakdown reported' : 'Load type not confirmed. Check the load.';
+  const rows = customer ? customerLoadRows(item, { billNo }) : loadRows(item, now);
+  // a broker hears where the truck stands against their delivery; an LTL customer doesn't see the next stop (it may be someone else's)
+  const impact = !customer || brokerLoad(item);
   const banner = update ? '#B45309' : RED;
   const consoleUrl = liveUrl(report.trip);
   const many = f.drivers.length > 1;
@@ -150,21 +182,23 @@ ${TRAINING_SLOT}
 ${sheetAttached ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${NAVY}" style="background:${NAVY};border-radius:8px;"><tr><td style="padding:12px 16px;font-family:${FONT};font-size:17px;font-weight:bold;color:#FFFFFF;">&#128206; ${esc(sheetNote)}</td></tr></table></td></tr>` : ''}
 ${update ? `<tr><td style="padding:0 24px 12px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF7E7" style="background:#FFF7E7;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:#92400E;">Update</b>${said(update.message)}From: <b>${esc(update.by)} · ${esc(et(now) || '')}</b>${earlier.length ? `<div style="padding-top:10px;font-size:13px;color:${MUTED};"><b>Earlier updates</b>${earlier.map((u) => `<div style="padding-top:4px;word-break:break-word;white-space:pre-line;">${lines(u.message)} (${esc(u.by)} · ${esc(et(u.atMs) || '')})</div>`).join('')}</div>` : ''}</td></tr></table></td></tr>` : ''}
 ${update ? photoBlock(photoCids, photosNote, 'Photos with this update') : ''}
-<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b>${said(report.reason)}${report.driverSays ? `<div style="padding:0 0 8px;"><b style="color:${RED};">What the driver says</b><div style="white-space:pre-line;word-break:break-word;">${lines(report.driverSays)}</div></div>` : ''}Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
-${update ? '' : `<tr><td style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Next step for dispatch</b><br>${esc(rc)}<br>${esc(next)}<div>${button(consoleUrl, 'Open the load')}</div></td></tr></table></td></tr>`}
+<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFF1F2" style="background:#FFF1F2;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${RED};">Reason</b>${said(report.reason)}${report.driverSays && !customer ? `<div style="padding:0 0 8px;"><b style="color:${RED};">What the driver says</b><div style="white-space:pre-line;word-break:break-word;">${lines(report.driverSays)}</div></div>` : ''}${customer && intro ? `<div style="padding:0 0 8px;"><b style="color:${RED};">Update</b><div style="white-space:pre-line;word-break:break-word;">${lines(intro)}</div></div>` : ''}Reported by: <b>${esc(reported)}</b></td></tr></table></td></tr>
+${update || customer ? '' : `<tr><td style="padding:12px 24px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#E8F1FC" style="background:#E8F1FC;border-radius:8px;"><tr><td style="padding:14px 16px;font-family:${FONT};font-size:15px;line-height:1.5;color:${TEXT};"><b style="color:${NAVY};">Next step for dispatch</b><br>${esc(rc)}<br>${esc(next)}<div>${button(consoleUrl, 'Open the load')}</div></td></tr></table></td></tr>`}
 ${update ? '' : photoBlock(photoCids, photosNote)}
 ${heading('Load')}
-<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${loadRows(item, now).map(([k, v]) => kv(k, v)).join('')}</table></td></tr>
+<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${rows.map(([k, v]) => kv(k, v)).join('')}</table></td></tr>
 ${heading('Last reported location')}
 ${f.mapCid ? `<tr><td style="padding:0 24px 10px;"><a href="${esc(mapUrl)}"><img src="cid:${esc(f.mapCid)}" width="592" alt="Map of the truck's last reported location" style="display:block;width:100%;max-width:592px;height:auto;border:0;border-radius:8px;"></a></td></tr>` : ''}
 <tr><td style="padding:0 24px;font-family:${FONT};font-size:16px;line-height:1.45;color:${TEXT};word-break:break-word;"><b>${esc(f.location || 'Location not reported')}</b>${mapUrl ? `<div>${button(mapUrl, 'Open map')}</div>` : ''}</td></tr>
-${heading(many ? 'Driver team' : 'Driver')}
-<tr><td style="padding:0 24px;">${f.drivers.length ? f.drivers.map((d, i) => driverCard(d, i, many)).join('') : `<div style="font-family:${FONT};font-size:15px;color:${TEXT};">No driver reported.</div>`}</td></tr>
-${heading('Delivery impact')}
-<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${kv('Next stop', f.next)}${kv('Appointment', f.appt)}${kv('Estimated arrival', f.eta)}${kv('Distance remaining', f.miles != null ? `${f.miles.toLocaleString('en-US')} mi` : null)}</table></td></tr>
+${customer ? '' : `${heading(many ? 'Driver team' : 'Driver')}
+<tr><td style="padding:0 24px;">${f.drivers.length ? f.drivers.map((d, i) => driverCard(d, i, many)).join('') : `<div style="font-family:${FONT};font-size:15px;color:${TEXT};">No driver reported.</div>`}</td></tr>`}
+${impact ? `${heading('Delivery impact')}
+<tr><td style="padding:0 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${kv('Next stop', f.next)}${kv('Appointment', f.appt)}${kv('Estimated arrival', f.eta)}${kv('Distance remaining', f.miles != null ? `${f.miles.toLocaleString('en-US')} mi` : null)}</table></td></tr>` : ''}
 <tr><td style="padding:18px 24px 20px;font-family:${FONT};font-size:13px;line-height:1.5;color:${MUTED};">Reply on this email to keep everyone on the chain. Jarvis keeps it on the load.<br><b style="color:${NAVY};">Jarvis · AI Dispatcher</b> · Florida Beauty</td></tr>
 </table></td></tr></table></body></html>`;
-  const text = [title, label, `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, ...(sheetNote ? [sheetNote] : []), '', ...(update ? [`Update: ${update.message}`, ...earlier.map((u) => `Earlier: ${u.message} (${u.by})`), ''] : []), `Reason: ${report.reason}`, ...(report.driverSays ? [`What the driver says: ${report.driverSays}`] : []), `Reported by: ${reported}`, ...(photoCids.length ? ['', `${photoCids.length} photo${photoCids.length === 1 ? '' : 's'} in this email.`] : []), ...(photosNote ? [photosNote] : []), '', 'LOAD', ...loadRows(item, now).map(([k, v]) => `${k}: ${v}`), '', 'NEXT STEP FOR DISPATCH', rc, next, consoleUrl, '', f.location || 'Location not reported', ...(mapUrl ? [mapUrl] : []), '', `Next stop: ${f.next || 'Not available'}`, `Estimated arrival: ${f.eta || 'Not available'}`, '', 'Reply on this email to keep everyone on the chain.', 'Jarvis · AI Dispatcher · Florida Beauty'].join('\n');
+  const text = customer
+    ? [title, label, `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, '', `Reason: ${report.reason}`, ...(intro ? [`Update: ${intro}`] : []), `Reported by: ${reported}`, ...(photoCids.length ? ['', `${photoCids.length} photo${photoCids.length === 1 ? '' : 's'} in this email.`] : []), ...(photosNote ? [photosNote] : []), '', 'LOAD', ...rows.map(([k, v]) => `${k}: ${v}`), '', f.location || 'Location not reported', ...(mapUrl ? [mapUrl] : []), ...(impact ? ['', `Next stop: ${f.next || 'Not available'}`, `Estimated arrival: ${f.eta || 'Not available'}`] : []), '', 'Reply on this email to keep everyone on the chain.', 'Jarvis · AI Dispatcher · Florida Beauty'].join('\n')
+      : [title, label, `Truck ${f.unit || 'not recorded'}`, `Trip ${f.trip || 'not recorded'}${f.trailer ? ` · Trailer ${f.trailer}` : ''}`, ...(sheetNote ? [sheetNote] : []), '', ...(update ? [`Update: ${update.message}`, ...earlier.map((u) => `Earlier: ${u.message} (${u.by})`), ''] : []), `Reason: ${report.reason}`, ...(report.driverSays ? [`What the driver says: ${report.driverSays}`] : []), `Reported by: ${reported}`, ...(photoCids.length ? ['', `${photoCids.length} photo${photoCids.length === 1 ? '' : 's'} in this email.`] : []), ...(photosNote ? [photosNote] : []), '', 'LOAD', ...rows.map(([k, v]) => `${k}: ${v}`), '', 'NEXT STEP FOR DISPATCH', rc, next, consoleUrl, '', f.location || 'Location not reported', ...(mapUrl ? [mapUrl] : []), '', `Next stop: ${f.next || 'Not available'}`, `Estimated arrival: ${f.eta || 'Not available'}`, '', 'Reply on this email to keep everyone on the chain.', 'Jarvis · AI Dispatcher · Florida Beauty'].join('\n');
   return { subject, html, text };
 }
 
@@ -246,6 +280,8 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
     await sendPhotos((await all())[k], item, fresh, who, text);
     return { ok: true };
   }
+  // the whole open report (photos too) — the customer copy of the breakdown email is built from it
+  const reportFor = async (trip) => { const k = await keyFor(trip); return k ? (await all())[k] : null; };
   const openFor = async (trip) => { const k = await keyFor(trip); if (!k) return null; const { by, reason, atMs, part, updates = [] } = (await all())[k]; return { by, reason, atMs, part: part || null, updates }; };
 
   const keyFor = async (trip) => { const c = await all(); return Object.keys(c).filter((k) => String(c[k].trip) === String(trip) && !c[k].clearedAt).sort((x, y) => c[y].atMs - c[x].atMs)[0] || null; };
@@ -368,5 +404,5 @@ export function initBreakdownReport(app, { db, secret, getBoard, send, sendChain
       try { const r = await submit(p, req.body || {}); return res.status(r.code).json(r); } catch (e) { console.warn('[breakdown-report]', e.message); return res.status(500).json({ error: 'Could not send. Call dispatch.' }); }
     });
   }
-  return { link, forTrip, submit, fromEmail, addPhotos, addUpdate, openFor, held, clear, fixed, rescuePlan, process, overlay, fixedWaiting, recoveryFor, claimRecovery, releaseRecovery };
+  return { link, forTrip, submit, fromEmail, addPhotos, addUpdate, openFor, reportFor, held, clear, fixed, rescuePlan, process, overlay, fixedWaiting, recoveryFor, claimRecovery, releaseRecovery };
 }

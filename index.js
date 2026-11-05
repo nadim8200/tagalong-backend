@@ -1048,7 +1048,18 @@ helpdesk = initHelpdesk(app, { requireAuth: requireDispatch, db, env: process.en
   sms: { live: async () => { try { const c = rc && rc.configFor ? await rc.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } }, send: (to, text) => rc.sendSms('__shared', { to, text }) } });
 // live tracking link for the rate con contact (one load only; stops once delivered)
 const brokerTrack = initBrokerTrack(app, { db, getBoard: (site) => truckmate.buildBoard(site), env: process.env });
-const statusMail = initStatusMail(app, { isTraining: async () => !!(await training.active()), onBreakdownNote: (trip, message, by) => breakdownReport.addUpdate({ trip, message, by }), onBreakdownOff: (trip) => breakdownReport.clear(trip), tempTeam: () => alertRecipients.resolve('reefer_temp'),  requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env,
+// the breakdown email as a broker / LTL customer gets it from Notify customers: photos, map and reason, no driver / stops / temperature
+const customerBreakdown = async (trip, item) => {
+  const report = await breakdownReport.reportFor(trip);
+  if (!report || !item) return null;
+  const map = await truckMap((item && item._samsara) || {}, 'red', reportBadge(report));
+  const photos = await breakdownPhotoFiles(report.photos, EMAIL_BYTES - total(map));
+  const etas = (((await db.get('taWatch:florida-beauty', {})) || {}).etas || {})[trip] || null;
+  const more = photos.rest.length ? `${photos.rest.length} more photo${photos.rest.length === 1 ? '' : 's'} on file.` : null;
+  return { attachments: [...map, ...photos.attachments],
+    render: ({ intro = null, billNo = null } = {}) => renderBreakdownEmail({ item, report, etas, customer: true, intro, billNo, mapCid: map.length ? 'truckmap' : null, photoCids: photos.attachments.map((x) => x.cid), photosNote: more }) };
+};
+const statusMail = initStatusMail(app, { customerBreakdown: (trip, item) => customerBreakdown(trip, item), isTraining: async () => !!(await training.active()), onBreakdownNote: (trip, message, by) => breakdownReport.addUpdate({ trip, message, by }), onBreakdownOff: (trip) => breakdownReport.clear(trip), tempTeam: () => alertRecipients.resolve('reefer_temp'),  requireAuth: requireDispatch, db, docs, comms, ringcentral: rc, env: process.env,
   track: (site, trip) => brokerTrack.linkFor(site, trip),
   chainReply: (site, trip, m) => (inbox ? inbox.replyOnLoadChain(site, trip, m) : { sent: false }) });
 let manifestsApi = null;   // set below — the inbox hands it rate cons that arrive by email

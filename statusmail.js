@@ -103,6 +103,11 @@ export function tmContact(rec) {
 // profile (contacts marked "Status emails"), emails saved for them; what dispatch saved for that stop's customer replaces those.
 // null when it isn't an LTL load. Pure.
 const sameCo = (a, b) => { const x = companyKey(a); const y = companyKey(b); return !!x && !!y && (x === y || (Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x)))); };
+// an LTL stop's own freight bill numbers (its customer's bills), for its copy of the breakdown email. Pure.
+export function stopBills(item, customer) {
+  const nos = billsOf(item).filter((b) => sameCo(customer, b.billToName) || sameCo(customer, b.consignee && (b.consignee.name || b.consignee.clientName))).map((b) => String(b.billNumber || '')).filter(Boolean);
+  return nos.length ? [...new Set(nos)] : null;
+}
 export function stopContacts(item, { customers = {}, stopEmails = {} } = {}) {
   const stops = ltlStops(item);
   if (!stops) return null;
@@ -537,7 +542,9 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
   return { subject, html, text };
 }
 
-export function initStatusMail(app, { requireAuth, db, isTraining = async () => false, onBreakdownNote = null, onBreakdownOff = null, docs = null, comms = null, ringcentral = null, track = null, chainReply = null, tempTeam = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initStatusMail(app, { requireAuth, db, isTraining = async () => false, onBreakdownNote = null, onBreakdownOff = null, docs = null, comms = null, ringcentral = null, track = null, chainReply = null, tempTeam = null, customerBreakdown = null, env = process.env, fetchFn = globalThis.fetch }) {
+  // customerBreakdown(trip, item) → null (no breakdown reported on the load) or { attachments, render({ intro, billNo }) → { html, text } }:
+  // the breakdown email (photos, map, reason) as a broker / LTL customer sees it — no driver, stops or temperature
   const enabled = !!(db && db.enabled);
   const cfgKey = 'taStatusMailCfg';
   const key = (site) => `taStatusMail:${site}`;      // { adopted, trips: { trip: { sent, log } } }
@@ -850,7 +857,8 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
       const m = breakdownMessages(item, on ? 'breakdown' : 'resumed', null, { geo: lastBoard.geo, now: Date.now() });
       const rcCfg = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null;
       const cfg0 = await settings();
-      res.json({ turningOn: on, ...who2, cc: teamCc(env), stops: stopContacts(item, cfg0), company: loadCompanies(item)[0] || null, subject: m.mail.subject, text: m.mail.text, sms: m.sms, texting: !!(rcCfg && rcCfg.fromNumber), outlook: mailConfig(env).ready });
+      const full = on && customerBreakdown ? await Promise.resolve(customerBreakdown(trip, item)).catch(() => null) : null;
+      res.json({ turningOn: on, ...who2, cc: teamCc(env), stops: stopContacts(item, cfg0), fullReport: !!full, company: loadCompanies(item)[0] || null, subject: full ? full.render({}).subject : m.mail.subject, text: m.mail.text, sms: m.sms, texting: !!(rcCfg && rcCfg.fromNumber), outlook: mailConfig(env).ready });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -882,6 +890,11 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
         const body = String(b.body || '').replace(/\r\n?/g, '\n').trim().slice(0, 10000);
         if (subj) m.mail = { ...m.mail, subject: subj };
         if (body) m.mail = { ...m.mail, text: body, html: plainEmailHtml(body) };
+        // a breakdown was reported on the load: they get that email (photos, map, reason) without the driver, stops or temperature,
+        // with dispatch's message on top
+        const full = on && customerBreakdown ? await Promise.resolve(customerBreakdown(trip, item)).catch((e) => { console.warn('[status-mail] breakdown copy:', e.message); return null; }) : null;
+        // the line dispatch added shows as an Update under the reason; the subject is the breakdown email's unless they changed it
+        const mailFor = (billNo = null) => { if (!full) return { subject: m.mail.subject, html: m.mail.html }; const r = full.render({ intro: note, billNo }); return { subject: subj || r.subject, html: r.html, attachments: full.attachments }; };
         // LTL: the stops dispatch checked, one email each (customers don't see each other's addresses)
         const ltl = stopContacts(item, await settings()) || [];
         const picked = (Array.isArray(b.stops) ? b.stops : []).map((x) => { const st = ltl.find((y) => y.key === String(x && x.key)); return st ? { ...st, emails: emailList(Array.isArray(x.emails) ? x.emails.slice(0, 10) : st.emails).filter((e) => !cc.includes(e) && !to.includes(e)) } : null; }).filter(Boolean);
@@ -889,7 +902,7 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
         if (picked.length && mailConfig(env).ready) {
           for (const st of picked) {
             if (!st.emails.length) { result.stops.push({ key: st.key, customer: st.customer, emailed: [], status: 'no email' }); continue; }
-            try { await sendMail({ to: st.emails, cc, subject: m.mail.subject, html: m.mail.html }, { env, fetchFn }); result.stops.push({ key: st.key, customer: st.customer, emailed: st.emails, status: 'sent' }); } // eslint-disable-line no-await-in-loop
+            try { await sendMail({ to: st.emails, cc, ...mailFor(stopBills(item, st.customer)) }, { env, fetchFn }); result.stops.push({ key: st.key, customer: st.customer, emailed: st.emails, status: 'sent' }); } // eslint-disable-line no-await-in-loop
             catch (e) { result.stops.push({ key: st.key, customer: st.customer, emailed: [], status: 'failed' }); result.errors.push(`${st.customer || 'stop'}: ${e.message}`); }
           }
         }
@@ -899,7 +912,7 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
         else if (!to.length) result.emailStatus = 'no customer emails on file — add the broker\'s email';
         else if (!mailConfig(env).ready) result.emailStatus = 'Outlook not connected yet';
         else {
-          try { await sendMail({ to, cc, subject: m.mail.subject, html: m.mail.html }, { env, fetchFn }); result.emailed = [...to, ...stopMails]; result.cc = cc; result.emailStatus = (await isTraining()) ? 'held, customers did not get it' : 'sent'; } catch (e) { result.emailStatus = 'failed'; result.errors.push(e.message); }
+          try { await sendMail({ to, cc, ...mailFor() }, { env, fetchFn }); result.emailed = [...to, ...stopMails]; result.cc = cc; result.emailStatus = (await isTraining()) ? 'held, customers did not get it' : 'sent'; } catch (e) { result.emailStatus = 'failed'; result.errors.push(e.message); }
         }
         const owner = String((req.user && (req.user.company || req.user.id)) || '__shared');
         const rcCfg = ringcentral && ringcentral.configFor ? await ringcentral.configFor(owner) : null;

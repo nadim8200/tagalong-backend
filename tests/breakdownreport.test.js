@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { makeToken, readToken, breakdownSubject, loadLabel, renderBreakdownEmail, reportPage, initBreakdownReport } from '../breakdownreport.js';
+import { makeToken, readToken, breakdownSubject, loadLabel, renderBreakdownEmail, customerLoadRows, reportPage, initBreakdownReport } from '../breakdownreport.js';
 import { renderTeamStopEmail, teamStopFacts } from '../teamstopmail.js';
 import { transferPlan } from '../transferwatch.js';
 
@@ -195,4 +195,29 @@ test('an update\'s photos sit right under the update, not at the bottom after th
   assert.match(up.html, /Photos with this update/); assert.equal(up.html.split('cid:bkphoto1').length, 2, 'once');
   const first = renderBreakdownEmail({ item: { trip: { tripNumber: '1', powerUnit: '2' } }, report, now: NOW, photoCids: ['bkphoto1'] });
   assert.ok(first.html.indexOf('Axle broke off') < first.html.indexOf('cid:bkphoto1'), 'the first report keeps them after the reason');
+});
+
+test('the customer copy (broker / LTL): the same email without the driver, stops left, temperature or dispatch steps; the load as numbers only', () => {
+  const item = { trip: { tripNumber: '626456', powerUnit: '713', trailer: '2054', status: 'DEPSHIP' }, _ratecon: { data: { loadNumber: 'L-88123', broker: 'TQL' } },
+    freightBills: [{ billNumber: 'B180615', billToName: 'SUTTON FERNERIES', temperature: 38, pieces: 1, endZoneDescription: 'MIAMI, FL, 33122' }],
+    _samsara: { driver1: 'Jorge Rodriguez', driver1Info: { name: 'Jorge Rodriguez', phone: '+17867683338' }, lat: 25.8, lng: -80.3, location: 'Miami, FL' } };
+  const report = { atMs: NOW, by: 'Gio', reason: 'The driver, Jorge Rodriguez (3338), called to report a blown tire. Call (786) 768-3338.', driverSays: 'the bar is hanging', trip: '626456', unit: '713' };
+  const inside = renderBreakdownEmail({ item, report, now: NOW });
+  assert.match(inside.html, /Jorge Rodriguez/); assert.match(inside.html, /Stops left|Temperature/);
+  const m = renderBreakdownEmail({ item, report, now: NOW, customer: true, mapCid: 'truckmap', photoCids: ['bkphoto1'], intro: 'Road service is on the way.' });
+  for (const gone of [/Jorge|Rodriguez|768|3338/, /Duty status|Drive left/, /Stops left/, /Temperature|38°/, /Customers/, /Next step for dispatch|Michelin/, /What the driver says|hanging/]) {
+    assert.doesNotMatch(m.html, gone, String(gone)); assert.doesNotMatch(m.text, gone, String(gone));
+  }
+  // the rest stays the team's email: banner, reason, photos, map, reported by
+  assert.match(m.html, /BROKER BREAKDOWN/); assert.match(m.html, /Breakdown reported/); assert.match(m.html, /cid:bkphoto1/); assert.match(m.html, /cid:truckmap/); assert.match(m.html, /Reported by: <b>Gio/);
+  assert.match(m.html, /The driver called to report a blown tire\./);
+  assert.match(m.html, /<b style="color:#[0-9A-F]+;">Update<\/b><div[^>]*>Road service is on the way\./i);
+  assert.equal(m.subject, 'BROKER BREAKDOWN TRUCK 713 TRAILER 2054 // TK 713 TL 2054 TO 626456');
+  assert.deepEqual(customerLoadRows(item), [['Truck', '713'], ['Trailer', '2054'], ['Trip', '626456'], ['Load number', 'L-88123'], ['B number', 'B180615']]);
+  assert.match(m.html, /Delivery impact/, 'a broker still hears the delivery impact');
+  // LTL customer: their own bill, no next stop (may be someone else's)
+  const ltl = { ...item, _ratecon: null, freightBills: [{ billNumber: 'F100', billToName: 'DALLAS' }, { billNumber: 'F101', billToName: 'TULSA' }] };
+  const c = renderBreakdownEmail({ item: ltl, report, now: NOW, customer: true, billNo: ['F101'] });
+  assert.deepEqual(customerLoadRows(ltl, { billNo: ['F101'] }), [['Truck', '713'], ['Trailer', '2054'], ['Trip', '626456'], ['B number', 'F101']]);
+  assert.doesNotMatch(c.html, /Delivery impact|Next stop|F100/);
 });

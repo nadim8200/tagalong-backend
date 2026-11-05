@@ -394,3 +394,24 @@ test('LTL breakdown notice: every stop listed with its emails; only the checked 
   await routes['GET /truckmate/breakdown/:trip/preview']({ params: { trip: '900200' }, query: {} }, res);
   assert.deepEqual(out.stops[0], { key: 's1', n: 1, customer: 'DALLAS WHOLESALE', city: 'Dallas', state: 'TX', emails: ['new@dallasw.com'], saved: true });
 });
+
+test('a breakdown was reported on the load: Notify customers sends that email (customer copy, photos + map attached) with dispatch\'s message on top', async () => {
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
+  const mails = [];
+  const fetchFn = async (url, opts) => (url.includes('oauth2') ? { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) } : (mails.push(JSON.parse(opts.body)), { ok: true, status: 202, json: async () => ({}) }));
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, put: (p, ...h) => { routes[`PUT ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); } };
+  const renders = [];
+  const customerBreakdown = async (trip) => (trip === '900200' ? { attachments: [{ name: 'map.png', contentType: 'image/png', bytes: Buffer.from('x'), cid: 'truckmap' }], render: (o) => { renders.push(o); return { subject: 'BROKER BREAKDOWN TRUCK 2403 // TK 2403 TL 5310 TO 900200', html: `<p>FULL ${o.intro}</p>`, text: 'FULL' }; } } : null);
+  const sm = initStatusMail(app, { requireAuth: () => {}, db: memDb(), env, fetchFn, comms: { log: async () => {} }, customerBreakdown });
+  await sm.process('florida-beauty', { trips: [load({ trip: { status: 'DEPSHIP' } })] }, { geo, now: NOW });
+  let out; const res = { json: (j) => { out = j; }, status() { return this; } };
+  await routes['GET /truckmate/breakdown/:trip/preview']({ params: { trip: '900200' }, query: {} }, res);
+  assert.equal(out.fullReport, true);
+  assert.equal(out.subject, 'BROKER BREAKDOWN TRUCK 2403 // TK 2403 TL 5310 TO 900200');
+  await routes['POST /truckmate/breakdown/:trip']({ params: { trip: '900200' }, body: { on: true, to: ['ops@broker.com'], note: 'Road service is on the way.' }, query: {}, user: { name: 'Gio' } }, res);
+  assert.equal(out.emailStatus, 'sent');
+  assert.match(mails.at(-1).message.body.content, /FULL Road service is on the way\./);
+  assert.equal(mails.at(-1).message.subject, 'BROKER BREAKDOWN TRUCK 2403 // TK 2403 TL 5310 TO 900200');
+  assert.equal(mails.at(-1).message.attachments.length, 1);
+});
