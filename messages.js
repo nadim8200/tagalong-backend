@@ -219,7 +219,18 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       if (!guard(req, res)) return;
       const me = userKey(req.user);
       directory().catch(() => {});   // warm the contact list, so the first search is quick
-      const [all, reads, pins, live] = await Promise.all([db.get(THREADS, {}), db.get(READ, {}), db.get(PINS, {}), textingLiveNow()]);
+      let [all, reads, pins, live] = await Promise.all([db.get(THREADS, {}), db.get(READ, {}), db.get(PINS, {}), textingLiveNow()]); // eslint-disable-line prefer-const
+      // conversations saved with a bad last time (texts logged without one, before Nov 5): the newest real time in their own history
+      const bad = Object.values(all || {}).filter((t) => t.last && Number.isNaN(Date.parse(t.last.at))).slice(0, 60);
+      if (bad.length) {
+        const fix = {};
+        for (const t of bad) {
+          const log = (await db.get(logKey(t.id), [])) || []; // eslint-disable-line no-await-in-loop
+          const at = log.map((m) => Date.parse(m.at)).filter((x) => !Number.isNaN(x)).sort((x, y) => y - x)[0];
+          fix[t.id] = at ? new Date(at).toISOString() : (t.createdAt || new Date(0).toISOString());
+        }
+        all = await db.update(THREADS, (cur) => { const a2 = { ...(cur || {}) }; for (const [id, at] of Object.entries(fix)) if (a2[id] && a2[id].last && Number.isNaN(Date.parse(a2[id].last.at))) a2[id] = { ...a2[id], last: { ...a2[id].last, at } }; return a2; }, {});
+      }
       const ts = (t) => Date.parse((t.last || {}).at) || Date.parse(t.createdAt) || 0;   // newest message in or out first; a bad time never jumps the list
       const threads = Object.values(all || {}).filter((t) => !t.deleted).sort((a, b) => ts(b) - ts(a)).slice(0, 400).map((t) => view(t, me, reads || {}, pins || {}));
       res.json({ me: nameOf(req.user), threads, pins: (pins || {})[me] || [], texting: { live, groupSms: live } });

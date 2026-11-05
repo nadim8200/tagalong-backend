@@ -248,7 +248,9 @@ test('conversations go newest first by the last message in or out; a message log
   assert.ok(!Number.isNaN(Date.parse(list[1].last.at)), 'the reminder has a real time');
   // a conversation stored earlier with a bad time doesn't jump the list, and the next message fixes it
   await h.db.update('taMsgThreads:florida-beauty', (cur) => ({ ...cur, 'p:7865550199': { ...cur['p:7865550199'], last: { ...cur['p:7865550199'].last, at: undefined } } }), {});
-  assert.equal((await call(h.app, 'GET /truckmate/messages', GEO)).body.threads[0].phone, '3055040711');
+  const fixed = (await call(h.app, 'GET /truckmate/messages', GEO)).body.threads;
+  assert.equal(fixed[0].phone, '3055040711');
+  assert.equal(fixed[1].last.at, '2026-11-04T15:00:00.000Z', 'repaired from its own history');
   h.at(Date.parse('2026-11-05T20:05:00Z'));
   await h.inbox.fromSms('7865550199', { type: 'reply', from: '7865550199', text: 'Sent the photo', at: '2026-11-05T20:05:00Z', extId: 'y2' });
   assert.equal((await call(h.app, 'GET /truckmate/messages', GEO)).body.threads[0].phone, '7865550199');
