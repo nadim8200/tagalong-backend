@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ALERTS, resolveEntries, cleanRecipients, initAlertRecipients } from '../alertrecipients.js';
+import { ALERTS, resolveEntries, cleanRecipients, initAlertRecipients, dropSaray, sarayGetsIt } from '../alertrecipients.js';
 
 const people = [{ name: 'Frank Ducassi', email: 'fducassi@floridabeauty.us' }, { name: 'Sebastian Manotas', email: 'smanotas@floridabeauty.us' }, { name: 'Ronen Koul', email: '' }];
 const groupEmail = (n) => (/^dispatch$/i.test(n) ? 'dispatches@floridabeauty.us' : null);
@@ -29,4 +29,17 @@ test('loading-temperature emails have their own list: warehouse + outbound, sepa
   const door = ALERTS.find((a) => a.key === 'door_temp');
   assert.deepEqual(door.defaults, ['warehouse@floridabeauty.us', 'outbound@floridabeauty.us']);
   assert.ok(ALERTS.find((a) => a.key === 'reefer_temp').defaults.includes('Dispatch'));
+});
+
+test('Saray: only on the extended stop email, and only Friday–Monday (Eastern); she already gets Inbound and Dispatches', () => {
+  const ppl = [{ name: 'Saray Fabregas', email: 'sfabregas@floridabeauty.us' }];
+  const list = ['dispatches@floridabeauty.us', 'sfabregas@floridabeauty.us', 'inbound-dispatch@floridabeauty.us'];
+  const fri = Date.parse('2026-11-06T15:00:00Z'); const mon = Date.parse('2026-11-09T15:00:00Z'); const wed = Date.parse('2026-11-04T15:00:00Z');
+  const tueLateNightEt = Date.parse('2026-11-10T03:30:00Z'); // still Monday 10:30 PM in Miami
+  assert.deepEqual(dropSaray(list, { key: 'team_stopped', people: ppl, now: fri }), list);
+  assert.deepEqual(dropSaray(list, { key: 'team_stopped', people: ppl, now: mon }), list);
+  assert.equal(sarayGetsIt('team_stopped', tueLateNightEt), true);
+  assert.deepEqual(dropSaray(list, { key: 'team_stopped', people: ppl, now: wed }), ['dispatches@floridabeauty.us', 'inbound-dispatch@floridabeauty.us']);
+  assert.deepEqual(dropSaray(list, { key: 'breakdown_report', people: ppl, now: fri }), ['dispatches@floridabeauty.us', 'inbound-dispatch@floridabeauty.us']);
+  assert.deepEqual(dropSaray(['saray.f@floridabeauty.us', 'a@x.com'], { key: 'transfer', now: fri }), ['a@x.com'], 'her address even when not on Employees');
 });

@@ -76,7 +76,18 @@ export function resolveEntries(entries = [], { people = [], groupEmail = () => n
   return { emails: [...new Set(emails)], unresolved };
 }
 
-export function initAlertRecipients(app, { requireAuth, requireAdmin = null, db, directory }) {
+// Saray already gets Inbound and Dispatches, so she's taken off the other alert emails. She stays only on the
+// extended stop email (Team truck stopped), and only Friday–Monday (Eastern). Pure.
+const SARAY = /\bsaray\b/i;
+const ET_DAY = (ms) => new Date(ms).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' });
+export function sarayGetsIt(key, ms = Date.now()) { return key === 'team_stopped' && ['Fri', 'Sat', 'Sun', 'Mon'].includes(ET_DAY(ms)); }
+export function dropSaray(emails = [], { key, people = [], now = Date.now() } = {}) {
+  if (sarayGetsIt(key, now)) return emails;
+  const hers = new Set(people.filter((p) => SARAY.test(p.name || '') && p.email).map((p) => String(p.email).toLowerCase()));
+  return emails.filter((e) => !hers.has(e) && !/^[^@]*(saray|fabregas)[^@]*@/i.test(e));
+}
+
+export function initAlertRecipients(app, { requireAuth, requireAdmin = null, db, directory, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   async function lists() {
     const saved = enabled ? ((await db.get(KEY, {})) || {}) : {};
@@ -99,9 +110,10 @@ export function initAlertRecipients(app, { requireAuth, requireAdmin = null, db,
   // the email addresses for one alert right now
   async function resolve(key) {
     const l = (await lists())[key] || [];
-    const r = resolveEntries(l, await dirData());
+    const d = await dirData();
+    const r = resolveEntries(l, d);
     if (r.unresolved.length) console.warn(`[alerts] ${key}: no email for`, r.unresolved.join(', '));
-    return r.emails;
+    return dropSaray(r.emails, { key, people: d.people, now: now() });
   }
 
   app.get('/truckmate/alert-recipients', requireAdmin || requireAuth, async (req, res) => {

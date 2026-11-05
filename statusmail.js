@@ -30,6 +30,7 @@ import { haversineMi, estimateArrival, MIAMI_TERMINAL, MIAMI_YARDS, placeKey } f
 import { requiredRange, brokerMayShare } from './temppolicy.js';
 import { fmtLocal } from './localtime.js';
 import { buildUpdateFor } from './updateemail.js';
+import { ltlStops } from './stopflow.js';
 
 const H = 3600000;
 const PICKED = /^(depship|depshp|pickd|intran|enroute|enrt|arrcons|arrcon|depcons|depcon|delvd|deliv|cmplt|complete)/i;
@@ -77,6 +78,8 @@ export function rateConAudience(item) {
 export const dueWatchSlot = (times = [], hhmm = '00:00', isDone = () => false) => [...times].sort().filter((t) => t <= hhmm && !isDone(t)).pop() || null;
 const MILESTONES = new Set(['at-shipper', 'picked-up', 'arrived', 'delivered']);
 export const emailList = (v) => [...new Set((Array.isArray(v) ? v : String(v || '').split(/[,;\s]+/)).map((x) => String(x).trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)))];
+// The breakdown notice to the broker / customer always copies our team (Inbound and Dispatches); BREAKDOWN_NOTICE_CC changes it.
+export const teamCc = (env = process.env) => emailList(env.BREAKDOWN_NOTICE_CC ?? 'inbound-dispatch@floridabeauty.us, dispatches@floridabeauty.us');
 
 const phone10 = (p) => { const d = String(p || '').replace(/\D+/g, ''); return d.length === 11 && d[0] === '1' ? d.slice(1) : d.length === 10 ? d : null; };
 const fmtPhone = (d) => (d ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : null);
@@ -94,6 +97,31 @@ export function tmContact(rec) {
   }
   const company = rec.name || rec.clientName || rec.customerName || rec.companyName || null;
   return email || phone ? { company: company ? String(company).trim() : null, name, email, phone } : null;
+}
+
+// LTL load: each trip-sheet stop with the emails for that customer — TruckMate's consignee on their bill, their Customers-tab
+// profile (contacts marked "Status emails"), emails saved for them; what dispatch saved for that stop's customer replaces those.
+// null when it isn't an LTL load. Pure.
+const sameCo = (a, b) => { const x = companyKey(a); const y = companyKey(b); return !!x && !!y && (x === y || (Math.min(x.length, y.length) >= 4 && (x.includes(y) || y.includes(x)))); };
+export function stopContacts(item, { customers = {}, stopEmails = {} } = {}) {
+  const stops = ltlStops(item);
+  if (!stops) return null;
+  return stops.map((st) => {
+    const saved = st.customer ? stopEmails[companyKey(st.customer)] : null;
+    let emails;
+    if (Array.isArray(saved)) emails = saved;
+    else {
+      const found = [];
+      for (const b of billsOf(item)) {
+        const c = tmContact(b.consignee);
+        if (c && c.email && (sameCo(st.customer, c.company) || sameCo(st.customer, b.consignee && (b.consignee.name || b.consignee.clientName)))) found.push(c.email);
+      }
+      for (const pr of (item && item._profiles) || []) if (sameCo(st.customer, pr.name)) for (const c of pr.contacts || []) if (c.statusEmails && c.email) found.push(c.email);
+      for (const [k, list] of Object.entries(customers || {})) if (sameCo(st.customer, k)) found.push(...(list || []));
+      emails = found;
+    }
+    return { key: st.key, n: st.n, customer: st.customer, city: st.city, state: st.state, emails: emailList(emails), saved: Array.isArray(saved) };
+  });
 }
 
 // Everyone to update on a load, from the trip sheet (incl. its rate con /
@@ -790,6 +818,28 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // an LTL stop's emails, edited or added in the breakdown notice: saved for that stop's customer (their next loads use it).
+  // { customer, emails } — an empty list goes back to what's found on file
+  app.put('/truckmate/stop-emails/:trip', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const b = req.body || {}; const name = String(b.customer || '').trim();
+    if (!companyKey(name)) return res.status(400).json({ error: 'Which customer?' });
+    const bad = (Array.isArray(b.emails) ? b.emails : []).filter((e) => String(e || '').trim() && !emailList(e).length);
+    if (bad.length) return res.status(400).json({ error: `Not an email: ${bad.join(', ')}` });
+    const want = emailList(b.emails || []).slice(0, 10);
+    try {
+      const cur = await settings();
+      const { seen, outlook, ...keep } = cur; // eslint-disable-line no-unused-vars
+      const all = { ...(cur.stopEmails || {}) };
+      if (want.length) all[companyKey(name)] = want; else delete all[companyKey(name)];
+      await db.set(cfgKey, { ...keep, stopEmails: all });
+      const site = siteOf(req); const trip = String(req.params.trip);
+      if (comms && comms.log) await comms.log(site, trip, { type: 'note', kind: 'contacts', text: `Stop emails for ${name}: ${want.join(', ') || 'back to what is on file'}`, by: who(req), at: new Date().toISOString() });
+      const item = itemFor(site, trip);
+      res.json({ ok: true, customer: name, emails: want, stops: item ? stopContacts(item, { ...cur, stopEmails: all }) : null });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.get('/truckmate/breakdown/:trip/preview', requireAuth, async (req, res) => {
     const site = siteOf(req); const trip = String(req.params.trip);
     const item = itemFor(site, trip);
@@ -799,11 +849,13 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
       const who2 = await everyone(item);
       const m = breakdownMessages(item, on ? 'breakdown' : 'resumed', null, { geo: lastBoard.geo, now: Date.now() });
       const rcCfg = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null;
-      res.json({ turningOn: on, ...who2, company: loadCompanies(item)[0] || null, subject: m.mail.subject, text: m.mail.text, sms: m.sms, texting: !!(rcCfg && rcCfg.fromNumber), outlook: mailConfig(env).ready });
+      const cfg0 = await settings();
+      res.json({ turningOn: on, ...who2, cc: teamCc(env), stops: stopContacts(item, cfg0), company: loadCompanies(item)[0] || null, subject: m.mail.subject, text: m.mail.text, sms: m.sms, texting: !!(rcCfg && rcCfg.fromNumber), outlook: mailConfig(env).ready });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // { on: true|false, notify: true|false, note? }
+  // { on: true|false, notify: true|false, note?, subject?, body?, to?, extraEmails? } — to / extraEmails: who dispatch picked for this notice
+  // (the broker's contact when the load has none on file); our team is always on Cc
   app.post('/truckmate/breakdown/:trip', requireAuth, async (req, res, next) => {
     if (!/^\d+$/.test(req.params.trip)) return next();   // /report and /update are the breakdown team's routes, not a trip
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
@@ -821,16 +873,33 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
     try {
       if (b.notify !== false) {
         const all = await everyone(item);
+        const cc = teamCc(env);
+        // `to`: the list exactly as dispatch left it in the dialog (added the broker's, erased a wrong one); else what's on file
+        const to = emailList(Array.isArray(b.to) ? b.to.slice(0, 15) : [...all.emails, ...emailList(b.extraEmails).slice(0, 10)]).filter((x) => !cc.includes(x));
         const m = breakdownMessages(item, on ? 'breakdown' : 'resumed', note, { geo: lastBoard.geo, now: Date.now() });
         // dispatch rewrote the subject and / or the message: theirs goes out as they wrote it
         const subj = String(b.subject || '').replace(/\s+/g, ' ').trim().slice(0, 250);
         const body = String(b.body || '').replace(/\r\n?/g, '\n').trim().slice(0, 10000);
         if (subj) m.mail = { ...m.mail, subject: subj };
         if (body) m.mail = { ...m.mail, text: body, html: plainEmailHtml(body) };
-        if (!all.emails.length) result.emailStatus = 'no customer emails on file';
+        // LTL: the stops dispatch checked, one email each (customers don't see each other's addresses)
+        const ltl = stopContacts(item, await settings()) || [];
+        const picked = (Array.isArray(b.stops) ? b.stops : []).map((x) => { const st = ltl.find((y) => y.key === String(x && x.key)); return st ? { ...st, emails: emailList(Array.isArray(x.emails) ? x.emails.slice(0, 10) : st.emails).filter((e) => !cc.includes(e) && !to.includes(e)) } : null; }).filter(Boolean);
+        result.stops = [];
+        if (picked.length && mailConfig(env).ready) {
+          for (const st of picked) {
+            if (!st.emails.length) { result.stops.push({ key: st.key, customer: st.customer, emailed: [], status: 'no email' }); continue; }
+            try { await sendMail({ to: st.emails, cc, subject: m.mail.subject, html: m.mail.html }, { env, fetchFn }); result.stops.push({ key: st.key, customer: st.customer, emailed: st.emails, status: 'sent' }); } // eslint-disable-line no-await-in-loop
+            catch (e) { result.stops.push({ key: st.key, customer: st.customer, emailed: [], status: 'failed' }); result.errors.push(`${st.customer || 'stop'}: ${e.message}`); }
+          }
+        }
+        const stopMails = result.stops.flatMap((x) => x.emailed);
+        if (!to.length && stopMails.length) { result.emailStatus = (await isTraining()) ? 'held, customers did not get it' : 'sent'; result.emailed = stopMails; result.cc = cc; }
+        else if (!to.length && picked.length && !mailConfig(env).ready) result.emailStatus = 'Outlook not connected yet';
+        else if (!to.length) result.emailStatus = 'no customer emails on file — add the broker\'s email';
         else if (!mailConfig(env).ready) result.emailStatus = 'Outlook not connected yet';
         else {
-          try { await sendMail({ to: all.emails, subject: m.mail.subject, html: m.mail.html }, { env, fetchFn }); result.emailed = all.emails; result.emailStatus = (await isTraining()) ? 'held, customers did not get it' : 'sent'; } catch (e) { result.emailStatus = 'failed'; result.errors.push(e.message); }
+          try { await sendMail({ to, cc, subject: m.mail.subject, html: m.mail.html }, { env, fetchFn }); result.emailed = [...to, ...stopMails]; result.cc = cc; result.emailStatus = (await isTraining()) ? 'held, customers did not get it' : 'sent'; } catch (e) { result.emailStatus = 'failed'; result.errors.push(e.message); }
         }
         const owner = String((req.user && (req.user.company || req.user.id)) || '__shared');
         const rcCfg = ringcentral && ringcentral.configFor ? await ringcentral.configFor(owner) : null;
@@ -843,7 +912,7 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
           result.textStatus = result.texted.length ? `sent to ${result.texted.length}` : 'failed';
         }
         if (comms && comms.log) {
-          if (result.emailed.length) await comms.log(site, trip, { type: 'email', dir: 'out', at, to: result.emailed.join(', '), subject: m.mail.subject, text: m.mail.text.slice(0, 600), by: who(req), noThread: true });
+          if (result.emailed.length) await comms.log(site, trip, { type: 'email', dir: 'out', at, to: result.emailed.join(', '), cc: cc.join(', '), subject: m.mail.subject, text: m.mail.text.slice(0, 600), by: who(req), noThread: true });
           for (const ph of result.texted) await comms.log(site, trip, { type: 'text', kind: on ? 'breakdown' : 'resumed', to: ph, text: m.sms, by: who(req), at, noThread: true }); // eslint-disable-line no-await-in-loop
         }
       }

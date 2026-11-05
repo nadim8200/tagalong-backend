@@ -336,3 +336,61 @@ test('dispatch can rewrite the breakdown email: their subject and their message 
   assert.equal(mails[0].message.subject, 'Load 900200 — delay');
   assert.match(mails[0].message.body.content, /white-space:pre-line">Hi Ana,\nThe truck had a tire blowout &lt;today&gt;\.\nNew ETA tomorrow 8 AM\.<\/div>/);
 });
+
+test('breakdown notice to the broker: dispatch adds emails, our team (Inbound, Dispatches) is always on Cc', async () => {
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
+  const mails = [];
+  const fetchFn = async (url, opts) => (url.includes('oauth2') ? { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) } : (mails.push(JSON.parse(opts.body)), { ok: true, status: 202, json: async () => ({}) }));
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, put: (p, ...h) => { routes[`PUT ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); } };
+  const sm = initStatusMail(app, { requireAuth: () => {}, db: memDb(), env, fetchFn, comms: { log: async () => {} } });
+  const item = load({ trip: { status: 'DEPSHIP' } }); // no broker email on file (Gio's case)
+  await sm.process('florida-beauty', { trips: [item] }, { geo, now: NOW });
+  let out; const res = { json: (j) => { out = j; }, status() { return this; } };
+  await routes['GET /truckmate/breakdown/:trip/preview']({ params: { trip: '900200' }, query: {} }, res);
+  assert.deepEqual(out.cc, ['inbound-dispatch@floridabeauty.us', 'dispatches@floridabeauty.us']);
+  await routes['POST /truckmate/breakdown/:trip']({ params: { trip: '900200' }, body: { on: true }, query: {}, user: { name: 'Gio' } }, res);
+  assert.match(out.emailStatus, /no customer emails on file/);
+  assert.equal(mails.length, 0, 'nothing to the team alone');
+  await routes['POST /truckmate/breakdown/:trip']({ params: { trip: '900200' }, body: { on: true, extraEmails: ['Ops@Broker.com', 'bad', 'ops@broker.com', 'dispatches@floridabeauty.us', 'jo@ltl.com'] }, query: {}, user: { name: 'Gio' } }, res);
+  assert.equal(out.emailStatus, 'sent');
+  assert.deepEqual(mails[0].message.toRecipients.map((r) => r.emailAddress.address), ['ops@broker.com', 'jo@ltl.com']);
+  assert.deepEqual(mails[0].message.ccRecipients.map((r) => r.emailAddress.address), ['inbound-dispatch@floridabeauty.us', 'dispatches@floridabeauty.us']);
+  // the dialog's list as shown wins (they erased one)
+  await routes['POST /truckmate/breakdown/:trip']({ params: { trip: '900200' }, body: { on: true, to: ['jo@ltl.com'] }, query: {}, user: { name: 'Gio' } }, res);
+  assert.deepEqual(mails[1].message.toRecipients.map((r) => r.emailAddress.address), ['jo@ltl.com']);
+});
+
+test('LTL breakdown notice: every stop listed with its emails; only the checked stops get it, one email each; stop emails can be saved', async () => {
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
+  const mails = [];
+  const fetchFn = async (url, opts) => (url.includes('oauth2') ? { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) } : (mails.push(JSON.parse(opts.body)), { ok: true, status: 202, json: async () => ({}) }));
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, put: (p, ...h) => { routes[`PUT ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); } };
+  const sm = initStatusMail(app, { requireAuth: () => {}, db: memDb(), env, fetchFn, comms: { log: async () => {} } });
+  const item = load({ trip: { status: 'DEPSHIP' }, bills: [
+    { billNumber: 'F100', billToName: 'Dallas Wholesale', consignee: { name: 'Dallas Wholesale Inc', email: 'recv@dallasw.com' } },
+    { billNumber: 'F101', billToName: 'Tulsa Flowers' },
+  ], extra: { _manifest: { stops: [
+    { key: 's1', stopNumber: 1, action: 'DELIVER', customer: 'DALLAS WHOLESALE', city: 'Dallas', state: 'TX' },
+    { key: 's2', stopNumber: 2, action: 'DELIVER', customer: 'TULSA FLOWERS', city: 'Tulsa', state: 'OK' },
+  ] }, _profiles: [{ name: 'Tulsa Flowers', type: 'customer', contacts: [{ email: 'ops@tulsaflowers.com', statusEmails: true }] }] } });
+  await sm.process('florida-beauty', { trips: [item] }, { geo, now: NOW });
+  let out; const res = { json: (j) => { out = j; }, status() { return this; } };
+  await routes['GET /truckmate/breakdown/:trip/preview']({ params: { trip: '900200' }, query: {} }, res);
+  assert.deepEqual(out.stops.map((s) => [s.key, s.customer, s.emails]), [['s1', 'DALLAS WHOLESALE', ['recv@dallasw.com']], ['s2', 'TULSA FLOWERS', ['ops@tulsaflowers.com']]]);
+  // only stop 2 checked, with an email added for this notice
+  const before = mails.length;
+  await routes['POST /truckmate/breakdown/:trip']({ params: { trip: '900200' }, body: { on: true, to: [], stops: [{ key: 's2', emails: ['ops@tulsaflowers.com', 'mgr@tulsaflowers.com'] }] }, query: {}, user: { name: 'Gio' } }, res);
+  assert.equal(out.emailStatus, 'sent');
+  const sent = mails.slice(before);
+  assert.equal(sent.length, 1, 'stop 1 unchecked: no email');
+  assert.deepEqual(sent[0].message.toRecipients.map((r) => r.emailAddress.address), ['ops@tulsaflowers.com', 'mgr@tulsaflowers.com']);
+  assert.deepEqual(sent[0].message.ccRecipients.map((r) => r.emailAddress.address), ['inbound-dispatch@floridabeauty.us', 'dispatches@floridabeauty.us']);
+  assert.deepEqual(out.stops, [{ key: 's2', customer: 'TULSA FLOWERS', emailed: ['ops@tulsaflowers.com', 'mgr@tulsaflowers.com'], status: 'sent' }]);
+  // saved for the stop's customer: used next time
+  await routes['PUT /truckmate/stop-emails/:trip']({ params: { trip: '900200' }, body: { customer: 'DALLAS WHOLESALE', emails: ['new@dallasw.com'] }, query: {}, user: { name: 'Gio' } }, res);
+  assert.deepEqual(out.stops[0].emails, ['new@dallasw.com']);
+  await routes['GET /truckmate/breakdown/:trip/preview']({ params: { trip: '900200' }, query: {} }, res);
+  assert.deepEqual(out.stops[0], { key: 's1', n: 1, customer: 'DALLAS WHOLESALE', city: 'Dallas', state: 'TX', emails: ['new@dallasw.com'], saved: true });
+});
