@@ -226,7 +226,7 @@ function traccarLive(device, p) {
   };
 }
 
-export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders, docs = null, overlays = [], routeProviders = [], onFinished = null }) {
+export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR_URL, traccarHeaders, docs = null, overlays = [], routeProviders = [], onFinished = null, extraItems = null }) {
   // 30s-cached index of Traccar devices → live overlay, keyed by unit number.
   let _tmTraccar = { at: 0, idx: null };
   async function traccarLiveIndex() {
@@ -527,6 +527,8 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     const store = (db && db.enabled) ? await db.get(`taTruckMateActive:${site}`, { trips: {} }) : { trips: {} };
     const recs = Object.values(store.trips || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     const trips = applyUnitAliases(recs.map((r) => { if (r.item) r.item._times = tripTimes(r); return r.item; }));
+    // loads that aren't in TruckMate (OC loads Jarvis made from email, ocloads.js): cards like the rest, every overlay included
+    if (extraItems) trips.push(...((await Promise.resolve(extraItems(site, trips)).catch((e) => { console.warn('[truckmate] extra loads:', e.message); return []; })) || []));
     // Overlay LIVE Samsara data (driver names, GPS/fuel/engine, reefer temp) on
     // each trip so the dispatcher can cross-check it against TruckMate. Cached
     // ~60s; if Samsara is down or unconfigured we just skip the overlay.

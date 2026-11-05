@@ -307,5 +307,27 @@ export function initCarriers(app, { requireAuth, db }) {
     return mark;
   }
 
-  return { overlay, recordFromSheets, addCheckins, read, setDriverInfo, setDriverContact };
+  // an OC load Jarvis made from email: outside carrier from the start (carrier still to fill in)
+  async function markOc(site, trip, { by, evidence = null }) {
+    if (!enabled) return null;
+    let mark = null;
+    await db.update(key(site), (cur) => { const s = { ...empty, ...(cur || {}), marks: { ...((cur || {}).marks || {}) } }; mark = { ...(s.marks[String(trip)] || {}), source: 'email', by, at: new Date().toISOString(), evidence }; s.marks[String(trip)] = mark; return s; }, empty);
+    return mark;
+  }
+  // the email load is now a TruckMate trip: its OC info (driver, phones, agreement) and check-ins go with it, without overwriting
+  // anything the TruckMate trip already has
+  async function moveMark(site, from, to) {
+    if (!enabled) return;
+    await db.update(key(site), (cur) => {
+      const s = { ...empty, ...(cur || {}), marks: { ...((cur || {}).marks || {}) } };
+      const a = s.marks[String(from)]; if (!a) return s;
+      const b = s.marks[String(to)] && !s.marks[String(to)].cleared ? s.marks[String(to)] : {};
+      const merged = { ...a }; for (const [k, v] of Object.entries(b)) if (v != null && v !== '') merged[k] = v;
+      s.marks[String(to)] = { ...merged, foldedFrom: String(from) };
+      return s;
+    }, empty);
+    await db.update(ckKey(site), (cur) => { const c = { ...(cur || {}) }; if (c[String(from)]) { c[String(to)] = [...(c[String(to)] || []), ...c[String(from)]]; delete c[String(from)]; } return c; }, {});
+  }
+
+  return { overlay, recordFromSheets, addCheckins, read, setDriverInfo, setDriverContact, markOc, moveMark };
 }

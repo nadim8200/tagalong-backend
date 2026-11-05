@@ -586,6 +586,38 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
     } catch (e) { res.status(500).json({ error: 'Could not save the location.' }); }
   });
 
+  // The driver says the load is delivered (the button in the TagAlong app). On an OC load Jarvis made from email it closes the
+  // load (ocloads.js: the sweep finishes it and the final report goes out); on any load it's a check-in dispatch sees.
+  let onDelivered = null;
+  app.post('/driver/link/:token/delivered', async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Tracking is not available right now.' });
+    try {
+      const tok = String(req.params.token);
+      const { link, status } = await activeLink(tok);
+      if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
+      if (!isLive(status)) return res.status(410).json({ active: false, status });
+      const fix = link.lastPing || null; const at = new Date().toISOString(); const by = link.driverName || 'OC driver';
+      await db.update(linkKey(tok), (cur) => (cur ? { ...cur, deliveredAt: cur.deliveredAt || at } : cur), null);
+      if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at, source: 'driver app', location: fix ? `${fix.lat.toFixed(4)}, ${fix.lng.toFixed(4)}` : null, text: 'Driver confirmed the load is delivered (TagAlong app)', issue: false, by }]);
+      const closed = onDelivered ? !!(await Promise.resolve(onDelivered(link.site, link.trip, `${by} (TagAlong app)`)).catch(() => false)) : false;
+      res.json({ ok: true, deliveredAt: at, closed });
+    } catch (e) { res.status(500).json({ error: 'Could not send it. Try again.' }); }
+  });
+
+  // An email load became a TruckMate trip: its link (and the location history) now belong to that trip.
+  async function moveLink(site, from, to) {
+    if (!enabled) return;
+    const idx = await db.get(siteKey(site), { byTrip: {} });
+    const tok = (idx.byTrip || {})[String(from)];
+    if (!tok) return;
+    const theirs = (idx.byTrip || {})[String(to)];
+    if (theirs && isLive(linkStatus(await db.get(linkKey(theirs), null)))) return;   // the TruckMate trip already has its own live link
+    await db.update(siteKey(site), (cur) => { const c = { ...(cur || {}), byTrip: { ...((cur || {}).byTrip || {}) } }; c.byTrip[String(to)] = tok; delete c.byTrip[String(from)]; return c; }, { byTrip: {} });
+    await db.update(linkKey(tok), (cur) => (cur ? { ...cur, trip: String(to), foldedFrom: String(from) } : cur), null);
+    const pos = await db.get(posKey(site, from), null);
+    if (pos) await db.set(posKey(site, to), pos);
+  }
+
   app.post('/driver/link/:token/checkin', async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Tracking is not available right now.' });
     try {
@@ -770,5 +802,5 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   // dispatch messages the driver hasn't opened on a load
   async function unread(site, trip) { return (((await db.get(chatKey(site), {})) || {})[String(trip)] || []).filter((m) => m.from === 'dispatch' && !m.readAt).length; }
   let onDispatchMessage = null;
-  return { overlay, routeFor, ensureDocsLink, messageDriver, unread, useComms, usePhotos, useRoadPhotos, onDispatchMessage: (fn) => { onDispatchMessage = fn; } };
+  return { overlay, routeFor, ensureDocsLink, messageDriver, unread, useComms, usePhotos, useRoadPhotos, moveLink, useDelivered: (fn) => { onDelivered = fn; }, onDispatchMessage: (fn) => { onDispatchMessage = fn; } };
 }

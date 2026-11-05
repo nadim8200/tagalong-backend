@@ -58,6 +58,8 @@ export function movedOn(item, items = []) {
 export function finishReason(item, items = []) {
   const t = tripOf(item);
   const status = String(t.status || '');
+  // an OC load Jarvis made from email: its driver confirmed delivery in the TagAlong app (ocloads.js)
+  if (item && item._ocEmail && item._ocEmail.deliveredAt) return 'OC driver confirmed delivery (TagAlong app)';
   if (DONE.test(status)) return 'TruckMate: delivered';
   const bills = (item && (item.freightBills || item.orders)) || t.freightBills || [];
   if (bills.length && bills.every((b) => b && b.actualDelivery)) return 'every stop delivered (TruckMate)';

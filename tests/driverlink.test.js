@@ -317,4 +317,11 @@ test('Track this OC: the driver\'s cell + agreement, a link, and the tracking te
   assert.match(sent[0].text, /^Florida Beauty Flora dispatch: Hola Carlos, tiene la carga 626494 \(MIAMI TERMINAL → LAWRENCE, MA\)/);
   assert.equal(r.body.status, 'sent'); assert.equal(r.body.lang, 'es');
   assert.equal(((await db.get('taSmsConsent:florida-beauty', {})) || {})['7865550144'].how, 'verbal (dispatcher, Track this OC)');
+  // the driver taps Delivered in the app: a check-in for dispatch, and an email OC load closes
+  const closing = []; dl.useDelivered(async (site, trip, by) => { closing.push([trip, by]); return true; });
+  carriers.addCheckins = async (site, trip, list) => { contacts.push({ checkin: list[0].text }); };
+  const d = await app.call('POST', '/driver/link/:token/delivered', { token: r.body.token }, {});
+  assert.equal(d.status, 200); assert.equal(d.body.closed, true);
+  assert.deepEqual(closing, [['626494', 'Carlos Ruiz (TagAlong app)']]);
+  assert.equal(contacts.at(-1).checkin, 'Driver confirmed the load is delivered (TagAlong app)');
 });
