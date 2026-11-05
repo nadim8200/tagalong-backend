@@ -85,7 +85,7 @@ export function initStopFlow({ db, docs = null, getBoard, sendMail = null, recip
     const stops = ltlStops(item);
     if (!stops) return null;
     const rec = (await all())[String(tripOf(item).tripNumber)] || { stops: {} };
-    return { stops: stops.map((s) => { const r = rec.stops[s.key] || {}; return { ...s, doneAt: r.doneAt || null, delivered: r.boxes != null ? r.boxes : null, check: boxCheck(r.boxes, s.boxes), paperwork: (r.docIds || []).length, issues: (r.issues || []).map((x) => ({ at: x.at, text: x.text, photos: (x.docIds || []).length })) }; }), completedAt: rec.completedAt || null };
+    return { stops: stops.map((s) => { const r = rec.stops[s.key] || {}; return { ...s, doneAt: r.doneAt || null, delivered: r.boxes != null ? r.boxes : null, check: boxCheck(r.boxes, s.boxes), paperwork: (r.docIds || []).length, issues: (r.issues || []).map((x) => ({ at: x.at, text: x.text, photos: (x.docIds || []).length })), comments: (r.comments || []).map((x) => ({ at: x.at, text: x.text, photos: (x.docIds || []).length })) }; }), completedAt: rec.completedAt || null };
   }
 
   // a stop done: the boxes delivered and the signed paperwork scan
@@ -129,25 +129,69 @@ export function initStopFlow({ db, docs = null, getBoard, sendMail = null, recip
     return { ok: true };
   }
 
-  // the last stop is done: the load is complete, one email with every stop and the signed paperwork
+  // a comment on a stop, with photos (taken or from the phone's library): on the load for dispatch, and in the trip report when the load closes
+  async function stopComment(trip, k, { text, files = [], by }) {
+    const item = await itemFor(trip); const stops = ltlStops(item);
+    const s = find(stops, k);
+    if (!s) return { error: 'That stop is not on this load.', code: 404 };
+    const said = clean(text);
+    if (said.length < 2 && !files.length) return { error: 'Write a comment or add a photo.', code: 400 };
+    const docIds = await store(trip, files, { name: `COMMENT-${trip}-stop${num(s)}`, by });
+    const at = now();
+    await save(String(trip), (r) => ({ ...r, stops: { ...r.stops, [s.key]: { ...(r.stops[s.key] || {}), comments: [...((r.stops[s.key] || {}).comments || []), { at, by, text: said, docIds }] } } }));
+    if (log) await log(SITE, String(trip), { type: 'reply', from: 'driver app', text: `Comment at stop ${num(s)} (${place(s)}): ${said || 'photos'}${docIds.length ? ` [${docIds.length} photo${docIds.length === 1 ? '' : 's'}]` : ''} (${by})`, noThread: true }).catch(() => {});
+    return { ok: true };
+  }
+
+  // everything the driver sent on this trip: stop scans, issue and comment photos, and the Paperwork tab — as attachments, split over as
+  // many emails as it takes. → [[attachment…], …]
+  async function allFiles(trip, rec) {
+    const known = Object.values(rec.stops || {}).flatMap((r) => [...(r.docIds || []), ...(r.issues || []).flatMap((x) => x.docIds || []), ...(r.comments || []).flatMap((x) => x.docIds || [])]);
+    const listed = docs && docs.listDocs ? await docs.listDocs({ site: SITE, trips: [String(trip)], kind: 'driverdoc' }).catch(() => []) : [];
+    const meta = new Map(listed.map((d) => [String(d.id), d]));
+    const ids = [...new Set([...known.map(String), ...listed.slice().reverse().map((d) => String(d.id))])];
+    if (!ids.length || !docs) return [];
+    const files = await docs.readDocs({ site: SITE, ids }).catch(() => []);
+    const groups = [[]]; let used = 0;
+    files.forEach((f, i) => {
+      const m = meta.get(String(f.id)) || {};
+      const ext = /pdf/i.test(f.mediaType || '') ? 'pdf' : /png/i.test(f.mediaType || '') ? 'png' : 'jpg';
+      const name = m.filename && /\.[a-z0-9]{2,4}$/i.test(m.filename) ? m.filename : `Driver file ${i + 1}.${ext}`;
+      if (f.data.length > EMAIL_BYTES) return;
+      if (used + f.data.length > EMAIL_BYTES && groups[groups.length - 1].length) { groups.push([]); used = 0; }
+      used += f.data.length; groups[groups.length - 1].push({ name, contentType: f.mediaType, bytes: f.data });
+    });
+    return groups.filter((g) => g.length);
+  }
+
+  // the driver completes the load (they're asked first; stops not marked done are allowed and named): one email with every stop, every
+  // comment and report, and every file they sent — more emails on the chain when the files don't fit in one
   async function complete(trip, { by }) {
     const item = await itemFor(trip); const stops = ltlStops(item);
     if (!stops) return { error: 'This load has no trip sheet stops.', code: 404 };
     const rec = (await all())[String(trip)] || { stops: {} };
     const open = stops.filter((s) => !(rec.stops[s.key] || {}).doneAt);
-    if (open.length) return { error: `Mark every stop done first (${open.length} left).`, code: 409 };
     if (rec.completedAt) return { ok: true, already: true };
     const at = now();
     await save(String(trip), (r) => ({ ...r, completedAt: at, completedBy: by }));
-    if (log) await log(SITE, String(trip), { type: 'reply', from: 'driver app', text: `Trip completed by ${by}: ${stops.length} stops`, noThread: true }).catch(() => {});
+    if (log) await log(SITE, String(trip), { type: 'reply', from: 'driver app', text: `Trip completed by ${by}: ${stops.length} stops${open.length ? `, ${open.length} not marked done` : ''}`, noThread: true }).catch(() => {});
     const lines = stops.map((s) => { const r = rec.stops[s.key] || {}; const c = boxCheck(r.boxes, s.boxes); return { s, r, c }; });
     const totalD = lines.reduce((n, x) => n + (x.r.boxes || 0), 0); const totalE = lines.reduce((n, x) => n + (x.s.boxes || 0), 0);
     const short = lines.filter((x) => x.c && x.c.diff !== 0);
-    const table = `<table cellpadding="6" style="border-collapse:collapse;margin-top:12px;font-size:14px"><tr style="background:#F3F4F6"><th align="left">Stop</th><th align="left">Done</th><th align="right">Boxes</th><th align="right">Trip sheet</th><th align="left">Paperwork</th><th align="left">Issues</th></tr>${lines.map(({ s, r, c }) => `<tr style="border-top:1px solid #E5E7EB"><td>${esc(`${num(s)}. ${place(s)}`)}</td><td>${esc(et(r.doneAt))}</td><td align="right"${c && c.diff ? ' style="color:#B91C1C;font-weight:bold"' : ''}>${esc(r.boxes)}</td><td align="right">${esc(s.boxes == null ? '—' : s.boxes)}</td><td>${(r.docIds || []).length ? 'Signed, attached' : 'None sent'}</td><td>${esc((r.issues || []).map((x) => x.text || 'Photos').join(' · ') || '—')}</td></tr>`).join('')}</table>`;
-    const a = await attach(lines.flatMap((x) => x.r.docIds || []));
-    await email('trip_completed', { subject: `TRIP COMPLETED // ${ids(item, trip)} // ${stops.length} STOPS${short.length ? ` // ${short.length} BOX MISMATCH${short.length === 1 ? '' : 'ES'}` : ''}`,
-      ...mail('Trip completed', `${by} completed the load: ${stops.length} stops, ${totalD} boxes delivered of ${totalE} on the trip sheet.`, [['Trip', ids(item, trip)], ['Completed', `${et(at)} ET`], ['Box mismatches', short.length ? short.map((x) => `stop ${num(x.s)} ${x.c.missing ? `−${x.c.missing}` : `+${x.c.extra}`}`).join(', ') : 'None']], `${table}${a.left ? `<p>${a.left} more file${a.left === 1 ? '' : 's'} on the load in the console.</p>` : ''}`), attachments: a.attachments });
-    return { ok: true };
+    const table = `<table cellpadding="6" style="border-collapse:collapse;margin-top:12px;font-size:14px"><tr style="background:#F3F4F6"><th align="left">Stop</th><th align="left">Done</th><th align="right">Boxes</th><th align="right">Trip sheet</th><th align="left">Paperwork</th><th align="left">Issues</th><th align="left">Comments</th></tr>${lines.map(({ s, r, c }) => `<tr style="border-top:1px solid #E5E7EB"><td>${esc(`${num(s)}. ${place(s)}`)}</td><td${r.doneAt ? '' : ' style="color:#B91C1C;font-weight:bold"'}>${r.doneAt ? esc(et(r.doneAt)) : 'Not marked done'}</td><td align="right"${c && c.diff ? ' style="color:#B91C1C;font-weight:bold"' : ''}>${esc(r.boxes)}</td><td align="right">${esc(s.boxes == null ? '—' : s.boxes)}</td><td>${(r.docIds || []).length ? 'Signed, attached' : 'None sent'}</td><td>${esc((r.issues || []).map((x) => x.text || 'Photos').join(' · ') || '—')}</td><td>${esc((r.comments || []).map((x) => x.text || 'Photos').join(' · ') || '—')}</td></tr>`).join('')}</table>`;
+    // what the driver wrote, stop by stop, with the time and how many photos
+    const said = lines.flatMap(({ s, r }) => [...(r.issues || []).map((x) => ({ s, x, kind: 'Issue' })), ...(r.comments || []).map((x) => ({ s, x, kind: 'Comment' }))]).sort((a, b) => Date.parse(a.x.at) - Date.parse(b.x.at));
+    const notes = said.length ? `<p style="font-size:16px;font-weight:bold;margin:18px 0 6px">What the driver reported</p>${said.map(({ s, x, kind }) => `<p style="margin:0 0 8px;padding:8px 10px;border-left:3px solid ${kind === 'Issue' ? '#B45309' : '#1D4ED8'};background:#F8FAFC"><b>${kind} · stop ${esc(num(s))} · ${esc(et(x.at))} ET</b><br>${esc(x.text || 'Photos only')}${(x.docIds || []).length ? ` · ${(x.docIds || []).length} photo${(x.docIds || []).length === 1 ? '' : 's'} attached` : ''}</p>`).join('')}` : '';
+    const parts = await allFiles(trip, rec);
+    const fileCount = parts.reduce((n, g) => n + g.length, 0);
+    const subject = `TRIP COMPLETED // ${ids(item, trip)} // ${stops.length} STOPS${open.length ? ` // ${open.length} NOT DONE` : ''}${short.length ? ` // ${short.length} BOX MISMATCH${short.length === 1 ? '' : 'ES'}` : ''}`;
+    const a = { attachments: parts[0] || [], left: 0 };
+    await email('trip_completed', { subject,
+      ...mail('Trip completed', `${by} completed the load: ${stops.length} stops, ${totalD} boxes delivered of ${totalE} on the trip sheet.`, [['Trip', ids(item, trip)], ['Completed', `${et(at)} ET`], ['Box mismatches', short.length ? short.map((x) => `stop ${num(x.s)} ${x.c.missing ? `−${x.c.missing}` : `+${x.c.extra}`}`).join(', ') : 'None'], ...(open.length ? [['Not marked done', open.map((x) => `${x.n != null ? `stop ${x.n} ` : ''}${x.customer || ''}`.trim()).join(', ')]] : []), ['Files from the driver', fileCount ? `${fileCount} attached${parts.length > 1 ? ` (in ${parts.length} emails on this chain)` : ''}` : 'None sent']], `${table}${notes}`), attachments: a.attachments });
+    for (let i = 1; i < parts.length; i += 1) {
+      await email('trip_completed', { subject: `Re: ${subject} // FILES ${i + 1} OF ${parts.length}`, ...mail(`Driver files ${i + 1} of ${parts.length}`, `More of what the driver sent on trip ${trip}.`, [['Trip', ids(item, trip)], ['Files in this email', String(parts[i].length)]]), attachments: parts[i] }); // eslint-disable-line no-await-in-loop
+    }
+    return { ok: true, notDone: open.length, files: fileCount };
   }
 
   // on the board for the console: how far the driver is
@@ -156,11 +200,11 @@ export function initStopFlow({ db, docs = null, getBoard, sendMail = null, recip
     for (const it of trips || []) {
       const r = s[String(tripOf(it).tripNumber)]; const stops = r && ltlStops(it);
       if (!r || !stops) continue;
-      const rows = stops.map((x) => { const d = r.stops[x.key] || {}; const c = boxCheck(d.boxes, x.boxes); return { n: x.n, customer: x.customer, city: x.city, doneAt: d.doneAt || null, boxes: d.boxes != null ? d.boxes : null, expected: x.boxes, diff: c ? c.diff : null, paperwork: (d.docIds || []).length, issues: (d.issues || []).map((i) => ({ at: i.at, text: i.text, photos: (i.docIds || []).length })) }; });
+      const rows = stops.map((x) => { const d = r.stops[x.key] || {}; const c = boxCheck(d.boxes, x.boxes); return { n: x.n, customer: x.customer, city: x.city, doneAt: d.doneAt || null, boxes: d.boxes != null ? d.boxes : null, expected: x.boxes, diff: c ? c.diff : null, paperwork: (d.docIds || []).length, issues: (d.issues || []).map((i) => ({ at: i.at, text: i.text, photos: (i.docIds || []).length })), comments: (d.comments || []).map((i) => ({ at: i.at, text: i.text, photos: (i.docIds || []).length })) }; });
       it._stopFlow = { total: rows.length, done: rows.filter((x) => x.doneAt).length, mismatches: rows.filter((x) => x.diff).length, issues: rows.reduce((n, x) => n + x.issues.length, 0), completedAt: r.completedAt || null, completedBy: r.completedBy || null, stops: rows };
     }
   }
   // which stops the driver marked done on a trip → { [stop key]: true }
   const done = async (trip) => Object.fromEntries(Object.entries(((await all())[String(trip)] || { stops: {} }).stops || {}).filter(([, r]) => r && r.doneAt).map(([k]) => [k, true]));
-  return { forDriver, stopDone, stopIssue, complete, overlay, done };
+  return { forDriver, stopDone, stopIssue, stopComment, complete, overlay, done };
 }

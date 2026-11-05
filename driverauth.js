@@ -214,6 +214,11 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     const b = req.body || {};
     try { return answer(res, await stopFlow.stopIssue(trip, req.params.n, { text: b.text, files: files(b), by: req.driver.name })); } catch (e) { return res.status(400).json({ error: e.message || 'Could not send.' }); }
   });
+  app.post('/driver/me/loads/:trip/stops/:n/comment', requireDriver, async (req, res) => {
+    const trip = await mine(req, res); if (!trip) return null;
+    const b = req.body || {};
+    try { return answer(res, await stopFlow.stopComment(trip, req.params.n, { text: b.text, files: files(b), by: req.driver.name })); } catch (e) { return res.status(400).json({ error: e.message || 'Could not send.' }); }
+  });
   app.post('/driver/me/loads/:trip/complete', requireDriver, async (req, res) => {
     const trip = await mine(req, res); if (!trip) return null;
     try { return answer(res, await stopFlow.complete(trip, { by: req.driver.name })); } catch (e) { return res.status(400).json({ error: e.message || 'Could not complete.' }); }

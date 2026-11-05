@@ -41,8 +41,6 @@ test('stop by stop: boxes against the trip sheet (mismatch email), signed paperw
   assert.equal((await flow.stopIssue('900500', 's4', { text: '', by: 'Frank U' })).code, 400);
   await flow.stopIssue('900500', 's4', { text: 'Receiver closed\nCalled the number on the door', files: [{ dataBase64: 'eA==', mediaType: 'image/jpeg' }], by: 'Frank U' });
   assert.equal(mails.at(-1).to[0], 'stop_issue@test'); assert.match(mails.at(-1).text, /Receiver closed\nCalled the number on the door/);
-  // can't complete with stop 4 open
-  assert.equal((await flow.complete('900500', { by: 'Frank U' })).code, 409);
   await flow.stopDone('900500', 's4', { boxes: 20, by: 'Frank U' });
   await flow.stopDone('900500', 's4b', { boxes: 7, by: 'Frank U' });
   const view = await flow.forDriver(LTL);
@@ -53,11 +51,37 @@ test('stop by stop: boxes against the trip sheet (mismatch email), signed paperw
   assert.match(done.subject, /^TRIP COMPLETED \/\/ TK 4550 TL 7328 TRIP 900500 \/\/ 4 STOPS \/\/ 1 BOX MISMATCH$/);
   assert.match(done.text, /59 boxes delivered of 61 on the trip sheet/); assert.match(done.text, /stop 3 −2/);
   assert.match(done.html, /Receiver closed/);
-  assert.equal(done.attachments.length, 1, 'the signed paperwork goes with it');
+  assert.equal(done.attachments.length, 2, 'the signed paperwork and the issue photo go with it');
+  assert.match(done.html, /What the driver reported/); assert.match(done.text, /Files from the driver: 2 attached/);
   assert.equal((await flow.complete('900500', { by: 'Frank U' })).already, true, 'only once');
   const items2 = [LTL]; await flow.overlay('x', items2);
   const sf = items2[0]._stopFlow;
   assert.deepEqual([sf.total, sf.done, sf.mismatches, sf.issues, !!sf.completedAt, sf.completedBy], [4, 4, 1, 1, true, 'Frank U']);
   assert.deepEqual(sf.stops.map((x) => [x.n, x.boxes, x.expected, x.diff, x.paperwork, x.issues.length]), [[2, 10, 10, 0, 1, 0], [3, 22, 24, -2, 0, 0], [4, 20, 20, 0, 0, 1], [null, 7, 7, 0, 0, 0]]);
   assert.ok(logged.some((e) => /Stop 3 done .*22 boxes, trip sheet 24/.test(e.text)));
+});
+
+test('complete any time (stops not done are named), comments with photos on a stop, and every file the driver sent goes out, split over emails', async () => {
+  const db = mem(); const mails = []; const stored = [];
+  const big = 'x'.repeat(1800 * 1024);
+  const docs = { enabled: true,
+    storeDocs: async ({ files }) => files.map((f) => { stored.push(f); return { id: String(stored.length) }; }),
+    listDocs: async () => [{ id: '99', filename: 'POD-paperwork-tab.pdf' }],
+    readDocs: async ({ ids }) => ids.map((id) => (id === '99' ? { id, mediaType: 'application/pdf', data: Buffer.from(big) } : { id, mediaType: stored[Number(id) - 1].mediaType, data: Buffer.from(big) })) };
+  const flow = initStopFlow({ db, docs, getBoard: async () => ({ trips: [LTL] }), sendMail: async (m) => { mails.push(m); }, recipients: async (k) => [`${k}@test`], now: () => Date.parse('2026-11-05T15:00:00Z') });
+  assert.equal((await flow.stopComment('900500', 's2', { text: '', by: 'Frank U' })).code, 400);
+  await flow.stopComment('900500', 's2', { text: 'Left the boxes inside the cooler, door was open', files: [{ dataBase64: 'eA==', mediaType: 'image/jpeg' }], by: 'Frank U' });
+  assert.equal(mails.length, 0, 'a comment goes on the load, not its own email');
+  const view = await flow.forDriver(LTL);
+  assert.deepEqual(view.stops[0].comments.map((c) => [c.text, c.photos]), [['Left the boxes inside the cooler, door was open', 1]]);
+  await flow.stopDone('900500', 's2', { boxes: 10, by: 'Frank U' });
+  const r = await flow.complete('900500', { by: 'Frank U' });
+  assert.deepEqual([r.ok, r.notDone, r.files], [true, 3, 2]);
+  const first = mails.find((m) => /^TRIP COMPLETED/.test(m.subject));
+  assert.match(first.subject, /4 STOPS \/\/ 3 NOT DONE$/);
+  assert.match(first.html, /Not marked done/); assert.match(first.text, /Not marked done: stop 3 EXAMPLE FLOWERS, stop 4 TEST BLOOMS, TEST BLOOMS \/ LOCKERS/);
+  assert.match(first.html, /Comment · stop 2/); assert.match(first.html, /Left the boxes inside the cooler/);
+  assert.equal(first.attachments.length, 1, 'one big file per email');
+  const more = mails.filter((m) => /^Re: TRIP COMPLETED/.test(m.subject));
+  assert.equal(more.length, 1); assert.match(more[0].subject, /FILES 2 OF 2$/); assert.equal(more[0].attachments[0].name, 'POD-paperwork-tab.pdf', 'Paperwork tab files too');
 });
