@@ -196,3 +196,19 @@ test('the ⋮ menu: rename a group; delete takes it off everyone\'s list (and pi
   await h.inbox.add(h.db.s['taMsgThreads:florida-beauty'][g.id], { dir: 'in', via: 'app', text: 'Back again', by: 'Carlos Rojas (app)' });
   assert.equal((await call(h.app, 'GET /truckmate/messages', VAL)).body.threads.some((t) => t.id === g.id), true);
 });
+
+test('company drivers signed the text agreement at hire: every cell on the driver list is on file (new ones too); STOP and existing entries are kept', async () => {
+  const db = mem();
+  db.s.taSmsOptOut = { 3055550303: { at: '2026-11-01T00:00:00Z', text: 'STOP' } };
+  db.s['taSmsConsent:florida-beauty'] = { 3055550101: { by: 'Gio', at: '2026-10-01T00:00:00Z', how: 'verbal' } };
+  let list = [{ code: '0986', name: 'Frank U', phone: '3055550101', phones: [{ number: '3055550101' }, { number: '7865550102' }] }, { code: '1200', name: 'Stopped Driver', phone: '3055550303', phones: [{ number: '3055550303' }] }, { code: '1300', name: 'No Cell', phone: null, phones: [] }];
+  const inbox = initMessages(fakeApp(), { requireAuth: () => {}, db, drivers: async () => list, now: () => Date.parse('2026-11-05T17:00:00Z') });
+  assert.equal(await inbox.companyConsent(), 1);
+  const c = db.s['taSmsConsent:florida-beauty'];
+  assert.deepEqual(c['3055550101'], { by: 'Gio', at: '2026-10-01T00:00:00Z', how: 'verbal' }, 'their own entry stays');
+  assert.deepEqual(c['7865550102'], { by: 'Nadim Tellez', how: 'signed text agreement at hire (company driver)', at: '2026-11-05T17:00:00.000Z', confirmSentAt: 'not sent: signed at hire', name: 'Frank U' });
+  assert.equal(c['3055550303'], undefined, 'replied STOP: stays off');
+  list = [...list, { code: '1400', name: 'New Hire', phone: '9545550404', phones: [{ number: '+1 (954) 555-0404' }] }];
+  assert.equal(await inbox.companyConsent(), 1, 'a new driver is covered on the next run');
+  assert.equal(db.s['taSmsConsent:florida-beauty']['9545550404'].name, 'New Hire');
+});

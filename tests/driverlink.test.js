@@ -102,6 +102,11 @@ test('create → driver opens → pings → board shows phone GPS → check-in �
   assert.equal(good.status, 200);
   assert.equal(good.body.needInfo, false);
   assert.equal(infoSaved[0].trip, '624268');
+  assert.equal(((await db.get('taSmsConsent:florida-beauty', {})) || {})['3055550117'], undefined, 'no box ticked: no text agreement');
+  // the driver ticks "I agree to texts" in the app: on file for their cell, the opt-in confirmation still to send
+  await app.call('POST', '/driver/link/:token/info', { token: tok }, { drivers: [{ name: 'Test Driver', phone: '305-555-0117' }], truck: '176', trailer: 'RR53153', smsConsent: true });
+  const agreed = ((await db.get('taSmsConsent:florida-beauty', {})) || {})['3055550117'];
+  assert.equal(agreed.how, 'checked "I agree to texts" in the TagAlong app'); assert.equal(agreed.name, 'Test Driver'); assert.equal(agreed.confirmSentAt, null);
   const now = Date.now();
   const p = await app.call('POST', '/driver/link/:token/ping', { token: tok }, { via: 'app', points: [{ latitude: 30.33, longitude: -81.65, speed: 25, time: now - 30000 }, { latitude: 30.34, longitude: -81.66, speed: 26, time: now }] });
   assert.equal(p.body.status, 'sharing');

@@ -50,6 +50,16 @@ export function signText(text, by) {
 // the pictures in an inbound text (MMS). Pure.
 export const mmsImages = (m) => ((m && m.attachments) || []).filter((a) => a && a.type === 'MmsAttachment' && a.uri && /^image\//i.test(a.contentType || '')).slice(0, 6).map((a) => ({ uri: a.uri, contentType: a.contentType, name: a.fileName || `text-photo-${a.id || 1}.jpg` }));
 
+// Which of the RingCentral user's numbers is the texting number: the preferred one when it can send texts (SmsSender), else the only
+// one that can. None, or several and none preferred → null (someone picks in the console). Pure.
+export function pickTextNumber(records = [], prefer = null) {
+  const d10 = (x) => String(x || '').replace(/\D/g, '').slice(-10);
+  const can = records.filter((n) => n && n.phoneNumber && (n.features || []).includes('SmsSender'));
+  const want = prefer && can.find((n) => d10(n.phoneNumber) === d10(prefer));
+  if (want) return want.phoneNumber;
+  return can.length === 1 ? can[0].phoneNumber : null;
+}
+
 export function initRingCentral(app, { requireAuth, db, pool, env = process.env }) {
   const cfgKey = 'taRingCentral';
 
@@ -203,6 +213,29 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
       res.json({ numbers, smsCapable: numbers.filter((n) => n.smsCapable) });
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
+
+  // The company texting number picks itself: once RingCentral lets a number send texts (business-texting registration done), it's
+  // saved as the from-number, so nobody has to choose it in "Calls, texts & email". RC_TEXT_NUMBER (default (786) 723-3912, the
+  // number on the approved campaign) wins when it can text; otherwise the only number that can. Checked at most every 5 minutes
+  // while none is set. → the from-number or null
+  let autoAt = 0;
+  async function autoFrom() {
+    if (!db || !db.enabled) return null;
+    const all = await db.get(cfgKey, {});
+    const cfg = all.__shared;
+    if (!cfg) return null;
+    if (cfg.fromNumber) return cfg.fromNumber;
+    if (Date.now() - autoAt < 5 * 60000) return null;
+    autoAt = Date.now();
+    try {
+      const j = await rcFetch('__shared', '/restapi/v1.0/account/~/extension/~/phone-number?perPage=100');
+      const pick = pickTextNumber(j.records || [], process.env.RC_TEXT_NUMBER || '+17867233912');
+      if (!pick) return null;
+      await db.update(cfgKey, (cur) => { const a = { ...(cur || {}) }; if (a.__shared && !a.__shared.fromNumber) a.__shared = { ...a.__shared, fromNumber: pick, fromAuto: new Date().toISOString() }; return a; }, {});
+      console.log(`[ringcentral] texting number set automatically: ${pick}`);
+      return pick;
+    } catch (e) { console.warn('[ringcentral] auto texting number:', e.message); return null; }
+  }
 
   // ---- send SMS ----
   // the signer's full name (Employees list) — set by index.js once the directory is up
@@ -397,5 +430,5 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   const setOnCall = (fn) => { onCall = fn; };
 
   const hasOwnConfig = async (owner) => !!((await db.get(cfgKey, {})) || {})[owner];
-  return { hasOwnConfig, mediaBytes, sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
+  return { hasOwnConfig, mediaBytes, sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, autoFrom, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
 }

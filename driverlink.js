@@ -500,6 +500,13 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       if (missing.length) return res.status(400).json({ error: `Missing: ${missing.join(', ')}`, missing });
       const updated = await db.update(linkKey(tok), (cur) => ({ ...cur, info, crew, infoAt: new Date().toISOString() }), link);
       if (carriers && carriers.setDriverInfo) await carriers.setDriverInfo(link.site, link.trip, { ...info, crew });
+      // the driver ticked "I agree to texts" in the app: on file for the cells they gave (the opt-in confirmation text follows once
+      // texting is live). Unticked changes nothing — an agreement already on file stays
+      if (b.smsConsent === true) {
+        const at = new Date().toISOString();
+        const cells = info.drivers.map((d) => ({ k: String(d.phone || '').replace(/\D/g, '').slice(-10), name: d.name || null })).filter((x) => x.k.length === 10);
+        await db.update(`taSmsConsent:${link.site}`, (cur) => { const a = { ...(cur || {}) }; for (const x of cells) if (!a[x.k]) a[x.k] = { by: x.name || 'driver', at, how: 'checked "I agree to texts" in the TagAlong app', name: x.name, trip: String(link.trip), confirmSentAt: null }; return a; }, {});
+      }
       res.json(publicView(updated, linkStatus(updated)));
     } catch (e) { res.status(500).json({ error: 'Could not save your information.' }); }
   });

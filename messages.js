@@ -65,7 +65,8 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
   const iso = () => new Date(now()).toISOString();
   const board = async () => { try { return getBoard ? ((await getBoard(SITE)) || {}).trips || [] : []; } catch { return []; } };
   const guard = (req, res) => { if (!enabled) { res.status(503).json({ error: 'Needs the database.' }); return false; } if (!isStaff(req.user)) { res.status(403).json({ error: 'Dispatch logins only.' }); return false; } return true; };
-  const textingLive = async () => { try { const c = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } };
+  // live once the company number can text; until one is set, ask RingCentral (at most every 5 min) whether it can now, and set it
+  const textingLive = async () => { try { const c = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null; if (c && c.fromNumber) return true; return !!(c && ringcentral.autoFrom && await ringcentral.autoFrom()); } catch { return false; } };
   const keep = (ms, fn) => { let c = null; return () => { if (c && c.v !== undefined && now() - c.at < ms) return Promise.resolve(c.v); if (c && c.wait) return c.v !== undefined ? Promise.resolve(c.v) : c.wait; const wait = fn().then((v) => { c = { at: now(), v }; return v; }, (e) => { c = c && c.v !== undefined ? { at: c.at, v: c.v } : null; throw e; }); c = { ...(c || {}), wait }; return c.v !== undefined ? Promise.resolve(c.v) : wait; }; };
   const loadsNow = keep(30000, async () => loadsOf(await board()));   // who drives what: kept 30 s so opening a conversation is quick
   const textingLiveNow = keep(60000, textingLive);
@@ -124,6 +125,32 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     const files = (e.docIds || []).map(String).filter((x) => /^\d+$/.test(x)).map((id) => ({ id }));
     await add(t, { at: e.at, dir, via: 'app', text: String(e.text || '').replace(/ \[\d+ photos?\]$/, ''), by: dir === 'in' ? (e.by || 'Driver (app)') : (e.by || 'Dispatch'), trip: String(trip), status: dir === 'out' ? 'sent' : null, ...(files.length ? { files } : {}) },
       e.extId ? `app:${e.extId}` : `app:${dir}:${trip}:${e.at || ''}:${String(e.text || '').slice(0, 60)}`);
+  }
+
+  // ---- company drivers agreed to texts when they were hired ----
+  // Every company driver (Samsara's drivers and the ones added in Driver profiles) signs a text agreement at hire (confirmed by Nadim
+  // Tellez, Nov 5 2026), so each of their cells is recorded as agreed — new drivers too, checked every hour. A driver who replied STOP
+  // stays off, and one already on record keeps their own entry. Outside carriers' drivers still need theirs recorded. → how many were added
+  const HIRE = { by: 'Nadim Tellez', how: 'signed text agreement at hire (company driver)' };
+  async function companyConsent() {
+    if (!drivers) return 0;
+    const list = await drivers().catch(() => []);
+    const cells = [...new Set((list || []).flatMap((d) => [...(d.phones || []).map((x) => x.number), d.phone]).map(last10).filter((x) => x && x.length === 10))];
+    if (!cells.length) return 0;
+    const optOut = (await db.get('taSmsOptOut', {})) || {};
+    const at = new Date(now()).toISOString(); let added = 0;
+    await db.update(CONSENT, (cur) => {
+      const a = { ...(cur || {}) };
+      // confirmSentAt: no "you're subscribed" text to every driver at once — they signed at hire
+      for (const k of cells) if (!a[k] && !optOut[k]) { a[k] = { ...HIRE, at, confirmSentAt: 'not sent: signed at hire', name: ((list || []).find((d) => [...(d.phones || []).map((x) => x.number), d.phone].map(last10).includes(k)) || {}).name || null }; added += 1; }
+      return a;
+    }, {});
+    if (added) console.log(`[messages] text agreement on file for ${added} company driver cell${added === 1 ? '' : 's'}`);
+    return added;
+  }
+  if (enabled && drivers && !process.env.NODE_TEST_CONTEXT) {
+    setTimeout(() => companyConsent().catch((e) => console.warn('[messages] driver consent:', e.message)), 30000).unref?.();
+    setInterval(() => companyConsent().catch((e) => console.warn('[messages] driver consent:', e.message)), 3600000).unref?.();
   }
 
   // ---- what a conversation can send right now (never pretends) ----
@@ -320,5 +347,5 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
   }
 
   console.log(`[messages] shared inbox ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { fromSms, fromApp, add };
+  return { fromSms, fromApp, add, companyConsent };
 }
