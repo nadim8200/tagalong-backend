@@ -162,3 +162,20 @@ test('a voice clip: admins only, short text, a known voice; OpenAI does the spea
   assert.deepEqual([asked[0][1].voice, asked[0][1].input, asked[0][1].response_format], ['fable', 'Hi, thank you for calling Florida Beauty!', 'mp3']);
   assert.equal((await call({ admin: true }, { text: '', voice: 'x' })).code, 400);
 });
+
+test('a main-line (queue) call is credited to the dispatcher who picked it up; nobody answering keeps it on the main line; no queue name in front of the caller', () => {
+  const base = { id: 'q1', startTime: '2026-11-04T21:42:17Z', duration: 47, direction: 'Inbound', from: { phoneNumber: '+13055551200', name: 'inbound call - FLORA LOGISTICS' }, to: { phoneNumber: '+13053955415' } };
+  const legs = [
+    { master: true, to: { phoneNumber: '+13053955415' }, result: 'Accepted' },
+    { to: { name: 'inbound call', extensionNumber: '1', extensionId: '63624028031' }, result: 'Accepted', legType: 'Accept' },
+    { to: { name: 'Valeria Cabarcas', extensionNumber: '106', extensionId: 'e106' }, result: 'Missed' },
+    { to: { name: 'Giovanni Di muro', extensionNumber: '102', extensionId: 'e102' }, result: 'Accepted' },
+    { to: { name: 'inbound call', extensionNumber: '1', extensionId: '63624028031' }, result: 'Call connected' },
+  ];
+  const took = callOf({ ...base, legs });
+  assert.deepEqual([took.by, took.ourExt, took.ourExtId, took.mainLine, took.otherName], ['Giovanni Di muro', '102', 'e102', true, 'FLORA LOGISTICS']);
+  const missed = callOf({ ...base, result: 'Missed', legs: legs.map((l) => ({ ...l, result: l.master ? 'Missed' : 'Missed' })) });
+  assert.deepEqual([missed.by, missed.mainLine], [null, true]);
+  const direct = callOf({ ...base, to: { phoneNumber: '+17867233912', name: 'Nadim Tellez', extensionNumber: '101', extensionId: 'e101' }, legs: [] });
+  assert.deepEqual([direct.by, direct.mainLine], ['Nadim Tellez', false]);
+});

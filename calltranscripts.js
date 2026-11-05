@@ -23,11 +23,24 @@ const dayOf = (ms) => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'Amer
 // One call-log record, in our words. Pure.
 export function callOf(r) {
   const out = /outbound/i.test(String(r.direction || ''));
-  const us = out ? r.from : r.to; const them = out ? r.to : r.from;
+  let us = out ? r.from : r.to; const them = out ? r.to : r.from;
+  // a call to the main number goes through the call queue: the log has the company number on our side, and the
+  // detailed legs say which agent picked it up. Credit that dispatcher; a queue call nobody answered stays "main line".
+  const legs = Array.isArray(r.legs) ? r.legs : [];
+  const queueNames = legs.map((l) => l && l.to && l.to.name).filter(Boolean);
+  const mainLine = !out && !(us && us.extensionNumber);
+  if (mainLine) {
+    const person = (t) => t && t.extensionId && t.name && String(t.extensionNumber || '').length >= 3 && !/queue|inbound call/i.test(t.name);   // not the queue itself (ext. 1, "inbound call")
+    const took = legs.filter((l) => l && !l.master && person(l.to) && /accepted|connected/i.test(String(l.result || ''))).pop();
+    if (took) us = { ...took.to, phoneNumber: (us && us.phoneNumber) || took.to.phoneNumber || null };
+  }
+  // RingCentral puts the queue's name in front of the caller's ("inbound call - FLORA LOGISTICS")
+  const strip = (n) => { let x = String(n || ''); for (const q of queueNames) if (q && x.toLowerCase().startsWith(`${String(q).toLowerCase()} - `)) x = x.slice(q.length + 3); return x.replace(/^inbound call\s*-\s*/i, '') || null; };
   return {
     id: String(r.id), at: r.startTime, direction: out ? 'outbound' : 'inbound', seconds: Number(r.duration) || 0,
     from: (r.from && r.from.phoneNumber) || null, to: (r.to && r.to.phoneNumber) || null,
-    other: (them && them.phoneNumber) || null, otherName: (them && them.name) || null,
+    other: (them && them.phoneNumber) || null, otherName: strip(them && them.name),
+    mainLine,
     by: (us && us.name) || null, ourLine: (us && us.phoneNumber) || null, ourExt: (us && us.extensionNumber) || null, ourExtId: us && us.extensionId ? String(us.extensionId) : null,
     recordingId: r.recording && r.recording.id ? String(r.recording.id) : null, contentUri: (r.recording && r.recording.contentUri) || null,
   };
@@ -134,7 +147,7 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
     try {
       const st = (await db.get(STATE, {})) || {};
       const since = st.since ? Date.parse(st.since) - 15 * MIN : t - 2 * 3600000;   // overlap: recordings show up a few minutes after the call
-      const q = new URLSearchParams({ dateFrom: new Date(since).toISOString(), withRecording: 'true', perPage: '250', view: 'Simple' });
+      const q = new URLSearchParams({ dateFrom: new Date(since).toISOString(), withRecording: 'true', perPage: '250', view: 'Detailed' });
       const recs = ((await rcGet(`/restapi/v1.0/account/~/call-log?${q}`)).records || []).map(callOf)
         .filter((c) => c.recordingId && c.contentUri && !(st.done || {})[c.recordingId]).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
       const day = dayOf(t); let used = ((st.minutes || {})[day]) || 0;
@@ -268,7 +281,7 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
       try {
         const recs = [];
         for (let page = 1; page <= 4; page += 1) {
-          const q = new URLSearchParams({ dateFrom: new Date(since).toISOString(), perPage: '250', page: String(page), view: 'Simple' });
+          const q = new URLSearchParams({ dateFrom: new Date(since).toISOString(), perPage: '250', page: String(page), view: 'Detailed' });
           const j = await rcGet(`/restapi/v1.0/account/~/call-log?${q}`); // eslint-disable-line no-await-in-loop
           recs.push(...(j.records || []));
           if (!(j.navigation && j.navigation.nextPage)) break;
@@ -280,7 +293,7 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
           if (c.recordingId && c.contentUri) keep[c.recordingId] = c.contentUri;
           if (!manager && !ownCall(c.ourExt, c.ourExtId)) continue;
           rows.push({ id: `rc-${c.id}`, source: 'ringcentral', ext: c.ourExt, at: c.at, direction: c.direction, result: r.result || null, missed: c.direction === 'inbound' && !/connected|accepted/i.test(r.result || ''), seconds: c.seconds,
-            number: c.other, name: (w && w.name) || c.otherName || null, role: (w && w.role) || null, detail: (w && w.detail) || null, by: c.by, trip: (e && e.trip) || null, loads: (e && e.loads) || null,
+            number: c.other, name: String((w && w.name) || c.otherName || '').replace(/^inbound call\s*-\s*/i, '') || null, mainLine: c.mainLine && !c.by, role: (w && w.role) || null, detail: (w && w.detail) || null, by: c.by, trip: (e && e.trip) || null, loads: (e && e.loads) || null,
             summary: (e && e.summary) || null, followUp: (e && e.followUp) || null, callId: e ? String(e.id).replace(/^call:/, '') : null, hasTranscript: !!(e && e.transcript),
             recording: c.recordingId && c.contentUri ? link(`rc:${c.recordingId}`) : null });
         }
