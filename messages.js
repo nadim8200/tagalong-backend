@@ -99,7 +99,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     if (!enabled || last10(phone).length !== 10 || (e.type !== 'text' && e.type !== 'reply') || e.inboxId) return;
     const w = activity && activity.lookup ? await activity.lookup(phone).catch(() => null) : null;
     const dir = e.type === 'reply' ? 'in' : 'out';
-    await add(personThread(phone, w || {}), { at: e.at, dir, via: 'sms', text: e.text, by: dir === 'in' ? ((w && w.name) || null) : (e.by || 'Dispatch'), from: dir === 'in' ? last10(phone) : null, trip: e.trip || null, status: dir === 'out' ? 'sent' : null },
+    await add(personThread(phone, w || {}), { at: e.at, dir, via: 'sms', text: e.text, by: dir === 'in' ? ((w && w.name) || null) : (e.by || 'Dispatch'), from: dir === 'in' ? last10(phone) : null, trip: e.trip || null, status: dir === 'out' ? (ringcentral && ringcentral.wasHeld && ringcentral.wasHeld(phone, e.text) ? 'held' : 'sent') : null },
       e.extId ? `sms:${e.extId}` : `sms:${dir}:${last10(phone)}:${e.at || ''}:${String(e.text || '').slice(0, 60)}`);
   }
   // a driver-app message on a load: one driver → their conversation; team drivers → the load's group

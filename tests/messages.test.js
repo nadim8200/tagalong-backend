@@ -15,7 +15,7 @@ const setup = ({ live = false, appResult = { sent: true, via: 'app (push)' }, do
   const db = mem(); const app = fakeApp(); const sent = []; let t = Date.parse('2026-11-04T15:00:00Z');
   const comms = { log: async () => {} };
   const driverLinks = { messageDriver: async (site, trip, text, by, opts = {}) => { sent.push(['app', trip, text, by, ...((opts.docIds || []).length ? [opts.docIds] : [])]); return appResult; } };
-  const ringcentral = { configFor: async () => (live ? { fromNumber: '+17867233912' } : {}), sendSms: async (o, m) => { sent.push(['sms', m.to, m.text, m.by]); return { id: 'm1', status: 'Queued' }; } };
+  const ringcentral = { configFor: async () => (live ? { fromNumber: '+17867233912' } : {}), sendSms: async (o, m) => { sent.push(['sms', m.to, m.text, m.by]); return { id: 'm1', status: 'Queued' }; }, wasHeld: (to, text) => /^HELD/.test(String(text)) };
   const inbox = initMessages(app, { requireAuth: () => {}, db, getBoard: async () => ({ trips: BOARD }), activity: { lookup: async (p) => (String(p).endsWith('0199') ? { role: 'driver', name: 'Ana Diaz' } : { role: 'unknown' }) }, ringcentral, driverLinks, comms, docs, now: () => t });
   return { db, app, sent, inbox, at: (ms) => { t = ms; } };
 };
@@ -211,4 +211,12 @@ test('company drivers signed the text agreement at hire: every cell on the drive
   list = [...list, { code: '1400', name: 'New Hire', phone: '9545550404', phones: [{ number: '+1 (954) 555-0404' }] }];
   assert.equal(await inbox.companyConsent(), 1, 'a new driver is covered on the next run');
   assert.equal(db.s['taSmsConsent:florida-beauty']['9545550404'].name, 'New Hire');
+});
+
+test('a text Jarvis sent that training mode held shows as held in the inbox, not as sent', async () => {
+  const h = setup({ live: true });
+  await h.inbox.fromSms('7865550199', { type: 'text', to: '7865550199', text: 'HELD reefer photo reminder', at: '2026-11-05T19:00:00Z', by: 'Jarvis (reefer temp photos)' });
+  await h.inbox.fromSms('7865550199', { type: 'text', to: '7865550199', text: 'Real text', at: '2026-11-05T19:01:00Z', by: 'Jarvis' });
+  const v = await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' } });
+  assert.deepEqual(v.body.messages.map((m) => [m.text, m.status]), [['HELD reefer photo reminder', 'held'], ['Real text', 'sent']]);
 });

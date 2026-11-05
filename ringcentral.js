@@ -246,6 +246,10 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
     try { return (await nameFor(st.user)) || JARVIS_SIGNATURE; } catch { return JARVIS_SIGNATURE; }
   }
   // sign: false only for the carrier-registered compliance texts (opt-in / HELP), which must stay word for word
+  // texts training mode held (number + words, 10 minutes): the inbox shows them as held, not sent
+  const held = new Map();
+  const heldKey = (to, text) => `${String(to || '').replace(/\D+/g, '').slice(-10)}|${String(text || '').trim().slice(0, 80)}`;
+  const wasHeld = (to, text) => { const at = held.get(heldKey(to, text)); return !!at && Date.now() - at < 10 * 60000; };
   async function sendSms(owner, { to, text: raw, from, allowOptedOut = false, sign = true, by = null }) {
     const text = sign ? signText(raw, by || await signerName()) : raw;
     // Anyone who replied STOP gets nothing from any part of the app until START.
@@ -254,7 +258,14 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
       const out = await db.get('taSmsOptOut', {});
       if (out[k]) { const e = new Error(`This number replied STOP on ${String(out[k].at).slice(0, 10)} — no texts until they reply START.`); e.optedOut = true; throw e; }
     }
-    if (smsGuard) { const held = await smsGuard({ to, text }); if (held) return { id: 'training', messageStatus: 'Held (training mode)', ...held }; }
+    if (smsGuard) {
+      const h = await smsGuard({ to, text });
+      if (h) {
+        for (const [k] of held) if (Date.now() - held.get(k) > 10 * 60000) held.delete(k);
+        held.set(heldKey(to, raw), Date.now()); held.set(heldKey(to, text), Date.now());
+        return { id: 'training', messageStatus: 'Held (training mode)', ...h };
+      }
+    }
     const cfg = await configFor(owner);
     const fromNumber = from || (cfg && cfg.fromNumber);
     if (!fromNumber) throw new Error('No RingCentral from-number configured.');
@@ -430,5 +441,5 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   const setOnCall = (fn) => { onCall = fn; };
 
   const hasOwnConfig = async (owner) => !!((await db.get(cfgKey, {})) || {})[owner];
-  return { hasOwnConfig, mediaBytes, sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, autoFrom, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
+  return { hasOwnConfig, mediaBytes, sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, autoFrom, wasHeld, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
 }
