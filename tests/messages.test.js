@@ -181,3 +181,18 @@ test('contacts: drivers first, then team, brokers, customers; note-like names la
   assert.equal(contactMatches({ name: 'Rene Valle', phone: '3055550100' }, 'jose rene'), false);
   assert.equal(contactMatches({ name: 'X', phone: '3055550100' }, '555-01'), true);
 });
+
+test('the ⋮ menu: rename a group; delete takes it off everyone\'s list (and pins) until someone writes again', async () => {
+  const h = setup();
+  const g = (await call(h.app, 'POST /truckmate/messages/groups', GEO, { body: { members: [{ phone: '3055550101', name: 'Carlos Rojas' }, { phone: '3055550102', name: 'Miguel Lopez' }] } })).body.thread;
+  assert.equal((await call(h.app, 'POST /truckmate/messages/thread/:id/rename', GEO, { params: { id: g.id }, body: { name: '  Truck 4566 team ' } })).body.name, 'Truck 4566 team');
+  assert.equal((await call(h.app, 'POST /truckmate/messages/thread/:id/rename', GEO, { params: { id: 'p:7865550199' }, body: { name: 'x y' } })).code, 400);
+  assert.equal((await call(h.app, 'GET /truckmate/messages', VAL)).body.threads.find((t) => t.id === g.id).name, 'Truck 4566 team');
+  await call(h.app, 'PUT /truckmate/messages/pins', VAL, { body: { pins: [g.id] } });
+  assert.equal((await call(h.app, 'POST /truckmate/messages/thread/:id/delete', GEO, { params: { id: g.id } })).code, 200);
+  const after = (await call(h.app, 'GET /truckmate/messages', VAL)).body;
+  assert.equal(after.threads.some((t) => t.id === g.id), false); assert.deepEqual(after.pins, []);
+  assert.equal(h.db.s['taMsgThreads:florida-beauty'][g.id].deleted.by, 'Geo', 'kept on record');
+  await h.inbox.add(h.db.s['taMsgThreads:florida-beauty'][g.id], { dir: 'in', via: 'app', text: 'Back again', by: 'Carlos Rojas (app)' });
+  assert.equal((await call(h.app, 'GET /truckmate/messages', VAL)).body.threads.some((t) => t.id === g.id), true);
+});

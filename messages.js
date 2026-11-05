@@ -85,6 +85,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       for (const k of ['name', 'role', 'trip', 'truck']) if (thread[k] && !t[k]) t[k] = thread[k];
       if (!t.last || String(m.at) >= String(t.last.at)) t.last = { at: m.at, text: (m.text || ((m.files || []).length ? `📎 ${(m.files || []).length === 1 ? 'Attachment' : `${m.files.length} attachments`}` : '')).slice(0, 140), dir: m.dir, by: m.by || null, via: m.via };
       if (m.dir === 'in') t.inbound = [...(t.inbound || []), m.at].sort().slice(-100);
+      if (t.deleted) delete t.deleted;   // someone wrote again: the conversation is back on the list
       all[thread.id] = t; return all;
     }, {});
     return m;
@@ -186,7 +187,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       const me = userKey(req.user);
       directory().catch(() => {});   // warm the contact list, so the first search is quick
       const [all, reads, pins, live] = await Promise.all([db.get(THREADS, {}), db.get(READ, {}), db.get(PINS, {}), textingLiveNow()]);
-      const threads = Object.values(all || {}).sort((a, b) => String((b.last || {}).at || b.createdAt).localeCompare(String((a.last || {}).at || a.createdAt))).slice(0, 400).map((t) => view(t, me, reads || {}, pins || {}));
+      const threads = Object.values(all || {}).filter((t) => !t.deleted).sort((a, b) => String((b.last || {}).at || b.createdAt).localeCompare(String((a.last || {}).at || a.createdAt))).slice(0, 400).map((t) => view(t, me, reads || {}, pins || {}));
       res.json({ me: nameOf(req.user), threads, pins: (pins || {})[me] || [], texting: { live, groupSms: false } });
     });
 
@@ -201,6 +202,25 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       const reads = await db.update(READ, (cur) => ({ ...(cur || {}), [me]: { ...((cur || {})[me] || {}), [id]: iso() } }), {});
       const ctx = t.kind === 'person' ? loads.find((l) => l.drivers.some((d) => d.phone === t.phone)) : loads.find((l) => l.trip === t.trip);
       res.json({ thread: { ...view(t, me, reads || {}, pins || {}), now: ctx ? { trip: ctx.trip, truck: ctx.truck, trailer: ctx.trailer } : null }, messages: messages || [], can: await channels(t, loads, live, consent || {}) });
+    });
+
+    // the ⋮ menu: rename a group, delete a conversation (off everyone's list — the messages stay on record, and a new
+    // message brings it back). Who did it is kept on the conversation.
+    app.post('/truckmate/messages/thread/:id/rename', requireAuth, async (req, res) => {
+      if (!guard(req, res)) return;
+      const id = String(req.params.id); const name = String((req.body || {}).name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+      if (!/^g:/.test(id)) return res.status(400).json({ error: 'Only group conversations can be renamed.' });
+      if (name.length < 2) return res.status(400).json({ error: 'Write a name for the group.' });
+      let found = false;
+      await db.update(THREADS, (cur) => { const all = { ...(cur || {}) }; if (all[id]) { found = true; all[id] = { ...all[id], name, renamedBy: nameOf(req.user), renamedAt: iso() }; } return all; }, {});
+      return found ? res.json({ ok: true, name }) : res.status(404).json({ error: 'No such conversation.' });
+    });
+    app.post('/truckmate/messages/thread/:id/delete', requireAuth, async (req, res) => {
+      if (!guard(req, res)) return;
+      const id = String(req.params.id); let found = false;
+      await db.update(THREADS, (cur) => { const all = { ...(cur || {}) }; if (all[id]) { found = true; all[id] = { ...all[id], deleted: { by: nameOf(req.user), at: iso() } }; } return all; }, {});
+      await db.update(PINS, (cur) => Object.fromEntries(Object.entries(cur || {}).map(([k, v]) => [k, (v || []).filter((x) => x !== id)])), {});
+      return found ? res.json({ ok: true }) : res.status(404).json({ error: 'No such conversation.' });
     });
 
     app.post('/truckmate/messages/thread/:id/unread', requireAuth, async (req, res) => {
