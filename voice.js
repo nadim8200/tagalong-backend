@@ -334,6 +334,10 @@ export function findLoad(items, { trip, bill, loadNumber, truck, trailer, phone 
   const T = norm(trip); const Bn = norm(bill) || norm(loadNumber); const U = norm(truck).replace(/^(TRUCK|UNIT|TK)/, ''); const L = norm(trailer).replace(/^(TRAILER|TRL|TL)/, ''); const P = last10(phone);
   const out = (item, by) => ({ item, by, role: roleOf(item, P) });
   for (const it of items) if (T && norm(tripNo(it)) === T) return out(it, 'trip number');
+  // a short number (up to 5 digits) is a truck / trailer before it's a reference: "4450" must not land on some load's PO 4450
+  const shortNo = /^\d{1,5}$/.test(Bn);
+  if (shortNo && U) { const one = pick(items.filter((it) => norm(tripOf(it).powerUnit) === U || (it._oc && norm(it._oc.truck) === U))); if (one) return out(one, 'truck number'); }
+  if (shortNo && L) { const one = pick(items.filter((it) => [tripOf(it).trailer, tripOf(it).trailer2, it._oc && it._oc.trailer].some((x) => x && norm(x) === L))); if (one) return out(one, 'trailer number'); }
   if (Bn) {
     const BnDigits = Bn.replace(/^[A-Z]+/, '').replace(/^0+/, '');
     const exact = items.filter((it) => { const r = refsOf(it); return r.has(Bn) || (BnDigits.length >= 5 && r.has(BnDigits)); });

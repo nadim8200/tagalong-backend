@@ -1081,3 +1081,12 @@ test('on a customer ETA call every tool but the lookup and take a message refuse
   assert.equal((await v.hit('POST /retell/fn/take_message', { args: { message: 'Please use the side door', caller_name: 'Brenda' }, call })).out.saved, true, 'they can leave a message for dispatch');
   assert.equal((await v.hit('POST /retell/fn/lookup_load', { args: { trip_number: '624393' }, call })).out.boxes, 25);
 });
+
+test('a short number is a truck before it is a reference: "4550" finds the truck even when another load has PO 4550', () => {
+  const items = [
+    { trip: { tripNumber: '626344', powerUnit: '4550', trailer: '7371' }, freightBills: [{ billNumber: 'M5055267' }] },
+    { trip: { tripNumber: '626372', powerUnit: '1910', trailer: '7222' }, freightBills: [{ billNumber: 'B180900', poNumber: '4550', referenceNumber: '4550' }], _ratecon: { loadNumber: '4550' } },
+  ];
+  const hit = findLoad(items, { trip: '4550', bill: '4550', loadNumber: '4550', truck: '4550', trailer: '4550' });
+  assert.equal(hit.item.trip.tripNumber, '626344'); assert.equal(hit.by, 'truck number');
+});
