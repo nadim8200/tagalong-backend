@@ -203,7 +203,17 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const urlOf = (tok) => `${base}/t/${tok}`;
-  const messageFor = (link) => `${company} dispatch: please share your location for load ${link.trip} until delivery. Open in the TagAlong app: ${urlOf(link.token)} (load code ${link.code}). You can stop sharing any time. Reply STOP to opt out.`;
+  // The text an outside carrier's driver gets with their load link (English or Spanish, picked by dispatch): who we are, the load and
+  // route, what to do in the app, the load code, and the registered opt-out line (it's the first text they get from us). Pure.
+  const messageFor = (link, lang = 'en') => {
+    const first = String(link.driverName || '').trim().split(/\s+/)[0] || '';
+    const place = (x) => String(x || '').replace(/,\s*\d{5}(-\d{4})?\s*$/, '').trim();
+    const route = link.origin && link.destination ? ` (${place(link.origin)} → ${place(link.destination)})` : '';
+    const url = urlOf(link.token);
+    return lang === 'es'
+      ? `${company} dispatch: Hola${first ? ` ${first}` : ''}, tiene la carga ${link.trip}${route}. Ábrala en la app TagAlong: ${url}\n\n1) Ponga su camión, tráiler y teléfono\n2) Comparta su ubicación hasta la entrega\n3) Envíe ahí las fotos del POD/BOL\n\nCódigo de carga: ${link.code}. Pueden aplicar tarifas de mensajes y datos. Responda STOP para cancelar, HELP para ayuda.`
+      : `${company} dispatch: Hi${first ? ` ${first}` : ''}, you're on load ${link.trip}${route}. Open it in the TagAlong app: ${url}\n\n1) Add your truck, trailer and phone\n2) Share your location until delivery\n3) Send your POD/BOL photos there\n\nLoad code: ${link.code}. Msg & data rates may apply. Reply STOP to opt out, HELP for help.`;
+  };
 
   // Latest board snapshot per site, refreshed by the overlay (every board build).
   const boardTrips = new Map();
@@ -218,7 +228,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
 
   // What the dispatcher card shows. Never includes the position history.
   const summary = (link, now = Date.now()) => (link ? {
-    token: link.token, url: urlOf(link.token), code: link.code, message: messageFor(link),
+    token: link.token, url: urlOf(link.token), code: link.code, message: messageFor(link, link.lang || 'en'), messageEs: messageFor(link, 'es'), messageEn: messageFor(link, 'en'), lang: link.lang || 'en',
     status: linkStatus(link, now),
     createdAt: link.createdAt, createdBy: link.createdBy, expiresAt: link.expiresAt,
     sentAt: link.sentAt || null, sentVia: link.sentVia || null, sentTo: link.sentTo || null,
@@ -393,9 +403,37 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       const to = toE164((req.body && req.body.to) || (item && item._oc && item._oc.driverPhone) || link.driverPhone);
       if (!to) return res.status(400).json({ error: 'Add the driver’s phone number first.' });
       const owner = String(req.user.company || req.user.id);
-      await ringcentral.sendSms(owner, { to, text: messageFor(link) });
-      const updated = await markSent(site, trip, { sentAt: new Date().toISOString(), sentVia: 'RingCentral text', sentTo: to, sentBy: who(req) });
+      const lang = req.body && req.body.lang === 'es' ? 'es' : 'en';
+      // already says who it's from and ends with the registered opt-out line: sent as written (no signature after it)
+      await ringcentral.sendSms(owner, { to, text: messageFor(link, lang), sign: false });
+      const updated = await markSent(site, trip, { sentAt: new Date().toISOString(), sentVia: 'RingCentral text', sentTo: to, sentBy: who(req), lang });
       res.json(summary(updated));
+    } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+
+  // "Track this OC" on the card: the driver's cell (and name), that they agreed to the text, the link (made if there isn't a live one),
+  // and the tracking text — one click. { phone, name?, lang: 'en'|'es', agreed: true }
+  app.post('/truckmate/oc/:trip/track', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    if (!ringcentral) return res.status(503).json({ error: 'RingCentral is not connected.' });
+    const site = siteOf(req); const trip = String(req.params.trip || '').trim(); const b = req.body || {};
+    const to = toE164(b.phone);
+    if (!to) return res.status(400).json({ error: 'Enter the driver’s 10-digit cell number.' });
+    if (b.agreed !== true) return res.status(409).json({ error: 'Confirm the driver agreed to get the text first.', needConsent: true });
+    const name = String(b.name || '').trim().slice(0, 80) || null;
+    const lang = b.lang === 'es' ? 'es' : 'en';
+    try {
+      if (carriers && carriers.setDriverContact) await carriers.setDriverContact(site, trip, { phone: to, name, by: who(req) });
+      await db.update(`taSmsConsent:${site}`, (cur) => { const a = { ...(cur || {}) }; const k = to.replace(/\D/g, '').slice(-10); if (!a[k]) a[k] = { by: who(req), at: new Date().toISOString(), how: 'verbal (dispatcher, Track this OC)', name, trip, confirmSentAt: null }; return a; }, {});
+      const idx = await db.get(siteKey(site), { byTrip: {} });
+      const tok0 = (idx.byTrip || {})[trip];
+      let link = tok0 ? await db.get(linkKey(tok0), null) : null;
+      if (!link || !isLive(linkStatus(link))) link = await createLink(site, trip, { by: who(req) });
+      link = await db.update(linkKey(link.token), (cur) => ({ ...cur, driverPhone: to, driverName: name || cur.driverName || null }), link);
+      const owner = String(req.user.company || req.user.id);
+      const r = await ringcentral.sendSms(owner, { to, text: messageFor(link, lang), sign: false });
+      const updated = await markSent(site, trip, { sentAt: new Date().toISOString(), sentVia: r && r.id === 'training' ? 'RingCentral text (held: training mode)' : 'RingCentral text', sentTo: to, sentBy: who(req), lang });
+      res.json({ ...summary(updated), held: !!(r && r.id === 'training') });
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
 

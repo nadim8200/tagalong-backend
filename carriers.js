@@ -293,5 +293,19 @@ export function initCarriers(app, { requireAuth, db }) {
   });
 
   console.log(`[carriers] outside-carrier tracking ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, recordFromSheets, addCheckins, read, setDriverInfo };
+  // a dispatcher starts tracking from the card: the driver's cell (and name), and that they agreed to texts. Only those change. → the mark
+  async function setDriverContact(site, trip, { phone, name = null, by, how = 'verbal (dispatcher)' }) {
+    if (!enabled) return null;
+    let mark = null;
+    await db.update(key(site), (cur) => {
+      const s = { ...empty, ...(cur || {}), marks: { ...((cur || {}).marks || {}) } };
+      const prev = s.marks[String(trip)] && !s.marks[String(trip)].cleared ? s.marks[String(trip)] : {};
+      mark = { ...prev, driverPhone: clean(phone) || prev.driverPhone || null, driverName: clean(name) || prev.driverName || null, smsConsent: { by, at: new Date().toISOString(), how } };
+      s.marks = { ...s.marks, [String(trip)]: mark };
+      return s;
+    }, empty);
+    return mark;
+  }
+
+  return { overlay, recordFromSheets, addCheckins, read, setDriverInfo, setDriverContact };
 }

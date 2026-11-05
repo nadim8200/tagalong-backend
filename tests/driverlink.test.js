@@ -74,13 +74,20 @@ test('create → driver opens → pings → board shows phone GPS → check-in �
   assert.match(made.body.url, /^https:\/\/mytagalong\.app\/t\/[\w-]{20,}$/);
   assert.match(made.body.code, /^\d{6}$/);
   assert.match(made.body.message, /load 624268/);
-  assert.match(made.body.message, /Reply STOP to opt out\.$/);
+  assert.match(made.body.message, /^Florida Beauty Flora dispatch: Hi( \w+)?, you're on load 624268 \(MIAMI, FL → ATLANTA, GA\)/);
+  assert.match(made.body.message, /1\) Add your truck, trailer and phone\n2\) Share your location until delivery\n3\) Send your POD\/BOL photos there/);
+  assert.match(made.body.message, new RegExp(`Load code: ${made.body.code}\\. Msg & data rates may apply\\. Reply STOP to opt out, HELP for help\\.$`));
+  assert.match(made.body.messageEs, /^Florida Beauty Flora dispatch: Hola( \w+)?, tiene la carga 624268/);
+  assert.match(made.body.messageEs, /Responda STOP para cancelar, HELP para ayuda\.$/);
   const tok = made.body.token;
 
   const txt = await app.call('POST', '/truckmate/oc/:trip/link/send', { trip: '624268' }, {}, { name: 'Ana', company: 'fbf' });
   assert.equal(txt.status, 200);
   assert.equal(sent[0].to, '+13055550117');
   assert.equal(txt.body.status, 'sent');
+  assert.equal(sent[0].sign, false, 'sent as written: it ends with the opt-out line');
+  const es = await app.call('POST', '/truckmate/oc/:trip/link/send', { trip: '624268' }, { lang: 'es' }, { name: 'Ana', company: 'fbf' });
+  assert.match(sent[1].text, /^Florida Beauty Flora dispatch: Hola/); assert.equal(es.body.lang, 'es');
 
   const byCode = await app.call('POST', '/driver/code', {}, { code: made.body.code });
   assert.equal(byCode.body.token, tok);
@@ -292,4 +299,22 @@ test('chat with the OC driver: dispatch writes → push to the phone; the driver
   const after = [{ ...item }];
   await dl.overlay('florida-beauty', after);
   assert.equal(after[0]._ocChat.unread, 0);
+});
+
+test('Track this OC: the driver\'s cell + agreement, a link, and the tracking text in one click', async () => {
+  const db = fakeDb(); const app = fakeApp(); const sent = []; const contacts = [];
+  const carriers = { setDriverContact: async (site, trip, c) => { contacts.push({ trip, ...c }); } };
+  const ringcentral = { sendSms: async (owner, msg) => { sent.push(msg); return { id: 'm1' }; } };
+  const dl = initDriverLinks(app, { requireAuth: () => {}, db, carriers, ringcentral, env: {} });
+  await dl.overlay('florida-beauty', [{ trip: { tripNumber: '626494', powerUnit: 'OC1016', origZoneDesc: 'MIAMI TERMINAL', destZoneDesc: 'LAWRENCE, MA, 01843' }, freightBills: [{ billNumber: 'G5056677' }], _oc: { carrier: { name: 'Carrier not identified' } } }]);
+  const user = { name: 'Gio', company: 'fbf' };
+  assert.equal((await app.call('POST', '/truckmate/oc/:trip/track', { trip: '626494' }, { phone: '555' , agreed: true }, user)).status, 400);
+  assert.equal((await app.call('POST', '/truckmate/oc/:trip/track', { trip: '626494' }, { phone: '(786) 555-0144' }, user)).status, 409, 'agreement first');
+  const r = await app.call('POST', '/truckmate/oc/:trip/track', { trip: '626494' }, { phone: '(786) 555-0144', name: 'Carlos Ruiz', lang: 'es', agreed: true }, user);
+  assert.equal(r.status, 200);
+  assert.deepEqual(contacts, [{ trip: '626494', phone: '+17865550144', name: 'Carlos Ruiz', by: 'Gio' }]);
+  assert.equal(sent[0].to, '+17865550144'); assert.equal(sent[0].sign, false);
+  assert.match(sent[0].text, /^Florida Beauty Flora dispatch: Hola Carlos, tiene la carga 626494 \(MIAMI TERMINAL → LAWRENCE, MA\)/);
+  assert.equal(r.body.status, 'sent'); assert.equal(r.body.lang, 'es');
+  assert.equal(((await db.get('taSmsConsent:florida-beauty', {})) || {})['7865550144'].how, 'verbal (dispatcher, Track this OC)');
 });
