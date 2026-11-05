@@ -39,6 +39,21 @@ export function loadsOf(board) {
   }).filter((l) => l.trip);
 }
 
+// Drivers first (they're who dispatch texts most), then our team, brokers, customers; by name inside each, and names
+// that are notes rather than names ("**ALEX…", "#disconnected…") last. Pure.
+const ROLE_ORDER = { driver: 0, team: 1, broker: 2, customer: 3 };
+export const rankContacts = (list) => [...list].sort((a, b) => {
+  const r = (ROLE_ORDER[a.role] ?? 4) - (ROLE_ORDER[b.role] ?? 4); if (r) return r;
+  const junk = (c) => (/^[A-Za-zÀ-ÿ]/.test(String(c.name || '').trim()) ? 0 : 1); const j = junk(a) - junk(b); if (j) return j;
+  return String(a.name || '~').localeCompare(String(b.name || '~'));
+});
+// Search words in any order ("jose rene" finds "Rene Jose"); 3+ digits also match the phone. Pure.
+export const contactMatches = (c, q) => {
+  const words = String(q || '').toLowerCase().split(/\s+/).filter(Boolean); if (!words.length) return true;
+  const hay = JSON.stringify([c.name, c.detail, c.truck, c.trailer, c.trips]).toLowerCase(); const digits = String(q).replace(/\D/g, '');
+  return words.every((w) => hay.includes(w)) || (digits.length >= 3 && String(c.phone || '').includes(digits));
+};
+
 // Unread for one dispatcher: inbound messages after they last opened it. Pure.
 export const unreadOf = (thread, readAt) => (thread.inbound || []).filter((at) => !readAt || at > readAt).length;
 
@@ -143,7 +158,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     for (const d of roster || []) for (const ph of [d.phone, ...(d.phones || []).map((x) => (x && x.number) || x)]) put({ phone: last10(ph), name: d.name || null, role: 'driver', truck: d.truck || null, trailer: d.trailer || null, trips: [] });
     for (const p of people || []) put({ phone: last10(p.phone), name: p.name || null, role: 'team', detail: p.department || null });
     for (const p of Object.values(profiles || {})) for (const c of p.contacts || []) put({ phone: last10(c.phone), name: c.name || p.name || null, role: p.type === 'broker' ? 'broker' : 'customer', detail: p.name || null });
-    return [...out.values()].sort((a, b) => String(a.name || '~').localeCompare(String(b.name || '~')));
+    return rankContacts([...out.values()]);
   }
   function directory() {
     if (dirCache && dirCache.list && now() - dirCache.at < 60000) return Promise.resolve(dirCache.list);
@@ -279,7 +294,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       if (!guard(req, res)) return;
       const q = String(req.query.q || '').toLowerCase().trim(); const qd = q.replace(/\D/g, '');
       const all = await directory();
-      const list = all.filter((c) => !q || JSON.stringify([c.name, c.detail, c.truck, c.trailer, c.trips]).toLowerCase().includes(q) || (qd.length >= 3 && c.phone.includes(qd)));
+      const list = all.filter((c) => contactMatches(c, q));
       res.json({ contacts: list.slice(0, 600), teams: teamsFor(await loadsNow(), q), newNumber: qd.length === 10 && !all.some((c) => c.phone === qd) ? qd : null });
     });
   }

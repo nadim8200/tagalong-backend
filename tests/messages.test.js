@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initMessages, loadsOf, samePeople, unreadOf } from '../messages.js';
+import { initMessages, loadsOf, samePeople, unreadOf, rankContacts, contactMatches } from '../messages.js';
 
 const mem = () => { const s = {}; return { enabled: true, s, get: async (k, d) => (k in s ? JSON.parse(JSON.stringify(s[k])) : d), set: async (k, v) => { s[k] = v; }, update: async (k, f, d) => { s[k] = f(k in s ? JSON.parse(JSON.stringify(s[k])) : d); return s[k]; } }; };
 const fakeApp = () => { const r = {}; const reg = (m) => (p, ...h) => { r[`${m} ${p}`] = h[h.length - 1]; }; return { r, get: reg('GET'), post: reg('POST'), put: reg('PUT'), delete: reg('DELETE') }; };
@@ -171,4 +171,13 @@ test('a load without a driver-app chat: it is opened on the first send, then the
   assert.equal(r.code, 200); assert.equal(linked, '626200'); assert.deepEqual(sent, [['626200', 'test']]);
   assert.equal(r.body.message.note, 'app (shows when opened)');
   void db;
+});
+
+test('contacts: drivers first, then team, brokers, customers; note-like names last; words in any order', () => {
+
+  const list = [{ name: '**ALEX, alexp', role: 'customer' }, { name: 'Ana Diaz', role: 'driver' }, { name: 'Bob', role: 'broker' }, { name: '1800 FLOWERS', role: 'customer' }, { name: 'Adrian Hernandez', role: 'driver' }, { name: 'Maria', role: 'team' }, { name: 'ACME', role: 'customer' }];
+  assert.deepEqual(rankContacts(list).map((c) => c.name), ['Adrian Hernandez', 'Ana Diaz', 'Maria', 'Bob', 'ACME', '**ALEX, alexp', '1800 FLOWERS']);
+  assert.equal(contactMatches({ name: 'Rene Jose Garcia', phone: '3055550100' }, 'jose rene'), true);
+  assert.equal(contactMatches({ name: 'Rene Valle', phone: '3055550100' }, 'jose rene'), false);
+  assert.equal(contactMatches({ name: 'X', phone: '3055550100' }, '555-01'), true);
 });
