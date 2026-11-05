@@ -245,6 +245,10 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
       const phones = it._oc ? [it._oc.driverPhone, it._oc.driver2Phone] : [s.driver1Info && s.driver1Info.phone, s.driver2Info && s.driver2Info.phone];
       for (const p of phones) if (last10(p).length === 10) driverPhones.set(last10(p), [...(driverPhones.get(last10(p)) || []), String(tripOf(it).tripNumber)]);
     }
+    // Listen-only for now (Nov 5 2026): Jarvis reads every text and how dispatch answers, but doesn't answer texts itself. A breakdown
+    // text still opens the road call and a missing-boxes text still opens the case (the team is alerted); only the text back is skipped.
+    // STOP / HELP / START answers stay (carrier rules). JARVIS_TEXT_REPLIES=on in Render turns the answers back on.
+    const answers = String(env.JARVIS_TEXT_REPLIES || '').toLowerCase() === 'on';
     for (const r of replies) {
       const kw = keyword(r.text);
       if (kw) { await handleKeyword(site, r, kw); } // eslint-disable-line no-await-in-loop
@@ -255,7 +259,7 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
       if (trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: trips.join(', '), extId: r.id, ...(photos.length ? { photos } : {}) }); // eslint-disable-line no-await-in-loop
       if (photos.length && onTextPhotos) await onTextPhotos(trips[0], photos, 'Driver (text)').catch((e) => console.warn('[comms] breakdown photos:', e.message)); // eslint-disable-line no-await-in-loop
       // an employee (phone on the Employees list) texting Jarvis a question → Jarvis texts the answer back
-      if (!kw && staffAsk) {
+      if (!kw && staffAsk && answers) {
         try {
           const ans = await staffAsk({ phone: r.from, text: r.text, media: r.media || [] }); // eslint-disable-line no-await-in-loop
           if (ans) {
@@ -270,7 +274,7 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
       if (!kw && roadCalls && driverPhones.has(last10(r.from))) {
         try {
           const rcr = await roadCalls.fromDriverText({ trip: driverPhones.get(last10(r.from))[0], from: r.from, text: r.text }); // eslint-disable-line no-await-in-loop
-          if (rcr && rcr.reply) {
+          if (rcr && rcr.reply && answers) {
             await ringcentral.sendSms('__shared', { to: r.from, text: rcr.reply }); // eslint-disable-line no-await-in-loop
             await thread(site, r.from, { type: 'text', kind: 'road-call', to: r.from, text: rcr.reply, by: 'AI Dispatcher (Jarvis)' }); // eslint-disable-line no-await-in-loop
           }
@@ -281,8 +285,10 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
         try {
           const mc = await missingCases.fromText({ from: r.from, text: r.text }); // eslint-disable-line no-await-in-loop
           if (mc) {
-            await ringcentral.sendSms('__shared', { to: r.from, text: mc.reply }); // eslint-disable-line no-await-in-loop
-            await thread(site, r.from, { type: 'text', kind: 'missing-boxes-case', to: r.from, text: mc.reply, by: 'AI Dispatcher (Jarvis)' }); // eslint-disable-line no-await-in-loop
+            if (answers) {
+              await ringcentral.sendSms('__shared', { to: r.from, text: mc.reply }); // eslint-disable-line no-await-in-loop
+              await thread(site, r.from, { type: 'text', kind: 'missing-boxes-case', to: r.from, text: mc.reply, by: 'AI Dispatcher (Jarvis)' }); // eslint-disable-line no-await-in-loop
+            }
             continue;
           }
         } catch (e) { console.warn('[comms] missing boxes:', e.message); }

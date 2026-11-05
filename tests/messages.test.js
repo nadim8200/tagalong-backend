@@ -61,11 +61,11 @@ test('team drivers: the load app chat is one group, replies labeled by sender, s
   assert.equal(list.length, 2); assert.equal(g.name, 'Carlos Rojas + Miguel Lopez'); assert.equal(g.trip, '626130'); assert.equal(g.truck, '4566');
   const th = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: g.id } })).body;
   assert.deepEqual(th.messages.map((m) => m.by), ['Carlos Rojas (app)', 'Miguel Lopez (app)']);
-  assert.equal(th.can.app.ok, true); assert.equal(th.can.sms.ok, false, 'no group texting until verified');
+  assert.equal(th.can.app.ok, true); assert.equal(th.can.sms.ok, false, 'texting not live yet');
   const s = await call(h.app, 'POST /truckmate/messages/send', GEO, { body: { thread: g.id, text: 'Appointment 8 AM', via: 'app', clientId: 'c-2' } });
   assert.equal(s.code, 200); assert.deepEqual(h.sent[0], ['app', '626130', 'Appointment 8 AM', 'Geo']);
   const sms = await call(h.app, 'POST /truckmate/messages/send', GEO, { body: { thread: g.id, text: 'x', via: 'sms', clientId: 'c-3' } });
-  assert.equal(sms.code, 409); assert.equal(h.sent.length, 1, 'never faked as separate texts');
+  assert.equal(sms.code, 409); assert.equal(h.sent.length, 1, 'nothing texted while texting is not live');
 });
 
 test('a group is made only after confirming members; truck/trip only when verified; members never change', async () => {
@@ -219,4 +219,37 @@ test('a text Jarvis sent that training mode held shows as held in the inbox, not
   await h.inbox.fromSms('7865550199', { type: 'text', to: '7865550199', text: 'Real text', at: '2026-11-05T19:01:00Z', by: 'Jarvis' });
   const v = await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' } });
   assert.deepEqual(v.body.messages.map((m) => [m.text, m.status]), [['HELD reefer photo reminder', 'held'], ['Real text', 'sent']]);
+});
+
+test('group text: once texting is live and everyone agreed to texts, the same text goes to each person from the company number', async () => {
+  const h = setup({ live: true });
+  await h.inbox.fromApp('626130', { type: 'reply', from: 'driver app', by: 'Carlos Rojas (app)', text: 'Received.', extId: 'x1' });
+  const g = (await call(h.app, 'GET /truckmate/messages', GEO)).body.threads.find((t) => t.kind === 'group');
+  // Miguel's agreement isn't on file yet: named
+  await h.db.set('taSmsConsent:florida-beauty', { 3055550101: { by: 'Nadim Tellez', how: 'signed at hire' } });
+  let th = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: g.id } })).body;
+  assert.equal(th.can.sms.ok, false); assert.match(th.can.sms.why, /Miguel Lopez agreed to texts/);
+  await h.db.set('taSmsConsent:florida-beauty', { 3055550101: { by: 'Nadim Tellez' }, 3055550102: { by: 'Nadim Tellez' } });
+  th = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: g.id } })).body;
+  assert.equal(th.can.sms.ok, true);
+  const s = await call(h.app, 'POST /truckmate/messages/send', GEO, { body: { thread: g.id, text: 'Appointment moved to 9 AM', via: 'sms', clientId: 'c-9' } });
+  assert.equal(s.code, 200);
+  assert.deepEqual(h.sent.filter((x) => x[0] === 'sms').map((x) => [x[1], x[2]]), [['3055550101', 'Appointment moved to 9 AM'], ['3055550102', 'Appointment moved to 9 AM']]);
+  assert.equal(s.body.message.status, 'sent'); assert.match(s.body.message.note, /texted each person \(2 of 2\)/);
+});
+
+test('conversations go newest first by the last message in or out; a message logged without a time never sticks to the top', async () => {
+  const h = setup({ live: true });
+  await h.inbox.fromSms('7865550199', { type: 'text', to: '7865550199', text: 'Jarvis reminder with no time', by: 'Jarvis' });   // no `at`: "now"
+  h.at(Date.parse('2026-11-05T20:00:00Z'));
+  await h.inbox.fromSms('3055040711', { type: 'reply', from: '3055040711', text: 'Yes copy', at: '2026-11-05T20:00:00Z', extId: 'y1' });
+  const list = (await call(h.app, 'GET /truckmate/messages', GEO)).body.threads;
+  assert.equal(list[0].phone, '3055040711', 'the newest text is on top');
+  assert.ok(!Number.isNaN(Date.parse(list[1].last.at)), 'the reminder has a real time');
+  // a conversation stored earlier with a bad time doesn't jump the list, and the next message fixes it
+  await h.db.update('taMsgThreads:florida-beauty', (cur) => ({ ...cur, 'p:7865550199': { ...cur['p:7865550199'], last: { ...cur['p:7865550199'].last, at: undefined } } }), {});
+  assert.equal((await call(h.app, 'GET /truckmate/messages', GEO)).body.threads[0].phone, '3055040711');
+  h.at(Date.parse('2026-11-05T20:05:00Z'));
+  await h.inbox.fromSms('7865550199', { type: 'reply', from: '7865550199', text: 'Sent the photo', at: '2026-11-05T20:05:00Z', extId: 'y2' });
+  assert.equal((await call(h.app, 'GET /truckmate/messages', GEO)).body.threads[0].phone, '7865550199');
 });

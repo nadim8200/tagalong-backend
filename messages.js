@@ -79,12 +79,14 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       await db.update(SEEN, (cur) => { const all = { ...(cur || {}) }; if (all[dedupe]) { dup = true; return all; } all[dedupe] = msg.at || iso(); const keys = Object.keys(all); return keys.length > 3000 ? Object.fromEntries(keys.slice(-2500).map((k) => [k, all[k]])) : all; }, {});
       if (dup) return null;
     }
-    const m = { id: msg.id || randomBytes(6).toString('hex'), at: msg.at || iso(), ...msg, text: String(msg.text || '').slice(0, 1600) };
-    await db.update(logKey(thread.id), (cur) => [...(Array.isArray(cur) ? cur : []).filter((x) => x.id !== m.id), m].sort((a, b) => String(a.at).localeCompare(String(b.at))).slice(-500), []);
+    // always a real time: a message logged without one (or with a bad one) is "now", so the newest conversation is on top
+    const when = msg.at && !Number.isNaN(Date.parse(msg.at)) ? new Date(msg.at).toISOString() : iso();
+    const m = { ...msg, id: msg.id || randomBytes(6).toString('hex'), at: when, text: String(msg.text || '').slice(0, 1600) };
+    await db.update(logKey(thread.id), (cur) => [...(Array.isArray(cur) ? cur : []).filter((x) => x.id !== m.id), m].sort((a, b) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0)).slice(-500), []);
     await db.update(THREADS, (cur) => {
       const all = { ...(cur || {}) }; const t = { ...(all[thread.id] || thread) };
       for (const k of ['name', 'role', 'trip', 'truck']) if (thread[k] && !t[k]) t[k] = thread[k];
-      if (!t.last || String(m.at) >= String(t.last.at)) t.last = { at: m.at, text: (m.text || ((m.files || []).length ? `📎 ${(m.files || []).length === 1 ? 'Attachment' : `${m.files.length} attachments`}` : '')).slice(0, 140), dir: m.dir, by: m.by || null, via: m.via };
+      if (!t.last || Date.parse(m.at) >= (Date.parse(t.last.at) || 0)) t.last = { at: m.at, text: (m.text || ((m.files || []).length ? `📎 ${(m.files || []).length === 1 ? 'Attachment' : `${m.files.length} attachments`}` : '')).slice(0, 140), dir: m.dir, by: m.by || null, via: m.via };
       if (m.dir === 'in') t.inbound = [...(t.inbound || []), m.at].sort().slice(-100);
       if (t.deleted) delete t.deleted;   // someone wrote again: the conversation is back on the list
       all[thread.id] = t; return all;
@@ -159,7 +161,11 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     if (t.kind === 'group') {
       const l = loads.find((x) => x.trip === t.trip);
       out.app = l && samePeople(t.members || [], l.drivers) ? { ok: true, trip: l.trip } : { ok: false, why: t.trip ? `The drivers on trip ${t.trip} changed (or it was delivered): this group can't use that load's app chat.` : 'Group app messages go through a load both drivers are on.' };
-      out.sms = { ok: false, why: live ? 'Group texting on RingCentral isn\'t verified yet. Use the app, or text each driver.' : 'Texting starts when RingCentral approves the company number.' };
+      // a group text goes to each person from the company number (replies come back to each one's own conversation)
+      const missing = (t.members || []).filter((m) => !consent[m.phone]).map((m) => m.name || `…${String(m.phone).slice(-4)}`);
+      out.sms = !live ? { ok: false, why: 'Texting starts when RingCentral approves the company number.' }
+        : missing.length ? { ok: false, why: `Record that ${missing.join(' and ')} agreed to texts first (trip card → Text).` }
+          : { ok: true, each: true };
       return out;
     }
     const l = loads.find((x) => x.drivers.some((d) => d.phone === t.phone));
@@ -214,8 +220,9 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       const me = userKey(req.user);
       directory().catch(() => {});   // warm the contact list, so the first search is quick
       const [all, reads, pins, live] = await Promise.all([db.get(THREADS, {}), db.get(READ, {}), db.get(PINS, {}), textingLiveNow()]);
-      const threads = Object.values(all || {}).filter((t) => !t.deleted).sort((a, b) => String((b.last || {}).at || b.createdAt).localeCompare(String((a.last || {}).at || a.createdAt))).slice(0, 400).map((t) => view(t, me, reads || {}, pins || {}));
-      res.json({ me: nameOf(req.user), threads, pins: (pins || {})[me] || [], texting: { live, groupSms: false } });
+      const ts = (t) => Date.parse((t.last || {}).at) || Date.parse(t.createdAt) || 0;   // newest message in or out first; a bad time never jumps the list
+      const threads = Object.values(all || {}).filter((t) => !t.deleted).sort((a, b) => ts(b) - ts(a)).slice(0, 400).map((t) => view(t, me, reads || {}, pins || {}));
+      res.json({ me: nameOf(req.user), threads, pins: (pins || {})[me] || [], texting: { live, groupSms: live } });
     });
 
     app.get('/truckmate/messages/thread/:id', requireAuth, async (req, res) => {
@@ -296,6 +303,18 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
           if (r && r.skipped) { appSending.delete(k); return res.status(409).json({ error: `Not sent: ${r.skipped}.` }); }
           status = /held/.test(String((r && r.via) || '')) ? 'held' : 'sent';
           note = (r && r.via) || null;
+        } else if (t.kind === 'group') {
+          // the same text to each person: each also sees it in their own conversation, where their reply lands
+          const l = loads.find((x) => x.trip === t.trip);
+          const res2 = [];
+          for (const mbr of t.members || []) {
+            try { const r = await ringcentral.sendSms('__shared', { to: mbr.phone, text, by }); res2.push(r && r.id === 'training' ? 'held' : 'sent'); if (comms && comms.log) await comms.log(SITE, l ? l.trip : null, { type: 'text', kind: 'custom', to: mbr.phone, text, by }).catch(() => {}); } // eslint-disable-line no-await-in-loop
+            catch (e) { res2.push(`failed for ${mbr.name || mbr.phone}: ${e.message}`); }
+          }
+          const bad = res2.filter((x) => /^failed/.test(x));
+          if (bad.length === res2.length) throw new Error(bad.join(' · '));
+          status = res2.every((x) => x === 'held') ? 'held' : 'sent';
+          note = `texted each person (${res2.length - bad.length} of ${res2.length})${bad.length ? ` · ${bad.join(' · ')}` : ''}`;
         } else {
           const r = await ringcentral.sendSms('__shared', { to: t.phone, text, by });
           status = r && r.id === 'training' ? 'held' : 'sent';
