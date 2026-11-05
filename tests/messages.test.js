@@ -255,3 +255,14 @@ test('conversations go newest first by the last message in or out; a message log
   await h.inbox.fromSms('7865550199', { type: 'reply', from: '7865550199', text: 'Sent the photo', at: '2026-11-05T20:05:00Z', extId: 'y2' });
   assert.equal((await call(h.app, 'GET /truckmate/messages', GEO)).body.threads[0].phone, '7865550199');
 });
+
+test('peek: the inbox loading a conversation in the background never marks it read; opening it does', async () => {
+  const h = setup();
+  await h.inbox.fromSms('7865550199', { type: 'reply', from: '7865550199', text: 'Arrived', at: '2026-11-04T15:00:00Z', extId: 'pk1' });
+  const unread = async () => (await call(h.app, 'GET /truckmate/messages', GEO)).body.threads.find((t) => t.phone === '7865550199').unread;
+  assert.equal(await unread(), 1);
+  await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' }, query: { peek: '1' } });
+  assert.equal(await unread(), 1, 'still unread after a peek');
+  await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' } });
+  assert.equal(await unread(), 0);
+});

@@ -244,7 +244,8 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       if (!t) return res.status(404).json({ error: 'No such conversation.' });
       const me = userKey(req.user);
       const [messages, loads, live, consent, pins] = await Promise.all([db.get(logKey(id), []), loadsNow(), textingLiveNow(), db.get(CONSENT, {}), db.get(PINS, {})]);
-      const reads = await db.update(READ, (cur) => ({ ...(cur || {}), [me]: { ...((cur || {})[me] || {}), [id]: iso() } }), {});
+      // ?peek=1: the inbox loading it in the background — not read until someone opens it
+      const reads = req.query && req.query.peek ? await db.get(READ, {}) : await db.update(READ, (cur) => ({ ...(cur || {}), [me]: { ...((cur || {})[me] || {}), [id]: iso() } }), {});
       const ctx = t.kind === 'person' ? loads.find((l) => l.drivers.some((d) => d.phone === t.phone)) : loads.find((l) => l.trip === t.trip);
       res.json({ thread: { ...view(t, me, reads || {}, pins || {}), now: ctx ? { trip: ctx.trip, truck: ctx.truck, trailer: ctx.trailer } : null }, messages: messages || [], can: await channels(t, loads, live, consent || {}) });
     });
