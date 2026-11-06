@@ -266,10 +266,13 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
         return { id: 'training', messageStatus: 'Held (training mode)', ...h };
       }
     }
-    const cfg = await configFor(owner);
-    const fromNumber = from || (cfg && cfg.fromNumber);
+    // a company's own setup without a texting number sends as the company line (the shared setup and its number, (786) 723-3912)
+    const own = await configFor(owner);
+    const via = !from && !(own && own.fromNumber) && owner !== '__shared' ? '__shared' : owner;
+    const cfg = via === owner ? own : await configFor('__shared');
+    const fromNumber = from || (cfg && cfg.fromNumber) || (via === '__shared' ? await autoFrom().catch(() => null) : null);
     if (!fromNumber) throw new Error('No RingCentral from-number configured.');
-    const out = await rcFetch(owner, '/restapi/v1.0/account/~/extension/~/sms', {
+    const out = await rcFetch(via, '/restapi/v1.0/account/~/extension/~/sms', {
       method: 'POST',
       body: JSON.stringify({
         from: { phoneNumber: fromNumber },
