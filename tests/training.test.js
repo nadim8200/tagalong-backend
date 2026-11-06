@@ -26,6 +26,13 @@ test('training: emails go to the test addresses with who they were for; texts / 
   const held = await t.hold('call', { to: '+13055550117', trip: '623869', purpose: 'pickup check' });
   assert.equal(held.training, true);
   assert.equal(sent.length, 1); assert.match(sent[0].subject, /would have called/);
+  // held texts are dropped quietly: no copy email, until an admin turns text copies on
+  const quiet = await t.hold('text', { to: '+13055550117', text: 'Pick up at 9', trip: '623869' });
+  assert.equal(quiet.training, true); assert.equal(quiet.quiet, true); assert.equal(sent.length, 1);
+  await routes['PUT /admin/training']({ body: { textCopies: true } }, res);
+  assert.equal(out.textCopies, true); assert.equal(out.on, true);
+  await t.hold('text', { to: '+13055550117', text: 'Pick up at 9', trip: '623869' });
+  assert.equal(sent.length, 2); assert.match(sent[1].subject, /would have texted/);
   await routes['GET /truckmate/training']({ user: { admin: true } }, res);
   assert.equal(out.on, true); assert.equal(out.show, true);
   // only the platform admin can tell: a dispatcher or company admin sees nothing, and no addresses

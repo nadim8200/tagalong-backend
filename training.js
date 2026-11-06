@@ -69,12 +69,14 @@ export function initTraining(app, { requireAuth, requireAdmin, db, sendDirect })
     const c = await active();
     if (!c) return null;
     if (info && allowedMatch(c.allow, info.to)) return null;          // an approved person → goes out for real
+    // held texts are dropped quietly — no "Jarvis would have texted" email — unless an admin turns copies back on
+    if (kind === 'text' && !c.textCopies) return { training: true, held: kind, to: info.to || null, quiet: true };
     const copy = heldCopy(kind, info);
     try { await sendDirect({ to: c.to, subject: copy.subject, html: copy.html }); } catch (e) { console.warn('[training] copy:', e.message); }
     return { training: true, held: kind, to: info.to || null };
   }
 
-  app.get('/truckmate/training', requireAuth, async (req, res) => { const c = await cfg(); const u = req.user || {}; if (!(u.admin || u.role === 'admin')) return res.json({ on: false, show: false, to: [], allow: [] }); return res.json({ on: !!c.on, show: true, to: c.to || [], allow: c.allow || [], since: c.since || null, by: c.by || null }); });   // only the platform admin sees it's on
+  app.get('/truckmate/training', requireAuth, async (req, res) => { const c = await cfg(); const u = req.user || {}; if (!(u.admin || u.role === 'admin')) return res.json({ on: false, show: false, to: [], allow: [] }); return res.json({ on: !!c.on, show: true, to: c.to || [], allow: c.allow || [], textCopies: !!c.textCopies, since: c.since || null, by: c.by || null }); });   // only the platform admin sees it's on
   app.put('/admin/training', requireAdmin, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const b = req.body || {};
@@ -82,7 +84,7 @@ export function initTraining(app, { requireAuth, requireAdmin, db, sendDirect })
     if (b.on && !to.length) return res.status(400).json({ error: 'Add at least one test email first.' });
     const cur = (await db.get(KEY, {})) || {};
     const allow = Array.isArray(b.allow) ? [...new Set(b.allow.map((x) => String(x).trim().toLowerCase()).filter((x) => okEmail(x) || digits(x).length === 10))].slice(0, 20) : (Array.isArray(cur.allow) ? cur.allow : DEFAULT_ALLOW);
-    const next = { on: b.on != null ? !!b.on : !!cur.on, to: to.length || b.to != null ? to : (cur.to || []), allow, since: b.on ? (cur.on ? cur.since : new Date().toISOString()) : (b.on == null ? cur.since || null : null), by: (req.user && (req.user.name || req.user.email)) || 'admin' };
+    const next = { on: b.on != null ? !!b.on : !!cur.on, to: to.length || b.to != null ? to : (cur.to || []), allow, textCopies: b.textCopies != null ? !!b.textCopies : !!cur.textCopies, since: b.on ? (cur.on ? cur.since : new Date().toISOString()) : (b.on == null ? cur.since || null : null), by: (req.user && (req.user.name || req.user.email)) || 'admin' };
     await db.set(KEY, next);
     cache = { at: 0, cfg: next };
     res.json(next);
