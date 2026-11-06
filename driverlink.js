@@ -478,7 +478,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   const billsNow = (link) => { const item = (boardTrips.get(link.site) || []).find((it) => String(tripOf(it).tripNumber || '') === link.trip); return [...new Set(((item && (item.freightBills || item.orders)) || tripOf(item).freightBills || []).map((b) => String(b.billNumber || '').trim()).filter(Boolean))].slice(0, 30); };
   const publicView = (link, status) => ({
     crew: crewOf(link), info: infoOf(link), needInfo: needInfo(link), purpose: link.purpose || 'track',
-    active: isLive(status), status, company, trip: link.trip, loadName: loadName(link),
+    active: isLive(status), status, company, trip: link.trip, loadName: loadName(link), code: link.code || null,   // the code: to open it in the app after installing
     carrierName: link.carrierName || null, origin: link.origin || null, destination: link.destination || null,
     sharing: !!link.sharing && status === 'sharing', lastPingAt: link.lastPingAt || null,
     expiresAt: link.expiresAt, pingEverySec: 60, bills: billsNow(link),
