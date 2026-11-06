@@ -54,3 +54,14 @@ test('the OC driver confirms delivery in the app → the card finishes (load rep
 test('Jarvis keeps "create_oc_load" from staff', () => {
   assert.deepEqual(parseInstructions([{ kind: 'create_oc_load', message: 'Jarvis please track this OC' }]).map((x) => x.kind), ['create_oc_load']);
 });
+
+test('dispatch can make an OC load by hand (or a test one): the same card', async () => {
+  const db = mem(); const routes = {};
+  const app = { post: (p, ...h) => { routes[p] = h.at(-1); } };
+  initOcLoads({ app, requireAuth: () => {}, db, carriers: { markOc: async () => {} } });
+  let out; const res = { json: (j) => { out = j; }, status() { return this; } };
+  await routes['/truckmate/oc-loads']({ body: { loadNumber: 'TEST-88123', broker: 'Test Broker', billNumber: 'B999001', test: true, pickup: { name: 'Test Farm', city: 'Homestead', state: 'FL' }, delivery: { name: 'Test DC', city: 'Lakeland', state: 'FL' } }, user: { name: 'Nadim' } }, res);
+  assert.deepEqual([out.ok, out.id, out.label], [true, '990001', 'OC LOAD TEST-88123']);
+  await routes['/truckmate/oc-loads']({ body: {}, user: {} }, res);
+  assert.match(out.error, /Load number/);
+});

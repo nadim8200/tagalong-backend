@@ -54,7 +54,7 @@ export function foldTarget(load, tmTrips = [], rcByTrip = {}) {
   return null;
 }
 
-export function initOcLoads({ db, ratecon = null, carriers = null, driverLinks = null, now = () => Date.now() } = {}) {
+export function initOcLoads({ app = null, requireAuth = null, db, ratecon = null, carriers = null, driverLinks = null, now = () => Date.now() } = {}) {
   const enabled = !!(db && db.enabled);
   const iso = () => new Date(now()).toISOString();
   const all = async (site) => ((enabled && (await db.get(key(site), null))) || { seq: 0, loads: {} });
@@ -111,6 +111,18 @@ export function initOcLoads({ db, ratecon = null, carriers = null, driverLinks =
     let ok = false;
     await db.update(key(site), (cur) => { const s = { ...(cur || {}), loads: { ...((cur || {}).loads || {}) } }; const l = s.loads[String(id)]; if (l && !l.deliveredAt && !l.foldedInto) { s.loads[String(id)] = { ...l, deliveredAt: iso(), deliveredBy: by }; ok = true; } return s; }, { seq: 0, loads: {} });
     return ok;
+  }
+
+  // dispatch makes one by hand (a load with no email, or a test): the load #, broker, our bill and the stops, like a rate con would
+  //   POST /truckmate/oc-loads { loadNumber, broker, billNumber, pickup: { name, city, state, date, time }, delivery: { … } }
+  if (app && requireAuth) {
+    app.post('/truckmate/oc-loads', requireAuth, async (req, res) => {
+      const b = req.body || {}; const s = (v, n = 80) => String(v || '').trim().slice(0, n) || null;
+      const stop = (x) => (x && (x.city || x.name) ? { name: s(x.name), address: s(x.address, 120), city: s(x.city, 60), state: s(x.state, 20), zip: s(x.zip, 10), date: s(x.date, 20), time: s(x.time, 20) } : null);
+      const record = { broker: s(b.broker), loadNumber: s(b.loadNumber, 40), fbfBillNumber: s(b.billNumber, 20), referenceNumbers: [], pickups: [stop(b.pickup)].filter(Boolean), deliveries: [stop(b.delivery)].filter(Boolean), summary: b.test ? 'Test load made by dispatch' : 'Made by dispatch' };
+      if (!record.loadNumber) return res.status(400).json({ error: 'Load number missing.' });
+      try { return res.json(await create(String(b.site || 'florida-beauty'), { record, by: (req.user && (req.user.name || req.user.email)) || 'dispatch', subject: b.test ? 'TEST load' : null })); } catch (e) { return res.status(500).json({ error: e.message }); }
+    });
   }
 
   const isEmailLoad = (trip) => Number(trip) > FIRST;

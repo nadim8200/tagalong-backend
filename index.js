@@ -1184,7 +1184,7 @@ truckmate = initTruckMate(app, { extraItems: (site, trips) => (ocLoads ? ocLoads
 // Outbound trip sheets — the AI reads the daily paper manifests (printed +
 // handwritten) so the Watchtower knows the real stop order and appointments.
 const ratecon = initRateCon(app, { requireAuth: requireDispatch, db, env: process.env, docs });
-ocLoads = initOcLoads({ db, ratecon, carriers, driverLinks });
+ocLoads = initOcLoads({ app, requireAuth: requireDispatch, db, ratecon, carriers, driverLinks });
 // the OC driver taps Delivered in the TagAlong app: an email OC load closes (the sweep finishes it, the load report goes out)
 driverLinks.useDelivered(async (site, trip, by) => (ocLoads.isEmailLoad(trip) ? ocLoads.delivered(site, trip, by) : false));
 ratecon.onSaved((site, trip, rc, prev) => follow.onRateCon(site, trip, rc, prev));
