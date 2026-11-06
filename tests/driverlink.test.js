@@ -325,3 +325,15 @@ test('Track this OC: the driver\'s cell + agreement, a link, and the tracking te
   assert.deepEqual(closing, [['626494', 'Carlos Ruiz (TagAlong app)']]);
   assert.equal(contacts.at(-1).checkin, 'Driver confirmed the load is delivered (TagAlong app)');
 });
+
+test('an OC load made from email or by hand: the text and the driver app name it OC LOAD <number>, not the internal trip', async () => {
+  const db = fakeDb(); const app = fakeApp(); const sent = [];
+  const dl = initDriverLinks(app, { requireAuth: () => {}, db, carriers: { setDriverContact: async () => {} }, ringcentral: { sendSms: async (o, m) => { sent.push(m); return { id: 'm1' }; } }, env: {} });
+  await dl.overlay('florida-beauty', [{ trip: { tripNumber: '990001', powerUnit: 'OC', origZoneDesc: 'Miami, FL', destZoneDesc: 'Chicago, IL' }, freightBills: [{ billNumber: 'B999001' }], _ocEmail: { label: 'OC LOAD TEST-88123', loadNumber: 'TEST-88123' }, _oc: { carrier: { name: 'OC Matthew' } } }]);
+  const r = await app.call('POST', '/truckmate/oc/:trip/track', { trip: '990001' }, { phone: '305-842-1587', name: 'Matthew', agreed: true }, { name: 'Nadim', company: 'fbf' });
+  assert.equal(r.status, 200);
+  assert.match(sent[0].text, /^Florida Beauty Flora dispatch: Hi Matthew, you're on OC LOAD TEST-88123 \(Miami, FL → Chicago, IL\)\./);
+  assert.match(r.body.messageEs, /tiene la carga OC LOAD TEST-88123/);
+  const view = await app.call('GET', '/driver/link/:token', { token: r.body.token });
+  assert.equal(view.body.loadName, 'OC LOAD TEST-88123');
+});

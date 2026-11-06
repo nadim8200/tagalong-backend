@@ -205,14 +205,17 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   const urlOf = (tok) => `${base}/t/${tok}`;
   // The text an outside carrier's driver gets with their load link (English or Spanish, picked by dispatch): who we are, the load and
   // route, what to do in the app, the load code, and the registered opt-out line (it's the first text they get from us). Pure.
+  // an OC load made from email or by hand goes by its OC LOAD number, not the internal 990001; a TruckMate load by its trip
+  const loadName = (link) => (link && link.ocLoad ? `OC LOAD ${link.ocLoad}` : String((link && link.trip) || ''));
   const messageFor = (link, lang = 'en') => {
     const first = String(link.driverName || '').trim().split(/\s+/)[0] || '';
     const place = (x) => String(x || '').replace(/,\s*\d{5}(-\d{4})?\s*$/, '').trim();
     const route = link.origin && link.destination ? ` (${place(link.origin)} → ${place(link.destination)})` : '';
     const url = urlOf(link.token);
+    const load = loadName(link);
     return lang === 'es'
-      ? `${company} dispatch: Hola${first ? ` ${first}` : ''}, tiene la carga ${link.trip}${route}. Ábrala en la app TagAlong: ${url}\n\n1) Ponga su camión, tráiler y teléfono\n2) Comparta su ubicación hasta la entrega\n3) Envíe ahí las fotos del POD/BOL\n\nCódigo de carga: ${link.code}. Pueden aplicar tarifas de mensajes y datos. Responda STOP para cancelar, HELP para ayuda.`
-      : `${company} dispatch: Hi${first ? ` ${first}` : ''}, you're on load ${link.trip}${route}. Open it in the TagAlong app: ${url}\n\n1) Add your truck, trailer and phone\n2) Share your location until delivery\n3) Send your POD/BOL photos there\n\nLoad code: ${link.code}. Msg & data rates may apply. Reply STOP to opt out, HELP for help.`;
+      ? `${company} dispatch: Hola${first ? ` ${first}` : ''}, tiene la carga ${load}${route}. Ábrala en la app TagAlong: ${url}\n\n1) Ponga su camión, tráiler y teléfono\n2) Comparta su ubicación hasta la entrega\n3) Envíe ahí las fotos del POD/BOL\n\nCódigo de carga: ${link.code}. Pueden aplicar tarifas de mensajes y datos. Responda STOP para cancelar, HELP para ayuda.`
+      : `${company} dispatch: Hi${first ? ` ${first}` : ''}, you're on ${/^OC LOAD/.test(load) ? load : `load ${load}`}${route}. Open it in the TagAlong app: ${url}\n\n1) Add your truck, trailer and phone\n2) Share your location until delivery\n3) Send your POD/BOL photos there\n\nLoad code: ${link.code}. Msg & data rates may apply. Reply STOP to opt out, HELP for help.`;
   };
 
   // Latest board snapshot per site, refreshed by the overlay (every board build).
@@ -350,6 +353,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
         carrierName: (oc && oc.carrier && oc.carrier.name) || null,
         driverName: (oc && oc.driverName) || null,
         driverPhone: (oc && oc.driverPhone) || null,
+        ocLoad: item && item._ocEmail ? (item._ocEmail.loadNumber || null) : null,
         origin: item ? tripOf(item).origZoneDesc || null : null,
         destination: item ? tripOf(item).destZoneDesc || null : null,
         createdAt: now.toISOString(), createdBy: by, purpose,
@@ -429,7 +433,8 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       const tok0 = (idx.byTrip || {})[trip];
       let link = tok0 ? await db.get(linkKey(tok0), null) : null;
       if (!link || !isLive(linkStatus(link))) link = await createLink(site, trip, { by: who(req) });
-      link = await db.update(linkKey(link.token), (cur) => ({ ...cur, driverPhone: to, driverName: name || cur.driverName || null }), link);
+      const it0 = await findItem(site, trip);
+      link = await db.update(linkKey(link.token), (cur) => ({ ...cur, driverPhone: to, driverName: name || cur.driverName || null, ...(it0 && it0._ocEmail && !cur.ocLoad ? { ocLoad: it0._ocEmail.loadNumber || null } : {}) }), link);
       const owner = String(req.user.company || req.user.id);
       const r = await ringcentral.sendSms(owner, { to, text: messageFor(link, lang), sign: false });
       const updated = await markSent(site, trip, { sentAt: new Date().toISOString(), sentVia: r && r.id === 'training' ? 'RingCentral text (held: training mode)' : 'RingCentral text', sentTo: to, sentBy: who(req), lang });
@@ -473,7 +478,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   const billsNow = (link) => { const item = (boardTrips.get(link.site) || []).find((it) => String(tripOf(it).tripNumber || '') === link.trip); return [...new Set(((item && (item.freightBills || item.orders)) || tripOf(item).freightBills || []).map((b) => String(b.billNumber || '').trim()).filter(Boolean))].slice(0, 30); };
   const publicView = (link, status) => ({
     crew: crewOf(link), info: infoOf(link), needInfo: needInfo(link), purpose: link.purpose || 'track',
-    active: isLive(status), status, company, trip: link.trip,
+    active: isLive(status), status, company, trip: link.trip, loadName: loadName(link),
     carrierName: link.carrierName || null, origin: link.origin || null, destination: link.destination || null,
     sharing: !!link.sharing && status === 'sharing', lastPingAt: link.lastPingAt || null,
     expiresAt: link.expiresAt, pingEverySec: 60, bills: billsNow(link),
