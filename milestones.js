@@ -9,7 +9,9 @@
 // geofence visit, or 10+ min stopped near it) or from the DRIVER: a text or an app
 // message like "loaded", "here", "empty", "still waiting, no door" counts.
 //
-// When Jarvis sees a step the driver hasn't told us, it asks the driver to confirm —
+// Jarvis asks the driver only on what the truck's GPS does at the load's own geofences
+// (loadfences.js): parked 20 min at a pickup / delivery, then leaving it. TruckMate statuses
+// never trigger a question (dispatch sets them when it dispatches). Questions go by
 // app push for drivers with the TagAlong app (outside carriers), a text for drivers
 // who agreed to dispatch texts once company texting is live. Never after STOP, not
 // while the driver is in the sleeper / off duty (it waits), at most 8 asks a day.
@@ -23,6 +25,8 @@ import { recipientFor } from './comms.js';
 import { stopsOf, pickupPoints } from './statusmail.js';
 import { haversineMi } from './watchtower.js';
 import { sendMail, mailConfig } from './mailer.js';
+import { geocodePlace } from './meetwatch.js';
+import { fencesFor, isLtlRun, stepFences, nextAsk, fenceText, askKey } from './loadfences.js';
 
 const MIN = 60000;
 const tripOf = (it) => (it && it.trip) || it || {};
@@ -142,12 +146,26 @@ export function applyReply(reply, { lastAsk = null, ms = {}, stops = [] } = {}) 
   return { kind: r.kind, set };
 }
 
-export function initMilestones(app, { requireAuth, db, ringcentral = null, comms = null, driverLinks = null, push = null, pushRules = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initMilestones(app, { requireAuth, db, ringcentral = null, comms = null, driverLinks = null, push = null, pushRules = null, geocode = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const key = (site) => `taMilestones:${site}`;
   const cfgKey = 'taMilestonesCfg';
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const settings = async () => ({ ...DEFAULTS, ...((enabled && (await db.get(cfgKey, {}))) || {}) });
+  // a fence's address → its point, kept (a miss is retried after a day)
+  const geoKey = 'taFenceGeo';
+  const lookup = geocode || ((q) => geocodePlace(q, null, { env, fetchFn }));
+  async function pointsFor(fences) {
+    const book = (await db.get(geoKey, {})) || {};
+    const out = {}; let changed = false;
+    for (const fe of fences) {
+      let g = book[fe.q];
+      if (!g || (g.none && now() - Date.parse(g.at) > 24 * 60 * MIN)) { const r = await lookup(fe.q).catch(() => null); g = r ? { lat: r.lat, lng: r.lng, at: new Date(now()).toISOString() } : { none: true, at: new Date(now()).toISOString() }; book[fe.q] = g; changed = true; } // eslint-disable-line no-await-in-loop
+      if (!g.none) out[fe.key] = { lat: g.lat, lng: g.lng };
+    }
+    if (changed) await db.set(geoKey, book);
+    return out;
+  }
   const smsLive = async () => { try { const c = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } };
 
   async function ask(site, item, text) {
@@ -215,7 +233,7 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
         if (!done && mins >= cfg.waitMin && !w.alertedAt) {
           w.alertedAt = nowIso;
           st.ms[`waiting:${place}`] = st.ms[`waiting:${place}`] || { at: nowIso, src: 'GPS', min: Math.round(mins) };
-          await alertDispatch(cfg, item, { title: `Load ${trip} — ${fmtMin(mins)} at ${place === 'pickup' ? 'the shipper' : labelOf(`arrived:${place}`, o.stops).replace(/^arrived at /, '')}`, body: `Truck ${tripOf(item).powerUnit || '—'} on load ${trip} has been parked ${place === 'pickup' ? 'at the shipper' : `at ${labelOf(`arrived:${place}`, o.stops).replace(/^arrived at /, '')}`} for ${fmtMin(mins)} (since ${new Date(near.since).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' })} ET) and isn't ${place === 'pickup' ? 'loaded' : 'delivered'} yet. Detention clock is on — Jarvis is asking the driver.` }); // eslint-disable-line no-await-in-loop
+          await alertDispatch(cfg, item, { title: `Load ${trip} — ${fmtMin(mins)} at ${place === 'pickup' ? 'the shipper' : labelOf(`arrived:${place}`, o.stops).replace(/^arrived at /, '')}`, body: `Truck ${tripOf(item).powerUnit || '—'} on load ${trip} has been parked ${place === 'pickup' ? 'at the shipper' : `at ${labelOf(`arrived:${place}`, o.stops).replace(/^arrived at /, '')}`} for ${fmtMin(mins)} (since ${new Date(near.since).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' })} ET) and isn't ${place === 'pickup' ? 'loaded' : 'delivered'} yet. Detention clock is on.` }); // eslint-disable-line no-await-in-loop
         }
         st.waits[place] = w;
       }
@@ -224,45 +242,26 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
         w.leftAt = nowIso; w.minutes = Math.round((Date.parse(nowIso) - Date.parse(w.arrivedAt)) / MIN);
         if (w.minutes >= cfg.waitMin && comms && comms.log) await comms.log(site, trip, { type: 'note', kind: 'detention', text: `Detention record: ${place === 'pickup' ? 'shipper' : labelOf(`arrived:${place}`, o.stops).replace(/^arrived at /, '')} — arrived ${w.arrivedAt}, left ${w.leftAt}, ${fmtMin(w.minutes)} on site (${fmtMin(Math.max(0, w.minutes - cfg.waitMin))} past ${fmtMin(cfg.waitMin)} free).`, by: 'Jarvis', noThread: true }); // eslint-disable-line no-await-in-loop
       }
-      // 3b) the SOP checklists, once each: at the shipper, almost at a receiver, at a receiver
-      st.lists = st.lists || {};
-      if (cfg.askDriver && !firstSight) {
-        const nm = (item._oc && item._oc.driverName) || (item._samsara && item._samsara.driver1Info && item._samsara.driver1Info.name) || '';
-        const rc = (item._ratecon && (item._ratecon.data || item._ratecon)) || {};
-        const pu = ((rc.pickups || [])[0] || {}).refs || null;
-        const legs = ((((await db.get(`taWatch:${site}`, {})) || {}).etas || {})[trip] || {}).stops || []; // eslint-disable-line no-await-in-loop
-        const due = [];
-        if (st.ms['arrived-shipper'] && !st.ms.departed && !st.lists.shipper) due.push(['shipper', checklistText('shipper', { name: nm, trip, pu })]);
-        const cur = o.stops.find((x) => !x.delivered && !st.ms[`delivered:${x.key}`]);
-        const leg = cur ? legs.find((l) => String(l.label || '').split(',')[0] === String(cur.label || cur.key).split(',')[0]) : null;
-        const where = cur ? `${cur.name || (cur.customers || [])[0] || ''} ${cur.place || ''}`.trim() : null;
-        if (cur && st.ms.departed && !st.ms[`arrived:${cur.key}`] && leg && (leg.miles < 40 || leg.etaMs - t0 < 75 * 60000) && !(st.lists.before || {})[cur.key]) due.push([`before:${cur.key}`, checklistText('before', { name: nm, trip, stop: where })]);
-        if (cur && st.ms[`arrived:${cur.key}`] && !(st.lists.delivery || {})[cur.key]) due.push([`delivery:${cur.key}`, checklistText('delivery', { name: nm, trip, stop: where })]);
-        const duty = S(item._samsara && item._samsara.hos && item._samsara.hos.status);
-        if (due.length && !/sleeper|off ?duty|offduty/i.test(duty)) {
-          const [k, text] = due[0];
-          let r; try { r = await ask(site, item, text); } catch (e) { r = { error: e.message }; } // eslint-disable-line no-await-in-loop
-          const [kind, sk] = k.split(/:(.+)/);
-          if (kind === 'shipper') st.lists.shipper = { at: nowIso, ...r };
-          else st.lists[kind === 'before' ? 'before' : 'delivery'] = { ...(st.lists[kind === 'before' ? 'before' : 'delivery'] || {}), [sk]: { at: nowIso, ...r } };
-        }
-      }
-      // 4) ask the driver to confirm one step at a time: newest unconfirmed, not yet asked
-      if (cfg.askDriver && !firstSight) {
-        const duty = S(item._samsara && item._samsara.hos && item._samsara.hos.status);
-        const resting = /sleeper|off ?duty|offduty/i.test(duty);
-        const today = Object.values(st.asks).filter((a) => a.via && t0 - Date.parse(a.at) < 24 * 60 * MIN).length;
-        const order = (k) => (k === 'arrived-shipper' ? 1 : k === 'loaded' ? 2 : k === 'departed' ? 3 : k.startsWith('waiting:') ? 9 : 5);
-        const open = Object.entries(st.ms).filter(([k, m]) => !m.driverAt && !m.seenFirst && !st.asks[k] && !k.startsWith('delivered:') && Date.parse(m.at) > t0 - 6 * 60 * MIN && !(k.startsWith('left:') && st.ms[`delivered:${k.slice(5)}`])).sort((a, b) => order(b[0]) - order(a[0]) || S(b[1].at).localeCompare(S(a[1].at)));
-        if (open.length && !resting && today < 8) {
-          const [k, m] = open[0];
-          const sk = k.includes(':') ? k.split(':').slice(1).join(':') : null;
-          const s = sk ? o.stops.find((x) => x.key === sk) : null;
-          const place = k === 'arrived-shipper' ? String(tripOf(item).origZoneDesc || '').replace(/,?\s*\d{5}.*$/, '') : s ? `${s.name || (s.customers || [])[0] || ''} ${s.place}`.trim() : (sk === 'pickup' ? 'the shipper' : null);
-          const name = (item._oc && item._oc.driverName) || (item._samsara && item._samsara.driver1Info && item._samsara.driver1Info.name) || '';
-          let r;
-          try { r = await ask(site, item, askText(k, { name, trip, place, waitMin: m.min || cfg.waitMin })); } catch (e) { r = { error: e.message }; } // eslint-disable-line no-await-in-loop
-          st.asks[k] = { at: nowIso, ...r };
+      // 4) the load's geofences: one question at a time, on what the GPS shows (never TruckMate statuses); none on LTL runs
+      if (cfg.askDriver && !isLtlRun(item)) {
+        const fences = fencesFor(item, o.stops);
+        if (fences.length) {
+          const live = item._samsara || {};
+          st.fences = stepFences(fences, await pointsFor(fences), st.fences, { lat: live.lat, lng: live.lng, at: live.gpsAt }, t0); // eslint-disable-line no-await-in-loop
+          const resting = /sleeper|off ?duty|offduty/i.test(S(live.hos && live.hos.status));
+          const today = Object.values(st.fences).flatMap((x) => [x.arrive, x.left]).filter((a) => a && a.via && t0 - Date.parse(a.at) < 24 * 60 * MIN).length;
+          const pick = nextAsk(fences, st.fences, { now: t0, lastAskAt: st.lastFenceAskAt || null, resting: resting || today >= 8 });
+          if (pick) {
+            for (const [k, ev] of pick.skip || []) if (!pick.wait) st.fences[k][ev] = st.fences[k][ev] || { at: nowIso, skipped: 'superseded' };
+            if (pick.fence) {
+              const name = (item._oc && item._oc.driverName) || (live.driver1Info && live.driver1Info.name) || '';
+              let r;
+              try { r = await ask(site, item, fenceText(pick.fence, pick.event, { name, trip })); } catch (e) { r = { error: e.message }; } // eslint-disable-line no-await-in-loop
+              st.fences[pick.fence.key][pick.event] = { at: nowIso, ...r };
+              st.asks[askKey(pick.fence, pick.event)] = { at: nowIso, ...r };
+              if (r && r.via) st.lastFenceAskAt = nowIso;
+            }
+          }
         }
       }
       book[trip] = st;

@@ -66,37 +66,41 @@ test('driver confirmations drive the customer emails: at shipper, loaded, rollin
 
 function memDb(seed = {}) { const m = new Map(Object.entries(seed)); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, JSON.parse(JSON.stringify(v))), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; }, raw: m }; }
 
-test('process: asks the driver (app push for OC), reads the reply, alerts dispatch on a long wait', async () => {
+test('process: geofence questions only — never on TruckMate statuses; reads the reply; alerts dispatch on a long wait', async () => {
   const db = memDb({ taMilestonesCfg: { notify: ['dispatch@floridabeauty.us'], waitMin: 120 } });
   const sentApp = []; const pushed = [];
   let t = NOW;
-  const ms = initMilestones({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, driverLinks: { messageDriver: async (site, trip, text) => { sentApp.push(text); return { sent: true, via: 'app (push)' }; } }, push: { sendToEmails: async (to, m) => { pushed.push(m); } }, now: () => t });
-  const oc = (over = {}) => load({ ...over, extra: { _oc: { driverName: 'Ana Ruiz', truck: '2019' }, ...(over.extra || {}) } });
-  await ms.process('florida-beauty', { trips: [oc()] }, { geo });                      // first sight: nothing asked
-  assert.equal(sentApp.length, 0);
+  const geocode = async (q) => (/Fort Mill/.test(q) ? { lat: 35.0, lng: -80.95 } : /Clovis/.test(q) ? { lat: 36.82, lng: -119.70 } : null);
+  const ms = initMilestones({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, geocode, driverLinks: { messageDriver: async (site, trip, text) => { sentApp.push(text); return { sent: true, via: 'app (push)' }; } }, push: { sendToEmails: async (to, m) => { pushed.push(m); } }, now: () => t });
+  const rc = { pickups: [{ name: 'Sun Valley', address: '100 Commerce Dr', city: 'Fort Mill', state: 'SC', zip: '29715' }], deliveries: [{ name: 'Paystar DC', address: '55 Herndon Ave', city: 'Clovis', state: 'CA', zip: '93612' }] };
+  const oc = (pos, hist = []) => load({ trip: { origZoneDesc: 'FORT MILL, SC, 29715' }, hist, live: { ...pos, gpsAt: new Date(t - 30000).toISOString() }, extra: { _oc: { driverName: 'Brian Lee', truck: '2019' }, _ratecon: rc } });
+  const atShipper = { lat: 35.001, lng: -80.95 }; const road = { lat: 35.3, lng: -80.95 };
+  await ms.process('florida-beauty', { trips: [oc(road)] }, { geo });                     // first sight
+  // dispatch marks arrived + departed in TruckMate at dispatch time: no question
   t += 5 * 60000;
-  await ms.process('florida-beauty', { trips: [oc({ hist: [{ status: 'LOADEDTOGO' }] })] }, { geo });
-  assert.equal(sentApp.length, 1); assert.match(sentApp[0], /Are you loaded and sealed/);
-  // driver answers in the app
-  await db.update('taTripComms:florida-beauty', () => ({ 624194: [{ type: 'reply', from: 'driver app', text: 'yes sealed', at: new Date(t + 60000).toISOString() }] }), {});
-  t += 2 * 60000;
-  const board = { trips: [oc({ hist: [{ status: 'LOADEDTOGO' }] })] };
-  await ms.process('florida-beauty', board, { geo });
-  assert.equal(board.trips[0]._milestones.loaded.src, 'TruckMate + driver');
-  // parked at the shipper 2h+ without departing → dispatch alert (once) + the driver is asked
-  t += 130 * 60000;
-  await ms.process('florida-beauty', { trips: [oc({ hist: [{ status: 'ARRSHIP' }] })] }, { geo });
-  assert.equal(pushed.length, 0, 'already loaded — not a wait');
-
-  // a different load: parked at its shipper 2h+, not loaded → one dispatch alert + a question to the driver
-  const other = (h = []) => load({ trip: { tripNumber: '700001' }, hist: h, live: { gpsAt: new Date(t - 60000).toISOString() }, extra: { _oc: { driverName: 'Leo', truck: '3001' } } });
-  await ms.process('florida-beauty', { trips: [other()] }, { geo });
-  t += 125 * 60000;
-  await ms.process('florida-beauty', { trips: [other()] }, { geo });
+  await ms.process('florida-beauty', { trips: [oc(road, [{ status: 'ARRSHIP' }, { status: 'DEPSHIP' }])] }, { geo });
+  assert.equal(sentApp.length, 0, 'TruckMate statuses never ask the driver');
+  // parked at the shipper: nothing before 20 min, then one "checked in / door?" question
+  t += 5 * 60000; await ms.process('florida-beauty', { trips: [oc(atShipper)] }, { geo });
+  t += 15 * 60000; await ms.process('florida-beauty', { trips: [oc(atShipper)] }, { geo });
+  assert.equal(sentApp.length, 0);
+  t += 6 * 60000; await ms.process('florida-beauty', { trips: [oc(atShipper)] }, { geo });
+  assert.equal(sentApp.length, 1); assert.match(sentApp[0], /Hi Brian, it looks like you're at Sun Valley in Fort Mill, SC for load 624194\. Are you checked in\? Did they give you a door yet\?/);
+  t += 2 * 60000; await ms.process('florida-beauty', { trips: [oc(atShipper)] }, { geo });
+  assert.equal(sentApp.length, 1, 'asked once');
+  // the driver answers YES → arrived at the shipper
+  await db.update('taTripComms:florida-beauty', () => ({ 624194: [{ type: 'reply', from: 'driver app', text: 'yes door 12', at: new Date(t + 30000).toISOString() }] }), {});
+  t += 60000; const b1 = { trips: [oc(atShipper)] }; await ms.process('florida-beauty', b1, { geo });
+  assert.match(b1.trips[0]._milestones['arrived-shipper'].src, /driver/);
+  // leaves the shipper → "loaded? send BOL / seal / temp photos"
+  t += 60 * 60000; await ms.process('florida-beauty', { trips: [oc(road)] }, { geo });
+  assert.equal(sentApp.length, 2); assert.match(sentApp[1], /I see you left Sun Valley in Fort Mill, SC on load 624194\. Are you loaded and sealed\? Please send the BOL, seal and reefer temp photos/);
+  // parked 2h+ near the receiver ZIP, not delivered → one dispatch alert
+  const wait = (h = []) => load({ trip: { tripNumber: '700001' }, hist: h, live: { gpsAt: new Date(t - 60000).toISOString() }, extra: { _oc: { driverName: 'Leo', truck: '3001' } } });
+  await ms.process('florida-beauty', { trips: [wait()] }, { geo });
+  t += 125 * 60000; await ms.process('florida-beauty', { trips: [wait()] }, { geo });
   assert.equal(pushed.length, 1); assert.match(pushed[0].title, /Load 700001 — 2h 5m at the shipper/);
-  assert.ok(sentApp.some((x) => /Still waiting\?/.test(x) || /at the shipper/.test(x)));
-  t += 10 * 60000;
-  await ms.process('florida-beauty', { trips: [other()] }, { geo });
+  t += 10 * 60000; await ms.process('florida-beauty', { trips: [wait()] }, { geo });
   assert.equal(pushed.length, 1, 'alerted once');
 });
 
