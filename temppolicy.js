@@ -36,6 +36,39 @@ export function requiredRange(item) {
   return b ? { ...parseTempRange(String(b.temperature)), from: 'TruckMate' } : null;
 }
 
+// The load's required temperature with the dispatcher's trip sheet too: the rate con, else the trip sheet ("MAINTAIN
+// TEMPERATURE" or a handwritten temp the dispatcher wrote), else TruckMate's bill. Pure. → { minF, maxF, text, from } | null
+export function loadTarget(item) {
+  const rc = item && item._ratecon && (item._ratecon.data || item._ratecon);
+  const fromRc = rc && requiredRange({ _ratecon: item._ratecon });
+  if (fromRc) return fromRc;
+  const sh = item && item._manifest;
+  if (sh) {
+    if (sh.maintainTempF != null && sh.maintainTempF !== '' && Number.isFinite(Number(sh.maintainTempF))) { const f = Number(sh.maintainTempF); return { minF: f, maxF: f, text: `${f}°F`, from: 'trip sheet (dispatcher)' }; }
+    const hand = [...(sh.handwritten || []), ...(sh.generalInstructions || [])].map(String).find((x) => /-?\d+\s*°?\s*[CF]\b/i.test(x));
+    const r = hand ? parseTempRange(hand) : null;
+    if (r) return { ...r, from: 'trip sheet (dispatcher)' };
+  }
+  return requiredRange({ freightBills: (item && (item.freightBills || item.orders)) || [] });
+}
+
+// A reefer reading (ARTIS's current temp / set point fields, names as ARTIS sends them) checked against the load's target. Pure.
+// → { status: 'ok' | 'out' | 'unknown', readingF, setF, target, offBy, setOff, why }
+const num = (v) => { const n = typeof v === 'number' ? v : parseFloat(String(v == null ? '' : v).replace(/[^\d.-]/g, '')); return Number.isFinite(n) ? n : null; };
+export function checkReading(reefer, target) {
+  const keys = Object.keys(reefer || {});
+  const pick = (re, not) => { const k = keys.find((x) => re.test(x) && !(not && not.test(x))); return k ? num(reefer[k]) : null; };
+  const readingF = pick(/curr.*temp|temp.*curr/i) ?? pick(/temp/i, /set|time|read|date|str$/i);
+  const setF = pick(/set ?point|settemp|set_temp/i, /time|date/i);
+  const off = (v) => (v == null || !target ? null : v < target.minF ? target.minF - v : v > target.maxF ? v - target.maxF : 0);
+  const offBy = off(readingF); const setOff = off(setF);
+  if (readingF == null) return { status: 'unknown', readingF, setF, target, offBy, setOff, why: 'no temperature in the reading' };
+  if (!target) return { status: 'unknown', readingF, setF, target, offBy, setOff, why: 'no required temperature on the rate con, trip sheet or TruckMate' };
+  if (offBy > TOLERANCE_F) return { status: 'out', readingF, setF, target, offBy, setOff, why: `${readingF}°F is ${Math.round(offBy)}°F outside ${target.text} (${target.from})` };
+  if (setOff != null && setOff > TOLERANCE_F) return { status: 'out', readingF, setF, target, offBy, setOff, why: `the reefer is set to ${setF}°F, but the load needs ${target.text} (${target.from})` };
+  return { status: 'ok', readingF, setF, target, offBy, setOff, why: `${readingF}°F is within ${target.text} (${target.from})` };
+}
+
 // May this reading go to the broker? Pure. → { share: bool, why, offBy }
 export function brokerMayShare(readingF, range) {
   if (readingF == null) return { share: false, why: 'no reading' };

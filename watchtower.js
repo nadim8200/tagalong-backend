@@ -661,7 +661,7 @@ const RULES = [
     const dutyLabel = { onDuty: 'on duty', driving: 'driving status', yardMove: 'yard move', offDuty: 'off duty', sleeperBerth: 'sleeper berth', sleeperBed: 'sleeper berth' }[duty] || (duty || 'duty status unknown');
     if (resting && fresh) {
       return {
-        code: 'stopped', teamStop: true, stoppedSinceMs: ctx.now - mins * MIN, stopStartUnknown: !!f.stopStartUnknown, severity: mins >= 120 || codes ? 'critical' : 'warning',
+        code: 'stopped', teamStop: true, stoppedSinceMs: ctx.now - mins * MIN, stopStartUnknown: !!f.stopStartUnknown, severity: mins >= TEAM_STOP_RED_MIN || codes ? 'critical' : 'warning',
         title: `Team truck stopped ${fmtMin(mins)}`,
         detail: `${l.location || 'Unknown location'} · ${dutyLabel}. ${fresh[1] || 'A driver'} has ${fmtMin(fresh[0].driveLeftMin)} of driving left, so a team should be rolling. Call the drivers.${codes ? ` ${codes} engine code${codes === 1 ? '' : 's'} on the truck, could be a breakdown.` : ''}`,
       };
@@ -869,7 +869,8 @@ export function underOwnPower(l) {
 // Has an emailed stop really ended? Only on fresh GPS (10 min at most): 10+ mph under its own power on 3 readings in a row,
 // over at least 3 minutes, and a quarter mile from where it sat. A stopped reading, a tow, or an open breakdown / road
 // call starts it over, so a GPS blip or a truck on a wrecker never counts. Pure.
-export const TEAM_STOP_MIN = 75;   // first team-stop alert
+export const TEAM_STOP_MIN = 135;  // first team-stop (extended stop) alert: 2h 15m
+export const TEAM_STOP_RED_MIN = TEAM_STOP_MIN + 45;   // it turns red (second email) 45 min later: 3h
 export const ROLL = { mph: 10, readings: 3, min: 3, miles: 0.25, freshMin: 10, keepHours: 72 };
 export function trackRolling(ep, l, now, { down = false } = {}) {
   const gpsMs = l && l.gpsAt ? Date.parse(l.gpsAt) : null;

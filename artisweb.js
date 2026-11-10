@@ -5,12 +5,15 @@
 //  • ETAs: twice a day (10 AM and 4 PM Miami time) Jarvis reads ARTIS's own ETA, miles to destination, current
 //    location, GPS ping and arrived / delivered for every customer stop on the active ARTIS runs — shown beside
 //    our ETA on each stop so dispatch can verify both.
+//  • Reefer temps: every hour, only for the loads on the board — ARTIS's current temp / set point / read time per trip.
+//    Only the latest reading per active load is kept (replaced each hour), so it never piles up.
 //  • Trip Manifest Detail (summary / detail / detail-with-farm) PDF for one customer on one trip: fetched on
 //    demand, stored on the trip (kind "manifest"), for the console, Ask Jarvis, and customer email replies.
 // One sign-in at a time; a refused sign-in waits an hour before trying again (no lock-outs).
 // ---------------------------------------------------------------
 import { webConfig } from './truckbuilder.js';
 import { nameScore } from './voice.js';
+import { loadTarget, checkReading } from './temppolicy.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taArtisEta:${SITE}`;
@@ -29,6 +32,21 @@ export function parseTripStatus(html) {
   try { return JSON.parse(s.slice(k + 12, end < 0 ? undefined : end).trim().replace(/;$/, '')); } catch { return null; }
 }
 // One ARTIS trip status → what we keep (no driver names / cell phones). Pure.
+// The reefer reading ARTIS shows on Trip Status (Current Temp, Set Point, Temp Read Time): every temperature-like field it
+// sends for the trip, kept as is (their exact names in ARTIS's data aren't confirmed yet). null when there are none. Pure.
+export function reeferOf(t) {
+  const out = {};
+  for (const src of [t || {}, (t && t.tripStatusInfo) || {}]) {
+    for (const [k, v] of Object.entries(src)) if (/temp|set ?point|reefer/i.test(k) && v != null && v !== '' && typeof v !== 'object') out[k] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+// When the hourly temperature read is due (Miami time, day and night). Pure.
+export function tempSlotDue(state = {}, now = Date.now()) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(now)).map((x) => [x.type, x.value]));
+  const slot = `${p.year}-${p.month}-${p.day}|${p.hour}`;
+  return state.slot === slot ? null : slot;
+}
 export function slimStatus(t, clientId) {
   const i = t.tripStatusInfo || {};
   const d = t.destinationClient || {};
@@ -159,10 +177,37 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
     await db.update(KEY, (cur) => ({ ...(cur || {}), at, trips: { ...((cur && cur.trips) || {}), ...trips }, last: { at, customers: want.size, read, errors: errors.slice(0, 10) } }), {});
     return { customers: want.size, read, trips: Object.keys(trips).length, errors };
   }
+  // the hourly temperature read: only the loads on the board, only their latest reefer reading (replaced each time)
+  const TEMPS = `taArtisTemps:${SITE}`;
+  async function readTemps() {
+    const board = getBoard ? await getBoard(SITE) : { trips: [] };
+    const items = ((board && board.trips) || []).filter((it) => it._tb && (it._tb.stops || []).length);
+    const active = new Set(items.map(tripNo));
+    const want = new Map();   // clientId → earliest run date (one ARTIS page per customer)
+    for (const it of items) for (const s of it._tb.stops) if (s.consigneeId) { const d = it._tb.date || ymd(now()); if (!want.has(s.consigneeId) || d < want.get(s.consigneeId)) want.set(s.consigneeId, d); }
+    const trips = {}; let read = 0; const errors = [];
+    for (const [clientId, d] of want) {
+      if ([...active].every((n) => trips[n])) break;   // every active load already has its reading
+      try {
+        const page = parseTripStatus(await (await get(`/shipment/eta?clientId=${encodeURIComponent(clientId)}&fromDate=${ymd(Date.parse(`${d}T12:00:00Z`) - 2 * 86400000)}&toDate=${ymd(now() + 3 * 86400000)}`)).text()); // eslint-disable-line no-await-in-loop
+        if (!page) throw new Error('ARTIS session ended');
+        read += 1;
+        for (const c of page) for (const t of (c.tripStatuses || [])) { const n = String(t.tripNumber || ''); const r = reeferOf(t); if (n && active.has(n) && r && !trips[n]) trips[n] = { ...r, trailer: t.trailer || null }; }
+      } catch (e) { errors.push(`${clientId}: ${e.message}`); if (/sign-in|session/i.test(e.message)) break; }
+      await new Promise((r) => setTimeout(r, 300)); // eslint-disable-line no-await-in-loop -- gentle on ARTIS
+    }
+    const at = new Date(now()).toISOString();
+    await db.set(TEMPS, { at, slot: (await db.get(TEMPS, {}) || {}).slot || null, trips, last: { at, loads: active.size, customers: want.size, read, withTemp: Object.keys(trips).length, errors: errors.slice(0, 5) } });
+    return { loads: active.size, read, withTemp: Object.keys(trips).length, errors };
+  }
   async function overlay(site, list) {
     if (!(db && db.enabled)) return;
     const st = (await db.get(KEY, {})) || {};
-    for (const it of list) { const x = (st.trips || {})[tripNo(it)]; if (x) it._artisEta = { at: st.at || null, stops: Object.values(x) }; }
+    const tt = (await db.get(TEMPS, {})) || {};
+    for (const it of list) {
+      const x = (st.trips || {})[tripNo(it)]; if (x) it._artisEta = { at: st.at || null, stops: Object.values(x) };
+      const r = (tt.trips || {})[tripNo(it)]; if (r) { const { trailer, ...reefer } = r; it._artisTemp = { ...r, readAt: tt.at, check: checkReading(reefer, loadTarget(it)) }; }
+    }
   }
 
   if (enabled()) {
@@ -175,6 +220,15 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
       console.log(`[artis-eta] ${slot}: ${r.read}/${r.customers} customers read, ${r.trips} trips${r.errors.length ? `, ${r.errors.length} errors` : ''}`);
     };
     const t = setInterval(() => { tick().catch((e) => console.warn('[artis-eta]', e.message)); }, 10 * MIN); if (t.unref) t.unref();
+    const tempTick = async () => {
+      const slot = tempSlotDue((await db.get(TEMPS, {})) || {}, now());
+      if (!slot) return;
+      await db.update(TEMPS, (cur) => ({ ...(cur || {}), slot }), {});
+      const r = await readTemps();
+      await db.update(TEMPS, (cur) => ({ ...(cur || {}), slot }), {});
+      console.log(`[artis-temps] ${slot}: ${r.withTemp}/${r.loads} loads with a reading (${r.read} pages)${r.errors.length ? `, ${r.errors.length} errors` : ''}`);
+    };
+    const t2 = setInterval(() => { tempTick().catch((e) => console.warn('[artis-temps]', e.message)); }, 10 * MIN); if (t2.unref) t2.unref();
   }
 
   // the console: the Trip Manifest PDF for a stop (fetched from ARTIS, kept on the trip)
@@ -196,11 +250,16 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
     if (!enabled()) return res.status(503).json({ error: 'ARTIS web login is not set up.' });
     try { res.json(await readEtas()); } catch (e) { res.status(502).json({ error: e.message }); }
   });
+  app.post('/truckmate/artis/temps/run', requireAdmin || requireAuth, async (req, res) => {
+    if (!enabled()) return res.status(503).json({ error: 'ARTIS web login is not set up.' });
+    try { res.json(await readTemps()); } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.get('/truckmate/artis/temps', requireAuth, async (req, res) => { const st = (await db.get(TEMPS, {})) || {}; res.json({ at: st.at || null, last: st.last || null, trips: st.trips || {} }); });
   app.get('/truckmate/artis/eta/status', requireAuth, async (req, res) => { const st = (await db.get(KEY, {})) || {}; res.json({ configured: enabled(), at: st.at || null, last: st.last || null, trips: Object.keys(st.trips || {}).length }); });
 
   // for the other ARTIS readers (artisreports.js): a page's text, or a JSON answer
   const fetchText = async (path) => (await get(path)).text();
   const fetchBuffer = async (path) => { const r = await get(path); return { buf: Buffer.from(await r.arrayBuffer()), type: String(r.headers.get('content-type') || '').toLowerCase() }; };
   const fetchJson = async (path) => { const t = await fetchText(path); try { return JSON.parse(t); } catch { throw new Error('ARTIS did not answer with data (session?)'); } };
-  return { tripStatus, manifestPdf, manifestDoc, readEtas, overlay, fetchText, fetchJson, fetchBuffer, clientIdFor, ready: enabled };
+  return { tripStatus, manifestPdf, manifestDoc, readEtas, readTemps, overlay, fetchText, fetchJson, fetchBuffer, clientIdFor, ready: enabled };
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTripStatus, slimStatus, etaSlotDue, initArtisWeb } from '../artisweb.js';
+import { parseTripStatus, slimStatus, etaSlotDue, initArtisWeb, reeferOf, tempSlotDue } from '../artisweb.js';
 import { initJarvisChat } from '../jarvischat.js';
 
 // shaped like ARTIS's Trip Status page (test data only)
@@ -70,4 +70,30 @@ test('ARTIS customer list: a stop\'s customer number by name, the right city whe
   assert.equal(pickConsignee(list, { name: 'DESIGNERS CHOICE BOSTON', city: 'BOSTON', state: 'MA' }), '02281');
   assert.equal(pickConsignee(list, { name: "Designer's Choice PA", city: 'Mechanicsburg' }), '02530');
   assert.equal(pickConsignee(list, { name: 'Zoom Bloom' }), null);
+});
+
+test('ARTIS reefer reading: current temp / set point / read time; checked once an hour, day and night', () => {
+  assert.deepEqual(reeferOf({ tripNumber: 1, tripStatusInfo: { currentTemp: 34.5, setPoint: 34, tempReadTimeStr: '11/10 9:40 AM', etaLong: 5 } }), { currentTemp: 34.5, setPoint: 34, tempReadTimeStr: '11/10 9:40 AM' });
+  assert.equal(reeferOf({ tripNumber: 1, tripStatusInfo: { currentTemp: null, setPoint: '' } }), null);
+  assert.equal(tempSlotDue({}, Date.parse('2026-10-22T13:00:00Z')), '2026-10-22|09');
+  assert.equal(tempSlotDue({ slot: '2026-10-22|09' }, Date.parse('2026-10-22T13:50:00Z')), null);
+  assert.equal(tempSlotDue({ slot: '2026-10-22|09' }, Date.parse('2026-10-23T06:30:00Z')), '2026-10-23|02');
+});
+
+import { loadTarget, checkReading } from '../temppolicy.js';
+test('ARTIS temp checked against the load: rate con first, then the dispatcher trip sheet, then TruckMate', () => {
+  const rc = { _ratecon: { tempSetting: 'Continuous 34-36°F' }, _manifest: { maintainTempF: 40 }, freightBills: [{ temperature: 33 }] };
+  assert.equal(loadTarget(rc).from, 'rate con'); assert.equal(loadTarget(rc).minF, 34);
+  assert.equal(loadTarget({ _manifest: { maintainTempF: 40 }, freightBills: [{ temperature: 33 }] }).from, 'trip sheet (dispatcher)');
+  assert.equal(loadTarget({ _manifest: { handwritten: ['PU 9am', '-10 F'] } }).minF, -10);
+  assert.equal(loadTarget({ freightBills: [{ temperature: 33 }] }).from, 'TruckMate');
+  assert.equal(loadTarget({}), null);
+  const t = loadTarget(rc);
+  assert.equal(checkReading({ currentTemp: 35.2, setPoint: 35 }, t).status, 'ok');
+  assert.equal(checkReading({ currentTemp: 38.5, setPoint: 35 }, t).status, 'ok', 'within 3°F of the range');
+  const hot = checkReading({ currentTemp: 44, setPoint: 35 }, t);
+  assert.equal(hot.status, 'out'); assert.match(hot.why, /44°F is 8°F outside 34–36°F \(rate con\)/);
+  assert.match(checkReading({ currentTemp: 35, setPoint: '45 F' }, t).why, /set to 45°F/);
+  assert.equal(checkReading({ setPoint: 35 }, t).status, 'unknown');
+  assert.equal(checkReading({ currentTemp: 35 }, null).status, 'unknown');
 });

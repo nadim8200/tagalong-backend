@@ -42,10 +42,12 @@ test('a team truck sitting: off duty is not a rest when a driver has hours; solo
   const item = (x = {}) => ({ trip: { tripNumber: '1', status: 'DEPSHIP', powerUnit: '733', driver: '1', driver2: '2' }, freightBills: [], _samsara: { lat: 33.6, lng: -80.3, location: 'Summerton, SC', gpsAt: '2026-11-01T11:59:00Z', speedMph: 0, driver1: 'Chad', driver2: 'Jose', hos: hos('offDuty', 660), hos2: hos('sleeperBerth', 282), ...x } });
   const run = (it, mins) => evaluateBoard({ trips: [it] }, { now, geo: () => null, unitState: () => ({ stoppedSince: now - mins * 60000 }) }).filter((a) => a.code === 'stopped');
   assert.equal(run(item(), 45).length, 0, 'a short stop is fine');
-  const warn = run(item(), 75)[0];
-  assert.equal(warn.severity, 'warning'); assert.match(warn.title, /Team truck stopped 1h 15m/); assert.match(warn.detail, /Chad has 11h 0m/);
-  assert.equal(run(item(), 130)[0].severity, 'critical');
-  assert.equal(run(item({ dtcCodes: [{ code: 'P0217' }] }), 75)[0].severity, 'critical');
+  assert.equal(run(item(), 130).length, 0, 'not yet at 2h 10m');
+  const warn = run(item(), 135)[0];
+  assert.equal(warn.severity, 'warning'); assert.match(warn.title, /Team truck stopped 2h 15m/); assert.match(warn.detail, /Chad has 11h 0m/);
+  assert.equal(run(item(), 175)[0].severity, 'warning');
+  assert.equal(run(item(), 180)[0].severity, 'critical');
+  assert.equal(run(item({ dtcCodes: [{ code: 'P0217' }] }), 135)[0].severity, 'critical');
   // both out of hours: a real reset, the old rule
   assert.equal(run(item({ hos: hos('offDuty', 0), hos2: hos('sleeperBerth', 30) }), 300).length, 0);
   // solo: unchanged

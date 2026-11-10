@@ -10,7 +10,7 @@ const a = (severity = 'warning') => ({ id: 'stopped:626133', code: 'stopped', te
 const fakeDb = (start) => { let v = start; return { get: async () => v, update: async (k, fn) => { v = fn(v); return v; }, peek: () => v }; };
 const review = { status: 'authorized', reason: 'hotel approved', by: 'Sara', source: 'email button', atMs: 5000 };
 
-test('first team stop alert is at 1h 15m', () => assert.equal(TEAM_STOP_MIN, 75));
+test('first team stop alert is at 2h 15m', () => assert.equal(TEAM_STOP_MIN, 135));
 
 test('Solved pressed: the same stop never emails again when the alert reopens', () => {
   const units = { 4560: { stopEpisode: { unit: '4560', mailLevel: 1, stoppedSinceMs: 1000 } } };
