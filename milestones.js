@@ -152,18 +152,23 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
   const cfgKey = 'taMilestonesCfg';
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const settings = async () => ({ ...DEFAULTS, ...((enabled && (await db.get(cfgKey, {}))) || {}) });
-  // a fence's address → its point, kept (a miss is retried after a day)
+  // a fence's address → its point, kept (a miss is retried after a day). The saved points are read once per cycle and at
+  // most GEO_PER_CYCLE new addresses are looked up per cycle (each capped at 8 s), so a backlog never holds up the board.
   const geoKey = 'taFenceGeo';
+  const GEO_PER_CYCLE = 5;
   const lookup = geocode || ((q) => geocodePlace(q, null, { env, fetchFn }));
-  async function pointsFor(fences) {
-    const book = (await db.get(geoKey, {})) || {};
-    const out = {}; let changed = false;
+  async function pointsFor(fences, geo) {
+    const out = {};
     for (const fe of fences) {
-      let g = book[fe.q];
-      if (!g || (g.none && now() - Date.parse(g.at) > 24 * 60 * MIN)) { const r = await lookup(fe.q).catch(() => null); g = r ? { lat: r.lat, lng: r.lng, at: new Date(now()).toISOString() } : { none: true, at: new Date(now()).toISOString() }; book[fe.q] = g; changed = true; } // eslint-disable-line no-await-in-loop
-      if (!g.none) out[fe.key] = { lat: g.lat, lng: g.lng };
+      let g = geo.book[fe.q];
+      if ((!g || (g.none && now() - Date.parse(g.at) > 24 * 60 * MIN)) && geo.looked < GEO_PER_CYCLE) {
+        geo.looked += 1;
+        const r = await lookup(fe.q).catch(() => null); // eslint-disable-line no-await-in-loop
+        g = r ? { lat: r.lat, lng: r.lng, at: new Date(now()).toISOString() } : { none: true, at: new Date(now()).toISOString() };
+        geo.book[fe.q] = g; geo.changed = true;
+      }
+      if (g && !g.none) out[fe.key] = { lat: g.lat, lng: g.lng };
     }
-    if (changed) await db.set(geoKey, book);
     return out;
   }
   const smsLive = async () => { try { const c = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } };
@@ -201,6 +206,7 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
     const t0 = now();
     const nowIso = new Date(t0).toISOString();
     const items = (board.trips || []).filter((it) => tripNo(it) && !/^(canc|void)/i.test(S(tripOf(it).status)));
+    const geoState = { book: (await db.get(geoKey, {})) || {}, changed: false, looked: 0 };
     for (const item of items) {
       const trip = tripNo(item);
       const st = book[trip] || { ms: {}, asks: {}, waits: {}, lastReadAt: nowIso, startedAt: nowIso };   // new to us: only what the driver says from now on
@@ -247,7 +253,7 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
         const fences = fencesFor(item, o.stops);
         if (fences.length) {
           const live = item._samsara || {};
-          st.fences = stepFences(fences, await pointsFor(fences), st.fences, { lat: live.lat, lng: live.lng, at: live.gpsAt }, t0); // eslint-disable-line no-await-in-loop
+          st.fences = stepFences(fences, await pointsFor(fences, geoState), st.fences, { lat: live.lat, lng: live.lng, at: live.gpsAt }, t0); // eslint-disable-line no-await-in-loop
           const resting = /sleeper|off ?duty|offduty/i.test(S(live.hos && live.hos.status));
           const today = Object.values(st.fences).flatMap((x) => [x.arrive, x.left]).filter((a) => a && a.via && t0 - Date.parse(a.at) < 24 * 60 * MIN).length;
           const pick = nextAsk(fences, st.fences, { now: t0, lastAskAt: st.lastFenceAskAt || null, resting: resting || today >= 8 });
@@ -269,6 +275,7 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
       item._waits = st.waits || {};   // arrive / leave times at the shipper and receivers (detention)
       item._milestones = Object.fromEntries(Object.entries(st.ms).map(([k, m]) => [k, { at: m.driverAt || m.at, src: m.driverAt ? (m.src === 'driver' ? 'driver' : `${m.src} + driver`) : m.src }]));
     }
+    if (geoState.changed) await db.set(geoKey, geoState.book);
     const live = new Set(items.map(tripNo));
     await db.update(key(site), (cur) => {
       const a = { ...(cur || {}), ...book };

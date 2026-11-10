@@ -65,13 +65,13 @@ export async function geocodePlace(place, region, { env = process.env, fetchFn =
   const key = env.GOOGLE_GEOCODE_KEY || env.GOOGLE_MAPS_KEY || '';
   if (key) {
     try {
-      const d = await (await fetchFn(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q)}&components=country:US&key=${key}`)).json();
+      const d = await (await fetchFn(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q)}&components=country:US&key=${key}`, { signal: AbortSignal.timeout(8000) })).json();
       const r = d && d.status === 'OK' && d.results && d.results[0];
       if (r) return { lat: r.geometry.location.lat, lng: r.geometry.location.lng, formatted: r.formatted_address };
     } catch { /* fall through */ }
   }
   try {
-    const d = await (await fetchFn(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=${encodeURIComponent(q)}`, { headers: { 'User-Agent': 'TagAlong-Dispatch/1.0' } })).json();
+    const d = await (await fetchFn(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=${encodeURIComponent(q)}`, { headers: { 'User-Agent': 'TagAlong-Dispatch/1.0' }, signal: AbortSignal.timeout(8000) })).json();
     if (d && d[0]) return { lat: parseFloat(d[0].lat), lng: parseFloat(d[0].lon), formatted: d[0].display_name };
   } catch { /* none */ }
   return null;

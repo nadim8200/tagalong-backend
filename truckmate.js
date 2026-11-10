@@ -523,12 +523,19 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   // ingest/latest, which is only the most recent delta.
   // The whole active board (trips + live overlays + rate cons + assignment
   // events). Shared by the dispatcher console and the Watchtower monitor.
+  // how long each step of the last board builds took (GET /truckmate/board-timing) — to find what makes the board slow
+  const boardTimings = [];
+  const overlayName = (fn, i) => { const m = String(fn).match(/(\w+)\.overlay/); return m ? m[1] : (fn.name || `overlay ${i + 1}`); };
   async function buildBoard(site) {
+    const t0 = Date.now(); let tPrev = t0; const steps = [];
+    const mark = (label) => { const n = Date.now(); steps.push([label, n - tPrev]); tPrev = n; };
     const store = (db && db.enabled) ? await db.get(`taTruckMateActive:${site}`, { trips: {} }) : { trips: {} };
+    mark('TruckMate board (database)');
     const recs = Object.values(store.trips || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     const trips = applyUnitAliases(recs.map((r) => { if (r.item) r.item._times = tripTimes(r); return r.item; }));
     // loads that aren't in TruckMate (OC loads Jarvis made from email, ocloads.js): cards like the rest, every overlay included
     if (extraItems) trips.push(...((await Promise.resolve(extraItems(site, trips)).catch((e) => { console.warn('[truckmate] extra loads:', e.message); return []; })) || []));
+    mark('OC loads from email');
     // Overlay LIVE Samsara data (driver names, GPS/fuel/engine, reefer temp) on
     // each trip so the dispatcher can cross-check it against TruckMate. Cached
     // ~60s; if Samsara is down or unconfigured we just skip the overlay.
@@ -539,6 +546,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         trips.forEach((item) => { try { const live = correlate(item, idx); if (live) item._samsara = live; } catch { /* per-trip skip */ } });
       }
     } catch { /* no live overlay this cycle */ }
+    mark('Samsara live');
     // Traccar overlay for trucks on Teltonika trackers (e.g. 2403) that Samsara
     // doesn't have — matched by power-unit number. Only fills trips Samsara missed.
     try {
@@ -575,6 +583,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         }
       });
     } catch { /* no traccar overlay this cycle */ }
+    mark('Traccar live');
     // Attach any stored rate confirmation (broker instructions) per trip so the
     // dispatcher sees the "has instructions" chip + AI check without extra fetches.
     try {
@@ -591,6 +600,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         });
       }
     } catch { /* no rate-con overlay this cycle */ }
+    mark('rate cons');
     // The day's uploaded trip sheet (real stop order, handwritten appointments,
     // pickup plan, call-aheads) + how it differs from what TruckMate sent.
     try {
@@ -603,6 +613,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         });
       }
     } catch { /* no trip-sheet overlay this cycle */ }
+    mark('trip sheets');
     // Geofence stop visits (server-tracked) and the stored original documents.
     try {
       if (db && db.enabled) {
@@ -632,14 +643,17 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         });
       }
     } catch (e) { console.warn('[truckmate] visits/docs overlay:', e.message); }
+    mark('visits, documents, packets');
     // extra overlays (outside carriers, check-ins, …)
-    for (const fn of overlays) {
+    for (const [i, fn] of overlays.entries()) {
       try { await fn(site, trips); } catch (e) { console.warn('[truckmate] overlay:', e.message); } // eslint-disable-line no-await-in-loop
+      mark(overlayName(fn, i));
     }
     // finished loads (delivered, every / last stop visited, truck moved on, or marked by a dispatcher) leave the board
     // …and loads whose truck / trailer already moved on to a newer load go to the "Not closed" list
     let unclosed = [];
     try { unclosed = (await finished.sweep(site, trips, store.trips || {})).unclosed || []; } catch (e) { console.warn('[truckmate] finished:', e.message); }
+    mark('finished sweep');
     // Detect NEW truck→load assignments: a truck's power unit appearing on an
     // active trip it wasn't on before. Each is announced once (state persists),
     // so the dispatcher gets a single pop-up and AI dispatching "starts now".
@@ -679,6 +693,11 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     // heartbeat from the raw ingest log
     const ing = (db && db.enabled) ? await db.get(`taTruckMateIngest:${site}`, { deliveries: [] }) : { deliveries: [] };
     const latest = (ing.deliveries || [])[0] || null;
+    mark('assignments + heartbeat');
+    const total = Date.now() - t0;
+    boardTimings.unshift({ at: new Date(t0).toISOString(), site, trips: trips.length, totalMs: total, slowest: [...steps].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([step, ms]) => ({ step, ms })) });
+    boardTimings.length = Math.min(boardTimings.length, 20);
+    if (total > 15000) console.warn(`[truckmate] board build took ${Math.round(total / 1000)}s — slowest: ${boardTimings[0].slowest.slice(0, 4).map((x) => `${x.step} ${Math.round(x.ms / 1000)}s`).join(', ')}`);
     return {
       site,
       count: trips.length,
@@ -690,6 +709,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     };
   }
 
+  app.get('/truckmate/board-timing', requireAuth, (req, res) => res.json({ builds: boardTimings }));
   app.get('/truckmate/active', requireAuth, async (req, res) => {
     try {
       res.json(await buildBoard(String(req.query.site || 'florida-beauty')));
