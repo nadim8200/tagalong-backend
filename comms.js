@@ -154,7 +154,7 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
       const text = messageFor(b.kind, { trip, stopLabel: b.stopLabel, link, phone: cfg && cfg.fromNumber, text: b.text });
       if (!text) return res.status(400).json({ error: b.kind === 'custom' ? 'Type a message first.' : 'Unknown message.' });
       const sent = await ringcentral.sendSms(owner, { to, text });
-      await log(site, trip, { type: 'text', kind: b.kind, to, text, by: who(req), stopKey: b.stopKey || null });
+      await log(site, trip, { type: 'text', kind: b.kind, to, text, by: who(req), stopKey: b.stopKey || null, held: !!(sent && sent.id === 'training') });
       await db.update(askKey(site), (cur) => [{ trip, kind: b.kind, stopKey: b.stopKey || null, stopLabel: b.stopLabel || null, phone: last10(to), at: new Date().toISOString() }, ...(Array.isArray(cur) ? cur : [])].slice(0, 500), []);
       res.json({ ok: true, id: sent.id, text });
     } catch (e) { res.status(502).json({ error: e.message }); }

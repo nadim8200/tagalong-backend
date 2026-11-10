@@ -80,6 +80,34 @@ export function appendTrack(pts, fixes) {
   return { pts: out.slice(-MAX_POINTS), added };
 }
 
+// The conversation with an OC driver on one load, oldest first, for the card. Pure (tested).
+//   first: the tracking welcome text (pinned) — logged when sent, else rebuilt from the link
+//   messages: texts to / from the driver's cell, TagAlong app messages both ways, and what the driver did in the app
+export function ocThread({ link = null, chat = [], log = [], phone = null, consent = null, firstPingAt = null, welcomeText = null }) {
+  const k = String(phone || (link && link.driverPhone) || '').replace(/\D/g, '').slice(-10);
+  const same = (x) => k.length === 10 && String(x || '').replace(/\D/g, '').slice(-10) === k;
+  const isApp = (e) => e.kind === 'app-message' || e.to === 'driver app' || e.from === 'driver app';
+  const out = [];
+  const sent = log.filter((e) => e.kind === 'tracking-link').sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  let first = sent[0] ? { at: sent[0].at, by: sent[0].by || null, text: sent[0].text, via: 'text', to: sent[0].to || null, held: !!sent[0].held } : null;
+  if (!first && link && link.sentAt && welcomeText) first = { at: link.sentAt, by: link.sentBy || link.createdBy || null, text: welcomeText, via: 'text', to: link.sentTo || null, held: /held/i.test(String(link.sentVia || '')) };
+  sent.slice(1).forEach((e) => out.push({ at: e.at, dir: 'out', via: 'text', by: e.by || null, text: e.text, held: !!e.held, resend: true }));
+  for (const e of log) {
+    if (e.kind === 'tracking-link') continue;
+    if (e.type === 'text' && isApp(e)) { if (e.held) out.push({ at: e.at, dir: 'out', via: 'app', by: e.by || null, text: e.text, held: true }); continue; }
+    if (e.type === 'text' && same(e.to)) out.push({ at: e.at, dir: 'out', via: 'text', by: e.by || null, text: e.text, held: !!e.held });
+    else if (e.type === 'reply' && !isApp(e) && same(e.from)) out.push({ at: e.at, dir: 'in', via: 'text', by: e.by || null, text: e.text });
+  }
+  for (const m of chat || []) out.push({ at: m.at, dir: m.from === 'driver' ? 'in' : 'out', via: 'app', by: m.by || null, text: m.text, photos: (m.docIds || []).length, read: m.from === 'dispatch' ? !!m.readAt : undefined });
+  const ev = (at, text) => { if (at) out.push({ at, dir: 'event', via: 'app', text }); };
+  if (link) { ev(link.openedAt, `Opened the link${link.openedVia === 'app' ? ' in the TagAlong app' : ''}`); ev(link.infoAt, 'Added their truck, trailer and phone'); }
+  if (consent && /app/i.test(String(consent.how || ''))) ev(consent.at, 'Agreed to texts');
+  ev(firstPingAt, 'Started sharing location');
+  if (link) { ev(link.stoppedAt, 'Stopped sharing location'); ev(link.completedAt, 'Confirmed delivered'); }
+  out.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  return { first, messages: out };
+}
+
 // Whole-trip history from a stored track: the trail, every stop (parked
 // ≥ STOP_MIN) with how long, and the distance covered. Pure (tested).
 export function tripHistory(pts) {
@@ -409,8 +437,10 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       const owner = String(req.user.company || req.user.id);
       const lang = req.body && req.body.lang === 'es' ? 'es' : 'en';
       // already says who it's from and ends with the registered opt-out line: sent as written (no signature after it)
-      await ringcentral.sendSms(owner, { to, text: messageFor(link, lang), sign: false });
-      const updated = await markSent(site, trip, { sentAt: new Date().toISOString(), sentVia: 'RingCentral text', sentTo: to, sentBy: who(req), lang });
+      const r = await ringcentral.sendSms(owner, { to, text: messageFor(link, lang), sign: false });
+      const held = !!(r && r.id === 'training');
+      if (comms && comms.log) await comms.log(site, trip, { type: 'text', kind: 'tracking-link', to, text: messageFor(link, lang), by: who(req), held });
+      const updated = await markSent(site, trip, { sentAt: new Date().toISOString(), sentVia: held ? 'RingCentral text (held: training mode)' : 'RingCentral text', sentTo: to, sentBy: who(req), lang });
       res.json(summary(updated));
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
@@ -437,6 +467,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       link = await db.update(linkKey(link.token), (cur) => ({ ...cur, driverPhone: to, driverName: name || cur.driverName || null, ...(it0 && it0._ocEmail && !cur.ocLoad ? { ocLoad: it0._ocEmail.loadNumber || null } : {}) }), link);
       const owner = String(req.user.company || req.user.id);
       const r = await ringcentral.sendSms(owner, { to, text: messageFor(link, lang), sign: false });
+      if (comms && comms.log) await comms.log(site, trip, { type: 'text', kind: 'tracking-link', to, text: messageFor(link, lang), by: who(req), held: !!(r && r.id === 'training') });
       const updated = await markSent(site, trip, { sentAt: new Date().toISOString(), sentVia: r && r.id === 'training' ? 'RingCentral text (held: training mode)' : 'RingCentral text', sentTo: to, sentBy: who(req), lang });
       res.json({ ...summary(updated), held: !!(r && r.id === 'training') });
     } catch (e) { res.status(502).json({ error: e.message }); }
@@ -703,7 +734,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
     if (!body) throw new Error('Write a message first.');
     const link = await linkForTrip(site, String(trip));
     if (!link || !isLive(linkStatus(link))) return { skipped: 'no active driver link on this load' };
-    if (training) { const held = await training.hold('app', { to: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'the driver app', trip, text: body }); if (held) return { sent: true, via: 'held — training mode (copy emailed)', ...held }; }
+    if (training) { const held = await training.hold('app', { to: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'the driver app', trip, text: body }); if (held) { if (comms && comms.log) await comms.log(site, String(trip), { type: 'text', kind: 'app-message', to: 'driver app', text: body, by, held: true, noThread: true }); return { sent: true, via: 'held — training mode', ...held }; } }
     const m = await addMessage(site, String(trip), { from: 'dispatch', by, text: body, docIds: files });
     if (onDispatchMessage) Promise.resolve(onDispatchMessage(site, String(trip), body, by)).catch(() => {});   // the driver profile's phones hear it too
     let pushed = false;
@@ -792,6 +823,18 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       if (list.some((m) => m.from === 'driver' && !m.seenAt)) await db.update(chatKey(site), (cur) => ({ ...(cur || {}), [trip]: ((cur || {})[trip] || []).map((m) => (m.from === 'driver' && !m.seenAt ? { ...m, seenAt: now } : m)) }), {});
       const link = await linkForTrip(site, trip);
       res.json({ messages: list, app: !!(link && (link.push || []).length), live: !!(link && isLive(linkStatus(link))) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  // the card's "Messages with the driver": the tracking welcome pinned first, then every text / app message / step, oldest first
+  app.get('/truckmate/oc/:trip/thread', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const site = siteOf(req); const trip = String(req.params.trip);
+    try {
+      const [link, chatAll, logAll, pts, item, consents] = await Promise.all([linkForTrip(site, trip), db.get(chatKey(site), {}), db.get(`taTripComms:${site}`, {}), db.get(posKey(site, trip), []), findItem(site, trip), db.get(`taSmsConsent:${site}`, {})]);
+      const phone = (item && item._oc && item._oc.driverPhone) || (link && (link.sentTo || link.driverPhone)) || null;
+      const k = String(phone || '').replace(/\D/g, '').slice(-10);
+      const t = ocThread({ link, chat: (chatAll || {})[trip] || [], log: (logAll || {})[trip] || [], phone, consent: (consents || {})[k] || null, firstPingAt: (pts || [])[0] ? pts[0].at : null, welcomeText: link ? messageFor(link, link.lang || 'en') : null });
+      res.json({ ...t, driver: { name: (item && item._oc && item._oc.driverName) || (link && link.driverName) || null, phone } });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
   app.post('/truckmate/oc/:trip/messages', requireAuth, async (req, res) => {

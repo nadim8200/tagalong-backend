@@ -179,8 +179,8 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
     if ((await db.get('taSmsOptOut', {}))[last10(rcpt.phone)]) return { skipped: 'driver replied STOP' };
     if (!(await smsLive())) return { skipped: 'texting not live yet' };
     const body = `${text} Reply STOP to opt out.`;
-    await ringcentral.sendSms('__shared', { to: rcpt.phone, text: body });
-    if (comms && comms.log) await comms.log(site, trip, { type: 'text', kind: 'driver-checkin', to: rcpt.phone, text: body, by: 'Jarvis (driver check-in)' });
+    const sent = await ringcentral.sendSms('__shared', { to: rcpt.phone, text: body });
+    if (comms && comms.log) await comms.log(site, trip, { type: 'text', kind: 'driver-checkin', to: rcpt.phone, text: body, by: 'Jarvis (driver check-in)', held: !!(sent && sent.id === 'training') });
     return { via: 'text' };
   }
 
