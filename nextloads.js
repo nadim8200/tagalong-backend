@@ -159,19 +159,22 @@ export function brief(rc, docIds = []) {
 // Is the next load confirmed? TruckMate has a booked trip for this truck with the same bill /
 // load, or a trip sheet ties the truck to it. Pure. → { by, trip } | null
 // Does this board trip carry the rate con's load (same FBF bill or broker load number)? Pure.
-export function carries(it, entry) {
+// blobOf: optional (item) → its bills as one search string, made once per board build (the overlay checks every waiting next
+// load against every trip; rebuilding these strings each time took seconds)
+const billBlob = (it) => billKey(JSON.stringify(billsOf(it)));
+export function carries(it, entry, blobOf = billBlob) {
   const bill = billKey(entry.rc.bill); const ln = billKey(entry.rc.loadNumber);
-  const blob = billKey(JSON.stringify(billsOf(it)));
+  const blob = blobOf(it);
   return !!((bill && blob.includes(bill)) || (ln && ln.length >= 5 && blob.includes(ln)));
 }
-export function verify(entry, items = [], sheets = []) {
+export function verify(entry, items = [], sheets = [], { blobOf = billBlob, sheetBlob = (s) => billKey(JSON.stringify(s)) } = {}) {
   const truck = entry.truck;
   const bill = billKey(entry.rc.bill); const ln = billKey(entry.rc.loadNumber);
-  const has = (it) => carries(it, entry);
+  const has = (it) => carries(it, entry, blobOf);
   if (entry.trip) { const it = items.find((x) => tripNo(x) === entry.trip); if (it && (!truck || unitOf(it) === truck)) return { by: 'TruckMate', trip: entry.trip }; }
   const tm = items.find((it) => unitOf(it) === truck && BOOKED.test(String(tripOf(it).status || '')) && has(it));
   if (tm) return { by: 'TruckMate', trip: tripNo(tm) };
-  const sh = sheets.find((s) => s && cleanTruck(s.truck) === truck && ((bill && billKey(JSON.stringify(s)).includes(bill)) || (ln && ln.length >= 5 && billKey(JSON.stringify(s)).includes(ln))));
+  const sh = sheets.find((s) => s && cleanTruck(s.truck) === truck && ((bill && sheetBlob(s).includes(bill)) || (ln && ln.length >= 5 && sheetBlob(s).includes(ln))));
   if (sh) return { by: 'trip sheet', trip: String(sh.tripNumber || '') || null };
   return null;
 }
@@ -209,6 +212,8 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
 
   // On the board: each truck's current trip shows the next load(s) Gus sent for that truck.
   async function overlay(site, trips) {
+    // how long each part took, for the board timings (truckmate.js shows them under "nextLoads")
+    const timing = []; let tp = Date.now(); const mark = (label) => { const n = Date.now(); timing.push({ step: label, ms: n - tp }); tp = n; };
     // TruckMate's next trips for each truck on a run (no AI, straight from the board)
     const tm = tmNextTrips(trips);
     let etas = null; let geoZip = null;
@@ -219,6 +224,7 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
       }
       if (etaCache) { etas = etaCache.etas; geoZip = etaCache.geo; }
     }
+    mark('live ETAs + ZIP points (read)');
     for (const it of trips) {
       const n = tm.get(tripNo(it)); if (!n) continue;
       // only the first next trip is timed — it's the one the truck runs right after this one
@@ -236,22 +242,33 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
           milesToPickup: tm.emptyMi != null && tm.deadheadMi != null ? Math.round(tm.emptyMi + tm.deadheadMi) : null };
       });
     }
-    if (!enabled) return;
+    mark('next trips on the cards');
+    if (!enabled) return { timing };
     const list = (((await db.get(key, { list: [] })) || {}).list || []).filter((x) => x.truck && !x.doneAt);
-    if (!list.length) return;
+    mark(`waiting next loads (read, ${list.length})`);
+    if (!list.length) return { timing };
     const sheets = Object.values((await db.get(`taTruckMateManifest:${site}`, {})) || {});
+    mark(`trip sheets (read, ${sheets.length})`);
+    // each trip's bills and each trip sheet as one search string — made once here, not once per waiting next load
+    const blobs = new Map(); const blobOf = (it) => { let b = blobs.get(it); if (b == null) { b = billBlob(it); blobs.set(it, b); } return b; };
+    const sheetBlobs = new Map(); const sheetBlob = (sh) => { let b = sheetBlobs.get(sh); if (b == null) { b = billKey(JSON.stringify(sh)); sheetBlobs.set(sh, b); } return b; };
+    const byTrip = new Map(trips.map((it) => [tripNo(it), it]));
     const finished = [];
     for (const n of list) {
       // the next trip has started (or the load is done) → no longer "next"
-      const own = n.trip ? trips.find((it) => tripNo(it) === n.trip) : null;
-      const v = verify(n, trips, sheets);
-      const started = (own && (ROLLING.test(String(tripOf(own).status || '')) || DONE.test(String(tripOf(own).status || '')))) || (v && v.trip && trips.some((it) => tripNo(it) === v.trip && ROLLING.test(String(tripOf(it).status || '')))) || trips.some((it) => carries(it, n) && (ROLLING.test(String(tripOf(it).status || '')) || DONE.test(String(tripOf(it).status || ''))));
+      const own = n.trip ? byTrip.get(n.trip) : null;
+      const v = verify(n, trips, sheets, { blobOf, sheetBlob });
+      const vIt = v && v.trip ? byTrip.get(v.trip) : null;
+      const started = (own && (ROLLING.test(String(tripOf(own).status || '')) || DONE.test(String(tripOf(own).status || '')))) || (vIt && ROLLING.test(String(tripOf(vIt).status || ''))) || trips.some((it) => carries(it, n, blobOf) && (ROLLING.test(String(tripOf(it).status || '')) || DONE.test(String(tripOf(it).status || ''))));
       if (started) { finished.push(n.id); continue; }
-      const cur = trips.filter((it) => unitOf(it) === n.truck && tripNo(it) !== n.trip && (!v || tripNo(it) !== v.trip) && !carries(it, n) && !DONE.test(String(tripOf(it).status || '')));
+      const cur = trips.filter((it) => unitOf(it) === n.truck && tripNo(it) !== n.trip && (!v || tripNo(it) !== v.trip) && !carries(it, n, blobOf) && !DONE.test(String(tripOf(it).status || '')));
       const host = cur.filter((it) => ROLLING.test(String(tripOf(it).status || '')));
       for (const it of (host.length ? host : cur)) (it._nextLoad = it._nextLoad || []).push({ ...n, verified: v });
     }
+    mark('matching');
     if (finished.length) await db.update(key, (cur) => ({ list: ((cur && cur.list) || []).map((x) => (finished.includes(x.id) ? { ...x, doneAt: new Date(now()).toISOString() } : x)) }), { list: [] });
+    if (finished.length) mark(`marked ${finished.length} started (write)`);
+    return { timing };
   }
 
   // the full rate con behind a next load (the card keeps only the short version)

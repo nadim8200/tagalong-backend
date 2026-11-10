@@ -659,9 +659,12 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     } catch (e) { console.warn('[truckmate] visits/docs overlay:', e.message); }
     mark('visits, documents, packets');
     // extra overlays (outside carriers, check-ins, …)
+    const inner = {};
     for (const [i, fn] of overlays.entries()) {
-      try { await fn(site, trips); } catch (e) { console.warn('[truckmate] overlay:', e.message); } // eslint-disable-line no-await-in-loop
+      let r = null;
+      try { r = await fn(site, trips); } catch (e) { console.warn('[truckmate] overlay:', e.message); } // eslint-disable-line no-await-in-loop
       mark(overlayName(fn, i));
+      if (r && Array.isArray(r.timing)) inner[overlayName(fn, i)] = r.timing;   // an overlay that times its own parts
     }
     // finished loads (delivered, every / last stop visited, truck moved on, or marked by a dispatcher) leave the board
     // …and loads whose truck / trailer already moved on to a newer load go to the "Not closed" list
@@ -709,7 +712,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     const latest = (ing.deliveries || [])[0] || null;
     mark('assignments + heartbeat');
     const total = Date.now() - t0;
-    boardTimings.unshift({ at: new Date(t0).toISOString(), site, trips: trips.length, totalMs: total, slowest: [...steps].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([step, ms]) => ({ step, ms })) });
+    boardTimings.unshift({ at: new Date(t0).toISOString(), site, trips: trips.length, totalMs: total, slowest: [...steps].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([step, ms]) => ({ step, ms })), inner });
     boardTimings.length = Math.min(boardTimings.length, 20);
     if (total > 15000) console.warn(`[truckmate] board build took ${Math.round(total / 1000)}s — slowest: ${boardTimings[0].slowest.slice(0, 4).map((x) => `${x.step} ${Math.round(x.ms / 1000)}s`).join(', ')}`);
     return {
