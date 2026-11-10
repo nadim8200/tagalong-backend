@@ -14,6 +14,7 @@ import { samsaraTokenFrom, snapshot, getLiveIndex, correlate, analyzeReefers, an
 import { buildFleet, updateStill, withStill } from './fleetmap.js';
 import { tripTimes } from './triptimes.js';
 import { applyUnitAliases } from './units.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -526,7 +527,20 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   // how long each step of the last board builds took (GET /truckmate/board-timing) — to find what makes the board slow
   const boardTimings = [];
   const overlayName = (fn, i) => { const m = String(fn).match(/(\w+)\.overlay/); return m ? m[1] : (fn.name || `overlay ${i + 1}`); };
-  async function buildBoard(site) {
+  // One build at a time per site: the console, Watchtower, the fleet map and the driver links all ask for the board, and
+  // overlapping builds fought over the database (three at once took 40–50 s each). A caller that comes while a build is
+  // running gets that build's board. A request made from INSIDE a build (an overlay asking for the board) builds its own,
+  // as before, so a build never waits on itself.
+  const building = new Map();
+  const inBuild = new AsyncLocalStorage();
+  function buildBoard(site) {
+    if (inBuild.getStore()) return buildBoardNow(site);
+    if (building.has(site)) return building.get(site);
+    const p = inBuild.run(true, () => buildBoardNow(site)).finally(() => building.delete(site));
+    building.set(site, p);
+    return p;
+  }
+  async function buildBoardNow(site) {
     const t0 = Date.now(); let tPrev = t0; const steps = [];
     const mark = (label) => { const n = Date.now(); steps.push([label, n - tPrev]); tPrev = n; };
     const store = (db && db.enabled) ? await db.get(`taTruckMateActive:${site}`, { trips: {} }) : { trips: {} };
