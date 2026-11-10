@@ -833,7 +833,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       const [link, chatAll, logAll, pts, item, consents] = await Promise.all([linkForTrip(site, trip), db.get(chatKey(site), {}), db.get(`taTripComms:${site}`, {}), db.get(posKey(site, trip), []), findItem(site, trip), db.get(`taSmsConsent:${site}`, {})]);
       const phone = (item && item._oc && item._oc.driverPhone) || (link && (link.sentTo || link.driverPhone)) || null;
       const k = String(phone || '').replace(/\D/g, '').slice(-10);
-      const t = ocThread({ link, chat: (chatAll || {})[trip] || [], log: (logAll || {})[trip] || [], phone, consent: (consents || {})[k] || null, firstPingAt: (pts || [])[0] ? pts[0].at : null, welcomeText: link ? messageFor(link, link.lang || 'en') : null });
+      const t = ocThread({ link, chat: (chatAll || {})[trip] || [], log: (logAll || {})[trip] || [], phone, consent: (consents || {})[k] || null, firstPingAt: ((pts || []).find((p) => link && p.at >= (link.createdAt || '')) || {}).at || null, welcomeText: link ? messageFor(link, link.lang || 'en') : null });
       res.json({ ...t, driver: { name: (item && item._oc && item._oc.driverName) || (link && link.driverName) || null, phone } });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
