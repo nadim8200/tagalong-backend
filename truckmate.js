@@ -15,6 +15,7 @@ import { buildFleet, updateStill, withStill } from './fleetmap.js';
 import { tripTimes } from './triptimes.js';
 import { applyUnitAliases } from './units.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { loadTarget, checkReading } from './temppolicy.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -671,6 +672,25 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     let unclosed = [];
     try { unclosed = (await finished.sweep(site, trips, store.trips || {})).unclosed || []; } catch (e) { console.warn('[truckmate] finished:', e.message); }
     mark('finished sweep');
+    // the load's temperature on every card: what it needs (rate con → dispatcher trip sheet → TruckMate) and what the reefer
+    // reads now (Samsara's return air when fresh, else TruckMate's Thermo King reading, else ARTIS's on an LTL run), checked against it
+    for (const item of trips) {
+      try {
+        const target = loadTarget(item);
+        const l = item._samsara || {}; const a = item._artisTemp || null;
+        const sam = l.tempF != null && !l.tempStale ? { source: 'Samsara', readingF: l.tempF, supplyF: l.supplyF != null ? l.supplyF : null, setF: l.setpointF != null ? l.setpointF : null, at: l.tempAt || null } : null;
+        // TruckMate's Thermo King reading (the reefer agent reads the Reefer Events window): return air is the load temp
+        const tk = item._tkReefer && item._tkReefer.reading;
+        const toF = (v) => (v == null || !Number.isFinite(Number(v)) ? null : (tk.tempUnits === 'C' ? Math.round(Number(v) * 9 / 5 + 32) : Number(v)));
+        const c1 = tk && Array.isArray(tk.compartments) ? tk.compartments[0] || {} : {};
+        const tkRet = tk ? toF(tk.returnTemp != null ? tk.returnTemp : c1.return) : null;
+        const tkm = !sam && tkRet != null ? { source: 'TruckMate (Thermo King)', readingF: tkRet, supplyF: toF(tk.supplyTemp != null ? tk.supplyTemp : c1.supply), setF: toF(tk.setTemp != null ? tk.setTemp : c1.set), at: item._tkReefer.at || null, powerOn: tk.powerOn, alarm: tk.latestAlarm || null } : null;
+        const art = !sam && !tkm && a && a.check && a.check.readingF != null ? { source: 'ARTIS', readingF: a.check.readingF, supplyF: null, setF: a.check.setF, at: a.readAt || null } : null;
+        const current = sam || tkm || art;
+        if (target || current) item._loadTemp = { target, current, check: current ? checkReading({ currentTemp: current.readingF, setPoint: current.setF }, target) : null };
+      } catch { /* per-trip skip */ }
+    }
+    mark('load temperatures');
     // Detect NEW truck→load assignments: a truck's power unit appearing on an
     // active trip it wasn't on before. Each is announced once (state persists),
     // so the dispatcher gets a single pop-up and AI dispatching "starts now".

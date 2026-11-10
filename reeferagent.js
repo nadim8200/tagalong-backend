@@ -1,0 +1,177 @@
+// ---------------------------------------------------------------
+// TruckMate reefer agent — reads Thermo King reefer readings off the TruckMate screen. READ ONLY.
+//
+// TruckMate keeps the TK readings per trailer (the "Reefer Events" window) but its API doesn't expose them, and IT can't
+// give us database access, so a small script (agent/truckmate-reefer-agent.ps1) on a dedicated Windows desktop that stays
+// signed in to TruckMate does what a person would: every hour it asks us which trailers to read, opens each one's Reefer
+// Events window with a short, fixed list of steps (the "recipe", set here by an admin), screenshots it, and sends us the
+// picture. Claude reads the picture; we keep only the latest reading per trailer on an active load and show it on the card.
+//
+// Read-only by design:
+//   • the recipe may only click, type the trailer number (or digits), press ENTER / ESC / TAB / arrows / F5, wait and
+//     take a screenshot — nothing else is accepted;
+//   • a screenshot that isn't a Reefer Events window stops the run (the agent presses ESC and waits for the next hour);
+//   • the agent signs in with its own key (never a TruckMate password; TruckMate stays signed in on that desktop).
+// ---------------------------------------------------------------
+import crypto from 'node:crypto';
+
+const SITE = 'florida-beauty';
+const MIN = 60000;
+const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+const KEYS = { key: 'taReeferAgentKey', recipe: 'taReeferAgentRecipe', readings: `taTkReefer:${SITE}`, shots: 'taReeferAgentShots', runs: 'taReeferAgentRuns' };
+const tripOf = (it) => (it && it.trip) || it || {};
+const tripNo = (it) => String(tripOf(it).tripNumber || '');
+const unit = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const hash = (k) => crypto.createHash('sha256').update(String(k)).digest('hex');
+
+export const ALLOWED_KEYS = ['ENTER', 'ESC', 'TAB', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'F5', 'HOME', 'END'];
+// Steps the agent may run: only these, nothing that could change TruckMate. Pure. → { ok, steps } | { ok: false, error }
+function cleanSteps(steps, label) {
+  if (!Array.isArray(steps)) return { ok: true, steps: [] };
+  if (steps.length > 30) return { ok: false, error: `${label}: at most 30 steps.` };
+  const frac = (v) => Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
+  const out = [];
+  for (const [i, s] of steps.entries()) {
+    const t = s && s.do; const at = `${label} step ${i + 1}`;
+    if (t === 'click' || t === 'doubleclick') { if (!frac(s.x) || !frac(s.y)) return { ok: false, error: `${at}: x and y are 0–1 (part of the window).` }; out.push({ do: t, x: Number(s.x), y: Number(s.y), note: String(s.note || '').slice(0, 80) }); continue; }
+    if (t === 'type') { const v = String(s.text || ''); if (!/^(\{trailer\}|[0-9]{1,10})$/.test(v)) return { ok: false, error: `${at}: only the trailer number ({trailer}) or digits may be typed.` }; out.push({ do: 'type', text: v }); continue; }
+    if (t === 'key') { const k = String(s.key || '').toUpperCase(); if (!ALLOWED_KEYS.includes(k)) return { ok: false, error: `${at}: key must be one of ${ALLOWED_KEYS.join(', ')}.` }; out.push({ do: 'key', key: k }); continue; }
+    if (t === 'wait') { const ms = Math.round(Number(s.ms)); if (!(ms >= 100 && ms <= 15000)) return { ok: false, error: `${at}: wait 100–15000 ms.` }; out.push({ do: 'wait', ms }); continue; }
+    if (t === 'shot') { out.push({ do: 'shot' }); continue; }
+    return { ok: false, error: `${at}: "${t}" is not allowed (click, doubleclick, type, key, wait, shot).` };
+  }
+  return { ok: true, steps: out };
+}
+// The recipe: steps that open one trailer's Reefer Events window and screenshot it, then steps that close it. Pure.
+export function cleanRecipe(r = {}) {
+  const main = cleanSteps(r.steps, 'Open');
+  if (!main.ok) return main;
+  if (!main.steps.some((s) => s.do === 'shot')) return { ok: false, error: 'The recipe has to take a screenshot (shot) of the Reefer Events window.' };
+  const after = cleanSteps(r.after, 'Close');
+  if (!after.ok) return after;
+  return { ok: true, recipe: { windowTitle: String(r.windowTitle || 'TruckMate').slice(0, 80), steps: main.steps, after: after.steps.length ? after.steps.filter((s) => s.do !== 'shot') : [{ do: 'key', key: 'ESC' }] } };
+}
+
+// The trailers to read: on active loads (not outside carriers), one entry each. Pure.
+export function trailersToRead(trips = [], max = 40) {
+  const seen = new Map();
+  for (const it of trips) {
+    const t = tripOf(it);
+    if (!t.trailer || (it && it._oc) || String(t.powerUnit || '').toUpperCase() === 'OC') continue;
+    if (/^(canc|void|compl)/i.test(String(t.status || ''))) continue;
+    const k = unit(t.trailer);
+    if (k && !seen.has(k)) seen.set(k, { trailer: String(t.trailer), trip: tripNo(it) });
+  }
+  return [...seen.values()].slice(0, max);
+}
+
+const PROMPT = (trailer) => [
+  `This is a screenshot from TruckMate (trucking software). We expect the "Reefer Events for Trailer ${trailer}" window.`,
+  'Read it and return ONLY a JSON object (no prose):',
+  '{ "isReeferEvents": boolean, "trailer": string|null, "eventTime": string|null, "trip": string|null,',
+  '  "mode": string|null, "powerOn": boolean|null, "tempUnits": "F"|"C"|null,',
+  '  "setTemp": number|null, "returnTemp": number|null, "supplyTemp": number|null,',
+  '  "compartments": [{ "n": number, "set": number|null, "return": number|null, "supply": number|null }],',
+  '  "fuelLevel": string|null, "location": string|null,',
+  '  "latestAlarm": { "time": string|null, "code": string|null, "description": string|null } | null }',
+  'Use the NEWEST event (the highlighted / top row and the fields above it). Numbers exactly as shown; null when a field is blank.',
+  'isReeferEvents is false if this is any other window, a dialog, an error, a login screen or a blank screen.',
+].join('\n');
+
+export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+  const enabled = !!(db && db.enabled);
+  const iso = () => new Date(now()).toISOString();
+  const model = env.REEFER_AGENT_MODEL || env.RATECON_MODEL || 'claude-haiku-4-5-20251001';
+
+  async function agentOk(req) {
+    const k = String(req.get('x-agent-key') || '');
+    const stored = enabled ? await db.get(KEYS.key, null) : null;
+    return !!(k && stored && stored.hash && crypto.timingSafeEqual(Buffer.from(hash(k)), Buffer.from(stored.hash)));
+  }
+  const agentOnly = (fn) => async (req, res) => { if (!(await agentOk(req))) return res.status(401).json({ error: 'Agent key missing or wrong.' }); return fn(req, res); };
+
+  async function read(png, trailer) {
+    const key = env.ANTHROPIC_API_KEY || '';
+    if (!key) throw new Error('AI reader not configured (ANTHROPIC_API_KEY).');
+    const r = await fetchFn(ANTHROPIC_URL, {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model, max_tokens: 1500, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }, { type: 'text', text: PROMPT(trailer) }] }] }),
+    });
+    if (!r.ok) throw new Error(`AI error (${r.status})`);
+    const j = await r.json();
+    const text = (j.content || []).map((c) => c.text || '').join('').trim();
+    const m = text.match(/\{[\s\S]*\}/);
+    return JSON.parse(m ? m[0] : text);
+  }
+  async function keepShot(kind, trailer, png, note) {
+    await db.update(KEYS.shots, (cur) => [{ id: crypto.randomBytes(6).toString('hex'), at: iso(), kind, trailer: trailer || null, note: note || null, png }, ...(Array.isArray(cur) ? cur : [])].slice(0, 3), []);
+  }
+
+  // ---- the agent's side (its own key) ----
+  app.get('/reefer-agent/jobs', agentOnly(async (req, res) => {
+    const recipe = (await db.get(KEYS.recipe, null)) || null;
+    const board = getBoard ? await getBoard(SITE).catch(() => ({ trips: [] })) : { trips: [] };
+    res.json({ recipe: recipe && recipe.steps && recipe.steps.length ? recipe : null, trailers: trailersToRead((board && board.trips) || []), intervalMin: 60 });
+  }));
+  // a screenshot: { kind: 'calibrate' | 'reading', trailer, trip, png (base64) } → for a reading: { ok, stop } (stop = not the expected window)
+  app.post('/reefer-agent/shot', agentOnly(async (req, res) => {
+    const b = req.body || {};
+    const png = String(b.png || '');
+    if (!png || png.length > 12 * 1024 * 1024) return res.status(400).json({ error: 'Send one PNG screenshot (base64, under 9 MB).' });
+    try {
+      if (b.kind !== 'reading') { await keepShot('calibrate', null, png, String(b.note || '').slice(0, 200)); return res.json({ ok: true }); }
+      const trailer = String(b.trailer || '').slice(0, 20);
+      const r = await read(png, trailer);
+      if (!r || !r.isReeferEvents || (r.trailer && unit(r.trailer) !== unit(trailer))) {
+        await keepShot('unexpected', trailer, png, r && r.isReeferEvents ? `showed trailer ${r.trailer}` : 'not a Reefer Events window');
+        return res.json({ ok: false, stop: true, why: r && r.isReeferEvents ? `The window shows trailer ${r.trailer}, not ${trailer}.` : 'That is not the Reefer Events window.' });
+      }
+      await db.update(KEYS.readings, (cur) => ({ ...(cur || {}), [unit(trailer)]: { at: iso(), trailer, trip: String(b.trip || '') || null, reading: r } }), {});
+      return res.json({ ok: true });
+    } catch (e) { return res.status(502).json({ error: e.message }); }
+  }));
+  app.post('/reefer-agent/run', agentOnly(async (req, res) => {
+    const b = req.body || {};
+    const run = { at: iso(), read: Number(b.read) || 0, of: Number(b.of) || 0, stopped: String(b.stopped || '').slice(0, 200) || null, agent: String(b.agent || '').slice(0, 60) || null };
+    await db.update(KEYS.runs, (cur) => [run, ...(Array.isArray(cur) ? cur : [])].slice(0, 24), []);
+    // only trailers still on the board keep a reading
+    const board = getBoard ? await getBoard(SITE).catch(() => null) : null;
+    if (board) { const on = new Set(trailersToRead(board.trips || [], 500).map((x) => unit(x.trailer))); await db.update(KEYS.readings, (cur) => Object.fromEntries(Object.entries(cur || {}).filter(([k]) => on.has(k))), {}); }
+    res.json({ ok: true });
+  }));
+
+  // ---- admins ----
+  app.post('/truckmate/reefer-agent/key', requireAdmin, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const k = `RA-${crypto.randomBytes(24).toString('base64url')}`;
+    await db.set(KEYS.key, { hash: hash(k), at: iso(), by: (req.user && (req.user.name || req.user.email)) || 'admin' });
+    res.json({ key: k, note: 'Shown once. Put it in the agent config on the TruckMate desktop; making a new key stops the old one.' });
+  });
+  app.get('/truckmate/reefer-agent/status', requireAdmin, async (req, res) => {
+    const [recipe, runs, shots, readings, key] = await Promise.all([db.get(KEYS.recipe, null), db.get(KEYS.runs, []), db.get(KEYS.shots, []), db.get(KEYS.readings, {}), db.get(KEYS.key, null)]);
+    res.json({ keySet: !!(key && key.hash), recipe, runs: runs || [], shots: (shots || []).map(({ png, ...s }) => s), readings: Object.values(readings || {}) });
+  });
+  app.get('/truckmate/reefer-agent/shot/:id', requireAdmin, async (req, res) => {
+    const s = ((await db.get(KEYS.shots, [])) || []).find((x) => x.id === String(req.params.id));
+    if (!s) return res.status(404).end();
+    res.type('png').send(Buffer.from(s.png, 'base64'));
+  });
+  app.put('/truckmate/reefer-agent/recipe', requireAdmin, async (req, res) => {
+    const c = cleanRecipe(req.body || {});
+    if (!c.ok) return res.status(400).json({ error: c.error });
+    await db.set(KEYS.recipe, { ...c.recipe, by: (req.user && (req.user.name || req.user.email)) || 'admin', at: iso() });
+    res.json(c.recipe);
+  });
+
+  // every board build: the latest TruckMate (Thermo King) reading on the load's trailer
+  async function overlay(site, trips) {
+    if (!enabled) return;
+    const all = (await db.get(KEYS.readings, {})) || {};
+    if (!Object.keys(all).length) return;
+    for (const it of trips) { const r = all[unit(tripOf(it).trailer)]; if (r && now() - Date.parse(r.at) < 3 * 60 * MIN) it._tkReefer = r; }
+  }
+
+  console.log(`[reefer-agent] TruckMate reefer screen reader ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
+  return { overlay };
+}
