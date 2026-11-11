@@ -38,20 +38,30 @@ test('a load with two shippers and two consignees says so', () => {
   assert.equal(loadParties({ freightBills: [{ billNumber: 'X' }] }, read), null);
 });
 
-test('customer notes: the trip sheet\'s delivery stops, by name and city, read every 10 days', async () => {
-  const { customersToRead, loadCustomerNotes, stopKey, nameMatch } = await import('../reeferagent.js');
+test('customer notes: the trip sheet\'s delivery stops, by their ARTIS customer number, read every 10 days', async () => {
+  const { customersToRead, loadCustomerNotes, stopKey, nameMatch, artisIdFor, customerId } = await import('../reeferagent.js');
+  // two MOBI'S locations: the trip's own ARTIS stop list says which one this stop is
   const trips = [
-    { trip: { tripNumber: '7' }, _manifest: { stops: [{ action: 'LOAD', customer: 'Miami hub' }, { action: 'DELIVER', customer: "Mobi's", city: 'Atlanta' }, { action: 'DELIVER', customer: 'Native Lombard', city: 'Lombard' }] } },
+    { trip: { tripNumber: '7' }, _tb: { stops: [{ consigneeId: '11857', consignee: "MOBI'S", city: 'ATLANTA' }] },
+      _manifest: { stops: [{ action: 'LOAD', customer: 'Miami hub' }, { action: 'DELIVER', customer: "Mobi's", city: 'Atlanta' }, { action: 'DELIVER', customer: 'Native Lombard', city: 'Lombard' }, { action: 'DELIVER', customer: 'Nobody Known', city: 'Ocala' }] } },
     { trip: { tripNumber: '8' }, freightBills: [{ billNumber: 'B9' }] },          // no trip sheet: not an LTL load
   ];
+  const artis = [{ id: '11834', name: "MOBI'S", city: 'DORAL' }, { id: '11857', name: "MOBI'S", city: 'ATLANTA' }, { id: '3516', name: 'NATIVE CHICAGO - LOMBARD', city: 'LOMBARD' }];
   const now = Date.parse('2026-11-11T00:00:00Z');
-  assert.deepEqual(customersToRead(trips, {}, { now }).map((x) => `${x.value}|${x.city}`), ["MOBI'S|ATLANTA", 'NATIVE LOMBARD|LOMBARD']);
-  const names = { [stopKey("Mobi's", 'Atlanta')]: { code: '11834', at: '2026-11-05T00:00:00Z' }, [stopKey('Native Lombard', 'Lombard')]: { code: '03516', at: '2026-10-30T00:00:00Z' } };
-  assert.deepEqual(customersToRead(trips, names, { now }).map((x) => x.value), ['NATIVE LOMBARD']);   // Mobi's is 6 days old
-  const customers = { 11834: { code: '11834', name: "MOBI'S", at: '2026-11-05T00:00:00Z', notes: 'Saturday dock 8am-2pm. Get the receiver signature.' } };
-  const n = loadCustomerNotes(trips[0], {}, customers, names);
+  // searched by ID; the stop with no known number is left out
+  assert.deepEqual(customersToRead(trips, {}, { now, artis }).map((x) => `${x.value}|${x.name}|${x.city}`), ["11857|MOBI'S|ATLANTA", '03516|NATIVE LOMBARD|LOMBARD']);
+  const read = { 11857: { code: '11857', at: '2026-11-05T00:00:00Z' }, '03516': { code: '03516', at: '2026-10-30T00:00:00Z' } };
+  assert.deepEqual(customersToRead(trips, read, { now, artis }).map((x) => x.value), ['03516']);   // Mobi's is 6 days old
+  // by name alone, several locations → no guess; the city picks one
+  assert.equal(artisIdFor(artis, "Mobi's"), null);
+  assert.equal(artisIdFor(artis, "Mobi's", 'Doral'), '11834');
+  assert.equal(customerId('3516'), '03516');
+  const customers = { 11857: { code: '11857', name: "MOBI'S", at: '2026-11-05T00:00:00Z', notes: 'Saturday dock 8am-2pm. Get the receiver signature.' }, 11834: { code: '11834', name: "MOBI'S", at: '2026-11-05T00:00:00Z', notes: 'Doral: back door only.' } };
+  const n = loadCustomerNotes(trips[0], {}, customers, {}, artis);
   assert.equal(n.length, 1);
-  assert.equal(n[0].code, '11834');
+  assert.equal(n[0].code, '11857');
+  // a stop read earlier by name still works
+  assert.equal(loadCustomerNotes({ _manifest: { stops: [{ customer: 'Zed', city: 'X' }] } }, {}, { 99999: { code: '99999', notes: 'x', at: '2026-11-05T00:00:00Z' } }, { [stopKey('Zed', 'X')]: { code: '99999' } })[0].code, '99999');
   assert.match(staffFacts({ _customerNotes: n }).customerInstructions[0].instructions, /dock 8am/);
   assert.equal(nameMatch('NATIVE CHICAGO - LOMBARD', 'Native Lombard'), true);
   assert.equal(nameMatch('WINN DIXIE JACKSONVILLE', 'Native Lombard'), false);

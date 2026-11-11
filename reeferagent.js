@@ -16,6 +16,7 @@
 import crypto from 'node:crypto';
 import { loadTarget } from './temppolicy.js';
 import { applyTruckMateCustomer } from './profiles.js';
+import { builderCustomerId } from './truckbuilder.js';
 
 const SITE = 'florida-beauty';
 const MIN = 60000;
@@ -192,28 +193,50 @@ export function nameMatch(screen, want) {
   if (!w.length || !got.size) return false;
   return got.has(w[0]) && w.filter((x) => got.has(x)).length / w.length >= 0.6;
 }
-// The customers to read: every delivery stop on a trip sheet (the LTL customers), by name and city, not read in the last
-// 10 days. names: { [stopKey]: { code, at } }. Pure.
-export function customersToRead(trips = [], names = {}, { now = Date.now(), max = CUSTOMERS_PER_RUN } = {}) {
+// ARTIS customer numbers are TruckMate's customer codes, 5 digits ("3516" → "03516"). Pure.
+export const customerId = (x) => { const s = String(x == null ? '' : x).trim().toUpperCase(); return /^\d{1,4}$/.test(s) ? s.padStart(5, '0') : s; };
+// A customer on ARTIS's customer list by name — and by city when the name has several locations. Null unless exactly one
+// fits. list: [{ id, name, city }]. Pure.
+export function artisIdFor(list = [], name, city = null) {
+  const hits = (list || []).filter((c) => c && c.id && c.name && (normName(c.name) === normName(name) || nameMatch(c.name, name)));
+  const ids = (xs) => [...new Set(xs.map((c) => customerId(c.id)))];
+  if (ids(hits).length === 1) return ids(hits)[0];
+  const t = normName(city);
+  const inTown = t ? ids(hits.filter((c) => normName(c.city) === t)) : [];
+  return inTown.length === 1 ? inTown[0] : null;
+}
+// A trip-sheet stop's customer code: the trip's own ARTIS stop list (exact for that trip), else ARTIS's customer list by
+// name + city. Pure.
+export function stopCustomerId(it, st, artis = []) {
+  if (!st || !st.customer) return null;
+  const id = builderCustomerId(it, st.customer, st.city) || artisIdFor(artis, st.customer, st.city);
+  return id ? customerId(id) : null;
+}
+// The customers to read: every delivery stop on a trip sheet (the LTL customers), by its customer code (so a customer with
+// several locations gets the right one and TruckMate is searched by ID), not read in the last 10 days. A stop whose code
+// isn't known is left out. customers: what was read, by code. Pure.
+export function customersToRead(trips = [], customers = {}, { now = Date.now(), max = CUSTOMERS_PER_RUN, artis = [] } = {}) {
   const out = new Map();
   for (const it of trips) {
     for (const st of ((it && it._manifest && it._manifest.stops) || [])) {
       if (!st || !/DELIVER/i.test(st.action || '') || !normName(st.customer)) continue;
-      const k = stopKey(st.customer, st.city);
-      if (out.has(k)) continue;
-      const done = names[k];
-      if (done && now - Date.parse(done.at) < CUSTOMER_REREAD_DAYS * 24 * 60 * MIN) continue;
-      out.set(k, { value: String(st.customer).toUpperCase().replace(/\s+/g, ' ').trim().slice(0, 60), city: normName(st.city) || null, state: st.state || null, trip: tripNo(it), isNew: !done });
+      const code = stopCustomerId(it, st, artis);
+      if (!code || out.has(code)) continue;
+      const done = customers[code];
+      if (done && done.at && now - Date.parse(done.at) < CUSTOMER_REREAD_DAYS * 24 * 60 * MIN) continue;
+      out.set(code, { value: code, name: String(st.customer).toUpperCase().replace(/\s+/g, ' ').trim().slice(0, 60), city: normName(st.city) || null, trip: tripNo(it), isNew: !done });
     }
   }
   return [...out.values()].sort((a, b) => (b.isNew ? 1 : 0) - (a.isNew ? 1 : 0)).slice(0, max).map(({ isNew, ...x }) => x);
 }
 // A load's customer notes: each shipper / consignee on its bills that has notes in TruckMate. Pure.
-export function loadCustomerNotes(item, bills = {}, customers = {}, names = {}) {
+export function loadCustomerNotes(item, bills = {}, customers = {}, names = {}, artis = []) {
   const out = new Map();
-  // the trip sheet's delivery stops, by the customer code found for their name and city
+  // the trip sheet's delivery stops, by their customer code (ARTIS), else the code found earlier for their name and city
   for (const st of ((item && item._manifest && item._manifest.stops) || [])) {
-    const n = st && names[stopKey(st.customer, st.city)]; const c = n && customers[codeKey(n.code)];
+    const n = st && names[stopKey(st.customer, st.city)];
+    const code = (st && stopCustomerId(item, st, artis)) || (n && n.code);
+    const c = code && customers[codeKey(code)];
     if (!c || !String(c.notes || '').trim()) continue;
     const cur = out.get(c.code) || { code: c.code, name: c.name || st.customer, roles: [], notes: c.notes, readAt: c.at };
     if (!cur.roles.includes('consignee')) cur.roles.push('consignee');
@@ -302,6 +325,8 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
     const m = text.match(/\{[\s\S]*\}/);
     return JSON.parse(m ? m[0] : text);
   }
+  // ARTIS's customer list (numbers = TruckMate codes, name, city) as the ARTIS sync keeps it
+  const artisList = async () => (((await db.get(`taArtisClients:${SITE}`, {}).catch(() => ({}))) || {}).clientList || []).map((c) => ({ id: c.id, name: c.name, city: c.city }));
   async function keepShot(kind, trailer, png, note) {
     await db.update(KEYS.shots, (cur) => [{ id: crypto.randomBytes(6).toString('hex'), at: iso(), kind, trailer: trailer || null, note: note || null, png }, ...(Array.isArray(cur) ? cur : [])].slice(0, 3), []);
   }
@@ -315,8 +340,7 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
       const [billRecipe, custRecipe, bills, customers] = await Promise.all([db.get(KEYS.billRecipe, null), db.get(KEYS.custRecipe, null), db.get(KEYS.bills, {}), db.get(KEYS.customers, {})]);
       const sets = [];
       if (billRecipe && billRecipe.steps && billRecipe.steps.length) sets.push({ kind: 'bill', recipe: billRecipe, items: billsToRead((board && board.trips) || [], bills || {}).map((x) => ({ value: x.bill, trip: x.trip, updated: x.updated })) });
-      const names = (await db.get(KEYS.custNames, {})) || {};
-      if (custRecipe && custRecipe.steps && custRecipe.steps.length) sets.push({ kind: 'customer', recipe: custRecipe, items: customersToRead((board && board.trips) || [], names, { now: now() }).map((x) => ({ value: x.value, city: x.city, trip: x.trip })) });
+      if (custRecipe && custRecipe.steps && custRecipe.steps.length) sets.push({ kind: 'customer', recipe: custRecipe, items: customersToRead((board && board.trips) || [], customers || {}, { now: now(), artis: await artisList() }).map((x) => ({ value: x.value, name: x.name, city: x.city, trip: x.trip })) });
       return sets.length ? { sets } : {};
     };
     // every EVERY_MIN after the last run that actually read trailers: until then the hourly check-in gets no trailers
@@ -521,6 +545,7 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
     const bills = (await db.get(KEYS.bills, {})) || {};
     const customers = (await db.get(KEYS.customers, {})) || {};
     const names = (await db.get(KEYS.custNames, {})) || {};
+    const artis = await artisList();
     for (const it of trips) {
       for (const b of (it.freightBills || it.orders || [])) {
         const r = b && bills[String(b.billNumber || '').trim()];
@@ -531,7 +556,7 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
       }
       const p = loadParties(it, bills);
       if (p) it._parties = p;
-      const n = loadCustomerNotes(it, bills, customers, names);
+      const n = loadCustomerNotes(it, bills, customers, names, artis);
       if (n) it._customerNotes = n;
     }
   }

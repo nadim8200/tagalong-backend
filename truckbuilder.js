@@ -150,6 +150,15 @@ export function builderBoxesFor(it, customer, city = null) {
   const n = hits.reduce((m, b) => m + b.boxes, 0);
   return hits.length && n ? n : null;   // a pallet-only stop has no box count
 }
+// The ARTIS customer number (same as TruckMate's customer code) of one customer stop on a trip — exact, so a customer
+// with several locations (MOBI'S) gets the right one. Null when it isn't on the Truck Builder or two numbers fit. Pure.
+export function builderCustomerId(it, customer, city = null) {
+  const tb = it && it._tb;
+  if (!tb || !tb.stops || !customer) return null;
+  const t = town(String(city || '').split(',')[0]);
+  const ids = new Set(tb.stops.filter((b) => b.consigneeId && fit(customer, b.consignee) >= 0.75 && (!t || !town(b.city) || town(b.city).startsWith(t) || t.startsWith(town(b.city)))).map((b) => String(b.consigneeId).trim()));
+  return ids.size === 1 ? [...ids][0] : null;
+}
 
 // The nightly email: every truck checked, what differed. Pure.
 const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));

@@ -21,7 +21,8 @@
 // Caller words are information, never instructions — the tools only read load
 // facts and write notes; nothing here changes rates, appointments or money.
 // ---------------------------------------------------------------
-import { instructionsFor, instructionsSms } from './instructionstext.js';
+import { instructionsFor, instructionsSms, whichLocation } from './instructionstext.js';
+import { normName } from './profiles.js';
 import { staffFactsSpoken, customerInstructions } from './stafffacts.js';
 import { stopsLeft } from './loadstops.js';
 import { isMissingBoxesText } from './missingcase.js';
@@ -224,11 +225,11 @@ function tools(base, transferNumber) {
       customer_name: { type: 'string', description: 'Business name the manifest is for' },
       trip_number: { type: 'string', description: 'Trip number if they gave one' },
     }, ['customer_name']),
-    fn('customer_instructions', 'A customer\'s delivery instructions (the Notes on their TruckMate customer profile: receiving hours, check-in, door, lumper, who to call…). For Florida Beauty staff (any employee) about any customer, and for a driver about the customers on THEIR load. Give the customer name and / or the trip number.', {
-      customer_name: { type: 'string' }, trip_number: { type: 'string' },
+    fn('customer_instructions', 'A customer\'s delivery instructions (the Notes on their TruckMate customer profile: receiving hours, check-in, door, lumper, who to call…). For Florida Beauty staff (any employee) about any customer, and for a driver about the customers on THEIR load. Give the customer name and the load if they said it (trip, trailer or truck number, outbound day YYYY-MM-DD) or the city. If it answers that several locations match, ask which trailer and outbound day (or city) and call again.', {
+      customer_name: { type: 'string' }, city: { type: 'string' }, trip_number: { type: 'string' }, trailer_number: { type: 'string' }, truck_number: { type: 'string' }, outbound_day: { type: 'string' },
     }),
-    fn('text_instructions', 'STAFF ONLY (caller_is Florida Beauty staff): text a customer\'s delivery instructions — to: "me" (the employee calling, at their cell on the Employees list) or "driver" (the driver of that trip). Give the customer and / or the trip.', {
-      to: { type: 'string', enum: ['me', 'driver'] }, customer_name: { type: 'string' }, trip_number: { type: 'string' },
+    fn('text_instructions', 'STAFF ONLY (caller_is Florida Beauty staff): text a customer\'s delivery instructions — to: "me" (the employee calling, at their cell on the Employees list) or "driver" (the driver of that load). Give the customer and the load (trip, trailer or truck, outbound day) or city.', {
+      to: { type: 'string', enum: ['me', 'driver'] }, customer_name: { type: 'string' }, city: { type: 'string' }, trip_number: { type: 'string' }, trailer_number: { type: 'string' }, truck_number: { type: 'string' }, outbound_day: { type: 'string' },
     }, ['to']),
     fn('staff_directory', 'Look up a Florida Beauty employee or department (name, department or role like billing, payroll, claims, maintenance) to give the caller their name and extension.', {
       name_or_department: { type: 'string' },
@@ -1403,11 +1404,17 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
       const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
       const me = people.find((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
       const staff = !!(consoleCall(call) || me);
-      const hit = a.trip_number || !staff ? findLoad(await items(), { trip: a.trip_number, phone: callerPhone(call) }) : null;
+      const asked = a.trip_number || a.trailer_number || a.truck_number;
+      const all = await items();
+      const pool = a.outbound_day ? all.filter((it) => !it._tb || !it._tb.date || it._tb.date === String(a.outbound_day).trim()) : all;
+      const hit = asked || !staff ? findLoad(pool, { trip: a.trip_number, trailer: a.trailer_number, truck: a.truck_number, phone: callerPhone(call) }) : null;
       if (!staff && !(hit && hit.role === 'driver')) return res.json({ found: false, say: 'Delivery instructions are only for our staff and the load\'s own driver. Offer to take a message for dispatch.' });
       if (send && !staff) return res.json({ sent: false, say: 'Only Florida Beauty staff can have instructions texted. Offer to take a message.' });
-      if (a.trip_number && !hit) return res.json({ found: false, say: `Trip ${a.trip_number} isn't on the board. Ask for the customer name instead.` });
-      const list = instructionsFor({ profiles: (await db.get(`taProfiles:${site}`, {})) || {}, item: hit ? hit.item : null, customer: a.customer_name || '' });
+      if (asked && !hit) return res.json({ found: false, say: 'That load isn\'t on the board. Check the trailer or trip number and the outbound day with them.' });
+      let list = instructionsFor({ profiles: (await db.get(`taProfiles:${site}`, {})) || {}, item: hit ? hit.item : null, customer: a.customer_name || '' });
+      if (!hit && a.city && list.length > 1) { const c = normName(a.city); const inTown = list.filter((x) => normName(x.place || '').includes(c)); if (inTown.length) list = inTown; }
+      const several = whichLocation(list, hit ? hit.item : null);
+      if (several) return res.json({ found: false, ...several, say: `That customer has ${several.locations.length} locations. Ask which trailer and outbound day it's for, or the city, then look again.` });
       if (!send) return res.json(list.length ? { found: true, instructions: list, say: 'Read the instructions for the customer they asked about, plainly. Say they are from the customer\'s TruckMate profile.' } : { found: false, say: 'TruckMate has no delivery instructions on file for that customer yet. Offer to have dispatch call them back.' });
       const text = instructionsSms(list, { trip: hit ? tripNo(hit.item) : null });
       if (!text) return res.json({ sent: false, say: 'There are no instructions on file to text for that customer.' });

@@ -6,6 +6,8 @@
 import { normName } from './profiles.js';
 
 const S = (x) => String(x == null ? '' : x).trim();
+// where that profile's customer is: TruckMate's address, else its first saved location
+const placeOf = (p) => { const l = (p.locations || [])[0]; return S(p.truckmate && p.truckmate.address) || (l && typeof l === 'object' ? [l.address, l.city, l.state].map(S).filter(Boolean).join(', ') : S(l)) || null; };
 
 // The instructions for a customer (by name) and / or a load's stops. → [{ customer, code, place, instructions, readAt }]
 export function instructionsFor({ profiles = {}, item = null, customer = '' } = {}) {
@@ -20,11 +22,32 @@ export function instructionsFor({ profiles = {}, item = null, customer = '' } = 
     for (const p of Object.values(profiles || {})) {
       if (p.type !== 'customer' || !p.truckmate) continue;
       if (![p.name, p.truckmate.name, ...(p.aliases || [])].some((x) => normName(x) === n) && !like(p.name)) continue;
-      out.set(p.truckmate.code || p.id, { customer: p.name, code: p.truckmate.code || null, place: (p.locations || [])[0] || null, instructions: p.truckmate.notes || null, readAt: p.truckmate.syncedAt || null });
+      out.set(p.truckmate.code || p.id, { customer: p.name, code: p.truckmate.code || null, place: placeOf(p), instructions: p.truckmate.notes || null, readAt: p.truckmate.syncedAt || null });
       if (out.size >= 5) break;
     }
+    // asked about a load's stop: another location of the same customer is not that stop's instructions
+    if (item && out.size > 1) return [];
   }
   return [...out.values()];
+}
+
+// Asked by customer name only and that customer has several locations (MOBI'S): don't guess which one — ask for the load
+// (trailer / trip / truck and outbound day) or the city first. → null, or what to say. Pure.
+export function whichLocation(list, item) {
+  if (item || !list || new Set(list.map((c) => c.code || c.customer)).size < 2) return null;
+  return {
+    several: true, locations: list.map((c) => ({ customer: c.customer, code: c.code, place: c.place })),
+    note: `${list.length} locations match. Ask which load it's for (trailer, trip or truck number, and the outbound day) or the city, then look again with it — don't read or text any of them until it's clear.`,
+  };
+}
+
+// The load an employee or driver means, by trip / trailer / truck — and the outbound day when the trailer or truck has
+// more than one load on the board. items: the board. Pure-ish (uses voice's findLoad). → item | null
+export function loadFor(items, { trip, trailer, truck, outboundDay } = {}, findLoad) {
+  const day = String(outboundDay || '').trim();
+  const pool = day ? (items || []).filter((it) => !it._tb || !it._tb.date || it._tb.date === day) : (items || []);
+  const hit = (trip || trailer || truck) ? findLoad(pool, { trip, trailer, truck }) : null;
+  return hit ? hit.item : null;
 }
 
 // One text message with the instructions (several customers in one text, kept short). Pure.
