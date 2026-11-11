@@ -93,6 +93,8 @@ test('bill on screen: the cursor on the first letter does not make it a differen
   assert.equal(sameBill('5505891.4', 'G5058914'), true);
   assert.equal(sameBill('5058914', 'G5058914'), true);
   assert.equal(sameBill('G5058915', 'G5058914'), false);
-  assert.equal(sameBill('B180922-AA', 'B180922'), false);
+  assert.equal(sameBill('B180922-AA', 'B180922'), true);    // same bill, stop AA
+  assert.equal(sameBill('B180922', 'B180922-AB'), true);
+  assert.equal(sameBill('B180923-AA', 'B180922-AA'), false);
   assert.equal(sameBill(null, 'G5058914'), false);
 });

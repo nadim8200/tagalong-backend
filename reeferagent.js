@@ -60,14 +60,16 @@ export function cleanRecipe(r = {}) {
   return { ok: true, recipe: { windowTitle: String(r.windowTitle || 'TruckMate').slice(0, 80), steps: main.steps, after: after.steps.length ? after.steps.filter((s) => s.do !== 'shot') : [{ do: 'key', key: 'ESC' }] } };
 }
 
-// The bill on the screen is the one we asked for. The text cursor sometimes sits on the bill's first letter and the reader
-// misses or misreads it ("G5058914" read as "5505891.4"), so the digits are enough when they match in full. Pure.
+// The bill on the screen is the one we asked for. A stop suffix ("-AA", "-AB": stops on the same bill) doesn't make it a
+// different bill, and the text cursor sometimes sits on the first letter ("G5058914" read as "5505891.4"), so the bill's
+// digits are enough when they match in full. Pure.
 export function sameBill(read, want) {
   const k = (x) => String(x == null ? '' : x).toUpperCase().replace(/[^A-Z0-9]/g, '');
   if (!k(read) || !k(want)) return false;
   if (k(read) === k(want)) return true;
-  // drop only the leading letters: what follows (digits and any suffix like "-AA") must still match in full
-  const core = (x) => k(x).replace(/^[A-Z]+/, '');
+  // drop the leading letters and the stop suffix ("B180922-AA" is stop AA of bill B180922): the bill's digits must match in full
+  const core = (x) => String(x == null ? '' : x).toUpperCase().split('-')[0].replace(/[^A-Z0-9]/g, '').replace(/^[A-Z]+/, '');
+  if (k(read).split('-')[0] === k(want).split('-')[0]) return true;
   const r = core(read); const w = core(want);
   return /^\d{5,}/.test(w) && r.endsWith(w) && r.length - w.length <= 2;
 }
