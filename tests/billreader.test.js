@@ -73,3 +73,16 @@ test('TruckMate customer info lands on our customer profile: instructions, phone
   assert.equal(applyTruckMateCustomer(profiles, { ...tm, name: 'PFG VIRGINIA' }).id, 'a');
   assert.ok(applyTruckMateCustomer({}, { code: '1', name: 'NEW CUSTOMER', notes: null, phones: [], emails: [], people: [] }).id);
 });
+
+test('find steps: the agent asks where a button is instead of fixed click spots', async () => {
+  const { cleanRecipe, boxCenter, pngSize } = await import('../reeferagent.js');
+  const r = cleanRecipe({ steps: [{ do: 'find', target: 'the Consignee tab at the bottom of the Notes for Client window' }, { do: 'shot' }] });
+  assert.equal(r.ok, true);
+  assert.equal(r.recipe.steps[0].do, 'find');
+  assert.equal(cleanRecipe({ steps: [{ do: 'find', target: 'x' }, { do: 'shot' }] }).ok, false);
+  assert.deepEqual(boxCenter([100, 200, 140, 220], { w: 800, h: 600 }), { x: 0.15, y: 0.35 });
+  assert.equal(boxCenter([0, 0, 700, 20], { w: 800, h: 600 }), null);       // far too wide for a button
+  assert.equal(boxCenter([790, 0, 820, 20], { w: 800, h: 600 }), null);     // outside the picture
+  const png = Buffer.alloc(24); png.write('\x89PNG', 0, 'latin1'); png.writeUInt32BE(856, 16); png.writeUInt32BE(843, 20);
+  assert.deepEqual(pngSize(png.toString('base64')), { w: 856, h: 843 });
+});

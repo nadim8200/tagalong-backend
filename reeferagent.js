@@ -44,7 +44,9 @@ function cleanSteps(steps, label) {
     if (t === 'key') { const k = String(s.key || '').toUpperCase(); if (!ALLOWED_KEYS.includes(k)) return { ok: false, error: `${at}: key must be one of ${ALLOWED_KEYS.join(', ')}.` }; out.push({ do: 'key', key: k }); continue; }
     if (t === 'wait') { const ms = Math.round(Number(s.ms)); if (!(ms >= 100 && ms <= 15000)) return { ok: false, error: `${at}: wait 100–15000 ms.` }; out.push({ do: 'wait', ms }); continue; }
     if (t === 'shot') { out.push({ do: 'shot' }); continue; }
-    return { ok: false, error: `${at}: "${t}" is not allowed (click, doubleclick, type, key, wait, shot).` };
+    // find: the agent sends a picture, Claude says where that button / tab is, the agent clicks its middle (no fixed spots)
+    if (t === 'find') { const g = String(s.target || '').replace(/[^\w .,'()/&:#-]/g, '').trim(); if (g.length < 3 || g.length > 120) return { ok: false, error: `${at}: find needs a target (what to click, 3–120 characters).` }; out.push({ do: 'find', target: g }); continue; }
+    return { ok: false, error: `${at}: "${t}" is not allowed (click, doubleclick, find, type, key, wait, shot).` };
   }
   return { ok: true, steps: out };
 }
@@ -57,6 +59,28 @@ export function cleanRecipe(r = {}) {
   if (!after.ok) return after;
   return { ok: true, recipe: { windowTitle: String(r.windowTitle || 'TruckMate').slice(0, 80), steps: main.steps, after: after.steps.length ? after.steps.filter((s) => s.do !== 'shot') : [{ do: 'key', key: 'ESC' }] } };
 }
+
+// A PNG's width and height, from its header. Pure. → { w, h } | null
+export function pngSize(b64) {
+  try { const b = Buffer.from(String(b64 || '').slice(0, 64), 'base64'); if (b.toString('ascii', 1, 4) !== 'PNG') return null; return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) }; } catch { return null; }
+}
+// Where to click, from Claude's box around the target: its middle as a part of the picture, or null when the box makes no
+// sense (outside the picture, or bigger than a button / tab should be). Pure.
+export function boxCenter(box, size) {
+  if (!Array.isArray(box) || box.length !== 4 || !size) return null;
+  const [x0, y0, x1, y1] = box.map(Number);
+  if (![x0, y0, x1, y1].every(Number.isFinite) || x1 <= x0 || y1 <= y0) return null;
+  if (x0 < 0 || y0 < 0 || x1 > size.w || y1 > size.h) return null;
+  if (x1 - x0 > size.w * 0.4 || y1 - y0 > size.h * 0.2) return null;
+  return { x: Math.round(((x0 + x1) / 2 / size.w) * 10000) / 10000, y: Math.round(((y0 + y1) / 2 / size.h) * 10000) / 10000 };
+}
+const LOCATE_PROMPT = (target, size) => [
+  `This is a ${size.w}x${size.h} pixel screenshot of a TruckMate (trucking software) window.`,
+  `Find exactly this, to click it: ${target}.`,
+  'Return ONLY a JSON object (no prose): { "found": boolean, "box": [x0, y0, x1, y1], "label": string|null }',
+  'box = the tight pixel rectangle around that one button / tab / icon in this picture (x to the right, y down, from the top-left corner).',
+  'found is false if it is not clearly visible, if more than one thing could match, or if a pop-up / message covers it. Never guess.',
+].join('\n');
 
 // Trailers that don't track temp: no Thermo King reading on 3 different active temperature loads → skipped from then on.
 // Still opened once a week (in case a unit was installed); a reading clears the flag. Pure helpers.
@@ -230,13 +254,13 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
   }
   const agentOnly = (fn) => async (req, res) => { if (!(await agentOk(req))) return res.status(401).json({ error: 'Agent key missing or wrong.' }); return fn(req, res); };
 
-  async function read(png, trailer, prompt = PROMPT(trailer)) {
+  async function read(png, trailer, prompt = PROMPT(trailer), useModel = model) {
     const key = env.ANTHROPIC_API_KEY || '';
     if (!key) throw new Error('AI reader not configured (ANTHROPIC_API_KEY).');
     const r = await fetchFn(ANTHROPIC_URL, {
       method: 'POST',
       headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model, max_tokens: 1500, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }, { type: 'text', text: prompt }] }] }),
+      body: JSON.stringify({ model: useModel, max_tokens: 1500, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }, { type: 'text', text: prompt }] }] }),
     });
     if (!r.ok) throw new Error(`AI error (${r.status})`);
     const j = await r.json();
@@ -334,6 +358,21 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
       const tempLoad = !!(item && loadTarget(item));
       await db.update(KEYS.noTemp, (cur) => { const all = { ...(cur || {}) }; const k = unit(trailer); const next = noteRead(all[k], { trip: String(b.trip || ''), hasTemp, tempLoad, at: iso() }); if (next) all[k] = { ...next, trailer }; else delete all[k]; return all; }, {});
       return res.json({ ok: true });
+    } catch (e) { return res.status(502).json({ error: e.message }); }
+  }));
+  // where a button / tab is on the agent's picture of the window in front: { png, target } → { found, x, y } (parts of the picture)
+  const locateModel = env.REEFER_LOCATE_MODEL || 'claude-sonnet-5-5';
+  app.post('/reefer-agent/locate', agentOnly(async (req, res) => {
+    const b = req.body || {};
+    const png = String(b.png || ''); const target = String(b.target || '').slice(0, 120);
+    const size = pngSize(png);
+    if (!png || !size || png.length > 12 * 1024 * 1024 || target.length < 3) return res.status(400).json({ error: 'Send one PNG and what to find.' });
+    try {
+      let r;
+      try { r = await read(png, null, LOCATE_PROMPT(target, size), locateModel); } catch (e) { if (locateModel === model) throw e; r = await read(png, null, LOCATE_PROMPT(target, size), model); }
+      const at = r && r.found ? boxCenter(r.box, size) : null;
+      if (!at) { await keepShot('unexpected', String(b.value || '') || null, png, `could not find: ${target}`); return res.json({ found: false, why: `Could not find ${target} on the screen.` }); }
+      return res.json({ found: true, ...at, label: r.label || null });
     } catch (e) { return res.status(502).json({ error: e.message }); }
   }));
   app.post('/reefer-agent/run', agentOnly(async (req, res) => {
