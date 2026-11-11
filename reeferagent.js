@@ -29,7 +29,8 @@ const hash = (k) => crypto.createHash('sha256').update(String(k)).digest('hex');
 
 // keys the recipe may press. MENU = the context menu of the selected row; W = its "View Reefer Events…" (every W/V item in
 // TruckMate's trailer menu only opens a view); ALT+C = the Reefer Events window's Close button.
-export const ALLOWED_KEYS = ['ENTER', 'ESC', 'TAB', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'F5', 'HOME', 'END', 'MENU', 'W', 'ALT+C'];
+// CTRL+F = TruckMate's Find (Find Freight Bill / Select Client: look-up only); CTRL+N = View Notes (Notes for Client).
+export const ALLOWED_KEYS = ['ENTER', 'ESC', 'TAB', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'F5', 'HOME', 'END', 'MENU', 'W', 'ALT+C', 'CTRL+F', 'CTRL+N'];
 // Steps the agent may run: only these, nothing that could change TruckMate. Pure. → { ok, steps } | { ok: false, error }
 function cleanSteps(steps, label) {
   if (!Array.isArray(steps)) return { ok: true, steps: [] };
