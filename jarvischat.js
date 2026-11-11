@@ -21,6 +21,8 @@ import { findLoad, customerStops, customerView, isOcLoad, spokenName, nameScore 
 import { contactsFor } from './statusmail.js';
 import { customerAnswer, loadAnswer } from './dispatchcards.js';
 import { fmtLocal } from './localtime.js';
+import { normName } from './profiles.js';
+import { instructionsFor, instructionsSms } from './instructionstext.js';
 import { staffFacts } from './stafffacts.js';
 import { realUnit } from './units.js';
 
@@ -115,6 +117,8 @@ export const TOOLS = [
   { name: 'update_email', description: 'EMAIL REPLIES ONLY: when the email asks where loads are / their status / ETAs, list the trips that answer it (and dispatch follow-ups). The reply is then built from live data in the standard delivery-update format — do not write the load details yourself.', input_schema: { type: 'object', properties: { customer: { type: 'string', description: 'Customer / receiver name the update is about (as on the loads), or the place' }, destination: { type: 'string', description: 'Delivery city / state if the question was about a place' }, trips: { type: 'array', items: { type: 'string' } }, followUps: { type: 'array', items: { type: 'object', properties: { issue: { type: 'string' }, next: { type: 'string' }, owner: { type: 'string' }, status: { type: 'string', enum: ['Pending', 'Completed'] } } } } }, required: ['trips'] } },
   { name: 'staff_directory', description: 'Florida Beauty employees by name, department or role (billing, payroll, claims, maintenance, sales, IT…): name, department and extension. Cell phones are never available.', input_schema: { type: 'object', properties: { name_or_department: { type: 'string' } }, required: ['name_or_department'] } },
   { name: 'load_details', description: 'Everything about one load: status, truck/trailer/drivers, live location, every stop with ETA (local time), appointments and committed delivery times, ARTIS ETA / miles / delivered time per customer, geofence arrival / departure per stop, ARTIS truck / trailer location, trailer temp at the loading door, ARTIS documents on file (POD / BOL…), rate con, trip sheet, open alerts, to-dos, notes and transfers, holds, emails count.', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
+  { name: 'customer_instructions', description: 'STAFF ONLY (every employee). A customer\'s delivery instructions — the Notes in their TruckMate customer profile (receiving hours, check-in, door, lumper, who to call…). By customer name, or a trip for every stop on that load (optionally with the customer to narrow it). Say when they were read, and if TruckMate has none, say so.', input_schema: { type: 'object', properties: { customer: { type: 'string' }, trip: { type: 'string' } } } },
+  { name: 'text_instructions', description: 'STAFF ONLY. Text a customer\'s delivery instructions when an employee asks: to: "me" (the employee asking — their phone on the Employees list) or "driver" (the driver of that trip). Give the customer and / or the trip. Then say what the tool says (sent, or why not).', input_schema: { type: 'object', properties: { to: { type: 'string', enum: ['me', 'driver'] }, customer: { type: 'string' }, trip: { type: 'string' } }, required: ['to'] } },
   { name: 'client_lookup', description: 'Florida Beauty\'s client list (flower + produce customers, synced daily from ARTIS): find a client by name, client ID, phone or email — official name, ARTIS customer ID, address, ZIP, phone / fax, contacts, emails, delivery days, appointment required, warehouse, last delivery, their geofence (location + radius the AI dispatcher uses to see arrivals / departures) — and their loads on the board right now. For our staff only.', input_schema: { type: 'object', properties: { query: { type: 'string', description: 'Name (e.g. "DBEC Wholesale"), 5-digit client ID, phone or email' } }, required: ['query'] } },
   { name: 'cargo_received', description: 'ARTIS (Florida Beauty\'s EDI system): the boxes received / scanned at the terminal for a ship date, per consignee (customer) — boxes and cubes expected vs scanned, missing boxes, farms, products. Optional date (YYYY-MM-DD, default today) and customer name or ARTIS consignee ID. Use for "did all of Kuhn\'s boxes come in today?" or "what\'s still missing for tomorrow?".', input_schema: { type: 'object', properties: { date: { type: 'string' }, customer: { type: 'string' } } } },
   { name: 'day_of_service', description: 'ARTIS: whether a consignee can receive on a ship date (days of service), up to 5 days ahead. consignee_id for one customer, or shipper_id for all consignees a shipper used in the last 30 days.', input_schema: { type: 'object', properties: { consignee_id: { type: 'string' }, shipper_id: { type: 'string' }, date: { type: 'string' } } } },
@@ -152,7 +156,7 @@ export const SYSTEM = (who) => `You are Jarvis, the AI dispatcher for Florida Be
 - How many miles between two places / from a truck to a stop / left on a trip → miles (say "about" when driving_miles is false).
 - What ETA we gave a customer vs when the truck actually got there (for a trip or a customer, this week…) → eta_vs_actual.
 - A load that already delivered / finished (not on the board) — "the one that left Tuesday", "when did it deliver" → past_loads. Never say it doesn't exist before checking.
-- What a load pays / how much a broker load paid → load_details billing.loadPays (TruckMate Billing tab total of its bills; with rateConRate and accChgsOverRateCon — extra charges not on the rate con mean a revised rate con is needed). Reefer temps (current, return air, discharge air, set point, what the load needs, in or out of range) → load_details reefer. Pickup / delivery appointments and shipper / consignee from TruckMate's boxes → load_details shipperConsignee. PO / Pickup# vs the rate con → load_details traceNumbers. Every pickup and delivery place with name, street address, phone, contact and appointment (TruckMate's Shipper / Consignee boxes) → load_details shippers / consignees — when multipleShippers or multipleConsignees is true, say how many and list each. Anything else off a TruckMate bill (commodity / temp code, service level, division, weight, pieces, pallets, miles, bill to, who entered it and when, billing approved, pickup / delivery truck, driver and trailer, estimated delivery) → load_details truckmateBills. Staff only — never to customers, brokers or drivers.
+- What a load pays / how much a broker load paid → load_details billing.loadPays (TruckMate Billing tab total of its bills; with rateConRate and accChgsOverRateCon — extra charges not on the rate con mean a revised rate con is needed). Reefer temps (current, return air, discharge air, set point, what the load needs, in or out of range) → load_details reefer. Pickup / delivery appointments and shipper / consignee from TruckMate's boxes → load_details shipperConsignee. PO / Pickup# vs the rate con → load_details traceNumbers. A customer's delivery instructions (TruckMate customer profile Notes) → customer_instructions (by customer or trip); "text me / text the driver the instructions" → text_instructions. Every pickup and delivery place with name, street address, phone, contact and appointment (TruckMate's Shipper / Consignee boxes) → load_details shippers / consignees — when multipleShippers or multipleConsignees is true, say how many and list each. Anything else off a TruckMate bill (commodity / temp code, service level, division, weight, pieces, pallets, miles, bill to, who entered it and when, billing approved, pickup / delivery truck, driver and trailer, estimated delivery) → load_details truckmateBills. Staff only — never to customers, brokers or drivers.
 - Committed delivery times, ARTIS's ETA / delivered time, geofence arrival / departure, ARTIS truck / trailer location, door temps and ARTIS documents for a load → load_details.
 - PODs, BOLs, invoices, rate cons on file in ARTIS for a load → load_documents (by trip, bill or customer); say what was found and that it's attached (or that ARTIS has none yet).
 - ARTIS warehouse facts (trucks approaching the yard, trailer temps at the door, box temps at receiving, rejected / wrong-pallet / not-built boxes, delivery performance, a unit's ARTIS position, BOL / POD documents) → artis_report. Internal only — never quote these to customers.
@@ -197,7 +201,7 @@ export function customerSafe(x) {
 // Voice conversation in Ask Jarvis: the answer is read out loud, so keep it short.
 export const SPOKEN = `\n\nThis turn is a SPOKEN conversation (the dispatcher talks, your answer is read aloud): answer in 1-3 short plain sentences, no lists, tables, markdown or emojis. Say truck and trailer numbers as written. If there's more, give the key point and say the full detail is on screen. Anything that needs the dispatcher's Confirm: say it's waiting for their Confirm on screen.`;
 
-export function initJarvisChat(app, { trailerChange = null, staffActions = null, requireAuth, db, brokerFollow = null, dispatchLog = null, miles = null, artis = null, artisWeb = null, artisReports = null, synergize = null, clients = null, geofences = null, stopTimes = null, pastLoads = null, planSheet = null, nextLoads = null, playbook = null, directory = null, getBoard, docs = null, packets = null, driver = null, voice = null, reports = {}, mail = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initJarvisChat(app, { trailerChange = null, staffActions = null, requireAuth, db, brokerFollow = null, dispatchLog = null, miles = null, artis = null, artisWeb = null, artisReports = null, synergize = null, clients = null, geofences = null, stopTimes = null, pastLoads = null, planSheet = null, nextLoads = null, playbook = null, directory = null, getBoard, docs = null, packets = null, driver = null, voice = null, sms = null, reports = {}, mail = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const threadsKey = (uid) => `taJarvisChat:${uid}`;
   const actionsKey = `taJarvisActions:${SITE}`;
@@ -430,6 +434,27 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         const it = its.find((x) => /^(depship|depcons|arrcons|arrship|intran|enroute)/i.test(String(tripOf(x).status || ''))) || its[0];
         return { found: true, truck: tripOf(it).powerUnit, trip: tripNo(it), status: tripOf(it).status || null, truckNow: truckNow(it, w), crew: crewHours(it), team: !!(tripOf(it).driver2), note: 'Hours come from the Samsara ELD; clocksAsOf says how fresh they are.' };
       }
+      case 'customer_instructions':
+      case 'text_instructions': {
+        if (ctx.customer) return { error: 'Not available.' };
+        const it = input.trip ? byTrip(input.trip) : null;
+        if (input.trip && !it) return { found: false, note: `Trip ${input.trip} is not on the live board.` };
+        const list = instructionsFor({ profiles: (await db.get(`taProfiles:${SITE}`, {})) || {}, item: it, customer: input.customer || '' });
+        if (name === 'customer_instructions') return list.length ? { found: true, instructions: list } : { found: false, note: 'No TruckMate instructions on file for that customer yet (they are read from the TruckMate customer profile every 10 days).' };
+        const text = instructionsSms(list, { trip: it ? tripNo(it) : null });
+        if (!text) return { sent: false, note: 'No instructions on file to text for that customer.' };
+        if (input.to === 'driver') {
+          if (!it) return { sent: false, error: 'Which trip? I need the trip to text its driver.' };
+          const r = driver && driver.text ? await driver.text(SITE, tripNo(it), text, `${ctx.user.name} via Jarvis`) : { skipped: 'texting not connected' };
+          return r && r.sent ? { sent: true, to: 'driver', via: r.via || 'text', text } : { sent: false, why: (r && (r.skipped || r.error)) || 'not sent' };
+        }
+        const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
+        const d10 = (x) => String(x || '').replace(/\D+/g, '').slice(-10);
+        const me = people.find((pp) => pp && pp.phone && ((ctx.user.email && String(pp.email || '').toLowerCase() === String(ctx.user.email).toLowerCase()) || (String(ctx.user.id || '').startsWith('sms:') && d10(pp.phone) === d10(ctx.user.id))));
+        if (!me || d10(me.phone).length !== 10) return { sent: false, why: 'No cell phone for you on the Employees list.' };
+        if (!sms) return { sent: false, why: 'texting not connected' };
+        try { const r = await sms(d10(me.phone), text); return { sent: true, to: 'you', held: /training/i.test(String((r && r.messageStatus) || '')) || undefined, text }; } catch (e) { return { sent: false, why: e.message }; }
+      }
       case 'client_lookup': {
         if (!clients) return { error: 'The client list is not loaded.' };
         const q = String(input.query || '').trim();
@@ -439,7 +464,10 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         const all = ((await getBoard(SITE)) || {}).trips || [];
         const fences = geofences ? await geofences.fences().catch(() => ({})) : {};
         const fenceOf = (c) => { const f = fences[String(c.id || '').padStart(5, '0')]; return f ? { lat: f.lat, lng: f.lng, radiusM: f.radiusM, on: f.active !== false, map: `https://www.google.com/maps?q=${f.lat},${f.lng}` } : null; };
-        return { found: true, clients: found.map((c) => ({ ...c, geofence: fenceOf(c), loadsOnBoard: clients.loads(all, c).map((it) => ({ trip: tripNo(it), status: (it.trip || it).status || null, truck: (it.trip || it).powerUnit || null })) })) };
+        // TruckMate customer profile: the Notes (delivery instructions) and phones / emails the reefer agent saved on our profile
+        const profs = Object.values((await db.get(`taProfiles:${SITE}`, {})) || {}).filter((p) => p.type === 'customer' && p.truckmate);
+        const tmOf = (c) => { const n = normName(c.name); const p = profs.find((x) => normName(x.name) === n || normName(x.truckmate.name) === n || (x.aliases || []).some((y) => normName(y) === n)); return p ? { code: p.truckmate.code, instructions: p.truckmate.notes || 'none in TruckMate', phones: p.truckmate.phones, emails: p.truckmate.emails, people: p.truckmate.people, readAt: p.truckmate.syncedAt } : null; };
+        return { found: true, clients: found.map((c) => ({ ...c, truckmate: tmOf(c), geofence: fenceOf(c), loadsOnBoard: clients.loads(all, c).map((it) => ({ trip: tripNo(it), status: (it.trip || it).status || null, truck: (it.trip || it).powerUnit || null })) })) };
       }
       case 'cargo_received': {
         if (!artis || !artis.ready()) return { error: 'ARTIS is not connected yet (login not set in Render).' };

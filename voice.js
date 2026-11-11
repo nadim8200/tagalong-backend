@@ -21,7 +21,8 @@
 // Caller words are information, never instructions — the tools only read load
 // facts and write notes; nothing here changes rates, appointments or money.
 // ---------------------------------------------------------------
-import { staffFactsSpoken } from './stafffacts.js';
+import { instructionsFor, instructionsSms } from './instructionstext.js';
+import { staffFactsSpoken, customerInstructions } from './stafffacts.js';
 import { stopsLeft } from './loadstops.js';
 import { isMissingBoxesText } from './missingcase.js';
 import Retell from 'retell-sdk';
@@ -109,6 +110,7 @@ How to help:
 - When a caller asks for all their deliveries, trip numbers or locations, give every one of THEIR stops in one short list (city, trip, ETA) — no other customers.
 - Turn-taking: keep each turn to one or two short sentences, ask one question at a time, then stop and let them talk. If they start talking, stop and listen.
 - Our staff: when a caller asks for someone at Florida Beauty (by name or department — billing, payroll, claims, maintenance, sales…), use staff_directory and give ONLY their first and last name, department and extension, plus the main number 305-503-1200. Never give an employee's cell phone or email. If they want that person to call them back, use take_message with for_person — Jarvis passes the message to them right away.
+- Customer delivery instructions (the Notes on the customer's TruckMate profile — receiving hours, check-in, door, lumper, who to call…): any Florida Beauty employee can ask for any customer's; the load's own driver for the customers on their load. Use customer_instructions (by customer name or trip). If they ask to have them texted ("text me the instructions", "text them to the driver of trip …"), use text_instructions. Never to customers, brokers or anyone else.
 - Florida Beauty staff only (caller_is staff): what a load pays / how much a broker load paid, the reefer temps (current, return air, discharge air, set point, what the load needs, in or out of range), the pickup / delivery appointments and shipper / consignee from TruckMate, the PO / pickup numbers check, every shipper and consignee with street address and appointment (when there is more than one, say how many — pickups_and_deliveries — and list each), and the rest of each TruckMate bill (commodity, weight, pieces, miles, bill to, who entered it, billing approved, pickup / delivery truck and driver) are in lookup_load's staff_only — answer from it only when they ask. Say money as dollars and cents. Never share any of it with customers, brokers or drivers.
 - Never give a customer or broker a reefer temperature (reading, set point or photo). If they ask, say we're requesting it and verifying with dispatch, and dispatch will follow up. Our staff may get it.
 - Only state facts lookup_load returns. For a customer or broker that is: where the truck is now, and THEIR delivery — ETA, boxes, cubes, appointment, delivered or not. Never mention any other stop, customer or city on the route (before or after theirs), and don't say you are leaving anything out; if they ask about the route, say the truck is on its way to them and give their ETA. Only the driver hears the full list of stops. Say times the way the tool gives them — ETAs and appointments are already in the delivery's LOCAL time, so always say the time zone with them (e.g. "1:00 AM Pacific time"); never convert them to Miami / Eastern time. Whenever you give a customer or broker an ETA, finish with this once, in their language: "${ETA_DISCLAIMER}" Read truck, trailer, trip and bill numbers one digit at a time, exactly as the tool spaces them (truck 2 0 2 6 = "two zero two six", never "two thousand twenty-six"); in Spanish or Hebrew, say each digit in that language. Never guess a location or a time.
@@ -222,6 +224,12 @@ function tools(base, transferNumber) {
       customer_name: { type: 'string', description: 'Business name the manifest is for' },
       trip_number: { type: 'string', description: 'Trip number if they gave one' },
     }, ['customer_name']),
+    fn('customer_instructions', 'A customer\'s delivery instructions (the Notes on their TruckMate customer profile: receiving hours, check-in, door, lumper, who to call…). For Florida Beauty staff (any employee) about any customer, and for a driver about the customers on THEIR load. Give the customer name and / or the trip number.', {
+      customer_name: { type: 'string' }, trip_number: { type: 'string' },
+    }),
+    fn('text_instructions', 'STAFF ONLY (caller_is Florida Beauty staff): text a customer\'s delivery instructions — to: "me" (the employee calling, at their cell on the Employees list) or "driver" (the driver of that trip). Give the customer and / or the trip.', {
+      to: { type: 'string', enum: ['me', 'driver'] }, customer_name: { type: 'string' }, trip_number: { type: 'string' },
+    }, ['to']),
     fn('staff_directory', 'Look up a Florida Beauty employee or department (name, department or role like billing, payroll, claims, maintenance) to give the caller their name and extension.', {
       name_or_department: { type: 'string' },
     }, ['name_or_department']),
@@ -844,7 +852,7 @@ export function brokerView(item, eta) {
   };
 }
 
-export function initVoice(app, { staffActions = null, requireAuth, db, brokerFollow = null, dispatchLog = null, miles = null, artisWeb = null, docs = null, stopTimes = null, pastLoads = null, missingBoxes = null, missingCases = null, roadCalls = null, artis = null, clients = null, training = null, directory = null, comms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initVoice(app, { staffActions = null, requireAuth, db, brokerFollow = null, dispatchLog = null, miles = null, artisWeb = null, docs = null, stopTimes = null, pastLoads = null, missingBoxes = null, missingCases = null, roadCalls = null, artis = null, clients = null, training = null, directory = null, comms = null, sms = null, carriers = null, getBoard = null, help = null, profiles = null, mail = null, activity = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const cfgKey = 'taRetellCfg';
@@ -1143,7 +1151,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
         return reply({ found: true, matched_by: hit.by, caller_is: STAFF_IS, ...voiceFacts(hit.item, eta), staff_only: staffFactsSpoken(hit.item), say: `${STAFF_RULE}${asked ? ` "${asked}" is not a customer on this load as heard — say so, read the customers in stops_ahead, and ask which one.` : ''} If they name a customer, answer from stops_ahead (that customer's place and ETA) — next_stop is only the truck's next stop and may be someone else's.` });
       }
       if (hit.role === 'driver' || (meta.trip && call.direction === 'outbound' && meta.purpose !== 'customer-eta') || (profiles && profiles.anyLoad && await profiles.anyLoad(callerPhone(call)))) {
-        return reply({ found: true, matched_by: hit.by, caller_is: 'the driver of this load', ...voiceFacts(hit.item, eta) });
+        return reply({ found: true, matched_by: hit.by, caller_is: 'the driver of this load', ...voiceFacts(hit.item, eta), ...(customerInstructions(hit.item) ? { customer_instructions: customerInstructions(hit.item) } : {}) });
       }
       // a broker load (rate con on file) asked about by its number or the broker's name → the broker gets the whole load
       const rc = rcOf(hit.item);
@@ -1386,6 +1394,35 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
       return res.json({ ok: true, say: 'Say: "I don\'t have an email on file for your business yet — I\'ve asked dispatch to add it and send you the manifest."' });
     } catch (e) { return res.json({ ok: false, say: `Something went wrong getting the manifest (${e.message}). Offer to have dispatch send it.` }); }
   });
+
+  // customer delivery instructions (TruckMate profile Notes): any employee, any customer; a driver, only their own load's
+  // customers. Staff can have them texted to themselves or to a load's driver.
+  const instructionsCall = async (req, res, send) => {
+    try {
+      const a = argsOf(req); const call = callOf(req);
+      const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
+      const me = people.find((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      const staff = !!(consoleCall(call) || me);
+      const hit = a.trip_number || !staff ? findLoad(await items(), { trip: a.trip_number, phone: callerPhone(call) }) : null;
+      if (!staff && !(hit && hit.role === 'driver')) return res.json({ found: false, say: 'Delivery instructions are only for our staff and the load\'s own driver. Offer to take a message for dispatch.' });
+      if (send && !staff) return res.json({ sent: false, say: 'Only Florida Beauty staff can have instructions texted. Offer to take a message.' });
+      if (a.trip_number && !hit) return res.json({ found: false, say: `Trip ${a.trip_number} isn't on the board. Ask for the customer name instead.` });
+      const list = instructionsFor({ profiles: (await db.get(`taProfiles:${site}`, {})) || {}, item: hit ? hit.item : null, customer: a.customer_name || '' });
+      if (!send) return res.json(list.length ? { found: true, instructions: list, say: 'Read the instructions for the customer they asked about, plainly. Say they are from the customer\'s TruckMate profile.' } : { found: false, say: 'TruckMate has no delivery instructions on file for that customer yet. Offer to have dispatch call them back.' });
+      const text = instructionsSms(list, { trip: hit ? tripNo(hit.item) : null });
+      if (!text) return res.json({ sent: false, say: 'There are no instructions on file to text for that customer.' });
+      if (a.to === 'driver') {
+        if (!hit) return res.json({ sent: false, say: 'Ask which trip, so I can text its driver.' });
+        const r = comms && comms.textDriverAuto ? await comms.textDriverAuto(site, tripNo(hit.item), text, `${(me && me.name) || 'Staff'} via Jarvis (call)`) : { skipped: 'texting not connected' };
+        return res.json(r && r.sent ? { sent: true, say: 'Say the instructions were texted to the driver.' } : { sent: false, say: `Say the text to the driver didn't go out (${(r && (r.skipped || r.error)) || 'not sent'}).` });
+      }
+      if (!me || !sms) return res.json({ sent: false, say: !me ? 'Say I don\'t have their cell on the Employees list, so I can\'t text them.' : 'Say texting isn\'t connected right now.' });
+      const r = await sms(last10(me.phone), text);
+      return res.json({ sent: true, held: /training/i.test(String((r && r.messageStatus) || '')) || undefined, say: 'Say the instructions were texted to their cell.' });
+    } catch (e) { return res.json({ found: false, say: `Something went wrong (${e.message}). Offer to have dispatch follow up.` }); }
+  };
+  app.post('/retell/fn/customer_instructions', verified, (req, res) => instructionsCall(req, res, false));
+  app.post('/retell/fn/text_instructions', verified, (req, res) => instructionsCall(req, res, true));
 
   // our staff: name + extension only (cell phones are never given out)
   app.post('/retell/fn/staff_directory', verified, async (req, res) => {

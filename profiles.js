@@ -144,6 +144,38 @@ export function applyArtisTo(store, artis = [], now = new Date().toISOString()) 
 
 // Can this phone get a customer's delivery details from Jarvis? Pure.
 // → { ok, why, profile }  (strict off, or the profile has no numbers yet → ok)
+// What TruckMate's customer profile says (the reefer agent reads it off the screen): the Notes (Specifications) — the
+// instructions drivers need at that stop — and the phones / emails. Saved on our customer profile (matched by TruckMate code,
+// then by name; a new profile when there's none). Contacts dispatch edited are never changed. Pure.
+export function applyTruckMateCustomer(store, tm, now = new Date().toISOString()) {
+  const all = { ...(store || {}) };
+  const code = String(tm.code || '').trim().toUpperCase();
+  const n = normName(tm.name);
+  let p0 = Object.values(all).find((p) => p.type === 'customer' && p.truckmate && p.truckmate.code === code)
+    || (n ? Object.values(all).find((p) => p.type === 'customer' && (p.key === profileKey('customer', tm.name) || (p.aliases || []).some((x) => normName(x) === n))) : null);
+  if (!p0) {
+    if (!n) return { profiles: all, id: null };
+    p0 = { id: newId(), key: profileKey('customer', tm.name), type: 'customer', name: cleanName(tm.name), office: null, locations: [], contacts: [], aliases: [], notes: '', verified: null, edited: false, loads: [], createdAt: now, sources: [] };
+  }
+  const p = { ...p0, contacts: [...(p0.contacts || [])], sources: [...new Set([...(p0.sources || []), 'TruckMate'])] };
+  const prev = p.truckmate || {};
+  p.truckmate = {
+    code, name: tm.name || prev.name || null,
+    notes: tm.notes !== undefined ? (tm.notes ? String(tm.notes).slice(0, 4000) : null) : (prev.notes ?? null),
+    address: tm.address || prev.address || null,
+    phones: tm.phones || prev.phones || [], emails: tm.emails || prev.emails || [], people: tm.people || prev.people || [],
+    syncedAt: now,
+  };
+  const has = (c) => p.contacts.some((x) => (c.email && x.email === c.email) || (c.phone && x.phone === c.phone));
+  const add = (c) => { if ((c.email || c.phone) && !has(c)) p.contacts.push({ id: newId(), name: c.name || null, role: c.role || 'customer', email: c.email || null, phone: c.phone || null, statusEmails: false, authorized: false, source: 'TruckMate', addedAt: now }); };
+  for (const ph of p.truckmate.phones) if (!/fax/i.test(ph.label || '')) add({ name: ph.label || null, phone: last10(ph.number) || null });
+  for (const em of p.truckmate.emails) add({ name: em.label || null, email: emailList(em.email)[0] || null });
+  for (const x of p.truckmate.people) add({ name: [x.name, x.title].filter(Boolean).join(' — ') || null, phone: last10(x.phone) || null, email: x.email ? emailList(x.email)[0] || null : null, role: /receiv|dock|warehouse/i.test(x.title || '') ? 'receiver' : 'customer' });
+  p.updatedAt = now;
+  all[p.id] = p;
+  return { profiles: all, id: p.id };
+}
+
 export function phoneAllowed({ profiles, settings = {}, customerName, phone }) {
   const P = last10(phone);
   if (P && (settings.anyLoad || []).some((x) => last10(x.phone) === P)) return { ok: true, why: 'authorized for every load' };

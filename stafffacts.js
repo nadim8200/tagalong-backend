@@ -23,6 +23,12 @@ const addr = (x) => (x && (x.address1 || x.address || x.city) ? [x.name, x.addre
 
 const party = (p) => ({ name: S(p.name) || null, address: addr({ ...p, name: null }), phone: S(p.phone) || null, contact: S(p.contact) || null, code: S(p.code) || null, bills: p.bills, appointments: (p.appointments || []).map((a) => [a.from, a.to].filter(Boolean).join(' – ') + (a.apptMade ? ' (appt made)' : a.apptRequired ? ' (appt required, not made)' : '')).filter((x) => x.trim()) });
 
+// The load's customers' Notes from their TruckMate profiles (for staff, and for the load's own driver). Pure.
+export function customerInstructions(item) {
+  const n = item && item._customerNotes;
+  return n && n.length ? n.map((c) => ({ customer: c.name, code: c.code, is: c.roles.join(' and '), instructions: c.notes, readAt: c.readAt })) : null;
+}
+
 export function staffFacts(item) {
   if (!item) return null;
   const bills = (item.freightBills || item.orders || tripOf(item).freightBills || []).filter(Boolean);
@@ -84,6 +90,8 @@ export function staffFacts(item) {
     multipleConsignees: item._parties ? item._parties.multipleConsignees : undefined,
     partiesNote: item._parties ? `${item._parties.multipleShippers ? `${item._parties.shippers.length} different shippers (pickups). ` : ''}${item._parties.multipleConsignees ? `${item._parties.consignees.length} different consignees (deliveries). ` : ''}Read off ${item._parties.readBills} of ${item._parties.totalBills} bills.` : undefined,
     truckmateBills: billInfo.length ? billInfo : null,
+    // TruckMate customer profile → Notes (Specifications) of each shipper / consignee on the load
+    customerInstructions: customerInstructions(item),
   };
 }
 
@@ -101,5 +109,6 @@ export function staffFactsSpoken(item) {
   if (f.consignees) out.consignees = f.consignees;
   if (f.partiesNote) out.pickups_and_deliveries = f.partiesNote;
   if (f.truckmateBills) out.truckmate_bills = f.truckmateBills;
+  if (f.customerInstructions) out.customer_instructions = f.customerInstructions;
   return out;
 }

@@ -37,3 +37,39 @@ test('a load with two shippers and two consignees says so', () => {
   assert.match(f.partiesNote, /2 different shippers.*2 different consignees.*3 of 3 bills/);
   assert.equal(loadParties({ freightBills: [{ billNumber: 'X' }] }, read), null);
 });
+
+test('customer notes: codes from the bills read once a week, and each load gets its customers\' notes', async () => {
+  const { customersToRead, loadCustomerNotes } = await import('../reeferagent.js');
+  const bills = {
+    B1: { trip: '7', screen: { shipper: { code: '29860', name: 'AMERICOLD' }, consignee: { code: '31797', name: 'PFG VIRGINIA' } } },
+    B2: { trip: '7', screen: { shipper: { code: '29860', name: 'AMERICOLD' }, consignee: { code: '35951', name: 'EASTERN FOOD' } } },
+  };
+  const now = Date.parse('2026-11-11T00:00:00Z');
+  // consignees only (the stops drivers deliver), only on trip-sheet loads
+  assert.deepEqual(customersToRead(bills, {}, { now }).map((x) => x.value), ['31797', '35951']);
+  assert.deepEqual(customersToRead(bills, {}, { now, ltlTrips: new Set(['8']) }), []);
+  const read = { 31797: { at: '2026-11-05T00:00:00Z', name: 'PFG VIRGINIA', notes: 'Check in at gate 2. Lumper paid by receiver.' }, 35951: { at: '2026-10-30T00:00:00Z', notes: null } };
+  assert.deepEqual(customersToRead(bills, read, { now }).map((x) => x.value), ['35951']);   // 31797 is 6 days old, 35951 12
+  const n = loadCustomerNotes({ freightBills: [{ billNumber: 'B1' }, { billNumber: 'B2' }] }, bills, read);
+  assert.equal(n.length, 1);
+  assert.deepEqual(n[0].roles, ['consignee']);
+  const item = { _customerNotes: n };
+  assert.match(staffFacts(item).customerInstructions[0].instructions, /gate 2/);
+});
+
+test('TruckMate customer info lands on our customer profile: instructions, phones, emails; edited contacts kept', async () => {
+  const { applyTruckMateCustomer } = await import('../profiles.js');
+  const store = { a: { id: 'a', key: 'customer|PFG THE VIRGINIA FOOD SERVICE GROUP|', type: 'customer', name: 'PFG THE VIRGINIA FOOD SERVICE GROUP', contacts: [{ id: 'c1', phone: '8045551234', name: 'Receiving', edited: true }], aliases: [] } };
+  const tm = { code: '31797', name: 'PFG THE VIRGINIA FOOD SERVICE GROUP', notes: 'Receiving 6AM-2PM. Check in at gate 2.', phones: [{ label: 'Main', number: '(804) 555-1234' }, { label: 'Fax', number: '804-555-9999' }, { label: 'Dock', number: '804-555-0000' }], emails: [{ label: 'Receiving', email: 'dock@pfg.com' }], people: [] };
+  const { profiles, id } = applyTruckMateCustomer(store, tm, '2026-11-11T00:00:00Z');
+  assert.equal(id, 'a');
+  const p = profiles.a;
+  assert.equal(p.truckmate.notes, 'Receiving 6AM-2PM. Check in at gate 2.');
+  assert.equal(p.truckmate.code, '31797');
+  assert.equal(p.contacts.length, 3);                       // existing 804-555-1234 kept as is, dock phone + email added, no fax
+  assert.equal(p.contacts[0].name, 'Receiving');
+  assert.ok(p.contacts.some((c) => c.email === 'dock@pfg.com' && c.source === 'TruckMate'));
+  // next time it matches by TruckMate code even if the name differs
+  assert.equal(applyTruckMateCustomer(profiles, { ...tm, name: 'PFG VIRGINIA' }).id, 'a');
+  assert.ok(applyTruckMateCustomer({}, { code: '1', name: 'NEW CUSTOMER', notes: null, phones: [], emails: [], people: [] }).id);
+});

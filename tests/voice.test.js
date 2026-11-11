@@ -105,7 +105,7 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   const llm = v.retellCalls.find((c) => c.url.endsWith('/create-retell-llm')).body;
   assert.equal(llm.model, undefined, 'no retired top-level model field'); assert.equal(llm.model_temperature, undefined);
   assert.equal(llm.model_config.type, 'cascading'); assert.match(llm.model_config.primary.model, /^claude/); assert.equal(llm.model_config.temperature, 0.2);
-  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'dispatch_log', 'report_breakdown', 'breakdown_update', 'breakdown_fixed', 'answer_stop', 'follow_up_load', 'report_missing_boxes', 'take_message', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
+  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'dispatch_log', 'report_breakdown', 'breakdown_update', 'breakdown_fixed', 'answer_stop', 'follow_up_load', 'report_missing_boxes', 'take_message', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'customer_instructions', 'text_instructions', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
   assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
   assert.deepEqual(agent.language, ['en-US', 'es-419', 'he-IL']);
@@ -1072,7 +1072,7 @@ test('Jarvis calling a customer before their delivery: the lookup gives only the
 test('on a customer ETA call every tool but the lookup and take a message refuses, whatever the customer asks', async () => {
   const v = setup();
   const call = { call_id: 'eta2', direction: 'outbound', to_number: '+15550100527', metadata: { trip: '624393', purpose: 'customer-eta', customer: 'AMLINGS', eta: '3:40 PM Eastern', boxes: '25' } };
-  const tools = ['boxes_check', 'follow_up_load', 'dispatch_log', 'report_missing_boxes', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'staff_directory', 'confirm_delivered', 'road_call_details', 'report_problem', 'report_breakdown', 'breakdown_update', 'breakdown_fixed', 'answer_stop'];
+  const tools = ['boxes_check', 'follow_up_load', 'dispatch_log', 'report_missing_boxes', 'past_loads', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'customer_instructions', 'text_instructions', 'staff_directory', 'confirm_delivered', 'road_call_details', 'report_problem', 'report_breakdown', 'breakdown_update', 'breakdown_fixed', 'answer_stop'];
   for (const t of tools) {
     const r = await v.hit(`POST /retell/fn/${t}`, { args: { trip_number: '624393', customer_name: 'Native Chicago', stop: 'Native Chicago' }, call }); // eslint-disable-line no-await-in-loop
     assert.equal(r.out.ok, false, t); assert.match(r.out.say, /only the delivery ETA/, t);

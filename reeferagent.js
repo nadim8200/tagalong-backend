@@ -15,12 +15,13 @@
 // ---------------------------------------------------------------
 import crypto from 'node:crypto';
 import { loadTarget } from './temppolicy.js';
+import { applyTruckMateCustomer } from './profiles.js';
 
 const SITE = 'florida-beauty';
 const MIN = 60000;
 export const EVERY_MIN = 120;   // a full read of the active loads' trailers every 2 hours (the agent checks in hourly)
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const KEYS = { noTemp: `taTkNoTemp:${SITE}`, key: 'taReeferAgentKey', recipe: 'taReeferAgentRecipe', billRecipe: 'taBillAgentRecipe', bills: `taTmBillStops:${SITE}`, readings: `taTkReefer:${SITE}`, shots: 'taReeferAgentShots', runs: 'taReeferAgentRuns' };
+const KEYS = { noTemp: `taTkNoTemp:${SITE}`, key: 'taReeferAgentKey', recipe: 'taReeferAgentRecipe', billRecipe: 'taBillAgentRecipe', bills: `taTmBillStops:${SITE}`, custRecipe: 'taCustAgentRecipe', customers: `taTmCustomerNotes:${SITE}`, readings: `taTkReefer:${SITE}`, shots: 'taReeferAgentShots', runs: 'taReeferAgentRuns' };
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
 const unit = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -38,7 +39,7 @@ function cleanSteps(steps, label) {
   for (const [i, s] of steps.entries()) {
     const t = s && s.do; const at = `${label} step ${i + 1}`;
     if (t === 'click' || t === 'doubleclick') { if (!frac(s.x) || !frac(s.y)) return { ok: false, error: `${at}: x and y are 0–1 (part of the window).` }; out.push({ do: t, x: Number(s.x), y: Number(s.y), note: String(s.note || '').slice(0, 80) }); continue; }
-    if (t === 'type') { const v = String(s.text || ''); if (!/^(\{trailer\}|\{bill\}|[0-9]{1,10})$/.test(v)) return { ok: false, error: `${at}: only the trailer number ({trailer}), the bill number ({bill}) or digits may be typed.` }; out.push({ do: 'type', text: v }); continue; }
+    if (t === 'type') { const v = String(s.text || ''); if (!/^(\{trailer\}|\{bill\}|\{code\}|[0-9]{1,10})$/.test(v)) return { ok: false, error: `${at}: only the trailer number ({trailer}), the bill number ({bill}), the customer code ({code}) or digits may be typed.` }; out.push({ do: 'type', text: v }); continue; }
     if (t === 'key') { const k = String(s.key || '').toUpperCase(); if (!ALLOWED_KEYS.includes(k)) return { ok: false, error: `${at}: key must be one of ${ALLOWED_KEYS.join(', ')}.` }; out.push({ do: 'key', key: k }); continue; }
     if (t === 'wait') { const ms = Math.round(Number(s.ms)); if (!(ms >= 100 && ms <= 15000)) return { ok: false, error: `${at}: wait 100–15000 ms.` }; out.push({ do: 'wait', ms }); continue; }
     if (t === 'shot') { out.push({ do: 'shot' }); continue; }
@@ -89,7 +90,7 @@ export function trailersToRead(trips = [], max = 40, { noTemp = {}, now = Date.n
 // ---- freight bills: the Shipper / Consignee boxes (name, street address, phone, contact, appointment) ----
 // TruckMate's feed has only the zones of each bill; the boxes' names and street addresses are read off the order screen
 // (type the bill number, screenshot, close). A bill is read once, and again only when TruckMate updates it.
-export const BILLS_PER_RUN = 25;
+export const BILLS_PER_RUN = 40;
 // The bills to read: on active loads (not outside carriers), not read yet or changed in TruckMate since. Pure.
 export function billsToRead(trips = [], read = {}, max = BILLS_PER_RUN) {
   const out = [];
@@ -103,10 +104,11 @@ export function billsToRead(trips = [], read = {}, max = BILLS_PER_RUN) {
       seen.add(n);
       const r = read[n];
       if (r && (!b.updatedTimestamp || r.updated === String(b.updatedTimestamp))) continue;
-      out.push({ bill: n, trip: tripNo(it), updated: b.updatedTimestamp ? String(b.updatedTimestamp) : null, isNew: !r });
+      out.push({ bill: n, trip: tripNo(it), updated: b.updatedTimestamp ? String(b.updatedTimestamp) : null, isNew: !r, ltl: !!(it._manifest && (it._manifest.stops || []).length) });
     }
   }
-  return out.sort((a, b) => (b.isNew ? 1 : 0) - (a.isNew ? 1 : 0)).slice(0, max).map(({ isNew, ...x }) => x);
+  // trip-sheet (LTL) loads first — their consignees are the customers whose instructions drivers need — then new bills
+  return out.sort((a, b) => (b.ltl ? 2 : 0) + (b.isNew ? 1 : 0) - (a.ltl ? 2 : 0) - (a.isNew ? 1 : 0)).slice(0, max).map(({ isNew, ltl, ...x }) => x);
 }
 
 // A load's shippers and consignees from its bills' boxes, one entry per place (several bills to one place = one entry). Pure.
@@ -132,6 +134,59 @@ export function loadParties(item, read = {}) {
   const shippers = [...S.values()]; const consignees = [...C.values()];
   return { shippers, consignees, multipleShippers: shippers.length > 1, multipleConsignees: consignees.length > 1, readBills: bills.filter((b) => read[String(b.billNumber || '').trim()]).length, totalBills: bills.length };
 }
+
+// ---- customer profiles: the Notes (Specifications) — what the driver needs at the stop — and phones / emails ----
+// For the LTL customers: the consignees on loads with a trip sheet. Saved on our customer profile; a customer is opened in
+// TruckMate again only when what we have is more than 10 days old.
+export const CUSTOMERS_PER_RUN = 25;
+export const CUSTOMER_REREAD_DAYS = 10;
+const codeKey = (c) => String(c == null ? '' : c).trim().toUpperCase();
+// The customer codes to read: the consignees read off the bills of trip-sheet (LTL) loads, not read in the last 10 days.
+// ltlTrips: the trips with a trip sheet (null = every trip). Pure.
+export function customersToRead(bills = {}, read = {}, { now = Date.now(), max = CUSTOMERS_PER_RUN, ltlTrips = null } = {}) {
+  const out = new Map();
+  for (const r of Object.values(bills)) {
+    if (ltlTrips && !(r && ltlTrips.has(String(r.trip || '')))) continue;
+    for (const [role, p] of [['consignee', r && r.screen && r.screen.consignee]]) {
+      const k = codeKey(p && p.code);
+      if (!/^[A-Z0-9-]{1,12}$/.test(k) || out.has(k)) continue;
+      const done = read[k];
+      if (done && now - Date.parse(done.at) < CUSTOMER_REREAD_DAYS * 24 * 60 * MIN) continue;
+      out.set(k, { value: k, trip: r.trip || null, role, name: (p && p.name) || null, isNew: !done });
+    }
+  }
+  return [...out.values()].sort((a, b) => (b.isNew ? 1 : 0) - (a.isNew ? 1 : 0)).slice(0, max).map(({ isNew, ...x }) => x);
+}
+// A load's customer notes: each shipper / consignee on its bills that has notes in TruckMate. Pure.
+export function loadCustomerNotes(item, bills = {}, customers = {}) {
+  const out = new Map();
+  for (const b of ((item && (item.freightBills || item.orders)) || [])) {
+    const r = b && bills[String(b.billNumber || '').trim()];
+    if (!r || !r.screen) continue;
+    for (const [role, p] of [['shipper', r.screen.shipper], ['consignee', r.screen.consignee]]) {
+      const k = codeKey(p && p.code); const c = customers[k];
+      if (!k || !c || !String(c.notes || '').trim()) continue;
+      const cur = out.get(k) || { code: k, name: c.name || (p && p.name) || null, roles: [], notes: c.notes, readAt: c.at };
+      if (!cur.roles.includes(role)) cur.roles.push(role);
+      out.set(k, cur);
+    }
+  }
+  return out.size ? [...out.values()] : null;
+}
+const CUSTOMER_PROMPT = (code) => [
+  `This is a screenshot from TruckMate (trucking software). We expect the "Customer & Vendor Profiles" window showing customer code ${code} (Code box at the top), on one of its tabs: Address, Notes (Specifications) or Shipping Instructions — or its "Notes for Client ${code}" window (tabs at the bottom: Caller, Shipper, Consignee, Sales, Collection Notes, Credit Notation).`,
+  'Read it and return ONLY a JSON object (no prose):',
+  '{ "isProfileScreen": boolean, "code": string|null, "name": string|null, "panel": "address"|"notes"|"shipping"|"clientNotes"|"other", "clientNotesTab": "caller"|"shipper"|"consignee"|"sales"|"collection"|"credit"|null, "dialogOpen": boolean,',
+  '  "address": string|null, "city": string|null, "state": string|null, "zip": string|null,',
+  '  "phones": [{ "label": string|null, "number": string }], "emails": [{ "label": string|null, "email": string }], "contact": string|null,',
+  '  "instructions": string|null, "notes": string|null, "shippingOptions": [{ "text": string, "checked": boolean }] }',
+  'Address tab: address / city / state / zip; phones = Phone (with Ext), Cell, and any other number (label it, e.g. "Cell KATHELY"; skip Fax); emails = EVERY email address in ANY box (staff often type emails in Web Site and notes in EMail).',
+  '  instructions = any delivery instruction typed in any box instead of its normal value — gate / keypad codes, hours, "call before", etc. — exactly as written; null when none.',
+  'Notes tab: notes = the full text of the Notes (Specifications) box, exactly as written, line breaks kept (\\n); null when empty.',
+  'Notes for Client window: panel "clientNotes", clientNotesTab = the selected bottom tab, notes = its full text exactly as written (line breaks kept); code = the number in its title. This window is expected — it is not a dialog.',
+  'Shipping Instructions tab: shippingOptions = each line under Pickup and Delivery Options with whether its box is checked.',
+  'dialogOpen is true if any pop-up, message box, question, search window or error is showing. isProfileScreen is false for any other window, a login screen or a blank screen.',
+].join('\n');
 
 const BILL_PROMPT = (bill) => [
   `This is a screenshot from TruckMate (trucking software). We expect the order / freight bill screen for bill ${bill}, with its Shipper and Consignee boxes.`,
@@ -195,8 +250,15 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
   app.get('/reefer-agent/jobs', agentOnly(async (req, res) => {
     const recipe = (await db.get(KEYS.recipe, null)) || null;
     // freight bills to read (only once an admin set the bill recipe): new bills, and bills TruckMate changed since
-    const billRecipe = (await db.get(KEYS.billRecipe, null)) || null;
-    const billJobs = async (board) => (billRecipe && billRecipe.steps && billRecipe.steps.length ? { billRecipe, bills: billsToRead((board && board.trips) || [], (await db.get(KEYS.bills, {})) || {}) } : {});
+    // and customer profiles' Notes for the shippers / consignees on those bills (once the customer recipe is set)
+    const billJobs = async (board) => {
+      const [billRecipe, custRecipe, bills, customers] = await Promise.all([db.get(KEYS.billRecipe, null), db.get(KEYS.custRecipe, null), db.get(KEYS.bills, {}), db.get(KEYS.customers, {})]);
+      const sets = [];
+      if (billRecipe && billRecipe.steps && billRecipe.steps.length) sets.push({ kind: 'bill', recipe: billRecipe, items: billsToRead((board && board.trips) || [], bills || {}).map((x) => ({ value: x.bill, trip: x.trip, updated: x.updated })) });
+      const ltlTrips = new Set(((board && board.trips) || []).filter((it) => it._manifest && (it._manifest.stops || []).length).map(tripNo));
+      if (custRecipe && custRecipe.steps && custRecipe.steps.length) sets.push({ kind: 'customer', recipe: custRecipe, items: customersToRead(bills || {}, customers || {}, { now: now(), ltlTrips }).map((x) => ({ value: x.value, trip: x.trip })) });
+      return sets.length ? { sets } : {};
+    };
     // every EVERY_MIN: until then the hourly check-in gets no trailers (and its empty run isn't recorded)
     const last = ((await db.get(KEYS.runs, [])) || []).find((r) => r.of > 0);
     const board = getBoard ? await getBoard(SITE).catch(() => ({ trips: [] })) : { trips: [] };
@@ -210,14 +272,46 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
     const png = String(b.png || '');
     if (!png || png.length > 12 * 1024 * 1024) return res.status(400).json({ error: 'Send one PNG screenshot (base64, under 9 MB).' });
     try {
+      if (b.kind === 'customer') {
+        const code = codeKey(b.value).slice(0, 12);
+        const r = await read(png, code, CUSTOMER_PROMPT(code));
+        const same = r && codeKey(r.code).replace(/^0+/, '') === code.replace(/^0+/, '');
+        if (!r || !r.isProfileScreen || r.dialogOpen || !same) {
+          const why = !r || !r.isProfileScreen ? 'That is not the customer profile screen.' : r.dialogOpen ? 'A pop-up / message is showing.' : `The screen shows customer ${r.code || '(none)'}, not ${code}.`;
+          await keepShot('unexpected', code, png, why);
+          return res.json({ ok: false, stop: true, dialog: !!(r && r.dialogOpen), why });
+        }
+        // one profile can take several shots (Notes, then contacts): each adds what it shows
+        const list = (x) => (Array.isArray(x) ? x.filter(Boolean).slice(0, 30) : []);
+        const saved = await db.update(KEYS.customers, (cur) => {
+          const prev = (cur || {})[code] || {};
+          const visit = prev.visitAt && now() - Date.parse(prev.visitAt) < 30 * MIN;   // the shots of one visit add up; a new visit starts over
+          const base = visit ? { ...prev } : { code, visitAt: iso(), phones: [], emails: [] };
+          const next = { ...base, at: iso(), code, name: r.name || base.name || prev.name || null };
+          if (r.panel === 'address') Object.assign(next, { address: [r.address, r.city, [r.state, r.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null, contact: r.contact || null, boxNotes: r.instructions || null });
+          if (r.panel === 'notes') next.profileNotes = r.notes || null;
+          // Notes for Client: the Consignee tab is what the driver needs at delivery, the Shipper tab at pickup
+          if (r.panel === 'clientNotes' && r.clientNotesTab === 'consignee') next.deliveryNotes = r.notes || null;
+          if (r.panel === 'clientNotes' && r.clientNotesTab === 'shipper') next.pickupNotes = r.notes || null;
+          if (r.panel === 'shipping') next.shipping = list(r.shippingOptions).filter((o) => o.checked).map((o) => String(o.text || '').trim()).filter(Boolean);
+          next.phones = [...list(base.phones), ...list(r.phones)].filter((x, i, a) => x && x.number && a.findIndex((y) => String(y.number).replace(/\D/g, '') === String(x.number).replace(/\D/g, '')) === i);
+          next.emails = [...list(base.emails), ...list(r.emails)].filter((x, i, a) => x && x.email && a.findIndex((y) => String(y.email).toLowerCase() === String(x.email).toLowerCase()) === i);
+          // what drivers need, all in one place: what's typed in the Address boxes, the Notes, the checked shipping options
+          next.notes = [next.deliveryNotes, next.boxNotes, next.profileNotes, ...(next.shipping || []), next.pickupNotes ? `At pickup: ${next.pickupNotes}` : null].filter(Boolean).join('\n').slice(0, 4000) || null;
+          return { ...(cur || {}), [code]: next };
+        }, {});
+        // and on our customer profile (Customers & brokers): instructions, phones and emails
+        await db.update(`taProfiles:${SITE}`, (cur) => applyTruckMateCustomer(cur || {}, saved[code], iso()).profiles, {}).catch((e) => console.warn('[reefer-agent] profile:', e.message));
+        return res.json({ ok: true });
+      }
       if (b.kind === 'bill') {
-        const bill = String(b.bill || '').slice(0, 20);
+        const bill = String(b.value || b.bill || '').slice(0, 20);
         const r = await read(png, bill, BILL_PROMPT(bill));
         const same = r && r.billNumber && String(r.billNumber).toUpperCase().replace(/[^A-Z0-9]/g, '') === bill.toUpperCase().replace(/[^A-Z0-9]/g, '');
         if (!r || !r.isBillScreen || r.dialogOpen || !same) {
           const why = !r || !r.isBillScreen ? 'That is not the bill screen.' : r.dialogOpen ? 'A pop-up / message is showing.' : `The screen shows bill ${r.billNumber || '(none)'}, not ${bill}.`;
           await keepShot('unexpected', bill, png, why);
-          return res.json({ ok: false, stop: true, why });
+          return res.json({ ok: false, stop: true, dialog: !!(r && r.dialogOpen), why });
         }
         const { isBillScreen, dialogOpen, ...screen } = r;
         await db.update(KEYS.bills, (cur) => ({ ...(cur || {}), [bill]: { at: iso(), bill, trip: String(b.trip || '') || null, updated: String(b.updated || '') || null, screen } }), {});
@@ -243,8 +337,8 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
   app.post('/reefer-agent/run', agentOnly(async (req, res) => {
     const b = req.body || {};
     const run = { at: iso(), read: Number(b.read) || 0, of: Number(b.of) || 0, stopped: String(b.stopped || '').slice(0, 200) || null, agent: String(b.agent || '').slice(0, 60) || null };
-    run.bills = Number(b.bills) || 0; run.billsOf = Number(b.billsOf) || 0;
-    if (!run.of && !run.stopped && !run.billsOf) return res.json({ ok: true, skipped: true });   // an hourly check-in between the 2-hour reads
+    run.bills = Number(b.bills) || 0; run.billsOf = Number(b.billsOf) || 0; run.customers = Number(b.customers) || 0; run.customersOf = Number(b.customersOf) || 0;
+    if (!run.of && !run.stopped && !run.billsOf && !run.customersOf) return res.json({ ok: true, skipped: true });   // an hourly check-in between the 2-hour reads
     await db.update(KEYS.runs, (cur) => [run, ...(Array.isArray(cur) ? cur : [])].slice(0, 24), []);
     // only trailers still on the board keep a reading
     const board = getBoard ? await getBoard(SITE).catch(() => null) : null;
@@ -293,8 +387,8 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
     res.json({ flagged: all.filter((e) => e.flaggedAt).sort((a, b) => String(b.flaggedAt).localeCompare(String(a.flaggedAt))), watching: all.filter((e) => !e.flaggedAt).sort((a, b) => b.loads.length - a.loads.length), rule: `${NO_TEMP_LOADS} active temperature loads with no reading → flagged and skipped; re-checked every ${RECHECK_DAYS} days` });
   });
   app.get('/truckmate/reefer-agent/status', requireAdmin, async (req, res) => {
-    const [recipe, runs, shots, readings, key, billRecipe, bills] = await Promise.all([db.get(KEYS.recipe, null), db.get(KEYS.runs, []), db.get(KEYS.shots, []), db.get(KEYS.readings, {}), db.get(KEYS.key, null), db.get(KEYS.billRecipe, null), db.get(KEYS.bills, {})]);
-    res.json({ keySet: !!(key && key.hash), recipe, billRecipe, runs: runs || [], shots: (shots || []).map(({ png, ...s }) => s), readings: Object.values(readings || {}), bills: Object.values(bills || {}) });
+    const [recipe, runs, shots, readings, key, billRecipe, bills, custRecipe, customers] = await Promise.all([db.get(KEYS.recipe, null), db.get(KEYS.runs, []), db.get(KEYS.shots, []), db.get(KEYS.readings, {}), db.get(KEYS.key, null), db.get(KEYS.billRecipe, null), db.get(KEYS.bills, {}), db.get(KEYS.custRecipe, null), db.get(KEYS.customers, {})]);
+    res.json({ keySet: !!(key && key.hash), recipe, billRecipe, custRecipe, customers: Object.values(customers || {}), runs: runs || [], shots: (shots || []).map(({ png, ...s }) => s), readings: Object.values(readings || {}), bills: Object.values(bills || {}) });
   });
   app.get('/truckmate/reefer-agent/shot/:id', requireAdmin, async (req, res) => {
     const s = ((await db.get(KEYS.shots, [])) || []).find((x) => x.id === String(req.params.id));
@@ -316,6 +410,15 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
     await db.set(KEYS.billRecipe, { ...c.recipe, by: (req.user && (req.user.name || req.user.email)) || 'admin', at: iso() });
     res.json(c.recipe);
   });
+  // the customer Notes recipe: open one customer profile by its code ({code}) on the Notes panel and screenshot it
+  app.put('/truckmate/reefer-agent/customer-recipe', requireAdmin, async (req, res) => {
+    const c = cleanRecipe(req.body || {});
+    if (!c.ok) return res.status(400).json({ error: c.error.replace('Reefer Events window', 'customer Notes screen') });
+    if (!c.recipe.steps.some((x) => x.do === 'type' && x.text === '{code}')) return res.status(400).json({ error: 'The customer recipe has to type the customer code ({code}).' });
+    await db.set(KEYS.custRecipe, { ...c.recipe, by: (req.user && (req.user.name || req.user.email)) || 'admin', at: iso() });
+    res.json(c.recipe);
+  });
+  app.post('/truckmate/reefer-agent/customer-recipe/off', requireAdmin, async (req, res) => { await db.set(KEYS.custRecipe, null); res.json({ ok: true, off: true }); });
   app.post('/truckmate/reefer-agent/bill-recipe/off', requireAdmin, async (req, res) => { await db.set(KEYS.billRecipe, null); res.json({ ok: true, off: true }); });
 
   // every board build: the latest TruckMate (Thermo King) reading on the load's trailer
@@ -326,6 +429,7 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
     // the Shipper / Consignee boxes read off each bill: on the bill (geofences, Jarvis) and the load's list of places
     const bills = (await db.get(KEYS.bills, {})) || {};
     if (!Object.keys(bills).length) return;
+    const customers = (await db.get(KEYS.customers, {})) || {};
     for (const it of trips) {
       for (const b of (it.freightBills || it.orders || [])) {
         const r = b && bills[String(b.billNumber || '').trim()];
@@ -336,6 +440,8 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
       }
       const p = loadParties(it, bills);
       if (p) it._parties = p;
+      const n = loadCustomerNotes(it, bills, customers);
+      if (n) it._customerNotes = n;
     }
   }
 
