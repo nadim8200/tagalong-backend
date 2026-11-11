@@ -35,8 +35,13 @@ export function fencesFor(item, stops = []) {
   const out = [];
   const yard = (s) => /MIAMI|MEDLEY|DORAL/i.test(`${s.city} ${s.customer || ''}`);
   const sheetPick = sheet.filter((s) => /PICK|LOAD/i.test(s.action || ''));
+  // TruckMate's own shipper / consignee on each bill (the connector reads them per bill): name, street, city, state, zip
+  const bills = (item.freightBills || item.orders || []).filter(Boolean);
+  const tmAddr = (x) => (x && (x.address1 || x.address) ? { name: x.name, address: [x.address1 || x.address, x.address2].filter(Boolean).join(' '), city: x.city, state: x.province, zip: x.postalCode } : null);
+  const tmShippers = [...new Map(bills.map((b) => tmAddr(b.shipper)).filter(Boolean).map((a) => [norm(`${a.address}${a.city}`), a])).values()];
   const picks = sheetPick.length ? sheetPick.map((s) => ({ name: s.customer, address: s.address, city: s.city, state: s.state, zip: s.zip }))
-    : (rc.pickups || []).map((p) => ({ name: p.name, address: p.address, city: p.city, state: p.state, zip: p.zip }));
+    : (rc.pickups || []).filter((p) => street(p.address)).length ? (rc.pickups || []).map((p) => ({ name: p.name, address: p.address, city: p.city, state: p.state, zip: p.zip }))
+      : tmShippers;
   if (!/MIAMI/i.test(t.origZoneDesc || '')) {
     picks.forEach((p, i) => { if (street(p.address) && !yard(p)) out.push({ key: `pickup:${i}`, kind: 'pickup', n: i, name: S(p.name) || null, city: cityOf(p), q: query(p) }); });
   }
@@ -46,7 +51,8 @@ export function fencesFor(item, stops = []) {
     const city = norm(String(st.place || '').split(',')[0]);
     const s = sheetDel.find((x) => (st.sheetKey && x.key === st.sheetKey) || norm(x.city) === city);
     const r = rcDel.find((x) => norm(x.city) === city);
-    const a = s && street(s.address) ? { name: s.customer, address: s.address, city: s.city, state: s.state, zip: s.zip } : (r && street(r.address) ? r : null);
+    const tmc = bills.map((b) => tmAddr(b.consignee)).find((x) => x && (norm(x.city) === city || (st.zip && String(x.zip || '').slice(0, 5) === String(st.zip).slice(0, 5))));
+    const a = s && street(s.address) ? { name: s.customer, address: s.address, city: s.city, state: s.state, zip: s.zip } : (r && street(r.address) ? r : (tmc && street(tmc.address) ? tmc : null));
     if (a) out.push({ key: `delivery:${st.key}`, kind: 'delivery', n: i, stopKey: st.key, name: S(a.name) || S(st.name) || (st.customers || [])[0] || null, city: cityOf(a), q: query(a) });
   });
   return out;

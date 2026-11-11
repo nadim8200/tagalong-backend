@@ -78,3 +78,13 @@ test('no consent → no texts; already rolling loads never trigger an email', as
   assert.equal(texts.length, 0);
   assert.ok(!r.some((x) => x.outcome), 'nothing reported');
 });
+
+import { plannedPickup as plannedPickup2, tmPickup } from '../pickupfollow.js';
+test('pickup time from TruckMate: the Shipper box appointment (made) wins over the rate con; date-only is skipped', () => {
+  const bill = { billNumber: 'B180921', pickUpBy: '2026-11-11T15:00:00', pickUpByEnd: '2026-11-11T15:00:00', pickUpApptReq: 'True', pickUpApptMade: 'True', startZoneDescription: 'PLANT CITY, FL, 33563' };
+  const p = plannedPickup2({ trip: { tripNumber: '626919', origZoneDesc: 'PLANT CITY, FL, 33563' }, freightBills: [bill], _ratecon: { pickups: [{ name: 'Americold', city: 'Plant City', state: 'FL', date: '2026-11-11', time: '14:00' }] } });
+  assert.equal(p.source, 'TruckMate appointment'); assert.equal(new Date(p.ms).toISOString(), '2026-11-11T20:00:00.000Z');
+  assert.equal(tmPickup({ freightBills: [{ ...bill, pickUpBy: '2026-11-11T00:00:00' }] }), null, 'midnight = date only');
+  assert.equal(plannedPickup2({ trip: {}, freightBills: [{ ...bill, pickUpApptMade: 'False' }], _ratecon: { pickups: [{ state: 'FL', date: '2026-11-11', time: '14:00' }] } }).source, 'rate con');
+  assert.equal(plannedPickup2({ trip: {}, freightBills: [{ ...bill, pickUpApptMade: 'False' }] }).source, 'TruckMate pick up by');
+});

@@ -21,6 +21,7 @@ import { findLoad, customerStops, customerView, isOcLoad, spokenName, nameScore 
 import { contactsFor } from './statusmail.js';
 import { customerAnswer, loadAnswer } from './dispatchcards.js';
 import { fmtLocal } from './localtime.js';
+import { staffFacts } from './stafffacts.js';
 import { realUnit } from './units.js';
 
 const SITE = 'florida-beauty';
@@ -151,6 +152,7 @@ export const SYSTEM = (who) => `You are Jarvis, the AI dispatcher for Florida Be
 - How many miles between two places / from a truck to a stop / left on a trip → miles (say "about" when driving_miles is false).
 - What ETA we gave a customer vs when the truck actually got there (for a trip or a customer, this week…) → eta_vs_actual.
 - A load that already delivered / finished (not on the board) — "the one that left Tuesday", "when did it deliver" → past_loads. Never say it doesn't exist before checking.
+- What a load pays / how much a broker load paid → load_details billing.loadPays (TruckMate Billing tab total of its bills; with rateConRate and accChgsOverRateCon — extra charges not on the rate con mean a revised rate con is needed). Reefer temps (current, return air, discharge air, set point, what the load needs, in or out of range) → load_details reefer. Pickup / delivery appointments and shipper / consignee from TruckMate's boxes → load_details shipperConsignee. PO / Pickup# vs the rate con → load_details traceNumbers. Every pickup and delivery place with name, street address, phone, contact and appointment (TruckMate's Shipper / Consignee boxes) → load_details shippers / consignees — when multipleShippers or multipleConsignees is true, say how many and list each. Anything else off a TruckMate bill (commodity / temp code, service level, division, weight, pieces, pallets, miles, bill to, who entered it and when, billing approved, pickup / delivery truck, driver and trailer, estimated delivery) → load_details truckmateBills. Staff only — never to customers, brokers or drivers.
 - Committed delivery times, ARTIS's ETA / delivered time, geofence arrival / departure, ARTIS truck / trailer location, door temps and ARTIS documents for a load → load_details.
 - PODs, BOLs, invoices, rate cons on file in ARTIS for a load → load_documents (by trip, bill or customer); say what was found and that it's attached (or that ARTIS has none yet).
 - ARTIS warehouse facts (trucks approaching the yard, trailer temps at the door, box temps at receiving, rejected / wrong-pallet / not-built boxes, delivery performance, a unit's ARTIS position, BOL / POD documents) → artis_report. Internal only — never quote these to customers.
@@ -513,6 +515,8 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
           // staff only — other customers' stops, locations, temps and documents never go into a customer answer
           ...(ctx.customer ? {} : await (async () => ({
           committedTimes: it._commit || null,   // per stop: the delivery time we committed to (late alerts use it)
+          // what the load pays (TruckMate Billing total) vs the rate con, reefer temps, Shipper / Consignee boxes, trace numbers
+          ...staffFacts(it),
           artisEta: it._artisEta ? { readAt: it._artisEta.at, stops: (it._artisEta.stops || []).map((x) => ({ customer: x.name, clientId: x.clientId, city: x.city, state: x.state, eta: x.etaText, miles: x.miles, location: x.location, delivered: x.delivered, arrivedAt: x.arrivedAt, boxes: x.boxes })) } : null,
           geofenceVisits: Object.values((((await db.get(`taStopVisits:${SITE}`, {})) || {})[n]) || {}).map((v) => ({ stop: v.stopKey, place: v.geofence && v.geofence.name, from: v.geofence && v.geofence.source, state: v.state, arrived: v.enteredAt ? new Date(v.enteredAt).toISOString() : null, left: v.exitedAt ? new Date(v.exitedAt).toISOString() : null, minutesThere: v.dwellMin })),
           artisLocation: it._artisLoc || null,

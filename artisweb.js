@@ -14,6 +14,7 @@
 import { webConfig } from './truckbuilder.js';
 import { nameScore } from './voice.js';
 import { loadTarget, checkReading } from './temppolicy.js';
+import { loadLabel } from './breakdownreport.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taArtisEta:${SITE}`;
@@ -181,8 +182,11 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
   const TEMPS = `taArtisTemps:${SITE}`;
   async function readTemps() {
     const board = getBoard ? await getBoard(SITE) : { trips: [] };
-    const items = ((board && board.trips) || []).filter((it) => it._tb && (it._tb.stops || []).length);
+    // ARTIS only has the LTL runs from the hubs — a broker load is never read
+    const items = ((board && board.trips) || []).filter((it) => it._tb && (it._tb.stops || []).length && loadLabel(it) !== 'BROKER');
     const active = new Set(items.map(tripNo));
+    let fields = null;        // ARTIS's field names on one load (names only, no values) — to see which reefer readings it sends
+    const keyPaths = (o, pre = '', d = 0) => (o && typeof o === 'object' && d < 3 ? Object.entries(o).flatMap(([k, v]) => (v && typeof v === 'object' && !Array.isArray(v) ? keyPaths(v, `${pre}${k}.`, d + 1) : [`${pre}${k}`])) : []);
     const want = new Map();   // clientId → earliest run date (one ARTIS page per customer)
     for (const it of items) for (const s of it._tb.stops) if (s.consigneeId) { const d = it._tb.date || ymd(now()); if (!want.has(s.consigneeId) || d < want.get(s.consigneeId)) want.set(s.consigneeId, d); }
     const trips = {}; let read = 0; const errors = [];
@@ -192,12 +196,12 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
         const page = parseTripStatus(await (await get(`/shipment/eta?clientId=${encodeURIComponent(clientId)}&fromDate=${ymd(Date.parse(`${d}T12:00:00Z`) - 2 * 86400000)}&toDate=${ymd(now() + 3 * 86400000)}`)).text()); // eslint-disable-line no-await-in-loop
         if (!page) throw new Error('ARTIS session ended');
         read += 1;
-        for (const c of page) for (const t of (c.tripStatuses || [])) { const n = String(t.tripNumber || ''); const r = reeferOf(t); if (n && active.has(n) && r && !trips[n]) trips[n] = { ...r, trailer: t.trailer || null }; }
+        for (const c of page) for (const t of (c.tripStatuses || [])) { const n = String(t.tripNumber || ''); if (!fields && n && active.has(n)) fields = keyPaths(t).slice(0, 120); const r = reeferOf(t); if (n && active.has(n) && r && !trips[n]) trips[n] = { ...r, trailer: t.trailer || null }; }
       } catch (e) { errors.push(`${clientId}: ${e.message}`); if (/sign-in|session/i.test(e.message)) break; }
       await new Promise((r) => setTimeout(r, 300)); // eslint-disable-line no-await-in-loop -- gentle on ARTIS
     }
     const at = new Date(now()).toISOString();
-    await db.set(TEMPS, { at, slot: (await db.get(TEMPS, {}) || {}).slot || null, trips, last: { at, loads: active.size, customers: want.size, read, withTemp: Object.keys(trips).length, errors: errors.slice(0, 5) } });
+    await db.set(TEMPS, { at, slot: (await db.get(TEMPS, {}) || {}).slot || null, trips, last: { at, loads: active.size, customers: want.size, read, withTemp: Object.keys(trips).length, errors: errors.slice(0, 5), fields } });
     return { loads: active.size, read, withTemp: Object.keys(trips).length, errors };
   }
   async function overlay(site, list) {

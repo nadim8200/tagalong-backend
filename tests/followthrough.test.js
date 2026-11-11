@@ -72,3 +72,12 @@ test('rate con email: only one emailed to Jarvis, on a load still set for pickup
   assert.equal(rateConEmailWanted({ source: 'email' }, { trip: { status: 'DEPSHIP' }, freightBills: [] }), false);
   assert.equal(rateConEmailWanted({ source: 'email' }, { trip: { status: 'DISP' }, freightBills: [{ actualPickup: '2026-10-21T10:00:00' }] }), false);
 });
+
+import { extrasFor as extrasFor2 } from '../followthrough.js';
+test('TruckMate Acc Chgs above the rate con rate → the revised rate con must include them', () => {
+  const x = extrasFor2({ rc: { rate: 2500 }, bills: [{ billNumber: 'B1', charges: 2500, totalCharges: 2650 }] });
+  assert.equal(x[0].kind, 'truckmate_charges');
+  assert.match(x[0].detail, /TruckMate charges \$2650 vs rate con \$2500 — \$150 in Acc Chgs/);
+  assert.equal(extrasFor2({ rc: { rate: 2500 }, bills: [{ totalCharges: 2500 }] }).length, 0, 'same total: nothing to ask');
+  assert.equal(extrasFor2({ rc: {}, bills: [{ totalCharges: 2650 }] }).length, 0, 'no rate on the rate con: no comparison');
+});

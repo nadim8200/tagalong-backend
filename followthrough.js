@@ -54,9 +54,17 @@ export function offersFromRateCon(trip, rc = {}) {
 }
 
 // Extras to bill once the load is over, from what we know about it. Pure.
-// comms: the load's log entries; tasks: its to-dos; docs: its documents.
-export function extrasFor({ comms = [], tasks = [], docs = [], rc = {} } = {}) {
+// comms: the load's log entries; tasks: its to-dos; docs: its documents; bills: TruckMate's freight bills on the load.
+export function extrasFor({ comms = [], tasks = [], docs = [], rc = {}, bills = [] } = {}) {
   const out = [];
+  // TruckMate's Acc Chgs: the bills' total (line haul + every accessorial dispatch added — lumper, detention, extra stop…)
+  // above the rate con's rate means charges the broker hasn't confirmed yet → the revised rate con must include them
+  const rate = Number(rc.rate);
+  const tmTotal = bills.reduce((a, b) => a + (Number(b && b.totalCharges) || 0), 0);
+  if (rate > 0 && tmTotal - rate >= 5) {
+    const money = (n) => `$${Math.round(n * 100) / 100}`;
+    out.push({ kind: 'truckmate_charges', detail: `TruckMate charges ${money(tmTotal)} vs rate con ${money(rate)} — ${money(tmTotal - rate)} in Acc Chgs (lumper / extras) not on the rate con` });
+  }
   for (const c of comms) if (c && c.kind === 'detention' && c.text) out.push({ kind: 'detention', detail: String(c.text).replace(/^Detention record:\s*/i, '') });
   const lumperDocs = docs.filter((d) => /lumper/i.test(`${d.docType || ''} ${d.filename || ''}`));
   if (lumperDocs.length) out.push({ kind: 'lumper', detail: `${lumperDocs.length} lumper receipt${lumperDocs.length === 1 ? '' : 's'} on file` });
@@ -211,10 +219,12 @@ ${offerBlock(items, token)}`) });
         }
       }
       // delivered → extras to bill? make sure the revised rate con comes in
-      if (cfg.closeout && isDelivered(it) && !(book[trip] || {}).closeoutChecked) {
+      // …and again later if TruckMate's Acc Chgs go above the rate con after that first check (a lumper entered after delivery)
+      const lateCharges = (book[trip] || {}).closeoutChecked && !(book[trip] || {}).closeout && extrasFor({ rc: rcs[trip] || {}, bills: (it.freightBills || it.orders || []).filter(Boolean) }).length > 0;
+      if (cfg.closeout && isDelivered(it) && (!(book[trip] || {}).closeoutChecked || lateCharges)) {
         const rc = rcs[trip] || {};
         const d = docs && docs.listDocs ? await docs.listDocs({ site, trips: [trip] }).catch(() => []) : []; // eslint-disable-line no-await-in-loop
-        const extras = extrasFor({ comms: comms[trip] || [], tasks: tasks[trip] || [], docs: d, rc });
+        const extras = extrasFor({ comms: comms[trip] || [], tasks: tasks[trip] || [], docs: d, rc, bills: (it.freightBills || it.orders || []).filter(Boolean) });
         const g = { ...(book[trip] || {}), closeoutChecked: new Date(t).toISOString() };
         if (extras.length) {
           g.closeout = { status: 'needed', extras, at: new Date(t).toISOString(), reminders: 0 };

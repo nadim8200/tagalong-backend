@@ -62,3 +62,9 @@ test('fence texts and the milestone a YES confirms', () => {
   assert.equal(askKey(fences[0], 'arrive'), 'arrived-shipper'); assert.equal(askKey(fences[0], 'left'), 'loaded');
   assert.equal(askKey(fences[1], 'left'), 'left:VENTURA, CA, 93003');
 });
+
+test('fences: TruckMate\'s own shipper / consignee addresses (per bill) when the trip sheet and rate con have none', () => {
+  const item = { trip: { tripNumber: '626919', origZoneDesc: 'PLANT CITY, FL, 33563' }, freightBills: [{ billNumber: 'B180921', shipper: { name: 'AMERICOLD', address1: '302 NORTH FRONTAGE ROAD', city: 'PLANT CITY', province: 'FL', postalCode: '33563' }, consignee: { name: 'PFG THE VIRGINIA FOOD SERVICE GROUP', address1: '7422 RANCO ROAD', city: 'RICHMOND', province: 'VA', postalCode: '23228' } }] };
+  const f = fencesFor(item, [{ key: 'RICHMOND, VA, 23228', place: 'RICHMOND, VA', zip: '23228' }]);
+  assert.deepEqual(f.map((x) => [x.kind, x.name, x.q]), [['pickup', 'AMERICOLD', '302 NORTH FRONTAGE ROAD, PLANT CITY, FL 33563'], ['delivery', 'PFG THE VIRGINIA FOOD SERVICE GROUP', '7422 RANCO ROAD, RICHMOND, VA 23228']]);
+});

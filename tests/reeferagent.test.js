@@ -16,8 +16,10 @@ test('recipe: only read-only steps are accepted', () => {
 });
 
 test('trailers to read: active company loads, one per trailer, no outside carriers', () => {
-  const t = (n, trailer, x = {}) => ({ trip: { tripNumber: n, trailer, powerUnit: '2403', status: 'DISP', ...(x.trip || {}) }, ...(x.item || {}) });
+  const t = (n, trailer, x = {}) => ({ trip: { tripNumber: n, trailer, powerUnit: '2403', status: 'DISP', ...(x.trip || {}) }, freightBills: [{ temperature: 34 }], ...(x.item || {}) });
   assert.deepEqual(trailersToRead([t('1', '7303'), t('2', '7303'), t('3', '7296'), t('4', '7650', { item: { _oc: {} } }), t('5', '7651', { trip: { status: 'CANCL' } }), t('6', '')]), [{ trailer: '7303', trip: '1' }, { trailer: '7296', trip: '3' }]);
+  assert.deepEqual(trailersToRead([{ trip: { tripNumber: '7', trailer: '7400', status: 'DISP' }, freightBills: [{ temperature: null }] }]), [], 'dry load: not read');
+  assert.equal(trailersToRead([{ trip: { tripNumber: '8', trailer: '7401', status: 'DISP' }, _ratecon: { tempSetting: '34-36F' } }]).length, 1, 'rate con temperature: read');
 });
 
 function memDb() { const m = new Map(); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, JSON.parse(JSON.stringify(v))), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } }; }
@@ -26,7 +28,7 @@ test('agent: needs its key; a reading lands on the trailer; a wrong window stops
   const db = memDb();
   let ai = { isReeferEvents: true, trailer: '7303', returnTemp: 34.5, setTemp: 34, supplyTemp: 33, tempUnits: 'F' };
   const fetchFn = async () => ({ ok: true, json: async () => ({ content: [{ text: JSON.stringify(ai) }] }) });
-  const board = { trips: [{ trip: { tripNumber: '621053', trailer: '7303', status: 'DEPSHIP' } }] };
+  const board = { trips: [{ trip: { tripNumber: '621053', trailer: '7303', status: 'DEPSHIP' }, freightBills: [{ temperature: 34 }] }] };
   const ra = initReeferAgent(app, { requireAuth: (q, s, n) => n(), requireAdmin: (q, s, n) => n(), db, getBoard: async () => board, env: { ANTHROPIC_API_KEY: 'x' }, fetchFn });
   let out; let code = 200; const res = { status(c) { code = c; return this; }, json(j) { out = j; return this; }, type() { return this; }, send() { return this; }, end() { return this; } };
   const req = (body = {}, key = '') => ({ body, get: (h) => (h === 'x-agent-key' ? key : ''), user: { name: 'Nadim' } });
@@ -60,7 +62,7 @@ test('enrollment: the agent waits, an admin approves, the agent gets its key onc
 test('every 2 hours: after a full read the hourly check-in gets no trailers, and its empty run is not recorded', async () => {
   const routes = {}; const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put: (p, ...h) => { routes[`PUT ${p}`] = h.at(-1); } };
   let t = Date.parse('2026-11-11T02:00:00Z');
-  const board = { trips: [{ trip: { tripNumber: '1', trailer: '7303', status: 'DEPSHIP' } }] };
+  const board = { trips: [{ trip: { tripNumber: '1', trailer: '7303', status: 'DEPSHIP' }, freightBills: [{ temperature: 34 }] }] };
   initReeferAgent(app, { requireAuth: (q, s, n) => n(), requireAdmin: (q, s, n) => n(), db: memDb(), getBoard: async () => board, env: {}, now: () => t });
   let out; const res = { status() { return this; }, json(j) { out = j; return this; } };
   await routes['POST /truckmate/reefer-agent/key']({ user: {} }, res); const key = out.key;
@@ -83,7 +85,7 @@ test('no temp tracking: 3 active temperature loads without a reading → flagged
   assert.equal(e.flaggedAt, at(2));
   const now = Date.parse(at(3));
   assert.equal(skipNoTemp(e, now), true);
-  assert.deepEqual(trailersToRead([{ trip: { tripNumber: '9', trailer: '7303', status: 'DEPSHIP' } }], 40, { noTemp: { 7303: e }, now }), []);
+  assert.deepEqual(trailersToRead([{ trip: { tripNumber: '9', trailer: '7303', status: 'DEPSHIP' }, freightBills: [{ temperature: 34 }] }], 40, { noTemp: { 7303: e }, now }), []);
   assert.equal(skipNoTemp(e, Date.parse(at(10))), false, 'weekly re-check');
   assert.equal(noteRead(e, { trip: '5', hasTemp: true, tempLoad: true, at: at(10) }), null, 'a reading clears it');
 });

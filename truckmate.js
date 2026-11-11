@@ -16,6 +16,7 @@ import { tripTimes } from './triptimes.js';
 import { applyUnitAliases } from './units.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { loadTarget, checkReading } from './temppolicy.js';
+import { traceCheck } from './tracecheck.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -691,6 +692,8 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         if (target || current) item._loadTemp = { target, current, check: current ? checkReading({ currentTemp: current.readingF, setPoint: current.setF }, target) : null };
       } catch { /* per-trip skip */ }
     }
+    // TruckMate's trace numbers (PO = load #, Pickup#s dispatch entered) checked against the rate con
+    for (const item of trips) { try { const t = traceCheck(item); if (t) item._trace = t; } catch { /* per-trip skip */ } }
     mark('load temperatures');
     // Detect NEW truck→load assignments: a truck's power unit appearing on an
     // active trip it wasn't on before. Each is announced once (state persists),

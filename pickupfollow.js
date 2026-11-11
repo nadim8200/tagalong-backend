@@ -42,6 +42,20 @@ const hmOf = (raw) => {
   return h <= 23 && min <= 59 ? [h, min] : null;
 };
 
+// TruckMate's pickup time on the load's bills: the earliest Pick Up By with a real time (midnight = date only, skipped),
+// in the shipper's time zone, and whether the appointment is made. Pure. → { ms, tz, made } | null
+export function tmPickup(item) {
+  const bills = ((item && (item.freightBills || item.orders)) || []).filter((b) => b && b.pickUpBy && !b.actualPickup);
+  const st = (b) => (String(b.startZoneDescription || '').match(/,\s*([A-Z]{2})\b/) || [])[1] || '';
+  const list = bills.map((b) => {
+    const v = String(b.pickUpBy).slice(0, 16);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(v) || /T00:00$/.test(v)) return null;
+    const tz = TZ_BY_STATE[st(b)] || 'America/New_York';
+    return { ms: wallMs(v.slice(0, 10), +v.slice(11, 13), +v.slice(14, 16), tz), tz, made: /^true$/i.test(String(b.pickUpApptMade || '')) };
+  }).filter(Boolean).sort((a, b) => a.ms - b.ms);
+  return list[0] || null;
+}
+
 // When and where the driver is supposed to pick up. Pure.
 export function plannedPickup(item) {
   const h = item && item._hold;
@@ -53,10 +67,14 @@ export function plannedPickup(item) {
   const ask = item && item._pickupAsk;   // a staff member emailed Jarvis the pickup time to follow up
   if (ask && ask.at) return { ms: wallMs(ask.at.slice(0, 10), +ask.at.slice(11, 13), +ask.at.slice(14, 16), ask.tz || 'America/New_York'), source: 'dispatch email', place: ask.place || place, tz: ask.tz || 'America/New_York' };
   if (m && m.pickupAt) return { ms: wallMs(String(m.pickupAt).slice(0, 10), +String(m.pickupAt).slice(11, 13), +String(m.pickupAt).slice(14, 16)), source: 'trip sheet', place };
+  // TruckMate's pickup appointment (the Shipper box: Pick Up date / time, Appt Req / Made) — confirmed by dispatch
+  const tm = tmPickup(item);
+  if (tm && tm.made) return { ms: tm.ms, source: 'TruckMate appointment', place, tz: tm.tz };
   if (pu) {
     const ymd = ymdOf(pu.date || pu.appointment); const hm = hmOf(pu.time || pu.appointment);
     if (ymd && hm) return { ms: wallMs(ymd, hm[0], hm[1], TZ_BY_STATE[String(pu.state || '').toUpperCase()] || 'America/New_York'), source: 'rate con', place, tz: TZ_BY_STATE[String(pu.state || '').toUpperCase()] || 'America/New_York' };
   }
+  if (tm) return { ms: tm.ms, source: 'TruckMate pick up by', place, tz: tm.tz };
   return null;
 }
 
