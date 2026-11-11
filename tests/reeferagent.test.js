@@ -23,7 +23,7 @@ test('trailers to read: active company loads, one per trailer, no outside carrie
 });
 
 function memDb() { const m = new Map(); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, JSON.parse(JSON.stringify(v))), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } }; }
-test('agent: needs its key; a reading lands on the trailer; a wrong window stops the run', async () => {
+test('agent: needs its key; a reading lands on the trailer; a wrong window skips that trailer', async () => {
   const routes = {}; const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put: (p, ...h) => { routes[`PUT ${p}`] = h.at(-1); } };
   const db = memDb();
   let ai = { isReeferEvents: true, trailer: '7303', returnTemp: 34.5, setTemp: 34, supplyTemp: 33, tempUnits: 'F' };
@@ -40,7 +40,7 @@ test('agent: needs its key; a reading lands on the trailer; a wrong window stops
   assert.equal(board.trips[0]._tkReefer.reading.returnTemp, 34.5);
   ai = { isReeferEvents: false };
   await routes['POST /reefer-agent/shot'](req({ kind: 'reading', trailer: '7303', png: 'aGk=' }, key), res);
-  assert.equal(out.stop, true); assert.match(out.why, /not the Reefer Events window/);
+  assert.equal(out.skip, true); assert.equal(out.stop, undefined); assert.match(out.why, /not the Reefer Events window/);
   await routes['GET /truckmate/reefer-agent/status'](req(), res);
   assert.equal(out.shots[0].kind, 'unexpected'); assert.equal(out.shots[0].png, undefined, 'no picture in the status list');
   code = 200; await routes['PUT /truckmate/reefer-agent/recipe'](req({ steps: [{ do: 'key', key: 'F2' }, { do: 'shot' }] }), res); assert.equal(code, 400);

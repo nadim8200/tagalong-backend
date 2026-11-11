@@ -320,7 +320,8 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
       return sets.length ? { sets } : {};
     };
     // every EVERY_MIN after the last run that actually read trailers: until then the hourly check-in gets no trailers
-    const last = ((await db.get(KEYS.runs, [])) || []).find((r) => r.of > 0 && r.read > 0);   // a run that read nothing (TruckMate closed, desktop disconnected) doesn't count
+    // a run that read nothing or stopped early (TruckMate closed, desktop disconnected) doesn't count
+    const last = ((await db.get(KEYS.runs, [])) || []).find((r) => r.of > 0 && r.read > 0 && (!r.stopped || r.read >= r.of * 0.8));
     const board = getBoard ? await getBoard(SITE).catch(() => ({ trips: [] })) : { trips: [] };
     if (last && now() - Date.parse(last.at) < (EVERY_MIN - 10) * MIN) return res.json({ recipe: recipe && recipe.steps && recipe.steps.length ? recipe : null, trailers: [], ...(await billJobs(board)), intervalMin: EVERY_MIN, nextAt: new Date(Date.parse(last.at) + EVERY_MIN * MIN).toISOString() });
     const noTemp = (await db.get(KEYS.noTemp, {})) || {};
@@ -396,7 +397,8 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
       const r = await read(png, trailer);
       if (!r || !r.isReeferEvents || (r.trailer && unit(r.trailer) !== unit(trailer))) {
         await keepShot('unexpected', trailer, png, r && r.isReeferEvents ? `showed trailer ${r.trailer}` : 'not a Reefer Events window');
-        return res.json({ ok: false, stop: true, why: r && r.isReeferEvents ? `The window shows trailer ${r.trailer}, not ${trailer}.` : 'That is not the Reefer Events window.' });
+        // one trailer whose window came up wrong (or slow) skips that trailer; the run goes on to the next one
+        return res.json({ ok: false, skip: true, why: r && r.isReeferEvents ? `The window shows trailer ${r.trailer}, not ${trailer}.` : 'That is not the Reefer Events window.' });
       }
       await db.update(KEYS.readings, (cur) => ({ ...(cur || {}), [unit(trailer)]: { at: iso(), trailer, trip: String(b.trip || '') || null, reading: r } }), {});
       // no Thermo King reading on an active temperature load → a strike toward "doesn't track temp"
