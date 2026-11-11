@@ -66,9 +66,10 @@ export function sameBill(read, want) {
   const k = (x) => String(x == null ? '' : x).toUpperCase().replace(/[^A-Z0-9]/g, '');
   if (!k(read) || !k(want)) return false;
   if (k(read) === k(want)) return true;
-  const d = (x) => k(x).replace(/\D/g, '');
-  const r = d(read); const w = d(want);
-  return w.length >= 5 && r.endsWith(w) && r.length - w.length <= 2;
+  // drop only the leading letters: what follows (digits and any suffix like "-AA") must still match in full
+  const core = (x) => k(x).replace(/^[A-Z]+/, '');
+  const r = core(read); const w = core(want);
+  return /^\d{5,}/.test(w) && r.endsWith(w) && r.length - w.length <= 2;
 }
 
 // A PNG's width and height, from its header. Pure. → { w, h } | null
