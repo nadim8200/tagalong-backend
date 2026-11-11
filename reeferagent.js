@@ -186,7 +186,8 @@ const CUSTOMER_PROMPT = (code) => [
   'Notes tab: notes = the full text of the Notes (Specifications) box, exactly as written, line breaks kept (\\n); null when empty.',
   'Notes for Client window: panel "clientNotes", clientNotesTab = the selected bottom tab, notes = its full text exactly as written (line breaks kept); code = the number in its title. This window is expected — it is not a dialog.',
   'Shipping Instructions tab: shippingOptions = each line under Pickup and Delivery Options with whether its box is checked.',
-  'dialogOpen is true if any pop-up, message box, question, search window or error is showing. isProfileScreen is false for any other window, a login screen or a blank screen.',
+  'isProfileScreen is TRUE for the Customer & Vendor Profiles window (any tab) AND for its "Notes for Client" window — both are this customer\'s screens. It is false only for some other program, a login screen or a blank screen.',
+  'dialogOpen is true only if a pop-up, message box, question, search window or error is showing on top (the Notes for Client window itself is not a dialog).',
 ].join('\n');
 
 const BILL_PROMPT = (bill) => [
