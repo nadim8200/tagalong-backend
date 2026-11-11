@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanRecipe, trailersToRead, initReeferAgent } from '../reeferagent.js';
+import { cleanRecipe, trailersToRead, initReeferAgent, noteRead, skipNoTemp } from '../reeferagent.js';
 
 test('recipe: only read-only steps are accepted', () => {
   const ok = cleanRecipe({ windowTitle: 'TruckMate', steps: [{ do: 'click', x: 0.1, y: 0.2 }, { do: 'type', text: '{trailer}' }, { do: 'key', key: 'enter' }, { do: 'wait', ms: 1500 }, { do: 'doubleclick', x: 0.5, y: 0.5 }, { do: 'shot' }] });
@@ -55,4 +55,35 @@ test('enrollment: the agent waits, an admin approves, the agent gets its key onc
   const key = out.key;
   await routes['POST /reefer-agent/enroll']({ body: { id } }, res); assert.notEqual(out.key, key, 'handed over once');
   await routes['GET /reefer-agent/jobs']({ get: () => key }, res); assert.notEqual(code, 401);
+});
+
+test('every 2 hours: after a full read the hourly check-in gets no trailers, and its empty run is not recorded', async () => {
+  const routes = {}; const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put: (p, ...h) => { routes[`PUT ${p}`] = h.at(-1); } };
+  let t = Date.parse('2026-11-11T02:00:00Z');
+  const board = { trips: [{ trip: { tripNumber: '1', trailer: '7303', status: 'DEPSHIP' } }] };
+  initReeferAgent(app, { requireAuth: (q, s, n) => n(), requireAdmin: (q, s, n) => n(), db: memDb(), getBoard: async () => board, env: {}, now: () => t });
+  let out; const res = { status() { return this; }, json(j) { out = j; return this; } };
+  await routes['POST /truckmate/reefer-agent/key']({ user: {} }, res); const key = out.key;
+  const req = (body = {}) => ({ body, get: () => key });
+  await routes['GET /reefer-agent/jobs'](req(), res); assert.equal(out.trailers.length, 1);
+  await routes['POST /reefer-agent/run'](req({ read: 1, of: 1 }), res);
+  t += 60 * 60000; await routes['GET /reefer-agent/jobs'](req(), res); assert.equal(out.trailers.length, 0, 'an hour later: nothing');
+  await routes['POST /reefer-agent/run'](req({ read: 0, of: 0 }), res); assert.equal(out.skipped, true);
+  t += 60 * 60000; await routes['GET /reefer-agent/jobs'](req(), res); assert.equal(out.trailers.length, 1, 'two hours later: read again');
+});
+
+test('no temp tracking: 3 active temperature loads without a reading → flagged and skipped; re-checked weekly; a reading clears it', () => {
+  const at = (d) => new Date(Date.parse('2026-11-11T00:00:00Z') + d * 86400000).toISOString();
+  let e = noteRead(undefined, { trip: '1', hasTemp: false, tempLoad: true, at: at(0) });
+  e = noteRead(e, { trip: '1', hasTemp: false, tempLoad: true, at: at(0) });        // same load twice counts once
+  e = noteRead(e, { trip: '2', hasTemp: false, tempLoad: false, at: at(0) });       // not a temperature load: no strike
+  assert.deepEqual(e.loads, ['1']); assert.equal(e.flaggedAt, null);
+  e = noteRead(e, { trip: '3', hasTemp: false, tempLoad: true, at: at(1) });
+  e = noteRead(e, { trip: '4', hasTemp: false, tempLoad: true, at: at(2) });
+  assert.equal(e.flaggedAt, at(2));
+  const now = Date.parse(at(3));
+  assert.equal(skipNoTemp(e, now), true);
+  assert.deepEqual(trailersToRead([{ trip: { tripNumber: '9', trailer: '7303', status: 'DEPSHIP' } }], 40, { noTemp: { 7303: e }, now }), []);
+  assert.equal(skipNoTemp(e, Date.parse(at(10))), false, 'weekly re-check');
+  assert.equal(noteRead(e, { trip: '5', hasTemp: true, tempLoad: true, at: at(10) }), null, 'a reading clears it');
 });

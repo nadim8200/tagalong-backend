@@ -14,11 +14,13 @@
 //   • the agent signs in with its own key (never a TruckMate password; TruckMate stays signed in on that desktop).
 // ---------------------------------------------------------------
 import crypto from 'node:crypto';
+import { loadTarget } from './temppolicy.js';
 
 const SITE = 'florida-beauty';
 const MIN = 60000;
+export const EVERY_MIN = 120;   // a full read of the active loads' trailers every 2 hours (the agent checks in hourly)
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const KEYS = { key: 'taReeferAgentKey', recipe: 'taReeferAgentRecipe', readings: `taTkReefer:${SITE}`, shots: 'taReeferAgentShots', runs: 'taReeferAgentRuns' };
+const KEYS = { noTemp: `taTkNoTemp:${SITE}`, key: 'taReeferAgentKey', recipe: 'taReeferAgentRecipe', readings: `taTkReefer:${SITE}`, shots: 'taReeferAgentShots', runs: 'taReeferAgentRuns' };
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
 const unit = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -54,15 +56,30 @@ export function cleanRecipe(r = {}) {
   return { ok: true, recipe: { windowTitle: String(r.windowTitle || 'TruckMate').slice(0, 80), steps: main.steps, after: after.steps.length ? after.steps.filter((s) => s.do !== 'shot') : [{ do: 'key', key: 'ESC' }] } };
 }
 
-// The trailers to read: on active loads (not outside carriers), one entry each. Pure.
-export function trailersToRead(trips = [], max = 40) {
+// Trailers that don't track temp: no Thermo King reading on 3 different active temperature loads → skipped from then on.
+// Still opened once a week (in case a unit was installed); a reading clears the flag. Pure helpers.
+export const NO_TEMP_LOADS = 3;
+export const RECHECK_DAYS = 7;
+// book: { [trailer]: { loads: [trip…], lastAt, flaggedAt, recheckedAt } } → the updated entry after one read. Pure.
+export function noteRead(entry = {}, { trip, hasTemp, tempLoad, at }) {
+  const e = { loads: [], ...(entry || {}) };
+  if (hasTemp) return null;                                         // it reads: not on the list (or off it again)
+  if (!tempLoad || !trip) return e.loads.length || e.flaggedAt ? { ...e, recheckedAt: e.flaggedAt ? at : e.recheckedAt || null } : null;
+  const loads = [...new Set([...e.loads, String(trip)])].slice(-10);
+  return { ...e, loads, lastAt: at, flaggedAt: e.flaggedAt || (loads.length >= NO_TEMP_LOADS ? at : null), recheckedAt: e.flaggedAt ? at : e.recheckedAt || null };
+}
+// skip a flagged trailer, unless its weekly re-check is due. Pure.
+export const skipNoTemp = (entry, now) => !!(entry && entry.flaggedAt) && now - Date.parse(entry.recheckedAt || entry.flaggedAt) < RECHECK_DAYS * 24 * 60 * MIN;
+
+// The trailers to read: on active loads (not outside carriers), one entry each, minus the ones that don't track temp. Pure.
+export function trailersToRead(trips = [], max = 40, { noTemp = {}, now = Date.now() } = {}) {
   const seen = new Map();
   for (const it of trips) {
     const t = tripOf(it);
     if (!t.trailer || (it && it._oc) || String(t.powerUnit || '').toUpperCase() === 'OC') continue;
     if (/^(canc|void|compl)/i.test(String(t.status || ''))) continue;
     const k = unit(t.trailer);
-    if (k && !seen.has(k)) seen.set(k, { trailer: String(t.trailer), trip: tripNo(it) });
+    if (k && !seen.has(k) && !skipNoTemp(noTemp[k], now)) seen.set(k, { trailer: String(t.trailer), trip: tripNo(it) });
   }
   return [...seen.values()].slice(0, max);
 }
@@ -113,8 +130,12 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
   // ---- the agent's side (its own key) ----
   app.get('/reefer-agent/jobs', agentOnly(async (req, res) => {
     const recipe = (await db.get(KEYS.recipe, null)) || null;
+    // every EVERY_MIN: until then the hourly check-in gets no trailers (and its empty run isn't recorded)
+    const last = ((await db.get(KEYS.runs, [])) || []).find((r) => r.of > 0);
+    if (last && now() - Date.parse(last.at) < (EVERY_MIN - 10) * MIN) return res.json({ recipe: recipe && recipe.steps && recipe.steps.length ? recipe : null, trailers: [], intervalMin: EVERY_MIN, nextAt: new Date(Date.parse(last.at) + EVERY_MIN * MIN).toISOString() });
     const board = getBoard ? await getBoard(SITE).catch(() => ({ trips: [] })) : { trips: [] };
-    res.json({ recipe: recipe && recipe.steps && recipe.steps.length ? recipe : null, trailers: trailersToRead((board && board.trips) || []), intervalMin: 60 });
+    const noTemp = (await db.get(KEYS.noTemp, {})) || {};
+    res.json({ recipe: recipe && recipe.steps && recipe.steps.length ? recipe : null, trailers: trailersToRead((board && board.trips) || [], 40, { noTemp, now: now() }), intervalMin: EVERY_MIN });
   }));
   // a screenshot: { kind: 'calibrate' | 'reading', trailer, trip, png (base64) } → for a reading: { ok, stop } (stop = not the expected window)
   app.post('/reefer-agent/shot', agentOnly(async (req, res) => {
@@ -130,12 +151,19 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
         return res.json({ ok: false, stop: true, why: r && r.isReeferEvents ? `The window shows trailer ${r.trailer}, not ${trailer}.` : 'That is not the Reefer Events window.' });
       }
       await db.update(KEYS.readings, (cur) => ({ ...(cur || {}), [unit(trailer)]: { at: iso(), trailer, trip: String(b.trip || '') || null, reading: r } }), {});
+      // no Thermo King reading on an active temperature load → a strike toward "doesn't track temp"
+      const hasTemp = [r.returnTemp, r.setTemp, r.supplyTemp, ...((r.compartments || []).flatMap((c) => [c.return, c.set, c.supply]))].some((v) => v != null) || !!r.eventTime;
+      const board = getBoard ? await getBoard(SITE).catch(() => null) : null;
+      const item = board ? (board.trips || []).find((it) => tripNo(it) === String(b.trip || '')) : null;
+      const tempLoad = !!(item && loadTarget(item));
+      await db.update(KEYS.noTemp, (cur) => { const all = { ...(cur || {}) }; const k = unit(trailer); const next = noteRead(all[k], { trip: String(b.trip || ''), hasTemp, tempLoad, at: iso() }); if (next) all[k] = { ...next, trailer }; else delete all[k]; return all; }, {});
       return res.json({ ok: true });
     } catch (e) { return res.status(502).json({ error: e.message }); }
   }));
   app.post('/reefer-agent/run', agentOnly(async (req, res) => {
     const b = req.body || {};
     const run = { at: iso(), read: Number(b.read) || 0, of: Number(b.of) || 0, stopped: String(b.stopped || '').slice(0, 200) || null, agent: String(b.agent || '').slice(0, 60) || null };
+    if (!run.of && !run.stopped) return res.json({ ok: true, skipped: true });   // an hourly check-in between the 2-hour reads
     await db.update(KEYS.runs, (cur) => [run, ...(Array.isArray(cur) ? cur : [])].slice(0, 24), []);
     // only trailers still on the board keep a reading
     const board = getBoard ? await getBoard(SITE).catch(() => null) : null;
@@ -173,6 +201,11 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
     const k = `RA-${crypto.randomBytes(24).toString('base64url')}`;
     await db.set(KEYS.key, { hash: hash(k), at: iso(), by: (req.user && (req.user.name || req.user.email)) || 'admin' });
     res.json({ key: k, note: 'Shown once. Put it in the agent config on the TruckMate desktop; making a new key stops the old one.' });
+  });
+  // the list: trailers with no Thermo King reading on active temperature loads (flagged ones are skipped)
+  app.get('/truckmate/reefer-agent/no-temp', requireAuth, async (req, res) => {
+    const all = Object.values((await db.get(KEYS.noTemp, {})) || {});
+    res.json({ flagged: all.filter((e) => e.flaggedAt).sort((a, b) => String(b.flaggedAt).localeCompare(String(a.flaggedAt))), watching: all.filter((e) => !e.flaggedAt).sort((a, b) => b.loads.length - a.loads.length), rule: `${NO_TEMP_LOADS} active temperature loads with no reading → flagged and skipped; re-checked every ${RECHECK_DAYS} days` });
   });
   app.get('/truckmate/reefer-agent/status', requireAdmin, async (req, res) => {
     const [recipe, runs, shots, readings, key] = await Promise.all([db.get(KEYS.recipe, null), db.get(KEYS.runs, []), db.get(KEYS.shots, []), db.get(KEYS.readings, {}), db.get(KEYS.key, null)]);
