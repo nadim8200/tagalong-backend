@@ -60,6 +60,17 @@ export function cleanRecipe(r = {}) {
   return { ok: true, recipe: { windowTitle: String(r.windowTitle || 'TruckMate').slice(0, 80), steps: main.steps, after: after.steps.length ? after.steps.filter((s) => s.do !== 'shot') : [{ do: 'key', key: 'ESC' }] } };
 }
 
+// The bill on the screen is the one we asked for. The text cursor sometimes sits on the bill's first letter and the reader
+// misses or misreads it ("G5058914" read as "5505891.4"), so the digits are enough when they match in full. Pure.
+export function sameBill(read, want) {
+  const k = (x) => String(x == null ? '' : x).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!k(read) || !k(want)) return false;
+  if (k(read) === k(want)) return true;
+  const d = (x) => k(x).replace(/\D/g, '');
+  const r = d(read); const w = d(want);
+  return w.length >= 5 && r.endsWith(w) && r.length - w.length <= 2;
+}
+
 // A PNG's width and height, from its header. Pure. → { w, h } | null
 export function pngSize(b64) {
   try { const b = Buffer.from(String(b64 || '').slice(0, 64), 'base64'); if (b.toString('ascii', 1, 4) !== 'PNG') return null; return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) }; } catch { return null; }
@@ -333,7 +344,7 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
       if (b.kind === 'bill') {
         const bill = String(b.value || b.bill || '').slice(0, 20);
         const r = await read(png, bill, BILL_PROMPT(bill));
-        const same = r && r.billNumber && String(r.billNumber).toUpperCase().replace(/[^A-Z0-9]/g, '') === bill.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const same = r && sameBill(r.billNumber, bill);
         if (!r || !r.isBillScreen || r.dialogOpen || !same) {
           const why = !r || !r.isBillScreen ? 'That is not the bill screen.' : r.dialogOpen ? 'A pop-up / message is showing.' : `The screen shows bill ${r.billNumber || '(none)'}, not ${bill}.`;
           await keepShot('unexpected', bill, png, why);

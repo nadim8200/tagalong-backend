@@ -86,3 +86,13 @@ test('find steps: the agent asks where a button is instead of fixed click spots'
   const png = Buffer.alloc(24); png.write('\x89PNG', 0, 'latin1'); png.writeUInt32BE(856, 16); png.writeUInt32BE(843, 20);
   assert.deepEqual(pngSize(png.toString('base64')), { w: 856, h: 843 });
 });
+
+test('bill on screen: the cursor on the first letter does not make it a different bill', async () => {
+  const { sameBill } = await import('../reeferagent.js');
+  assert.equal(sameBill('G5058914', 'G5058914'), true);
+  assert.equal(sameBill('5505891.4', 'G5058914'), true);
+  assert.equal(sameBill('5058914', 'G5058914'), true);
+  assert.equal(sameBill('G5058915', 'G5058914'), false);
+  assert.equal(sameBill('B180922-AA', 'B180922'), false);
+  assert.equal(sameBill(null, 'G5058914'), false);
+});
