@@ -85,7 +85,7 @@ export function boxCenter(box, size) {
   const [x0, y0, x1, y1] = box.map(Number);
   if (![x0, y0, x1, y1].every(Number.isFinite) || x1 <= x0 || y1 <= y0) return null;
   if (x0 < 0 || y0 < 0 || x1 > size.w || y1 > size.h) return null;
-  if (x1 - x0 > size.w * 0.4 || y1 - y0 > size.h * 0.2) return null;
+  if (x1 - x0 > size.w * 0.6 || y1 - y0 > size.h * 0.2) return null;   // a dropdown / text box in a small dialog can be ~45% of its width
   return { x: Math.round(((x0 + x1) / 2 / size.w) * 10000) / 10000, y: Math.round(((y0 + y1) / 2 / size.h) * 10000) / 10000 };
 }
 const LOCATE_PROMPT = (target, size) => [

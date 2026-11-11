@@ -84,6 +84,7 @@ test('find steps: the agent asks where a button is instead of fixed click spots'
   assert.deepEqual(boxCenter([100, 200, 140, 220], { w: 800, h: 600 }), { x: 0.15, y: 0.35 });
   assert.equal(boxCenter([0, 0, 700, 20], { w: 800, h: 600 }), null);       // far too wide for a button
   assert.equal(boxCenter([790, 0, 820, 20], { w: 800, h: 600 }), null);     // outside the picture
+  assert.ok(boxCenter([458, 46, 796, 66], { w: 816, h: 430 }));             // Select Client's Search/Sort By dropdown (~41% wide)
   const png = Buffer.alloc(24); png.write('\x89PNG', 0, 'latin1'); png.writeUInt32BE(856, 16); png.writeUInt32BE(843, 20);
   assert.deepEqual(pngSize(png.toString('base64')), { w: 856, h: 843 });
 });
