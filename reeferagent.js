@@ -198,7 +198,7 @@ const BILL_PROMPT = (bill) => [
   '  "pickup": { "from": string|null, "to": string|null, "apptRequired": boolean|null, "apptMade": boolean|null },',
   '  "delivery": { "from": string|null, "to": string|null, "apptRequired": boolean|null, "apptMade": boolean|null },',
   '  "startZone": string|null, "endZone": string|null }',
-  'code is the number in the box next to F (the customer code). province = the 2-letter state. Dates / times exactly as shown (e.g. "11/11/2026 3:00").',
+  'code = the customer code: the number in the first white box right under the "Shipper" / "Consignee" heading, after the small grey "F" (e.g. 37694, 51778). Read BOTH codes — never leave one null when a number is there. province = the 2-letter state. Dates / times exactly as shown (e.g. "11/11/2026 3:00").',
   'Text that is cut off at the edge: give what is visible. null when a field is blank.',
   'dialogOpen is true if any pop-up, message box, question or error is showing. isBillScreen is false for any other window, a login screen or a blank screen.',
 ].join('\n');
