@@ -299,8 +299,8 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
       if (custRecipe && custRecipe.steps && custRecipe.steps.length) sets.push({ kind: 'customer', recipe: custRecipe, items: customersToRead(bills || {}, customers || {}, { now: now(), ltlTrips }).map((x) => ({ value: x.value, trip: x.trip })) });
       return sets.length ? { sets } : {};
     };
-    // every EVERY_MIN: until then the hourly check-in gets no trailers (and its empty run isn't recorded)
-    const last = ((await db.get(KEYS.runs, [])) || []).find((r) => r.of > 0);
+    // every EVERY_MIN after the last run that actually read trailers: until then the hourly check-in gets no trailers
+    const last = ((await db.get(KEYS.runs, [])) || []).find((r) => r.of > 0 && r.read > 0);   // a run that read nothing (TruckMate closed, desktop disconnected) doesn't count
     const board = getBoard ? await getBoard(SITE).catch(() => ({ trips: [] })) : { trips: [] };
     if (last && now() - Date.parse(last.at) < (EVERY_MIN - 10) * MIN) return res.json({ recipe: recipe && recipe.steps && recipe.steps.length ? recipe : null, trailers: [], ...(await billJobs(board)), intervalMin: EVERY_MIN, nextAt: new Date(Date.parse(last.at) + EVERY_MIN * MIN).toISOString() });
     const noTemp = (await db.get(KEYS.noTemp, {})) || {};
