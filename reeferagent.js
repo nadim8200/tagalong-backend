@@ -505,7 +505,7 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
   app.put('/truckmate/reefer-agent/customer-recipe', requireAdmin, async (req, res) => {
     const c = cleanRecipe(req.body || {});
     if (!c.ok) return res.status(400).json({ error: c.error.replace('Reefer Events window', 'customer Notes screen') });
-    if (!c.recipe.steps.some((x) => x.do === 'type' && x.text === '{code}')) return res.status(400).json({ error: 'The customer recipe has to type the customer code ({code}).' });
+    if (!c.recipe.steps.some((x) => x.do === 'type' && (x.text === '{code}' || x.text === '{name}'))) return res.status(400).json({ error: 'The customer recipe has to type the customer code ({code}) or name ({name}).' });
     await db.set(KEYS.custRecipe, { ...c.recipe, by: (req.user && (req.user.name || req.user.email)) || 'admin', at: iso() });
     res.json(c.recipe);
   });
