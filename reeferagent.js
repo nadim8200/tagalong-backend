@@ -24,7 +24,9 @@ const tripNo = (it) => String(tripOf(it).tripNumber || '');
 const unit = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const hash = (k) => crypto.createHash('sha256').update(String(k)).digest('hex');
 
-export const ALLOWED_KEYS = ['ENTER', 'ESC', 'TAB', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'F5', 'HOME', 'END'];
+// keys the recipe may press. MENU = the context menu of the selected row; W = its "View Reefer Events…" (every W/V item in
+// TruckMate's trailer menu only opens a view); ALT+C = the Reefer Events window's Close button.
+export const ALLOWED_KEYS = ['ENTER', 'ESC', 'TAB', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'F5', 'HOME', 'END', 'MENU', 'W', 'ALT+C'];
 // Steps the agent may run: only these, nothing that could change TruckMate. Pure. → { ok, steps } | { ok: false, error }
 function cleanSteps(steps, label) {
   if (!Array.isArray(steps)) return { ok: true, steps: [] };
@@ -140,6 +142,30 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
     if (board) { const on = new Set(trailersToRead(board.trips || [], 500).map((x) => unit(x.trailer))); await db.update(KEYS.readings, (cur) => Object.fromEntries(Object.entries(cur || {}).filter(([k]) => on.has(k))), {}); }
     res.json({ ok: true });
   }));
+
+  // ---- enrollment: the agent asks once, an admin approves it in the console, the agent picks up its key ----
+  const ENROLL = 'taReeferAgentEnroll';
+  app.post('/reefer-agent/enroll', async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const b = req.body || {};
+    const id = String(b.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+    if (id.length < 16) return res.status(400).json({ error: 'Send a random id (16+ characters).' });
+    const cur = (await db.get(ENROLL, null)) || null;
+    if (cur && cur.id === id && cur.key) { await db.set(ENROLL, { ...cur, key: null, pickedUpAt: iso() }); return res.json({ approved: true, key: cur.key }); }   // handed over once
+    if (cur && cur.id === id) return res.json({ approved: false, waiting: true });
+    if (cur && !cur.pickedUpAt && !cur.key && Date.now() - Date.parse(cur.at) < 30 * MIN) return res.status(409).json({ error: 'Another agent is already waiting for approval.' });
+    await db.set(ENROLL, { id, at: iso(), machine: String(b.machine || '').slice(0, 60) || null, key: null });
+    res.json({ approved: false, waiting: true });
+  });
+  app.post('/truckmate/reefer-agent/approve', requireAdmin, async (req, res) => {
+    const cur = (await db.get(ENROLL, null)) || null;
+    if (!cur || cur.pickedUpAt || Date.now() - Date.parse(cur.at) > 30 * MIN) return res.status(404).json({ error: 'No agent is waiting for approval (run the agent first).' });
+    const k = `RA-${crypto.randomBytes(24).toString('base64url')}`;
+    await db.set(KEYS.key, { hash: hash(k), at: iso(), by: (req.user && (req.user.name || req.user.email)) || 'admin', machine: cur.machine });
+    await db.set(ENROLL, { ...cur, key: k, approvedAt: iso() });
+    res.json({ ok: true, machine: cur.machine, note: 'Approved. The agent picks up its key on its next try; the old key (if any) stops working.' });
+  });
+  app.get('/truckmate/reefer-agent/enroll', requireAdmin, async (req, res) => { const cur = (await db.get(ENROLL, null)) || null; res.json(cur ? { waiting: !cur.approvedAt && !cur.pickedUpAt, machine: cur.machine, at: cur.at, approvedAt: cur.approvedAt || null, pickedUpAt: cur.pickedUpAt || null } : { waiting: false }); });
 
   // ---- admins ----
   app.post('/truckmate/reefer-agent/key', requireAdmin, async (req, res) => {

@@ -7,6 +7,8 @@ test('recipe: only read-only steps are accepted', () => {
   assert.equal(ok.ok, true); assert.deepEqual(ok.recipe.after, [{ do: 'key', key: 'ESC' }]);
   assert.match(cleanRecipe({ steps: [{ do: 'type', text: 'DELETE' }, { do: 'shot' }] }).error, /only the trailer number/);
   assert.match(cleanRecipe({ steps: [{ do: 'key', key: 'DEL' }, { do: 'shot' }] }).error, /key must be one of/);
+  assert.equal(cleanRecipe({ steps: [{ do: 'key', key: 'menu' }, { do: 'key', key: 'w' }, { do: 'shot' }], after: [{ do: 'key', key: 'alt+c' }] }).recipe.after[0].key, 'ALT+C');
+  assert.match(cleanRecipe({ steps: [{ do: 'key', key: 'ALT+F4' }, { do: 'shot' }] }).error, /key must be one of/);
   assert.match(cleanRecipe({ steps: [{ do: 'key', key: 'CTRL+S' }, { do: 'shot' }] }).error, /key must be one of/);
   assert.match(cleanRecipe({ steps: [{ do: 'click', x: 2, y: 0 }, { do: 'shot' }] }).error, /x and y are 0–1/);
   assert.match(cleanRecipe({ steps: [{ do: 'click', x: 0.1, y: 0.1 }] }).error, /screenshot/);
@@ -40,4 +42,17 @@ test('agent: needs its key; a reading lands on the trailer; a wrong window stops
   await routes['GET /truckmate/reefer-agent/status'](req(), res);
   assert.equal(out.shots[0].kind, 'unexpected'); assert.equal(out.shots[0].png, undefined, 'no picture in the status list');
   code = 200; await routes['PUT /truckmate/reefer-agent/recipe'](req({ steps: [{ do: 'key', key: 'F2' }, { do: 'shot' }] }), res); assert.equal(code, 400);
+});
+
+test('enrollment: the agent waits, an admin approves, the agent gets its key once', async () => {
+  const routes = {}; const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put: (p, ...h) => { routes[`PUT ${p}`] = h.at(-1); } };
+  initReeferAgent(app, { requireAuth: (q, s, n) => n(), requireAdmin: (q, s, n) => n(), db: memDb(), getBoard: async () => ({ trips: [] }), env: {} });
+  let out; let code = 200; const res = { status(c) { code = c; return this; }, json(j) { out = j; return this; } };
+  const id = 'abcdefghijklmnop1234';
+  await routes['POST /reefer-agent/enroll']({ body: { id, machine: 'EC2AMAZ' } }, res); assert.equal(out.waiting, true);
+  await routes['POST /truckmate/reefer-agent/approve']({ user: { name: 'Nadim' } }, res); assert.equal(out.ok, true); assert.equal(out.key, undefined, 'the admin never sees the key');
+  await routes['POST /reefer-agent/enroll']({ body: { id } }, res); assert.equal(out.approved, true); assert.match(out.key, /^RA-/);
+  const key = out.key;
+  await routes['POST /reefer-agent/enroll']({ body: { id } }, res); assert.notEqual(out.key, key, 'handed over once');
+  await routes['GET /reefer-agent/jobs']({ get: () => key }, res); assert.notEqual(code, 401);
 });
