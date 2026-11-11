@@ -89,11 +89,12 @@ const PROMPT = (trailer) => [
   'Read it and return ONLY a JSON object (no prose):',
   '{ "isReeferEvents": boolean, "trailer": string|null, "eventTime": string|null, "trip": string|null,',
   '  "mode": string|null, "powerOn": boolean|null, "tempUnits": "F"|"C"|null,',
-  '  "setTemp": number|null, "returnTemp": number|null, "supplyTemp": number|null,',
+  '  "setTemp": number|null, "returnTemp": number|null, "supplyTemp": number|null, "sensorTemp": number|null,',
   '  "compartments": [{ "n": number, "set": number|null, "return": number|null, "supply": number|null }],',
   '  "fuelLevel": string|null, "location": string|null,',
   '  "latestAlarm": { "time": string|null, "code": string|null, "description": string|null } | null }',
   'Use the NEWEST event (the highlighted / top row and the fields above it). Numbers exactly as shown; null when a field is blank.',
+  'sensorTemp is the first value in the Reefer "Sensors" row (the box / current temperature); 0.0 next to blanks means no sensor — use null then.',
   'isReeferEvents is false if this is any other window, a dialog, an error, a login screen or a blank screen.',
 ].join('\n');
 
