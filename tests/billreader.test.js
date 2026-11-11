@@ -38,23 +38,24 @@ test('a load with two shippers and two consignees says so', () => {
   assert.equal(loadParties({ freightBills: [{ billNumber: 'X' }] }, read), null);
 });
 
-test('customer notes: codes from the bills read once a week, and each load gets its customers\' notes', async () => {
-  const { customersToRead, loadCustomerNotes } = await import('../reeferagent.js');
-  const bills = {
-    B1: { trip: '7', screen: { shipper: { code: '29860', name: 'AMERICOLD' }, consignee: { code: '31797', name: 'PFG VIRGINIA' } } },
-    B2: { trip: '7', screen: { shipper: { code: '29860', name: 'AMERICOLD' }, consignee: { code: '35951', name: 'EASTERN FOOD' } } },
-  };
+test('customer notes: the trip sheet\'s delivery stops, by name and city, read every 10 days', async () => {
+  const { customersToRead, loadCustomerNotes, stopKey, nameMatch } = await import('../reeferagent.js');
+  const trips = [
+    { trip: { tripNumber: '7' }, _manifest: { stops: [{ action: 'LOAD', customer: 'Miami hub' }, { action: 'DELIVER', customer: "Mobi's", city: 'Atlanta' }, { action: 'DELIVER', customer: 'Native Lombard', city: 'Lombard' }] } },
+    { trip: { tripNumber: '8' }, freightBills: [{ billNumber: 'B9' }] },          // no trip sheet: not an LTL load
+  ];
   const now = Date.parse('2026-11-11T00:00:00Z');
-  // consignees only (the stops drivers deliver), only on trip-sheet loads
-  assert.deepEqual(customersToRead(bills, {}, { now }).map((x) => x.value), ['31797', '35951']);
-  assert.deepEqual(customersToRead(bills, {}, { now, ltlTrips: new Set(['8']) }), []);
-  const read = { 31797: { at: '2026-11-05T00:00:00Z', name: 'PFG VIRGINIA', notes: 'Check in at gate 2. Lumper paid by receiver.' }, 35951: { at: '2026-10-30T00:00:00Z', notes: null } };
-  assert.deepEqual(customersToRead(bills, read, { now }).map((x) => x.value), ['35951']);   // 31797 is 6 days old, 35951 12
-  const n = loadCustomerNotes({ freightBills: [{ billNumber: 'B1' }, { billNumber: 'B2' }] }, bills, read);
+  assert.deepEqual(customersToRead(trips, {}, { now }).map((x) => `${x.value}|${x.city}`), ["MOBI'S|ATLANTA", 'NATIVE LOMBARD|LOMBARD']);
+  const names = { [stopKey("Mobi's", 'Atlanta')]: { code: '11834', at: '2026-11-05T00:00:00Z' }, [stopKey('Native Lombard', 'Lombard')]: { code: '03516', at: '2026-10-30T00:00:00Z' } };
+  assert.deepEqual(customersToRead(trips, names, { now }).map((x) => x.value), ['NATIVE LOMBARD']);   // Mobi's is 6 days old
+  const customers = { 11834: { code: '11834', name: "MOBI'S", at: '2026-11-05T00:00:00Z', notes: 'Saturday dock 8am-2pm. Get the receiver signature.' } };
+  const n = loadCustomerNotes(trips[0], {}, customers, names);
   assert.equal(n.length, 1);
-  assert.deepEqual(n[0].roles, ['consignee']);
-  const item = { _customerNotes: n };
-  assert.match(staffFacts(item).customerInstructions[0].instructions, /gate 2/);
+  assert.equal(n[0].code, '11834');
+  assert.match(staffFacts({ _customerNotes: n }).customerInstructions[0].instructions, /dock 8am/);
+  assert.equal(nameMatch('NATIVE CHICAGO - LOMBARD', 'Native Lombard'), true);
+  assert.equal(nameMatch('WINN DIXIE JACKSONVILLE', 'Native Lombard'), false);
+  assert.equal(nameMatch("MOBI'S", "Mobi's"), true);
 });
 
 test('TruckMate customer info lands on our customer profile: instructions, phones, emails; edited contacts kept', async () => {

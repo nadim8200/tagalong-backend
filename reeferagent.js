@@ -21,7 +21,7 @@ const SITE = 'florida-beauty';
 const MIN = 60000;
 export const EVERY_MIN = 120;   // a full read of the active loads' trailers every 2 hours (the agent checks in hourly)
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const KEYS = { noTemp: `taTkNoTemp:${SITE}`, key: 'taReeferAgentKey', recipe: 'taReeferAgentRecipe', billRecipe: 'taBillAgentRecipe', bills: `taTmBillStops:${SITE}`, custRecipe: 'taCustAgentRecipe', customers: `taTmCustomerNotes:${SITE}`, readings: `taTkReefer:${SITE}`, shots: 'taReeferAgentShots', runs: 'taReeferAgentRuns' };
+const KEYS = { noTemp: `taTkNoTemp:${SITE}`, key: 'taReeferAgentKey', recipe: 'taReeferAgentRecipe', billRecipe: 'taBillAgentRecipe', bills: `taTmBillStops:${SITE}`, custRecipe: 'taCustAgentRecipe', customers: `taTmCustomerNotes:${SITE}`, custNames: `taTmCustomerNames:${SITE}`, custVisit: 'taCustAgentVisit', readings: `taTkReefer:${SITE}`, shots: 'taReeferAgentShots', runs: 'taReeferAgentRuns' };
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
 const unit = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -40,12 +40,12 @@ function cleanSteps(steps, label) {
   for (const [i, s] of steps.entries()) {
     const t = s && s.do; const at = `${label} step ${i + 1}`;
     if (t === 'click' || t === 'doubleclick') { if (!frac(s.x) || !frac(s.y)) return { ok: false, error: `${at}: x and y are 0–1 (part of the window).` }; out.push({ do: t, x: Number(s.x), y: Number(s.y), note: String(s.note || '').slice(0, 80) }); continue; }
-    if (t === 'type') { const v = String(s.text || ''); if (!/^(\{trailer\}|\{bill\}|\{code\}|[0-9]{1,10})$/.test(v)) return { ok: false, error: `${at}: only the trailer number ({trailer}), the bill number ({bill}), the customer code ({code}) or digits may be typed.` }; out.push({ do: 'type', text: v }); continue; }
+    if (t === 'type') { const v = String(s.text || ''); if (!/^(\{trailer\}|\{bill\}|\{code\}|\{name\}|[0-9]{1,10})$/.test(v)) return { ok: false, error: `${at}: only the trailer number ({trailer}), the bill number ({bill}), the customer code ({code}) or name ({name}) or digits may be typed.` }; out.push({ do: 'type', text: v }); continue; }
     if (t === 'key') { const k = String(s.key || '').toUpperCase(); if (!ALLOWED_KEYS.includes(k)) return { ok: false, error: `${at}: key must be one of ${ALLOWED_KEYS.join(', ')}.` }; out.push({ do: 'key', key: k }); continue; }
     if (t === 'wait') { const ms = Math.round(Number(s.ms)); if (!(ms >= 100 && ms <= 15000)) return { ok: false, error: `${at}: wait 100–15000 ms.` }; out.push({ do: 'wait', ms }); continue; }
     if (t === 'shot') { out.push({ do: 'shot' }); continue; }
     // find: the agent sends a picture, Claude says where that button / tab is, the agent clicks its middle (no fixed spots)
-    if (t === 'find') { const g = String(s.target || '').replace(/[^\w .,'()/&:#-]/g, '').trim(); if (g.length < 3 || g.length > 120) return { ok: false, error: `${at}: find needs a target (what to click, 3–120 characters).` }; out.push({ do: 'find', target: g }); continue; }
+    if (t === 'find') { const g = String(s.target || '').replace(/[^\w .,'()/&:#{}-]/g, '').trim(); if (g.length < 3 || g.length > 120) return { ok: false, error: `${at}: find needs a target (what to click, 3–120 characters).` }; out.push({ do: 'find', target: g }); continue; }
     return { ok: false, error: `${at}: "${t}" is not allowed (click, doubleclick, find, type, key, wait, shot).` };
   }
   return { ok: true, steps: out };
@@ -180,25 +180,45 @@ export function loadParties(item, read = {}) {
 export const CUSTOMERS_PER_RUN = 25;
 export const CUSTOMER_REREAD_DAYS = 10;
 const codeKey = (c) => String(c == null ? '' : c).trim().toUpperCase();
-// The customer codes to read: the consignees read off the bills of trip-sheet (LTL) loads, not read in the last 10 days.
-// ltlTrips: the trips with a trip sheet (null = every trip). Pure.
-export function customersToRead(bills = {}, read = {}, { now = Date.now(), max = CUSTOMERS_PER_RUN, ltlTrips = null } = {}) {
+const normName = (x) => String(x == null ? '' : x).toUpperCase().replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+// A trip-sheet stop's key: its customer name and city. Pure.
+export const stopKey = (name, city) => `${normName(name)}|${normName(city)}`;
+// Does the name TruckMate shows match the name on the trip sheet? Every word of 3+ letters on the trip sheet (minus words
+// like INC) must be in TruckMate's name, and the first one always. Pure.
+export function nameMatch(screen, want) {
+  const stop = new Set(['INC', 'LLC', 'CORP', 'CO', 'THE', 'AND', 'OF']);
+  const w = normName(want).split(' ').filter((x) => x.length >= 3 && !stop.has(x));
+  const got = new Set(normName(screen).split(' '));
+  if (!w.length || !got.size) return false;
+  return got.has(w[0]) && w.filter((x) => got.has(x)).length / w.length >= 0.6;
+}
+// The customers to read: every delivery stop on a trip sheet (the LTL customers), by name and city, not read in the last
+// 10 days. names: { [stopKey]: { code, at } }. Pure.
+export function customersToRead(trips = [], names = {}, { now = Date.now(), max = CUSTOMERS_PER_RUN } = {}) {
   const out = new Map();
-  for (const r of Object.values(bills)) {
-    if (ltlTrips && !(r && ltlTrips.has(String(r.trip || '')))) continue;
-    for (const [role, p] of [['consignee', r && r.screen && r.screen.consignee]]) {
-      const k = codeKey(p && p.code);
-      if (!/^[A-Z0-9-]{1,12}$/.test(k) || out.has(k)) continue;
-      const done = read[k];
+  for (const it of trips) {
+    for (const st of ((it && it._manifest && it._manifest.stops) || [])) {
+      if (!st || !/DELIVER/i.test(st.action || '') || !normName(st.customer)) continue;
+      const k = stopKey(st.customer, st.city);
+      if (out.has(k)) continue;
+      const done = names[k];
       if (done && now - Date.parse(done.at) < CUSTOMER_REREAD_DAYS * 24 * 60 * MIN) continue;
-      out.set(k, { value: k, trip: r.trip || null, role, name: (p && p.name) || null, isNew: !done });
+      out.set(k, { value: String(st.customer).toUpperCase().replace(/\s+/g, ' ').trim().slice(0, 60), city: normName(st.city) || null, state: st.state || null, trip: tripNo(it), isNew: !done });
     }
   }
   return [...out.values()].sort((a, b) => (b.isNew ? 1 : 0) - (a.isNew ? 1 : 0)).slice(0, max).map(({ isNew, ...x }) => x);
 }
 // A load's customer notes: each shipper / consignee on its bills that has notes in TruckMate. Pure.
-export function loadCustomerNotes(item, bills = {}, customers = {}) {
+export function loadCustomerNotes(item, bills = {}, customers = {}, names = {}) {
   const out = new Map();
+  // the trip sheet's delivery stops, by the customer code found for their name and city
+  for (const st of ((item && item._manifest && item._manifest.stops) || [])) {
+    const n = st && names[stopKey(st.customer, st.city)]; const c = n && customers[codeKey(n.code)];
+    if (!c || !String(c.notes || '').trim()) continue;
+    const cur = out.get(c.code) || { code: c.code, name: c.name || st.customer, roles: [], notes: c.notes, readAt: c.at };
+    if (!cur.roles.includes('consignee')) cur.roles.push('consignee');
+    out.set(c.code, cur);
+  }
   for (const b of ((item && (item.freightBills || item.orders)) || [])) {
     const r = b && bills[String(b.billNumber || '').trim()];
     if (!r || !r.screen) continue;
@@ -212,8 +232,8 @@ export function loadCustomerNotes(item, bills = {}, customers = {}) {
   }
   return out.size ? [...out.values()] : null;
 }
-const CUSTOMER_PROMPT = (code) => [
-  `This is a screenshot from TruckMate (trucking software). We expect the "Customer & Vendor Profiles" window showing customer code ${code} (Code box at the top), on one of its tabs: Address, Notes (Specifications) or Shipping Instructions — or its "Notes for Client ${code}" window (tabs at the bottom: Caller, Shipper, Consignee, Sales, Collection Notes, Credit Notation).`,
+const CUSTOMER_PROMPT = (who) => [
+  `This is a screenshot from TruckMate (trucking software). We expect the "Customer & Vendor Profiles" window showing the customer ${who} (Code and Name boxes at the top), on one of its tabs: Address, Notes (Specifications) or Shipping Instructions — or its "Notes for Client <code>" window (tabs at the bottom: Caller, Shipper, Consignee, Sales, Collection Notes, Credit Notation).`,
   'Read it and return ONLY a JSON object (no prose):',
   '{ "isProfileScreen": boolean, "code": string|null, "name": string|null, "panel": "address"|"notes"|"shipping"|"clientNotes"|"other", "clientNotesTab": "caller"|"shipper"|"consignee"|"sales"|"collection"|"credit"|null, "dialogOpen": boolean,',
   '  "address": string|null, "city": string|null, "state": string|null, "zip": string|null,',
@@ -295,8 +315,8 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
       const [billRecipe, custRecipe, bills, customers] = await Promise.all([db.get(KEYS.billRecipe, null), db.get(KEYS.custRecipe, null), db.get(KEYS.bills, {}), db.get(KEYS.customers, {})]);
       const sets = [];
       if (billRecipe && billRecipe.steps && billRecipe.steps.length) sets.push({ kind: 'bill', recipe: billRecipe, items: billsToRead((board && board.trips) || [], bills || {}).map((x) => ({ value: x.bill, trip: x.trip, updated: x.updated })) });
-      const ltlTrips = new Set(((board && board.trips) || []).filter((it) => it._manifest && (it._manifest.stops || []).length).map(tripNo));
-      if (custRecipe && custRecipe.steps && custRecipe.steps.length) sets.push({ kind: 'customer', recipe: custRecipe, items: customersToRead(bills || {}, customers || {}, { now: now(), ltlTrips }).map((x) => ({ value: x.value, trip: x.trip })) });
+      const names = (await db.get(KEYS.custNames, {})) || {};
+      if (custRecipe && custRecipe.steps && custRecipe.steps.length) sets.push({ kind: 'customer', recipe: custRecipe, items: customersToRead((board && board.trips) || [], names, { now: now() }).map((x) => ({ value: x.value, city: x.city, trip: x.trip })) });
       return sets.length ? { sets } : {};
     };
     // every EVERY_MIN after the last run that actually read trailers: until then the hourly check-in gets no trailers
@@ -313,14 +333,28 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
     if (!png || png.length > 12 * 1024 * 1024) return res.status(400).json({ error: 'Send one PNG screenshot (base64, under 9 MB).' });
     try {
       if (b.kind === 'customer') {
-        const code = codeKey(b.value).slice(0, 12);
-        const r = await read(png, code, CUSTOMER_PROMPT(code));
-        const same = r && codeKey(r.code).replace(/^0+/, '') === code.replace(/^0+/, '');
-        if (!r || !r.isProfileScreen || r.dialogOpen || !same) {
-          const why = !r || !r.isProfileScreen ? 'That is not the customer profile screen.' : r.dialogOpen ? 'A pop-up / message is showing.' : `The screen shows customer ${r.code || '(none)'}, not ${code}.`;
-          await keepShot('unexpected', code, png, why);
+        // asked by code (digits) or by the trip sheet's name + city
+        const asked = String(b.value || '').slice(0, 60); const byCode = /^\d+$/.test(asked);
+        const k = byCode ? null : stopKey(asked, b.city);
+        const r = await read(png, null, CUSTOMER_PROMPT(byCode ? `code ${asked}` : `named like ${asked}${b.city ? ` in ${b.city}` : ''}`));
+        const visit = (await db.get(KEYS.custVisit, null)) || null;
+        const sameVisit = visit && visit.asked === asked && now() - Date.parse(visit.at) < 15 * MIN;
+        let code = codeKey(r && r.code).slice(0, 12); let why = null;
+        if (!r || !r.isProfileScreen) why = 'That is not the customer profile screen.';
+        else if (r.dialogOpen) why = 'A pop-up / message is showing.';
+        else if (r.panel === 'clientNotes') {
+          // the Notes window only shows a code: it must be the customer this visit found (catches Notes for another client)
+          if (!sameVisit) why = 'Notes window before the customer was found.';
+          else if (code.replace(/^0+/, '') !== String(visit.code).replace(/^0+/, '')) why = `Notes are for client ${code || '(none)'}, not ${visit.code}.`;
+          else code = visit.code;
+        } else if (byCode ? code.replace(/^0+/, '') !== asked.replace(/^0+/, '') : !nameMatch(r.name, asked)) why = `The screen shows ${r.name || '(no name)'} ${r.code || ''}, not ${asked}.`;
+        if (!why && !code) why = 'No customer code on the screen.';
+        if (why) {
+          await keepShot('unexpected', asked, png, why);
           return res.json({ ok: false, stop: true, dialog: !!(r && r.dialogOpen), why });
         }
+        if (r.panel !== 'clientNotes') await db.set(KEYS.custVisit, { asked, code, at: iso() });
+        if (k) await db.update(KEYS.custNames, (cur) => ({ ...(cur || {}), [k]: { code, name: r.name || asked, at: iso() } }), {});
         // one profile can take several shots (Notes, then contacts): each adds what it shows
         const list = (x) => (Array.isArray(x) ? x.filter(Boolean).slice(0, 30) : []);
         const saved = await db.update(KEYS.customers, (cur) => {
@@ -483,8 +517,8 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
     for (const it of trips) { const r = all[unit(tripOf(it).trailer)]; if (r && now() - Date.parse(r.at) < 3 * 60 * MIN) it._tkReefer = r; }
     // the Shipper / Consignee boxes read off each bill: on the bill (geofences, Jarvis) and the load's list of places
     const bills = (await db.get(KEYS.bills, {})) || {};
-    if (!Object.keys(bills).length) return;
     const customers = (await db.get(KEYS.customers, {})) || {};
+    const names = (await db.get(KEYS.custNames, {})) || {};
     for (const it of trips) {
       for (const b of (it.freightBills || it.orders || [])) {
         const r = b && bills[String(b.billNumber || '').trim()];
@@ -495,7 +529,7 @@ export function initReeferAgent(app, { requireAuth, requireAdmin, db, getBoard, 
       }
       const p = loadParties(it, bills);
       if (p) it._parties = p;
-      const n = loadCustomerNotes(it, bills, customers);
+      const n = loadCustomerNotes(it, bills, customers, names);
       if (n) it._customerNotes = n;
     }
   }
