@@ -25,6 +25,7 @@ import { normName } from './profiles.js';
 import { instructionsFor, instructionsSms, whichLocation, loadFor } from './instructionstext.js';
 import { staffFacts } from './stafffacts.js';
 import { realUnit } from './units.js';
+import { maySet } from './usualarrival.js';
 
 const SITE = 'florida-beauty';
 const API = 'https://api.anthropic.com/v1/messages';
@@ -111,6 +112,7 @@ export const TOOLS = [
   { name: 'past_loads', description: 'Loads that already FINISHED (delivered / closed, off the board), last 60 days: by customer, truck, trip, bill, the day it left our hub (outbound_day, e.g. "Tuesday", "10/20") or when it delivered (delivered_day — a day, or "this week" / "last week" / "last 3 days"). When it left, from which hub, truck, trailer, each stop and when it was delivered. Use when a load isn\'t on the board.', input_schema: { type: 'object', properties: { customer: { type: 'string' }, truck: { type: 'string' }, trip: { type: 'string' }, bill: { type: 'string' }, outbound_day: { type: 'string' }, delivered_day: { type: 'string' } } } },
   { name: 'eta_vs_actual', description: 'The ETA we gave vs when the truck actually got there, per stop: the first and last ETA we gave (and when), ARTIS\'s ETA, the actual arrival (customer geofence, else TruckMate delivered), how far off, time at the stop. For a trip (on the board or finished), or a customer (their recent loads). STAFF ONLY.', input_schema: { type: 'object', properties: { trip: { type: 'string' }, customer: { type: 'string' }, delivered_day: { type: 'string', description: 'optional: "this week", "Thursday", "10/22"' } } } },
   { name: 'miles', description: 'Mile calculator: driving miles between any two points — a truck (live GPS), a customer on a load, our Miami or Ventura hub, or any city / zip / address. A truck or trip with no "to" → miles to each stop it has left, leg by leg, with HOS-aware ETAs. Use for "how many miles from 2403 to its next stop?", "miles from Miami to Carbone Derry", "how far is Boston from Hartford?". STAFF ONLY.', input_schema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, truck: { type: 'string' }, trip: { type: 'string' } } } },
+  { name: 'usual_arrival', description: 'STAFF ONLY. When our trucks usually get to an LTL customer (learned from past arrivals, or set). ONLY Nadim or Ronen may SET a delivery time ("add a delivery time for a customer"). Script — ask one at a time until you have all: 1) which customer (and the city if it has several places), 2) from which hub — Miami or Ventura, 3) what time it is set to get there and which day — the second or the third day after the outbound day, early morning, day or night (so 4 in the early morning = 4 AM; 8 at night = 8 PM). Then repeat it back ("Pyramid Oxnard, from Miami, 4 AM on the third day — Monday outbound gets there Thursday 4 AM") and only after they say yes call this with time + hub + days_after_outbound (second day = 2, third day = 3). When an LTL load\'s ETA runs 1 h 30 min past this time an alert goes out.', input_schema: { type: 'object', properties: { customer: { type: 'string' }, city: { type: 'string' }, state: { type: 'string', description: '2 letters' }, hub: { type: 'string', enum: ['Miami', 'Ventura'] }, time: { type: 'string', description: 'to SET: the local delivery time, e.g. 4 AM' }, days_after_outbound: { type: 'number', description: '2 = second day, 3 = third day after the outbound day' } }, required: ['customer'] } },
   { name: 'stop_times', description: 'How long trucks took at their stops (customer geofence in → out): arrived, left, time there — for a trip, a truck and / or a customer, over the last few days; plus any truck at a stop right now and how long so far. Use for "how long was 734 at Direct Flowers?", "how long are trucks taking at Carbone?", "is 2403 still at the stop?". STAFF ONLY.', input_schema: { type: 'object', properties: { trip: { type: 'string' }, truck: { type: 'string' }, customer: { type: 'string' }, days: { type: 'number', description: '1–30, default 7' } } } },
   { name: 'truck_hours', description: 'Driving hours (hours of service) for a truck or driver: each driver\'s duty status, drive time left, shift (14-hr) left, 70-hr cycle left and when a break is due (Samsara ELD) — plus the truck\'s current load and where it is. Use for "how many hours does 2217 have", "can 2403 make it", "is the team rested".', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck / unit number, or a driver name' } }, required: ['truck'] } },
   { name: 'loads_to_place', description: 'A PLACE only (never a customer name — use customer_etas for those): every load on the board with a stop in a city / state (e.g. "Lombard, IL", "Chicago", "NJ") — trip, truck, customer at that stop, delivered or not, and the live ETA. Use for questions like "update on deliveries to Lombard IL".', input_schema: { type: 'object', properties: { place: { type: 'string' } }, required: ['place'] } },
@@ -415,6 +417,18 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         if (ctx.customer) return { error: 'Not available.' };
         if (!miles) return { error: 'The mile calculator is not set up.' };
         return miles.ask({ from: input.from, to: input.to, truck: input.truck, trip: input.trip }, ((await getBoard(SITE)) || {}).trips || []);
+      }
+      case 'usual_arrival': {
+        if (ctx.customer) return { error: 'Not available.' };
+        if (!stopTimes || !stopTimes.setUsual) return { error: 'Usual arrival times are not set up.' };
+        if (input.time) {
+          const phone = ctx.user && /^sms:/.test(String(ctx.user.id || '')) ? String(ctx.user.id).slice(4) : null;
+          if (!maySet({ phone, name: ctx.user && ctx.user.name })) return { ok: false, note: 'Only Nadim or Ronen can set delivery times. Say so.' };
+          if (!input.hub) return { ok: false, note: 'Ask which hub the load leaves from — Miami or Ventura.' };
+          return stopTimes.setUsual({ customer: input.customer, city: input.city || null, state: input.state || null, hub: input.hub, time: input.time, daysAfter: input.days_after_outbound, by: (ctx.user && ctx.user.name) || 'dispatch' });
+        }
+        const list = await stopTimes.usualTimes(input.customer);
+        return list.length ? { places: list } : { found: false, note: 'No arrivals at that customer learned yet.' };
       }
       case 'stop_times': {
         if (ctx.customer) return { error: 'Not available.' };

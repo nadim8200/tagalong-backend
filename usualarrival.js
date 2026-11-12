@@ -27,6 +27,29 @@ const dowOf = (ymd) => new Date(`${ymd}T12:00:00Z`).getUTCDay();
 const clock = (m) => { const h = Math.floor(m / 60); const mm = m % 60; return `${h % 12 || 12}:${String(mm).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
 const DOW = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
+// Which hub a load left from / a person said: MIAMI or VENTURA | null. Pure.
+export const hubKey = (x) => { const u = String(x || '').toUpperCase(); return /VENTUR|OXNARD|CALIF/.test(u) ? 'VENTURA' : /MIAMI|MIA\b|FLORIDA|TERMINAL/.test(u) ? 'MIAMI' : null; };
+export const hubOf = (it) => hubKey((it && it._tb && it._tb.hub) || tripOf(it).origZoneDesc || (it && it._manifest && ((it._manifest.stops || []).find((x) => /^LOAD/i.test(x.action || '')) || {}).city));
+// Only Nadim and Ronen may set usual delivery times (by text, call or Ask Jarvis).
+export const SETTERS = ['3055040711', '3052063095'];
+export const maySet = ({ phone = null, name = '' } = {}) => (phone ? SETTERS.includes(String(phone).replace(/\D+/g, '').slice(-10)) : /^(nadim|ronen)\b/i.test(String(name || '').trim()));
+
+// "4am", "4:30 AM", "04:00", "16:30" → minutes after midnight | null. Pure.
+export function parseClock(x) {
+  const m = String(x || '').trim().toUpperCase().match(/^(\d{1,2})(?::?(\d{2}))?\s*(A\.?M\.?|P\.?M\.?)?$/);
+  if (!m) return null;
+  let h = Number(m[1]); const mm = Number(m[2] || 0);
+  if (mm > 59 || h > 23 || (m[3] && (h < 1 || h > 12))) return null;
+  if (m[3]) h = (h % 12) + (m[3].startsWith('P') ? 12 : 0);
+  return h * 60 + mm;
+}
+// the most common "days after outbound" in what was learned (even one arrival) | null. Pure.
+export function learnedDays(rec) {
+  const c = {}; ((rec && rec.arrivals) || []).forEach((a) => { c[a.days] = (c[a.days] || 0) + 1; });
+  const top = Object.entries(c).sort((a, b) => b[1] - a[1])[0];
+  return top ? Number(top[0]) : null;
+}
+
 // one arrival from the stop-times log → what we learn from it (needs the trip's outbound day). Pure.
 export function arrivalFact(row, outbound) {
   if (!row || !row.arrivedMs || !row.customer || !row.place || !/^\d{4}-\d{2}-\d{2}$/.test(String(outbound || ''))) return null;
@@ -44,7 +67,15 @@ const medianMin = (mins) => {
 };
 // When this customer usually gets the truck, for a load with this outbound day: the outbound weekday's own arrivals when
 // there are 3+, else all of them. Needs 3+ arrivals that agree on the day (60%+). → { days, min, n, text } | null. Pure.
-export function usualFor(rec, outbound) {
+export function usualFor(rec, outbound, hub = null) {
+  // set by Nadim / Ronen ("Pyramid Oxnard from Miami: 4 AM on the 3rd day") — per hub; wins over what was learned
+  const byHub = (rec && rec.fixedByHub) || {};
+  const fx = (hub && byHub[hub]) || (!hub && Object.values(byHub).length === 1 ? Object.values(byHub)[0] : null) || (rec && rec.fixed) || null;
+  if (fx && fx.days != null && fx.min != null) {
+    const f = fx; const d = Number(f.days);
+    return { days: d, min: f.min, n: 'set', of: 'set', set: true, by: f.by || null,
+      text: `${d === 0 ? 'the outbound day' : d === 1 ? '1 day after the outbound day' : `${d} days after the outbound day`} at ${clock(f.min)} local${f.hub ? ` from ${f.hub === 'VENTURA' ? 'Ventura' : 'Miami'}` : ''} (set by ${f.by || 'dispatch'})` };
+  }
   const all = (rec && rec.arrivals) || [];
   if (all.length < 3) return null;
   const dow = outbound ? dowOf(outbound) : null;
@@ -102,7 +133,7 @@ export function lateCheck(items = [], etas = {}, learned = {}) {
       let best = null;
       for (const c of names) {
         const rec = learned[stopKey(c, s.label)] || Object.values(learned).find((r) => custKey(r.customer) === custKey(c) && town(r.place) === town(s.label));
-        const u = usualFor(rec, od); const ms = usualMs(u, od, s.label);
+        const u = usualFor(rec, od, hubOf(it)); const ms = usualMs(u, od, s.label);
         if (u && ms && (!best || ms < best.usualMs)) best = { customer: c, usual: u, usualMs: ms };
       }
       if (!best) continue;
@@ -130,13 +161,14 @@ export function lateEmail(x, item, { worse = false } = {}) {
     ['Outbound', `${DOW[dowOf(x.outbound)]}, ${x.outbound}`],
     ['Stop', `${x.customers.join(', ')} — ${x.label}`],
     ['ETA now', fmtLocal(x.etaMs, x.label)],
-    ['Usually there', `${fmtLocal(x.usualMs, x.label)} — ${x.usual.text}, from ${x.usual.n} of the last ${x.usual.of} arrivals`],
+    ['Usually there', `${fmtLocal(x.usualMs, x.label)} — ${x.usual.text}${x.usual.set ? '' : `, from ${x.usual.n} of the last ${x.usual.of} arrivals`}`],
     ['Late by', hm(x.lateMin)],
     ...(where ? [['Truck now', where]] : []),
   ];
   const html = `<div style="font-family:Arial,sans-serif;font-size:14px"><p>Good day,</p><p>Trip ${esc(x.trip)} is running ${worse ? 'even ' : ''}later than usual for ${esc(x.customer)}.</p>`
     + `<table style="border-collapse:collapse">${rows.map(([k, v]) => `<tr><td style="padding:3px 12px 3px 0;color:#555"><b>${esc(k)}</b></td><td style="padding:3px 0">${esc(v)}</td></tr>`).join('')}</table>`
-    + '<p style="color:#666;font-size:12px">The usual time is learned from our trucks\' geofence arrivals at this customer. LTL runs only.</p><p>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>';
+    + `<p style="color:#666;font-size:12px">${x.usual.set ? 'The usual time was set by dispatch.' : 'The usual time is learned from our trucks\' geofence arrivals at this customer.'} LTL runs only.</p>`
+    + '<p>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>';
   return { subject, html };
 }
 

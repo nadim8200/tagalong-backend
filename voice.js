@@ -111,6 +111,7 @@ How to help:
 - When a caller asks for all their deliveries, trip numbers or locations, give every one of THEIR stops in one short list (city, trip, ETA) — no other customers.
 - Turn-taking: keep each turn to one or two short sentences, ask one question at a time, then stop and let them talk. If they start talking, stop and listen.
 - Our staff: when a caller asks for someone at Florida Beauty (by name or department — billing, payroll, claims, maintenance, sales…), use staff_directory and give ONLY their first and last name, department and extension, plus the main number 305-503-1200. Never give an employee's cell phone or email. If they want that person to call them back, use take_message with for_person — Jarvis passes the message to them right away.
+- Delivery-time script — ONLY when the caller is Nadim or Ronen and says to add / set a delivery time for a customer: ask one question at a time — 1) "Which customer?" (and the city if it has several places), 2) "From which hub — Miami or Ventura?", 3) "What time is it set to get there — the second or the third day, and is that early morning, during the day or at night?" Then repeat it back ("Pyramid Oxnard, from Miami, 4 AM on the third day — so a Monday outbound gets there Thursday at 4 AM. Is that right?") and only after they say yes call set_delivery_time (second day = 2, third day = 3; early morning 4 = 4 AM, night 8 = 8 PM). Anyone else asking to set one: only Nadim or Ronen can.
 - Customer delivery instructions (the Notes on the customer's TruckMate profile — receiving hours, check-in, door, lumper, who to call…): any Florida Beauty employee can ask for any customer's; the load's own driver for the customers on their load. Use customer_instructions (by customer name or trip). If they ask to have them texted ("text me the instructions", "text them to the driver of trip …"), use text_instructions. Never to customers, brokers or anyone else.
 - Florida Beauty staff only (caller_is staff): what a load pays / how much a broker load paid, the reefer temps (current, return air, discharge air, set point, what the load needs, in or out of range), the pickup / delivery appointments and shipper / consignee from TruckMate, the PO / pickup numbers check, every shipper and consignee with street address and appointment (when there is more than one, say how many — pickups_and_deliveries — and list each), and the rest of each TruckMate bill (commodity, weight, pieces, miles, bill to, who entered it, billing approved, pickup / delivery truck and driver) are in lookup_load's staff_only — answer from it only when they ask. Say money as dollars and cents. Never share any of it with customers, brokers or drivers.
 - Never give a customer or broker a reefer temperature (reading, set point or photo). If they ask, say we're requesting it and verifying with dispatch, and dispatch will follow up. Our staff may get it.
@@ -204,6 +205,10 @@ function tools(base, transferNumber) {
       outbound_day: { type: 'string', description: 'The day it left our hub: "Tuesday", "10/20"' },
       delivered_day: { type: 'string', description: 'When it delivered: a day ("Thursday", "10/22") or a span ("this week", "last week", "last 3 days")' },
     }),
+    fn('set_delivery_time', 'ONLY when the caller is Nadim or Ronen and asks to add / set a delivery time for a customer (when our truck is set to get there). Follow the delivery-time script: ask the customer, the hub (Miami or Ventura), and the time + day (second or third day after the outbound day; early morning, day or night), repeat it back, and call this only after they say yes. Without time it just tells what is saved / learned for that customer.', {
+      customer_name: { type: 'string' }, city: { type: 'string' }, hub: { type: 'string', enum: ['Miami', 'Ventura'] },
+      time: { type: 'string', description: 'Local time at the customer, e.g. 4 AM, 8 PM' }, days_after_outbound: { type: 'number', description: '2 = second day, 3 = third day' },
+    }, ['customer_name']),
     fn('eta_vs_actual', 'STAFF ONLY: the ETA we gave vs when the truck actually got there, per stop — first / last ETA we gave, ARTIS ETA, actual arrival, how far off, time at the stop — for a trip (on the board or finished) or a customer.', {
       trip_number: { type: 'string' }, customer: { type: 'string' }, delivered_day: { type: 'string', description: 'optional: "this week", "Thursday", "10/22"' },
     }),
@@ -1257,6 +1262,27 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
       if (!found.length) return res.json(note({ ok: false, say: 'No finished load matches that in the last 60 days. Say so and ask for the trip, bill or truck number.' }));
       return res.json(note(spokenNumbers({ ok: true, past_loads: staff ? found : found.map(({ trip, finished, departed_at: dep, ...v }) => v), say: `Give for each: which hub it came from and its outbound day (left_from + outbound — never the time it departed; staff may get departed_at only if they ask when it left), the truck and trailer, and when it was delivered${customer ? ` to ${spokenName(customer)}` : ''} (delivered_at — the stop's local time).${staff ? ' Staff may hear the trip number and boxes too.' : ''} If several match, ask which one.` })));
     } catch (e) { return res.json({ ok: false, say: 'Could not look up past loads right now.' }); }
+  });
+
+  // Nadim / Ronen: set when our truck is set to get to a customer (per hub) — the late alert and Jarvis use it
+  app.post('/retell/fn/set_delivery_time', verified, async (req, res) => {
+    const a = argsOf(req); const call = callOf(req);
+    try {
+      if (!stopTimes || !stopTimes.setUsual) return res.json({ ok: false, say: 'Not available right now.' });
+      const SETTERS = { 3055040711: 'Nadim', 3052063095: 'Ronen' };   // only they set delivery times
+      const metaName = String((call && call.metadata && (call.metadata.name || call.metadata.user)) || '');
+      const by = SETTERS[last10(callerPhone(call))] || (consoleCall(call) && /^(nadim|ronen)\b/i.test(metaName) ? metaName : null);
+      const ok = !!by;
+      if (!a.time) {
+        const list = await stopTimes.usualTimes(a.customer_name || '');
+        return res.json(list.length ? { ok: true, places: list, say: 'Read what is saved / learned for that customer, short.' } : { ok: false, say: 'Nothing saved or learned for that customer yet.' });
+      }
+      if (!ok) return res.json({ ok: false, say: 'Only Nadim or Ronen can set delivery times. Say so politely.' });
+      if (!a.hub) return res.json({ ok: false, say: 'Ask which hub the load leaves from — Miami or Ventura.' });
+      const r = await stopTimes.setUsual({ customer: a.customer_name, city: a.city || null, hub: a.hub, time: a.time, daysAfter: a.days_after_outbound, by: `${by} (call)` });
+      if (r.ok) return res.json({ ok: true, saved: r.saved, say: `Saved. Say: "${sayStates(String(r.saved.customer))}, from ${r.saved.hub === 'VENTURA' ? 'Ventura' : 'Miami'}: ${r.saved.usual.replace(/ \(set by.*\)$/, '')}. I'll alert if a truck is running an hour and a half past that."` });
+      return res.json({ ok: false, ...r, say: r.several ? `Several places match: ${r.several.join('; ')}. Ask which city.` : r.note || r.error || 'Could not save that.' });
+    } catch (e) { return res.json({ ok: false, say: 'Could not save that right now.' }); }
   });
 
   // staff: the ETA we gave vs when the truck got there

@@ -9,8 +9,8 @@
 // ---------------------------------------------------------------
 import { localToUtcMs } from './watchtower.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
-import { outboundDate } from './voice.js';
-import { learn, lateCheck, shouldAlert, lateEmail, usualView, usualFor as usualOf } from './usualarrival.js';
+import { outboundDate, nameScore } from './voice.js';
+import { learn, lateCheck, shouldAlert, lateEmail, usualView, usualFor as usualOf, parseClock, learnedDays, stopKey, hubKey } from './usualarrival.js';
 
 const SITE = 'florida-beauty';
 const LOG = (site) => `taEtaLog:${site}`;
@@ -212,7 +212,7 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
       for (const [k, v] of Object.entries(nowTried)) if (now() - v > 40 * 24 * 60 * MIN) delete nowTried[k];
       await db.set(USUAL(site), { at: new Date(now()).toISOString(), stops: next, tried: nowTried });
     }
-    const learned = fresh.length ? ((await db.get(USUAL(site), {})) || {}).stops || {} : stops;
+    const learned = withSet(fresh.length ? ((await db.get(USUAL(site), {})) || {}).stops || {} : stops, (await db.get(SET(site), {})) || {});
     const rows = lateCheck(items, etas, learned);
     const byTrip = {}; rows.forEach((x) => { (byTrip[x.trip] = byTrip[x.trip] || []).push(x); });
     await db.set(LATE(site), { at: new Date(now()).toISOString(), trips: byTrip });
@@ -233,6 +233,52 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     }
     await db.set(LATE_SENT(site), Object.fromEntries(Object.entries(sent).slice(-1000)));
   }
+  // usual times set by staff win over the learned ones
+  const SET = (site) => `taUsualArrivalSet:${site}`;
+  const withSet = (learned, set) => {
+    const out = { ...learned };
+    for (const [k0, f] of Object.entries(set || {})) {
+      const k = k0.split('#')[0];
+      const r = { ...(out[k] || { customer: f.customer, place: f.place, arrivals: [] }) };
+      if (f.hub) r.fixedByHub = { ...(r.fixedByHub || {}), [f.hub]: f }; else r.fixed = f;
+      out[k] = r;
+    }
+    return out;
+  };
+  // the customer stops a name means (several places → ask which) — from what was learned + what was set
+  async function placesFor(customer, site = SITE) {
+    const all = withSet(((await db.get(USUAL(site), {})) || {}).stops || {}, (await db.get(SET(site), {})) || {});
+    const fit = (a, b) => nameScore(a, b) >= 0.75 || nameScore(b, a) >= 0.75;
+    return Object.entries(all).filter(([, r]) => fit(customer, r.customer || '')).map(([key, r]) => ({ key, ...r }));
+  }
+  // staff: "Pyramid Oxnard usually delivers 4 AM" → saved; the days after the outbound day from what was learned when not said
+  async function setUsual({ customer, city = null, state = null, hub = null, time, daysAfter = null, by = 'dispatch', site = SITE } = {}) {
+    if (!enabled) return { ok: false, error: 'no database' };
+    const min = parseClock(time);
+    if (min == null) return { ok: false, error: `I could not read the time "${time}" — say it like 4 AM or 16:30.` };
+    let hits = customer ? await placesFor(customer, site) : [];
+    if (city) { const c = String(city).toUpperCase().trim(); const inTown = hits.filter((h) => String(h.place || '').toUpperCase().startsWith(c)); hits = inTown.length ? inTown : []; }
+    let key; let rec;
+    if (hits.length === 1) { key = hits[0].key; rec = hits[0]; }
+    else if (hits.length > 1) return { ok: false, several: hits.map((h) => `${h.customer} — ${h.place}`), note: 'Several places match — ask which city.' };
+    else if (customer && city && state) { rec = { customer: String(customer).toUpperCase(), place: `${String(city).toUpperCase()}, ${String(state).toUpperCase().slice(0, 2)}`, arrivals: [] }; key = stopKey(rec.customer, rec.place); }
+    else return { ok: false, note: 'No trips to that customer were seen yet — give the city and state too.' };
+    const days = daysAfter != null && daysAfter !== '' ? Number(daysAfter) : learnedDays(rec);
+    if (days == null || !Number.isFinite(days) || days < 0 || days > 8) return { ok: false, note: `How many days after the outbound day does the truck usually get to ${rec.customer}? (e.g. Monday outbound → Thursday = 3)` };
+    const H = hubKey(hub);
+    const f = { customer: rec.customer, place: rec.place, ...(H ? { hub: H } : {}), days, min, by, at: new Date(now()).toISOString() };
+    await db.update(SET(site), (cur) => ({ ...(cur || {}), [H ? `${key}#${H}` : key]: f }), {});
+    return { ok: true, saved: { customer: f.customer, place: f.place, hub: H, usual: usualOf({ fixed: f }, null).text } };
+  }
+  // what Jarvis knows about a customer's usual arrival (learned or set)
+  async function usualTimes(customer, site = SITE) {
+    if (!enabled) return [];
+    return (await placesFor(customer, site)).map((r) => {
+      const set = Object.keys(r.fixedByHub || {}).map((h) => usualOf(r, null, h).text);
+      const u = set.length ? null : usualOf(r, null);
+      return { customer: r.customer, place: r.place, arrivals: (r.arrivals || []).length, usual: set.length ? set.join(' · ') : u ? u.text : 'not known yet (needs 3 arrivals that agree, or set it)' };
+    });
+  }
   // for Jarvis: this trip's open stops vs their usual time; and a customer's usual time
   async function usualFor(trip, site = SITE) {
     if (!enabled) return [];
@@ -245,10 +291,15 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
       const site = String(req.query.site || SITE);
       const st = (await db.get(USUAL(site), {})) || {};
       const q = String(req.query.customer || '').toUpperCase();
-      const stops = Object.values(st.stops || {}).filter((r) => !q || String(r.customer).toUpperCase().includes(q))
+      const stops = Object.values(withSet(st.stops || {}, (await db.get(SET(site), {})) || {})).filter((r) => !q || String(r.customer).toUpperCase().includes(q))
         .map((r) => { const u = usualOf(r, null); return { customer: r.customer, place: r.place, arrivals: (r.arrivals || []).length, usual: u ? u.text : 'not enough arrivals yet (needs 3 that agree)' }; })
         .sort((a, b) => b.arrivals - a.arrivals);
       res.json({ at: st.at || null, count: stops.length, stops, late: ((await db.get(LATE(site), {})) || {}).trips || {}, settings: { on: true, limitMin: 90, ...((await db.get(LATE_CFG, {})) || {}) } });
+    });
+    // set a customer's usual time: { customer, city?, state?, time: '4 AM', daysAfter? }
+    app.post('/truckmate/usual-arrivals/set', requireAuth, async (req, res) => {
+      const b = req.body || {};
+      res.json(await setUsual({ customer: b.customer, city: b.city || null, state: b.state || null, hub: b.hub || null, time: b.time, daysAfter: b.daysAfter, by: (req.user && (req.user.name || req.user.email)) || 'dispatch', site: String(req.query.site || SITE) }));
     });
     app.post('/truckmate/usual-arrivals/settings', requireAuth, async (req, res) => {
       if (!enabled) return res.status(503).json({ error: 'no database' });
@@ -340,5 +391,5 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
       };
     });
   }
-  return { process, onFinished, query, etaVsActual, usualFor, site: SITE };
+  return { process, onFinished, query, etaVsActual, usualFor, setUsual, usualTimes, site: SITE };
 }
