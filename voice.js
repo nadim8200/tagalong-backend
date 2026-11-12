@@ -339,7 +339,9 @@ function refsOf(it) {
 }
 const ROLLING = /^(DEPSHIP|ARRCONS|DEPCONS|ARRSHIP)/i;
 // Several loads with the same truck / trailer: the one on the road, else the next one.
-const pick = (hits) => (hits.length === 1 ? hits[0] : hits.find((it) => ROLLING.test(String(tripOf(it).status))) || null);
+// (an empty move to the YARD / a terminal with no bills is never "the load" when the truck has a real one)
+const realLoad = (it) => billsOf(it).length > 0 || !/^(YARD|.*TERMINAL)\b/i.test(String(tripOf(it).destZoneDesc || '').trim());
+const pick = (hits) => (hits.length === 1 ? hits[0] : hits.find((it) => realLoad(it) && ROLLING.test(String(tripOf(it).status))) || hits.find((it) => ROLLING.test(String(tripOf(it).status))) || null);
 
 export function findLoad(items, { trip, bill, loadNumber, truck, trailer, phone }) {
   const T = norm(trip); const Bn = norm(bill) || norm(loadNumber); const U = norm(truck).replace(/^(TRUCK|UNIT|TK)/, ''); const L = norm(trailer).replace(/^(TRAILER|TRL|TL)/, ''); const P = last10(phone);

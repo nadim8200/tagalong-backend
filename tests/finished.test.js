@@ -46,6 +46,13 @@ test('not closed: truck or trailer on a newer load; emails dispatch once, then a
   assert.equal(movedOn(L('624195', 'DEPSHIP', '930', '7317'), [L('624195', 'DEPSHIP', '930', '7317'), L('624500', 'DISP', '930', '7400')]), null, 'only assigned, not picked up yet');
   assert.equal(movedOn(L('624195', 'DEPSHIP', '', '7317'), [L('624195', 'DEPSHIP', '', '7317'), L('624500', 'ARRSHIP', '931', '7317')]).by, 'trailer');
   assert.equal(movedOn(L('624494', 'DEPSHIP', '2206', '7296'), [L('624494', 'DEPSHIP', '2206', '7296'), L('624496', 'DEPSHIP', '2619', '7296')]), null, 'its truck is still on it — a trailer swap, not a forgotten load');
+  // trip 626845: truck 2611 got an empty move to the YARD (no bills) — it is still on its way to Oxnard, not on a new load
+  const yard = { trip: { tripNumber: '626907', status: 'ARRSHIP', powerUnit: '2611', trailer: '', destZoneDesc: 'YARD' }, freightBills: [] };
+  const ox = L('626845', 'DEPCONS', '2611', '7136');
+  assert.equal(movedOn(ox, [ox, yard]), null, 'an empty yard move is not a new load');
+  assert.equal(movedOn(ox, [ox, { ...yard, trip: { ...yard.trip, destZoneDesc: 'MIAMI TERMINAL' } }]), null);
+  assert.equal(finishReason(ox, [ox, { ...yard, trip: { ...yard.trip, status: 'DEPSHIP' } }]), null);
+  assert.equal(movedOn(ox, [ox, L('626990', 'DEPSHIP', '2611', '7400')]).newTrip, '626990', 'a real load still counts');
   const at = (L0, iso) => ({ ...L0, _times: { statusHistory: [{ status: 'DEPSHIP', at: iso }] } });
   const a = at(L('624188', 'ARRCONS', '2208', '7001'), '2026-10-06T22:00:00Z'); const b = at(L('624190', 'ARRCONS', '2208', '7001'), '2026-10-06T23:00:00Z');
   assert.equal(movedOn(a, [a, b]), null, 'two trips picked up together ride the same truck');
@@ -72,4 +79,11 @@ test('not closed: truck or trailer on a newer load; emails dispatch once, then a
   // TruckMate closes 624128 → it leaves the list
   await f.sweep('florida-beauty', [L('624195', 'DEPSHIP', '930', '7317'), L('624600', 'DEPSHIP', '930', '7320')], { 624195: {}, 624600: {} });
   assert.deepEqual(Object.keys(await db.get('taUnclosed:florida-beauty', {})), ['624195']);
+});
+
+test('Jarvis by truck number: the real load, not the truck\'s empty yard move', async () => {
+  const { findLoad } = await import('../voice.js');
+  const yard = { trip: { tripNumber: '626907', status: 'ARRSHIP', powerUnit: '2611', destZoneDesc: 'YARD' }, freightBills: [] };
+  const ox = { trip: { tripNumber: '626845', status: 'DEPCONS', powerUnit: '2611', trailer: '7136', destZoneDesc: 'OXNARD, CA' }, freightBills: [{ billNumber: 'M1', endZoneDescription: 'OXNARD, CA, 93030' }] };
+  assert.equal(findLoad([yard, ox], { truck: '2611' }).item.trip.tripNumber, '626845');
 });

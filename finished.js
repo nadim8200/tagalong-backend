@@ -20,6 +20,9 @@ const DONE = /^(DELVD|DELIV|DELIVERED|DEL$|CMPLT|COMPLETE)/i;
 const cityOf = (s) => String(s || '').split(',')[0].trim().toUpperCase();
 const ON_NEW_LOAD = /^(ARRSHIP|DEPSHIP|ARRCONS|DEPCONS|INTRAN|ENROUTE)/i;   // at / past the new load's shipper
 const created = (it) => Date.parse((it && it._times && it._times.created) || '') || Number(tripNo(it)) || 0;
+// An empty move (no bills, going to the YARD / a terminal) is not a new load: the truck still has the old one to deliver.
+const TERMINAL = /^(YARD|.*TERMINAL)\b/i;
+export const emptyMove = (it) => !(((it && (it.freightBills || it.orders)) || []).length) && TERMINAL.test(String(tripOf(it).destZoneDesc || tripOf(it).destinationZone || '').trim());
 
 // When the load was picked up (first ARRSHIP / DEPSHIP we saw), else when it was created.
 const pickedAt = (it) => {
@@ -41,7 +44,7 @@ export function movedOn(item, items = []) {
   const t = tripOf(item);
   if (!t || NOT_STARTED.test(String(t.status || '')) || DONE.test(String(t.status || '')) || (item && item._oc)) return null;
   const unit = unitKey(t.powerUnit); const trailer = unitKey(t.trailer);
-  const newer = (o) => o !== item && !(o && o._oc) && ON_NEW_LOAD.test(String(tripOf(o).status || '')) && created(o) > created(item) && !together(item, o);
+  const newer = (o) => o !== item && !(o && o._oc) && !emptyMove(o) && ON_NEW_LOAD.test(String(tripOf(o).status || '')) && created(o) > created(item) && !together(item, o);
   const newest = (list) => list.sort((a, b) => created(b) - created(a))[0];      // the truck's current load, not another old one
   if (unit && !/^OC/.test(unit)) {
     const o = newest(items.filter((x) => newer(x) && unitKey(tripOf(x).powerUnit) === unit));
@@ -76,7 +79,7 @@ export function finishReason(item, items = []) {
   const unit = unitKey(t.powerUnit);
   if (unit && !(item && item._oc) && !/^OC/.test(unit) && !NOT_STARTED.test(status)) {
     const created = (it) => Date.parse((it && it._times && it._times.created) || '') || Number(tripNo(it)) || 0;
-    const next = items.find((o) => o !== item && unitKey(tripOf(o).powerUnit) === unit && ROLLING.test(String(tripOf(o).status || '')) && created(o) > created(item));
+    const next = items.find((o) => o !== item && !emptyMove(o) && unitKey(tripOf(o).powerUnit) === unit && ROLLING.test(String(tripOf(o).status || '')) && created(o) > created(item));
     if (next) return `truck ${t.powerUnit} moved on to trip ${tripNo(next)}`;
   }
   return null;
