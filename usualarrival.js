@@ -52,7 +52,7 @@ export function usualFor(rec, outbound) {
   const pool = same.length >= 3 ? same : all;
   const count = {}; pool.forEach((a) => { count[a.days] = (count[a.days] || 0) + 1; });
   const [days, n] = Object.entries(count).sort((a, b) => b[1] - a[1])[0];
-  if (n / pool.length < 0.6) return null;
+  if (n < 3 || n / pool.length < 0.6) return null;   // 3+ arrivals that agree on the day
   const hits = pool.filter((a) => String(a.days) === days);
   const min = medianMin(hits.map((a) => a.min));
   const d = Number(days);
