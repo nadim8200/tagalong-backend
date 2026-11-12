@@ -1130,8 +1130,8 @@ const alertRecipients = initAlertRecipients(app, { requireAuth: requireDispatch,
 const etaReport = initEtaReport({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('eta_report'), lateRecipients: () => alertRecipients.resolve('running_late') });
 const pastLoads = initPastLoads({ db, etaReport });
 let brokerFollow = null;
-// LTL reefer 5°F off its set point → email the list (inbound@) + text Nadim and Ronen (training-mode allow list)
-const ltlTemp = initLtlTempAlert({ db, sendMail: (m) => sendMail(m, { env: process.env }), emails: () => alertRecipients.resolve('ltl_temp'), phones: async () => { const p = await alertRecipients.phones('ltl_temp'); return p.length ? p : ['+13055040711', '+13052063095']; }, sendSms: (to, text) => rc.sendSms('__shared', { to, text }) });
+// LTL reefer 5°F off its set point → email the list (inbound@) + text Nadim (Ronen off by request)
+const ltlTemp = initLtlTempAlert({ db, sendMail: (m) => sendMail(m, { env: process.env }), emails: () => alertRecipients.resolve('ltl_temp'), phones: async () => { const p = await alertRecipients.phones('ltl_temp'); return p.length ? p : ['+13055040711']; }, sendSms: (to, text) => rc.sendSms('__shared', { to, text }) });
 const commitments = initCommitments(app, { requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), emails: () => alertRecipients.resolve('late_commitment'), phones: () => alertRecipients.phones('late_commitment'), sendSms: (to, text) => rc.sendSms('__shared', { to, text }) });
 const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: (k) => alertRecipients.resolve(k), env: process.env });
 // Missing boxes a customer asked about → email the "Customer asked about a load with missing boxes" list

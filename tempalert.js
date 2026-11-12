@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------
 // LTL reefer temperature alert (flower runs only — never broker loads). When a load's reefer reading is more than 5°F
 // above or below its set point OR the temperature the load needs, and when ARTIS's set point isn't the temperature the
-// load needs, an email goes to the "LTL reefer 5°F off" list (inbound@) and a text to Nadim and Ronen. A reading: once per
+// load needs, an email goes to the "LTL reefer 5°F off" list (inbound@) and a text to Nadim. A reading: once per
 // time it goes off, again only if 3°F worse; a set point: once per value. Readings while the truck is at a receiver
 // (doors open, unloading) don't count. The reading is the card's: Samsara return air,
 // else TruckMate's Thermo King, else ARTIS's Trip Status.
@@ -15,6 +15,8 @@ const MIN = 60000;
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || (it && it._id) || '');
 const r1 = (v) => Math.round(Number(v) * 10) / 10;
+// "35°F per the trip sheet" — where the required temperature came from, said plainly. Pure.
+const need = (t) => `${t.text}${t.from ? ` per the ${String(t.from).replace(/\s*\(.*\)\s*$/, '').trim()}` : ''}`;
 
 // How far off the reading is — checked against BOTH the set point and the range the load needs; the worse one counts.
 // → { offF, vs, refText } | null. Pure.
@@ -24,7 +26,7 @@ export function offBy(lt) {
   const checks = [];
   if (c.setF != null && Number.isFinite(Number(c.setF))) checks.push({ offF: r1(v - Number(c.setF)), vs: 'set point', refText: `set point ${r1(c.setF)}°F` });
   const t = lt.target;
-  if (t && t.minF != null && t.maxF != null) checks.push({ offF: r1(v < t.minF ? v - t.minF : v > t.maxF ? v - t.maxF : 0), vs: 'required', refText: `required ${t.text}${t.from ? ` (${t.from})` : ''}` });
+  if (t && t.minF != null && t.maxF != null) checks.push({ offF: r1(v < t.minF ? v - t.minF : v > t.maxF ? v - t.maxF : 0), vs: 'required', refText: `required ${need(t)}` });
   return checks.sort((a, b) => Math.abs(b.offF) - Math.abs(a.offF))[0] || null;
 }
 // ARTIS's set point vs the temperature the load needs: different (more than 1°F outside the range) → { setF, target } | null. Pure.
@@ -34,7 +36,7 @@ export function setPointMismatch(it) {
   const setF = a && a.setPointF != null ? Number(a.setPointF) : lt && lt.current && lt.current.setF != null ? Number(lt.current.setF) : null;
   if (setF == null || !Number.isFinite(setF) || !t || t.minF == null || t.maxF == null) return null;
   const off = setF < t.minF ? setF - t.minF : setF > t.maxF ? setF - t.maxF : 0;
-  return Math.abs(off) > 1 ? { setF: r1(setF), offF: r1(off), setFrom: a && a.setPointF != null ? 'ARTIS' : (lt.current.source || null), refText: `required ${t.text}${t.from ? ` (${t.from})` : ''}` } : null;
+  return Math.abs(off) > 1 ? { setF: r1(setF), offF: r1(off), setFrom: a && a.setPointF != null ? 'ARTIS' : (lt.current.source || null), refText: `required ${need(t)}` } : null;
 }
 
 const base = (it) => ({ trip: tripNo(it), truck: String(tripOf(it).powerUnit || '').trim() || null, trailer: String(tripOf(it).trailer || '').trim() || null, where: (it._samsara && it._samsara.location) || null });
