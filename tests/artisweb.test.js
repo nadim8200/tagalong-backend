@@ -72,9 +72,16 @@ test('ARTIS customer list: a stop\'s customer number by name, the right city whe
   assert.equal(pickConsignee(list, { name: 'Zoom Bloom' }), null);
 });
 
-test('ARTIS reefer reading: current temp / set point / read time; checked once an hour, day and night', () => {
+test('ARTIS reefer reading: current temp / set point / read time; checked once an hour, day and night', async () => {
   assert.deepEqual(reeferOf({ tripNumber: 1, tripStatusInfo: { currentTemp: 34.5, setPoint: 34, tempReadTimeStr: '11/10 9:40 AM', etaLong: 5 } }), { currentTemp: 34.5, setPoint: 34, tempReadTimeStr: '11/10 9:40 AM' });
   assert.equal(reeferOf({ tripNumber: 1, tripStatusInfo: { currentTemp: null, setPoint: '' } }), null);
+  // the real Trip Status shape (trip 626845: Current Temp 36.45, Set Point 34.99, read 11/11/2026 10:40 PM EST)
+  const r = reeferOf({ tripNumber: 626845, tripStatusTempInfo: { returnAirTemp: 36.45, setPointTemp: 34.99, tempDateTime: Date.parse('2026-11-12T03:40:00Z'), tempDateTimeStr: '11/11/2026 10:40 PM EST', assetId: '7136' } });
+  assert.deepEqual(r, { currentTempF: 36.45, setPointF: 34.99, tempAt: '2026-11-12T03:40:00.000Z', tempTimeText: '11/11/2026 10:40 PM EST' });
+  const { checkReading } = await import('../temppolicy.js');
+  const c = checkReading({ currentTempF: r.currentTempF, setPointF: r.setPointF, tempAt: r.tempAt, tempTimeText: r.tempTimeText }, { minF: 33, maxF: 36, text: '33–36°F', from: 'test' });
+  assert.equal(c.readingF, 36.45);
+  assert.equal(c.setF, 34.99);
   assert.equal(tempSlotDue({}, Date.parse('2026-10-22T13:00:00Z')), '2026-10-22|09');
   assert.equal(tempSlotDue({ slot: '2026-10-22|09' }, Date.parse('2026-10-22T13:50:00Z')), null);
   assert.equal(tempSlotDue({ slot: '2026-10-22|09' }, Date.parse('2026-10-23T06:30:00Z')), '2026-10-23|02');

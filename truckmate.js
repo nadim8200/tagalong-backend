@@ -687,7 +687,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         const c1 = tk && Array.isArray(tk.compartments) ? tk.compartments[0] || {} : {};
         const tkRet = tk ? toF(tk.returnTemp != null ? tk.returnTemp : c1.return) : null;
         const tkm = !sam && tkRet != null ? { source: 'TruckMate (Thermo King)', readingF: tkRet, returnF: tkRet, currentF: toF(tk.sensorTemp) != null && toF(tk.sensorTemp) !== 0 ? toF(tk.sensorTemp) : tkRet, supplyF: toF(tk.supplyTemp != null ? tk.supplyTemp : c1.supply), setF: toF(tk.setTemp != null ? tk.setTemp : c1.set), at: item._tkReefer.at || null, powerOn: tk.powerOn, alarm: tk.latestAlarm || null } : null;
-        const art = !sam && !tkm && a && a.check && a.check.readingF != null ? { source: 'ARTIS', readingF: a.check.readingF, currentF: a.check.readingF, returnF: null, supplyF: null, setF: a.check.setF, at: a.readAt || null } : null;
+        const art = !sam && !tkm && a && a.check && a.check.readingF != null ? { source: 'ARTIS', readingF: a.check.readingF, currentF: a.check.readingF, returnF: null, supplyF: null, setF: a.check.setF, at: a.tempAt || a.readAt || null } : null;
         const current = sam || tkm || art;
         if (target || current) item._loadTemp = { target, current, check: current ? checkReading({ currentTemp: current.readingF, setPoint: current.setF }, target) : null };
       } catch { /* per-trip skip */ }

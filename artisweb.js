@@ -36,6 +36,13 @@ export function parseTripStatus(html) {
 // The reefer reading ARTIS shows on Trip Status (Current Temp, Set Point, Temp Read Time): every temperature-like field it
 // sends for the trip, kept as is (their exact names in ARTIS's data aren't confirmed yet). null when there are none. Pure.
 export function reeferOf(t) {
+  // Trip Status's Current Temp / Set Point / Temp Read Time come in tripStatusTempInfo (returnAirTemp, setPointTemp, tempDateTime)
+  const ti = (t && t.tripStatusTempInfo) || null;
+  const n = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+  if (ti && (n(ti.returnAirTemp) != null || n(ti.setPointTemp) != null)) {
+    const ms = Number(ti.tempDateTime) || Date.parse(ti.tempDateTime || '') || null;
+    return { currentTempF: n(ti.returnAirTemp), setPointF: n(ti.setPointTemp), tempAt: ms ? new Date(ms).toISOString() : null, tempTimeText: ti.tempDateTimeStr || null };
+  }
   const out = {};
   for (const src of [t || {}, (t && t.tripStatusInfo) || {}]) {
     for (const [k, v] of Object.entries(src)) if (/temp|set ?point|reefer/i.test(k) && v != null && v !== '' && typeof v !== 'object') out[k] = v;
