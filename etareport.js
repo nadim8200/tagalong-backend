@@ -9,6 +9,8 @@
 // ---------------------------------------------------------------
 import { localToUtcMs } from './watchtower.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
+import { outboundDate } from './voice.js';
+import { learn, lateCheck, shouldAlert, lateEmail, usualView, usualFor as usualOf } from './usualarrival.js';
 
 const SITE = 'florida-beauty';
 const LOG = (site) => `taEtaLog:${site}`;
@@ -161,7 +163,7 @@ export function stopTimesFrom(visitsByTrip = {}, items = [], have = {}) {
 }
 
 const MAIL_ON = (site) => `taEtaReportMail:${site}`;
-export function initEtaReport({ app = null, requireAuth = null, db, sendMail = null, recipients = async () => [], now = () => Date.now() }) {
+export function initEtaReport({ app = null, requireAuth = null, db, sendMail = null, recipients = async () => [], lateRecipients = async () => [], now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   // after each Watchtower cycle: log this cycle's ETAs
   async function process(site, board) {
@@ -182,6 +184,79 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
       for (const [k, v] of Object.entries(next)) if (at - (v.leftMs || 0) > 30 * 24 * 60 * MIN) delete next[k];
       return next;
     }, {});
+    await usualCycle(site, items, etas).catch((e) => console.warn('[usual-arrival]', e.message));
+  }
+
+  // ---- usual arrival times (LTL only): learn from the geofence arrivals, alert when an ETA runs past the usual time ----
+  const USUAL = (site) => `taUsualArrival:${site}`;
+  const LATE = (site) => `taRunningLate:${site}`;
+  const LATE_SENT = (site) => `taRunningLateSent:${site}`;
+  const LATE_CFG = 'taRunningLateCfg';
+  async function usualCycle(site, items, etas) {
+    const times = Object.values((await db.get(TIMES(site), {})) || {});
+    const st = (await db.get(USUAL(site), {})) || {};
+    const stops = st.stops || {}; const tried = st.tried || {};
+    const learnedTrips = new Set(Object.values(stops).flatMap((r) => (r.arrivals || []).map((a) => `${a.trip}|${r.customer}`)));
+    const fresh = times.filter((r) => r.customer && r.place && !learnedTrips.has(`${r.trip}|${r.customer}`) && !tried[r.trip]);
+    if (fresh.length) {
+      const byTrip = new Map(items.map((it) => [tripNo(it), it]));
+      let rundowns = null;
+      const outboundOf = (n) => {
+        const it = byTrip.get(n) || (rundowns && rundowns[n] && rundowns[n].rec && rundowns[n].rec.item);
+        return it ? outboundDate(it) : null;
+      };
+      if (fresh.some((r) => !byTrip.has(String(r.trip)))) rundowns = (await db.get(`taRundowns:${site}`, {})) || {};
+      const next = learn(stops, fresh, outboundOf);
+      const nowTried = { ...tried };
+      for (const r of fresh) if (!outboundOf(String(r.trip))) nowTried[r.trip] = now();   // no outbound day known — don't look again
+      for (const [k, v] of Object.entries(nowTried)) if (now() - v > 40 * 24 * 60 * MIN) delete nowTried[k];
+      await db.set(USUAL(site), { at: new Date(now()).toISOString(), stops: next, tried: nowTried });
+    }
+    const learned = fresh.length ? ((await db.get(USUAL(site), {})) || {}).stops || {} : stops;
+    const rows = lateCheck(items, etas, learned);
+    const byTrip = {}; rows.forEach((x) => { (byTrip[x.trip] = byTrip[x.trip] || []).push(x); });
+    await db.set(LATE(site), { at: new Date(now()).toISOString(), trips: byTrip });
+    const cfg = { on: true, limitMin: 90, ...((await db.get(LATE_CFG, {})) || {}) };
+    if (!cfg.on || !sendMail) return;
+    const sent = (await db.get(LATE_SENT(site), {})) || {};
+    const due = rows.filter((x) => shouldAlert(sent[`${x.trip}|${x.label}`], x.lateMin, cfg.limitMin));
+    if (!due.length) return;
+    const to = await lateRecipients();
+    if (!to.length) return;
+    const byN = new Map(items.map((it) => [tripNo(it), it]));
+    for (const x of due) {
+      const k = `${x.trip}|${x.label}`;
+      const m = lateEmail(x, byN.get(x.trip), { worse: !!sent[k] });
+      await sendMail({ to, subject: m.subject, html: m.html }); // eslint-disable-line no-await-in-loop
+      sent[k] = { lateMin: x.lateMin, at: new Date(now()).toISOString() };
+      console.log(`[usual-arrival] late alert: trip ${x.trip} ${x.label} +${x.lateMin} min`);
+    }
+    await db.set(LATE_SENT(site), Object.fromEntries(Object.entries(sent).slice(-1000)));
+  }
+  // for Jarvis: this trip's open stops vs their usual time; and a customer's usual time
+  async function usualFor(trip, site = SITE) {
+    if (!enabled) return [];
+    return usualView((((await db.get(LATE(site), {})) || {}).trips || {})[String(trip)] || []);
+  }
+  if (app && requireAuth) {
+    // what Jarvis learned: each customer stop's usual arrival (Boston market: 2 days after outbound, about 4 AM)
+    app.get('/truckmate/usual-arrivals', requireAuth, async (req, res) => {
+      if (!enabled) return res.json({ stops: [] });
+      const site = String(req.query.site || SITE);
+      const st = (await db.get(USUAL(site), {})) || {};
+      const q = String(req.query.customer || '').toUpperCase();
+      const stops = Object.values(st.stops || {}).filter((r) => !q || String(r.customer).toUpperCase().includes(q))
+        .map((r) => { const u = usualOf(r, null); return { customer: r.customer, place: r.place, arrivals: (r.arrivals || []).length, usual: u ? u.text : 'not enough arrivals yet (needs 3 that agree)' }; })
+        .sort((a, b) => b.arrivals - a.arrivals);
+      res.json({ at: st.at || null, count: stops.length, stops, late: ((await db.get(LATE(site), {})) || {}).trips || {}, settings: { on: true, limitMin: 90, ...((await db.get(LATE_CFG, {})) || {}) } });
+    });
+    app.post('/truckmate/usual-arrivals/settings', requireAuth, async (req, res) => {
+      if (!enabled) return res.status(503).json({ error: 'no database' });
+      const b = req.body || {}; const v = { ...((await db.get(LATE_CFG, {})) || {}) };
+      if (b.on != null) v.on = !!b.on;
+      if (Number(b.limitMin) >= 15) v.limitMin = Math.round(Number(b.limitMin));
+      await db.set(LATE_CFG, v); res.json(v);
+    });
   }
   // the trip-report email: off by default; dispatch turns it on (or off) here
   if (app && requireAuth) {
@@ -265,5 +340,5 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
       };
     });
   }
-  return { process, onFinished, query, etaVsActual, site: SITE };
+  return { process, onFinished, query, etaVsActual, usualFor, site: SITE };
 }

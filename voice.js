@@ -312,8 +312,10 @@ export function voiceFacts(item, eta) {
     stops_ahead: stops.filter((x) => !x.delivered && !x.passed).map((x) => {
       const l = eta && eta.stops ? eta.stops.find((e) => town(cityOf(e.label)) === town(x.place)) : null;
       const onSheet = sheet.filter((h) => /DELIVER/i.test(h.action || '') && (town(h.tmPlace) === town(x.place) || town(h.city) === town(x.place))).map((h) => h.customer).filter(Boolean);
-      return { customers: onSheet.length ? [...new Set(onSheet)] : [x.customer].filter(Boolean), place: x.place, eta: l ? fmtLocal(l.etaMs, l.label) : null };
+      const u = eta && eta.usual ? eta.usual.find((v) => town(cityOf(v.stop)) === town(x.place)) : null;
+      return { customers: onSheet.length ? [...new Set(onSheet)] : [x.customer].filter(Boolean), place: x.place, eta: l ? fmtLocal(l.etaMs, l.label) : null, ...(u ? { usually_there: u.usually_there, vs_usual: u.vs_usual } : {}) };
     }),
+    usual_note: eta && eta.usual && eta.usual.length ? 'usually_there = when our trucks usually reach that customer (learned from past arrivals); vs_usual = how this ETA compares. If asked whether it is late, or if it is 1 h+ later than usual, say so plainly with both times.' : undefined,
     stops_note: stops.some((x) => x.passed) ? 'stops_already_passed = the truck already drove past them, so they were most likely delivered (paperwork not confirmed yet). Never say the truck will go back to them.' : undefined,
     total_stops: stops.length,
   };
@@ -550,6 +552,10 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
     ...x, ...boxFor({ ...x, _sheetBoxes, _billBoxes, _tbBoxes, _split }),
     ...(!x.delivered && !x.truck_already_passed && !x.arrived_at_receiver && !x.estimated_arrival ? { eta_note: 'No ETA available right now — do NOT estimate or guess a time. Say dispatch will call back with the ETA, and take a message.' } : {}),
     ...(etasByTrip[x.trip] && etasByTrip[x.trip].leavesAt && !x.delivered ? { truck_leaves_terminal_at: fmt(etasByTrip[x.trip].leavesAt) } : {}),
+    ...(() => {   // staff: when we usually get there, and how this ETA compares (LTL, learned from past arrivals)
+      const u = staff && !x.delivered && x.estimated_arrival && etasByTrip[x.trip] && etasByTrip[x.trip].usual ? etasByTrip[x.trip].usual.find((v) => String(v.stop).split(',')[0].trim().toUpperCase() === String(x.city || '').split(',')[0].trim().toUpperCase()) : null;
+      return u ? { usually_there: u.usually_there, vs_usual: u.vs_usual } : {};
+    })(),
   }));
 }
 
@@ -595,7 +601,7 @@ export function spokenName(raw) {
 // words every call uses — so speech-to-text hears "load", not "loan"
 // Florida Beauty's own staff (a phone saved on an employee in Employees) can get any load's ETA.
 const STAFF_IS = 'Florida Beauty staff (phone on the Employees list)';
-const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). ALWAYS start each load with where the truck is right now (truck_now, "as of" as_of, moving or stopped) and which hub it left from and its outbound day (left_from + outbound — the day the trip was built, not when it rolled out) — before the ETA, without being asked. Give the day and time it actually departed (departed_at) ONLY if they ask when it left / departed. If a load has not_left_yet, say it has NOT left — it is still at the hub, no truck or ETA yet — and say trailer_still_at (e.g. "trailer 7 3 3 1 is still in Miami"); never say it left. Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — what the TruckMate bills add up to; never any other count), and only if present: the different trip sheet count (boxes_on_trip_sheet). If split_between_trailers is there, say the order is split and how many boxes are on each truck.';
+const STAFF_RULE = 'This caller is Florida Beauty staff — their phone is on the Employees list. Give them the ETA and details for any customer, broker or load they ask about (every stop is fine). ALWAYS start each load with where the truck is right now (truck_now, "as of" as_of, moving or stopped) and which hub it left from and its outbound day (left_from + outbound — the day the trip was built, not when it rolled out) — before the ETA, without being asked. Give the day and time it actually departed (departed_at) ONLY if they ask when it left / departed. If a load has not_left_yet, say it has NOT left — it is still at the hub, no truck or ETA yet — and say trailer_still_at (e.g. "trailer 7 3 3 1 is still in Miami"); never say it left. Do not ask them to confirm a business name, and never read out any employee\'s phone number. For each delivery say the trip number and truck (so they can match it to the trip sheet), when it was delivered (delivered_at), and the boxes loaded (boxes_loaded — what the TruckMate bills add up to; never any other count), and only if present: the different trip sheet count (boxes_on_trip_sheet). If split_between_trailers is there, say the order is split and how many boxes are on each truck. If usually_there is present, it is when our trucks usually reach that customer (LTL, learned from past arrivals) — when vs_usual says it is 1 h or more later than usual, say so plainly with both times.';
 export const BASE_WORDS = ['Florida Beauty Flora', 'Jarvis', 'ETA', 'load', 'trip number', 'bill number', 'trailer', 'POD', 'BOL', 'rate confirmation'];
 export function customerKeywords(items, max = 100) {
   const n = new Map();
@@ -871,7 +877,13 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     try { cached = { at: Date.now(), items: getBoard ? ((await getBoard(site)).trips || []) : [] }; } catch { /* keep last */ }
     return cached.items;
   }
-  const etaFor = async (trip) => { try { return ((await db.get(`taWatch:${site}`, {})).etas || {})[trip] || null; } catch { return null; } };
+  const etaFor = async (trip) => {
+    let e = null;
+    try { e = ((await db.get(`taWatch:${site}`, {})).etas || {})[trip] || null; } catch { e = null; }
+    // LTL: each stop's usual arrival time and how this ETA compares (learned from geofence arrivals)
+    const usual = stopTimes && stopTimes.usualFor ? await stopTimes.usualFor(trip).catch(() => []) : [];
+    return e && usual.length ? { ...e, usual } : e;
+  };
   const callTrip = new Map();   // call_id → trip found during the call
   const callLookups = new Map(); // call_id → what lookup_load answered (kept on the call record)
 
@@ -1025,8 +1037,15 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
       const name = said || (call.call_id && callName.get(call.call_id)) || (known && known.name) || null;   // remembered from earlier in the call
       const numbers = [a.trip_number, a.bill_number, a.broker_load_number, a.truck_number, a.trailer_number].some((v) => v && !isName(v));
       if ((said || (known && !numbers)) && !numbers) {
-        const etas = ((await db.get(`taWatch:${site}`, {})).etas) || {};
+        const etas = { ...(((await db.get(`taWatch:${site}`, {})).etas) || {}) };
         const all = await items();
+        // staff: each LTL stop's usual arrival time vs this ETA (stops whose trips the customer is on)
+        if (staffPhone && stopTimes && stopTimes.usualFor) {
+          for (const n of new Set(customerStops(all, name, etas, { staff: true }).map((x) => x.trip))) {
+            const u = await stopTimes.usualFor(n).catch(() => []); // eslint-disable-line no-await-in-loop
+            if (u.length && etas[n]) etas[n] = { ...etas[n], usual: u };
+          }
+        }
         // a name Jarvis itself suggested → only after the caller said yes to "Is that …?"
         const guessed = said && call.call_id && (callGuess.get(call.call_id) || new Set()).has(String(said).toUpperCase());
         if (guessed && !a.caller_confirmed) return reply({ found: false, did_you_mean: [said], say: `Not confirmed yet. Ask exactly: "Is that ${said}?" Only if they clearly say yes, call lookup_load again with customer_name "${said}" and caller_confirmed true. If no, ask them to spell their business name. Share nothing about any load until then.` });

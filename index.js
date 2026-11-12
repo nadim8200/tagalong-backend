@@ -1126,7 +1126,7 @@ let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers o
 // who gets each alert email (Employees → Alert emails in the console)
 const alertRecipients = initAlertRecipients(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, directory });
 // 📅 committed delivery times per stop → late alerts (email + text, internal)
-const etaReport = initEtaReport({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('eta_report') });
+const etaReport = initEtaReport({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('eta_report'), lateRecipients: () => alertRecipients.resolve('running_late') });
 const pastLoads = initPastLoads({ db, etaReport });
 let brokerFollow = null;
 const commitments = initCommitments(app, { requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), emails: () => alertRecipients.resolve('late_commitment'), phones: () => alertRecipients.phones('late_commitment'), sendSms: (to, text) => rc.sendSms('__shared', { to, text }) });
