@@ -10,7 +10,7 @@
 import { localToUtcMs } from './watchtower.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 import { outboundDate, nameScore } from './voice.js';
-import { learn, lateCheck, shouldAlert, lateEmail, usualView, usualFor as usualOf, parseClock, learnedDays, stopKey, hubKey } from './usualarrival.js';
+import { learn, lateCheck, shouldAlert, lateEmail, usualView, usualFor as usualOf, parseClock, learnedDays, stopKey, hubKey, hubOf } from './usualarrival.js';
 
 const SITE = 'florida-beauty';
 const LOG = (site) => `taEtaLog:${site}`;
@@ -198,21 +198,23 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     const stops = st.stops || {}; const tried = st.tried || {};
     const learnedTrips = new Set(Object.values(stops).flatMap((r) => (r.arrivals || []).map((a) => `${a.trip}|${r.customer}`)));
     const fresh = times.filter((r) => r.customer && r.place && !learnedTrips.has(`${r.trip}|${r.customer}`) && !tried[r.trip]);
-    if (fresh.length) {
+    // arrivals learned before the hub was kept: fill it in once from the trip (on the board, else its finished record)
+    const noHub = Object.values(stops).some((r) => (r.arrivals || []).some((a) => !a.hub));
+    if (fresh.length || noHub) {
       const byTrip = new Map(items.map((it) => [tripNo(it), it]));
       let rundowns = null;
-      const outboundOf = (n) => {
-        const it = byTrip.get(n) || (rundowns && rundowns[n] && rundowns[n].rec && rundowns[n].rec.item);
-        return it ? outboundDate(it) : null;
-      };
-      if (fresh.some((r) => !byTrip.has(String(r.trip)))) rundowns = (await db.get(`taRundowns:${site}`, {})) || {};
-      const next = learn(stops, fresh, outboundOf);
+      const itemOf = (n) => byTrip.get(n) || (rundowns && rundowns[n] && rundowns[n].rec && rundowns[n].rec.item) || null;
+      const outboundOf = (n) => { const it = itemOf(n); return it ? outboundDate(it) : null; };
+      const hubFor = (n) => { const it = itemOf(n); return it ? hubOf(it) : null; };
+      if (noHub || fresh.some((r) => !byTrip.has(String(r.trip)))) rundowns = (await db.get(`taRundowns:${site}`, {})) || {};
+      if (noHub) for (const r of Object.values(stops)) r.arrivals = (r.arrivals || []).map((a) => (a.hub ? a : { ...a, hub: hubFor(String(a.trip)) || 'unknown' }));
+      const next = learn(stops, fresh, outboundOf, hubFor);
       const nowTried = { ...tried };
       for (const r of fresh) if (!outboundOf(String(r.trip))) nowTried[r.trip] = now();   // no outbound day known — don't look again
       for (const [k, v] of Object.entries(nowTried)) if (now() - v > 40 * 24 * 60 * MIN) delete nowTried[k];
       await db.set(USUAL(site), { at: new Date(now()).toISOString(), stops: next, tried: nowTried });
     }
-    const learned = withSet(fresh.length ? ((await db.get(USUAL(site), {})) || {}).stops || {} : stops, (await db.get(SET(site), {})) || {});
+    const learned = withSet(fresh.length || noHub ? ((await db.get(USUAL(site), {})) || {}).stops || {} : stops, (await db.get(SET(site), {})) || {});
     const rows = lateCheck(items, etas, learned);
     const byTrip = {}; rows.forEach((x) => { (byTrip[x.trip] = byTrip[x.trip] || []).push(x); });
     await db.set(LATE(site), { at: new Date(now()).toISOString(), trips: byTrip });
@@ -227,7 +229,7 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     for (const x of due) {
       const k = `${x.trip}|${x.label}`;
       const m = lateEmail(x, byN.get(x.trip), { worse: !!sent[k] });
-      await sendMail({ to, subject: m.subject, html: m.html }); // eslint-disable-line no-await-in-loop
+      await sendMail({ to, subject: m.subject, html: m.html, text: m.text, attachments: m.attachments || [] }); // eslint-disable-line no-await-in-loop
       sent[k] = { lateMin: x.lateMin, at: new Date(now()).toISOString() };
       console.log(`[usual-arrival] late alert: trip ${x.trip} ${x.label} +${x.lateMin} min`);
     }
@@ -274,9 +276,8 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
   async function usualTimes(customer, site = SITE) {
     if (!enabled) return [];
     return (await placesFor(customer, site)).map((r) => {
-      const set = Object.keys(r.fixedByHub || {}).map((h) => usualOf(r, null, h).text);
-      const u = set.length ? null : usualOf(r, null);
-      return { customer: r.customer, place: r.place, arrivals: (r.arrivals || []).length, usual: set.length ? set.join(' · ') : u ? u.text : 'not known yet (needs 3 arrivals that agree, or set it)' };
+      const per = ['MIAMI', 'VENTURA'].map((h) => { const u = usualOf(r, null, h); return u ? `${h === 'VENTURA' ? 'Ventura' : 'Miami'} loads: ${u.text}` : null; }).filter(Boolean);
+      return { customer: r.customer, place: r.place, arrivals: (r.arrivals || []).length, usual: per.length ? per.join(' · ') : 'not known yet (needs 3 arrivals from the same hub that agree, or set it)' };
     });
   }
   // for Jarvis: this trip's open stops vs their usual time; and a customer's usual time
@@ -292,7 +293,7 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
       const st = (await db.get(USUAL(site), {})) || {};
       const q = String(req.query.customer || '').toUpperCase();
       const stops = Object.values(withSet(st.stops || {}, (await db.get(SET(site), {})) || {})).filter((r) => !q || String(r.customer).toUpperCase().includes(q))
-        .map((r) => { const u = usualOf(r, null); return { customer: r.customer, place: r.place, arrivals: (r.arrivals || []).length, usual: u ? u.text : 'not enough arrivals yet (needs 3 that agree)' }; })
+        .map((r) => { const per = ['MIAMI', 'VENTURA'].map((h) => { const u = usualOf(r, null, h); return u ? `${h === 'VENTURA' ? 'Ventura' : 'Miami'} loads: ${u.text}` : null; }).filter(Boolean); return { customer: r.customer, place: r.place, arrivals: (r.arrivals || []).length, usual: per.length ? per.join(' · ') : 'not enough arrivals yet (needs 3 from the same hub that agree)' }; })
         .sort((a, b) => b.arrivals - a.arrivals);
       res.json({ at: st.at || null, count: stops.length, stops, late: ((await db.get(LATE(site), {})) || {}).trips || {}, settings: { on: true, limitMin: 90, ...((await db.get(LATE_CFG, {})) || {}) } });
     });

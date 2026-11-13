@@ -8,7 +8,8 @@
 import { outboundDate } from './voice.js';
 import { isFlowerLoad } from './flowerreport.js';
 import { loadLabel } from './breakdownreport.js';
-import { tzOf, fmtLocal, fmtLocalShort } from './localtime.js';
+import { readFileSync } from 'node:fs';
+import { tzOf, zoneName, fmtLocal, fmtLocalShort } from './localtime.js';
 import { localToUtcMs } from './watchtower.js';
 
 const MIN = 60000; const DAY = 24 * 60 * MIN;
@@ -28,8 +29,14 @@ const clock = (m) => { const h = Math.floor(m / 60); const mm = m % 60; return `
 const DOW = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 // Which hub a load left from / a person said: MIAMI or VENTURA | null. Pure.
-export const hubKey = (x) => { const u = String(x || '').toUpperCase(); return /VENTUR|OXNARD|CALIF/.test(u) ? 'VENTURA' : /MIAMI|MIA\b|FLORIDA|TERMINAL/.test(u) ? 'MIAMI' : null; };
-export const hubOf = (it) => hubKey((it && it._tb && it._tb.hub) || tripOf(it).origZoneDesc || (it && it._manifest && ((it._manifest.stops || []).find((x) => /^LOAD/i.test(x.action || '')) || {}).city));
+export const hubKey = (x) => { const u = String(x || '').toUpperCase(); return /VENTUR|OXNARD|CALIF|,\s*CA\b/.test(u) ? 'VENTURA' : /MIAMI|MIA\b|FLORIDA|,\s*FL\b|TERMINAL/.test(u) ? 'MIAMI' : null; };
+// The hub a load left from: the Truck Builder's hub, the trip sheet's load stop ("VENTURA TERMINAL"), else the origin (a California
+// origin is a Ventura run, a Florida one a Miami run). Pure.
+export const hubOf = (it) => {
+  const load = (it && it._manifest && (it._manifest.stops || []).find((x) => /^LOAD/i.test(x.action || ''))) || {};
+  for (const v of [it && it._tb && it._tb.hub, load.customer, load.city && `${load.city}, ${load.state || ''}`, tripOf(it).origZoneDesc]) { const h = hubKey(v); if (h) return h; }
+  return null;
+};
 // Only Nadim and Ronen may set usual delivery times (by text, call or Ask Jarvis).
 export const SETTERS = ['3055040711', '3052063095'];
 export const maySet = ({ phone = null, name = '' } = {}) => (phone ? SETTERS.includes(String(phone).replace(/\D+/g, '').slice(-10)) : /^(nadim|ronen)\b/i.test(String(name || '').trim()));
@@ -51,12 +58,12 @@ export function learnedDays(rec) {
 }
 
 // one arrival from the stop-times log → what we learn from it (needs the trip's outbound day). Pure.
-export function arrivalFact(row, outbound) {
+export function arrivalFact(row, outbound, hub = null) {
   if (!row || !row.arrivedMs || !row.customer || !row.place || !/^\d{4}-\d{2}-\d{2}$/.test(String(outbound || ''))) return null;
   const tz = tzOf(row.place);
   const days = daysBetween(outbound, ymdIn(row.arrivedMs, tz));
   if (days < 0 || days > 8) return null;
-  return { trip: String(row.trip), ms: row.arrivedMs, outbound, dow: dowOf(outbound), days, min: minOfDay(row.arrivedMs, tz) };
+  return { trip: String(row.trip), ms: row.arrivedMs, outbound, dow: dowOf(outbound), days, min: minOfDay(row.arrivedMs, tz), hub: hub || 'unknown' };
 }
 
 // the middle arrival time — minutes counted from noon so a 11:50 PM / 12:10 AM pair doesn't average to noon. Pure.
@@ -73,10 +80,12 @@ export function usualFor(rec, outbound, hub = null) {
   const fx = (hub && byHub[hub]) || (!hub && Object.values(byHub).length === 1 ? Object.values(byHub)[0] : null) || (rec && rec.fixed) || null;
   if (fx && fx.days != null && fx.min != null) {
     const f = fx; const d = Number(f.days);
-    return { days: d, min: f.min, n: 'set', of: 'set', set: true, by: f.by || null,
+    return { days: d, min: f.min, n: 'set', of: 'set', set: true, by: f.by || null, hub: f.hub || null,
       text: `${d === 0 ? 'the outbound day' : d === 1 ? '1 day after the outbound day' : `${d} days after the outbound day`} at ${clock(f.min)} local${f.hub ? ` from ${f.hub === 'VENTURA' ? 'Ventura' : 'Miami'}` : ''} (set by ${f.by || 'dispatch'})` };
   }
-  const all = (rec && rec.arrivals) || [];
+  // a load is compared only with arrivals from its own hub (a Ventura truck needs days longer than a Miami one to the same
+  // customer); without a hub there's nothing fair to compare with
+  const all = ((rec && rec.arrivals) || []).filter((a) => hub && a.hub === hub);
   if (all.length < 3) return null;
   const dow = outbound ? dowOf(outbound) : null;
   const same = dow != null ? all.filter((a) => a.dow === dow) : [];
@@ -98,13 +107,13 @@ export function usualMs(u, outbound, place) {
 }
 
 // fold new arrivals into the learned store (each trip|stop once; last 40 per customer stop). Pure.
-export function learn(store = {}, rows = [], outboundOf = () => null) {
+export function learn(store = {}, rows = [], outboundOf = () => null, hubFor = () => null) {
   const out = { ...store };
   for (const r of rows) {
     const k = stopKey(r.customer, r.place);
     const have = (out[k] && out[k].arrivals) || [];
     if (have.some((a) => a.trip === String(r.trip))) continue;
-    const f = arrivalFact(r, outboundOf(String(r.trip)));
+    const f = arrivalFact(r, outboundOf(String(r.trip)), hubFor(String(r.trip)));
     if (!f) continue;
     out[k] = { customer: r.customer, place: r.place, arrivals: [...have, f].sort((a, b) => a.ms - b.ms).slice(-40) };
   }
@@ -138,7 +147,7 @@ export function lateCheck(items = [], etas = {}, learned = {}) {
       }
       if (!best) continue;
       out.push({ trip: n, truck: String(tripOf(it).powerUnit || '').trim() || null, trailer: String(tripOf(it).trailer || '').trim() || null, outbound: od,
-        label: s.label, customers: [...names], customer: best.customer, etaMs: s.etaMs, usual: best.usual, usualMs: best.usualMs, lateMin: Math.round((s.etaMs - best.usualMs) / MIN) });
+        label: s.label, customers: [...names], customer: best.customer, etaMs: s.etaMs, miles: s.miles != null && Number.isFinite(Number(s.miles)) ? Math.round(Number(s.miles)) : null, usual: best.usual, usualMs: best.usualMs, lateMin: Math.round((s.etaMs - best.usualMs) / MIN) });
     }
   }
   return out;
@@ -151,25 +160,114 @@ export function shouldAlert(prev, lateMin, limit = 90) {
 }
 
 const hm = (m) => (m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}` : `${m} min`);
-const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const esc = (x) => String(x == null ? '' : x).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// the company's flower mark (the same one the trailer-change email carries), inside the email as a cid picture
+const ASSET = (f) => { try { return readFileSync(new URL(`./assets/email/${f}`, import.meta.url)); } catch { return null; } };
+const MARK = ASSET('flower-mark.png');
+const ICONS = { route: ASSET('icon-route.png'), driver: ASSET('icon-driver.png'), truck: ASSET('icon-truck.png') };   // navy line icons
+const ABBR = { Eastern: 'ET', Central: 'CT', Mountain: 'MT', Arizona: 'MST', Pacific: 'PT', Alaska: 'AKT', Hawaii: 'HT' };
+const zoneAbbr = (tz) => ABBR[zoneName(tz)] || zoneName(tz);
+// "Fri, Nov 13" and "6:47 PM CT" in a time zone. Pure.
+const dayIn = (ms, tz) => new Date(ms).toLocaleDateString('en-US', { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric' });
+const yearIn = (ms, tz) => new Date(ms).toLocaleDateString('en-US', { timeZone: tz, year: 'numeric' });
+const timeIn = (ms, tz) => `${new Date(ms).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' })} ${zoneAbbr(tz)}`;
+const shortIn = (ms, tz) => `${new Date(ms).toLocaleDateString('en-US', { timeZone: tz, month: 'short', day: 'numeric' })} · ${timeIn(ms, tz)}`;
+const tel = (p) => String(p || '').replace(/[^\d+]/g, '');
+const phoneSaid = (p) => { const d = String(p || '').replace(/\D/g, '').slice(-10); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(p || '').trim(); };
+// The delay as the two times on the email show it (both to the minute), so "15 h 12 min" always matches 3:35 AM → 6:47 PM. Pure.
+export const lateShown = (etaMs, usualMs) => Math.floor(etaMs / MIN) - Math.floor(usualMs / MIN);
+// "HUNTSVILLE, AL, 35816" → "Huntsville, AL 35816". Pure.
+const placeSaid = (label) => { const p = String(label || '').split(',').map((x) => x.trim()).filter(Boolean); const city = (p[0] || '').toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase()); return [city, [p[1], p[2]].filter(Boolean).join(' ')].filter(Boolean).join(', '); };
+
+// Samsara's "18435 US 84 / GA 38, Thomas County, GA, 31757" → street "18435 US 84 / GA 38", town "Thomas County, GA 31757". Pure.
+export function whereSaid(location) {
+  const p = String(location || '').split(',').map((v) => v.trim()).filter(Boolean);
+  const zip = p.length && /^\d{5}(-\d{4})?$/.test(p[p.length - 1]) ? p.pop() : null;
+  const state = p.length && /^[A-Z]{2}$/i.test(p[p.length - 1]) ? p.pop().toUpperCase() : null;
+  const city = p.length > 1 ? p.pop() : null;
+  return { street: p.join(', ') || city || null, town: [p.length ? city : null, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null };
+}
+
+// The drivers on the load (Samsara, else the trip's driver codes): name + phone; the team driver only when there is one. Pure.
+export function driversOf(item) {
+  const s = (item && item._samsara) || {}; const t = tripOf(item);
+  const one = (name, info, code) => ({ name: (info && info.name) || name || (code ? `Driver ${code}` : null), phone: (info && info.phone) || null });
+  const d1 = one(s.driver1, s.driver1Info, t.driver);
+  const d2 = (s.driver2 || s.driver2Info || t.driver2) ? one(s.driver2, s.driver2Info, t.driver2) : null;
+  return { driver: d1, team: d2 };
+}
+
+// "Arrival delay update" (the approved design): the customer, outbound day + updated ETA, how far past the usual arrival, the
+// load, miles to this stop, the drivers, the usual time, where the truck is, and what the usual time comes from. Tables and inline
+// styles only (Outlook, Gmail, Apple Mail), 600 px wide, the two date cards stack on a phone. Pure. → { subject, html, text, attachments }
 export function lateEmail(x, item, { worse = false } = {}) {
+  const tz = tzOf(x.label);
   const live = (item && item._samsara) || {};
-  const where = live.location ? `${live.location}${live.gpsAt ? ` (as of ${fmtLocalShort(Date.parse(live.gpsAt), 'FL')})` : ''}` : null;
-  const subject = `${worse ? 'Later still' : 'Running late'}: trip ${x.trip} — ${x.customer} (${x.label.replace(/,?\s*\d{5}.*$/, '')}) ETA ${hm(x.lateMin)} past usual`;
-  const rows = [
-    ['Trip', `${x.trip}${x.truck ? ` · truck ${x.truck}` : ''}${x.trailer ? ` · trailer ${x.trailer}` : ''}`],
-    ['Outbound', `${DOW[dowOf(x.outbound)]}, ${x.outbound}`],
-    ['Stop', `${x.customers.join(', ')} — ${x.label}`],
-    ['ETA now', fmtLocal(x.etaMs, x.label)],
-    ['Usually there', `${fmtLocal(x.usualMs, x.label)} — ${x.usual.text}${x.usual.set ? '' : `, from ${x.usual.n} of the last ${x.usual.of} arrivals`}`],
-    ['Late by', hm(x.lateMin)],
-    ...(where ? [['Truck now', where]] : []),
-  ];
-  const html = `<div style="font-family:Arial,sans-serif;font-size:14px"><p>Good day,</p><p>Trip ${esc(x.trip)} is running ${worse ? 'even ' : ''}later than usual for ${esc(x.customer)}.</p>`
-    + `<table style="border-collapse:collapse">${rows.map(([k, v]) => `<tr><td style="padding:3px 12px 3px 0;color:#555"><b>${esc(k)}</b></td><td style="padding:3px 0">${esc(v)}</td></tr>`).join('')}</table>`
-    + `<p style="color:#666;font-size:12px">${x.usual.set ? 'The usual time was set by dispatch.' : 'The usual time is learned from our trucks\' geofence arrivals at this customer.'} LTL runs only.</p>`
-    + '<p>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>';
-  return { subject, html };
+  const late = lateShown(x.etaMs, x.usualMs);
+  const others = (x.customers || []).filter((c) => c && c !== x.customer);
+  const place = placeSaid(x.label);
+  const titleCase = (v) => String(v).toLowerCase().replace(/(^|[\s\-/(&])([a-z])/g, (m0, a, b) => a + b.toUpperCase()).replace(/\b(Llc|Inc|Dc)\b/g, (w) => w.toUpperCase());
+  const sub = [others.map(titleCase).join(', '), place].filter(Boolean).join(' · ');
+  const { driver, team } = driversOf(item);
+  const { street, town } = whereSaid(live.location);
+  const gpsMs = live.gpsAt ? Date.parse(live.gpsAt) : null;
+  const basis = x.usual.set ? `Usual time set by ${x.usual.by || 'dispatch'}${x.usual.hub ? ` for ${x.usual.hub === 'VENTURA' ? 'Ventura' : 'Miami'} outbounds` : ''}. LTL runs only.`
+    : `Based on the last ${x.usual.n} geofence arrival${x.usual.n === 1 ? '' : 's'} at this customer. LTL runs only.`;
+  const subject = `${worse ? 'Later still' : 'Running late'}: trip ${x.trip} — ${x.customer} (${String(x.label).replace(/,?\s*\d{5}.*$/, '')}) ETA ${hm(late)} past usual`;
+  const attachments = [...(MARK ? [{ name: 'flower-mark.png', contentType: 'image/png', bytes: MARK, cid: 'ud-mark' }] : []),
+    ...Object.entries(ICONS).filter(([, b]) => b).map(([k, b]) => ({ name: `icon-${k}.png`, contentType: 'image/png', bytes: b, cid: `ud-${k}` }))];
+
+  const NAVY = '#13325B'; const TEXT = '#14213D'; const MUTED = '#5B6778'; const LINE = '#D9E0EA'; const BLUE = '#EEF4FB'; const AMBER = '#FDECC8'; const AMBER_DEEP = '#F8C55A'; const AMBER_INK = '#B45309'; const F = 'Arial,Helvetica,sans-serif';
+  const nameSize = x.customer.length > 32 ? 24 : x.customer.length > 22 ? 30 : 38;
+  const cap = (t) => `<div style="font-family:${F};font-size:11px;font-weight:bold;letter-spacing:1px;color:${TEXT};text-transform:uppercase;">${esc(t)}</div>`;
+  const dateCard = (label, big, small, bg) => `<td class="ud-card" width="50%" valign="top" style="padding:0 5px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${bg};border-radius:10px;"><tr><td align="center" style="padding:12px 8px;">${cap(label)}<div class="ud-date" style="font-family:${F};font-size:24px;font-weight:bold;color:${TEXT};line-height:30px;margin-top:4px;">${esc(big)}</div><div style="font-family:${F};font-size:16px;font-weight:bold;color:${TEXT};">${esc(small)}</div></td></tr></table></td>`;
+  const idCell = (label, v) => `<td width="33%" style="padding:0 4px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ${LINE};border-radius:8px;"><tr><td align="center" style="padding:8px 4px;">${cap(label)}<div style="font-family:${F};font-size:20px;font-weight:bold;color:${TEXT};word-break:break-all;">${esc(v || 'Not provided')}</div></td></tr></table></td>`;
+  const ico = (k) => `<td width="52" valign="middle" align="center" style="padding:0 6px;">${ICONS[k] ? `<img src="cid:ud-${k}" width="30" height="30" alt="" style="display:block;border:0;width:30px;height:30px;">` : ''}</td>`;
+  const person = (label, d) => `<tr><td style="font-family:${F};font-size:13px;font-weight:bold;color:${TEXT};padding:2px 10px 2px 0;white-space:nowrap;">${esc(label)}</td><td style="font-family:${F};font-size:13px;color:${TEXT};padding:2px 0;">${esc(d && d.name ? d.name : 'Not available')}${d && d.phone ? ` · <a href="tel:${esc(tel(d.phone))}" style="color:#1D4ED8;text-decoration:underline;">${esc(phoneSaid(d.phone))}</a>` : (d && d.name ? ' · phone not available' : '')}</td></tr>`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="x-apple-disable-message-reformatting">
+<style>@media only screen and (max-width:480px){.ud-wrap{width:100%!important}.ud-name{font-size:26px!important;line-height:30px!important}.ud-brand{font-size:15px!important;letter-spacing:.5px!important}.ud-date{font-size:20px!important;line-height:26px!important}}@media only screen and (max-width:340px){.ud-card{display:block!important;width:100%!important;padding:0 0 8px!important}}</style></head>
+<body style="margin:0;padding:0;background:#E8EEF6;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#E8EEF6;"><tr><td align="center" style="padding:16px 8px;">
+<table role="presentation" class="ud-wrap" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background:#FFFFFF;border-radius:10px;overflow:hidden;">
+<tr><td style="background:${NAVY};padding:14px 20px;"><table role="presentation" cellpadding="0" cellspacing="0"><tr>
+${MARK ? `<td valign="middle" style="padding-right:14px;border-right:1px solid #5F7799;"><img src="cid:ud-mark" width="40" height="40" alt="Florida Beauty Flora" style="display:block;border:0;width:40px;height:40px;"></td>` : ''}
+<td valign="middle" style="padding-left:${MARK ? 14 : 0}px;"><div class="ud-brand" style="font-family:${F};font-size:19px;font-weight:bold;letter-spacing:1px;color:#FFFFFF;white-space:nowrap;">FLORIDA BEAUTY FLORA</div><div style="font-family:${F};font-size:12px;letter-spacing:2px;color:#C9D6EA;">JARVIS · DISPATCH ALERT</div></td></tr></table></td></tr>
+<tr><td style="padding:18px 20px 6px;" align="center">
+<div style="font-family:${F};font-size:15px;font-weight:bold;letter-spacing:1px;color:${AMBER_INK};">&#9888; ${worse ? 'ARRIVAL DELAY UPDATE — LATER STILL' : 'ARRIVAL DELAY UPDATE'}</div>
+<div class="ud-name" style="font-family:${F};font-size:${nameSize}px;line-height:${nameSize + 6}px;font-weight:900;color:${TEXT};margin-top:6px;word-break:break-word;">${esc(String(x.customer).toUpperCase())}</div>
+${sub ? `<div style="font-family:${F};font-size:15px;color:${TEXT};margin-top:4px;">${esc(sub)}</div>` : ''}
+</td></tr>
+<tr><td style="padding:10px 15px 6px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+${dateCard('Outbound date', dayIn(Date.parse(`${x.outbound}T12:00:00Z`), 'UTC'), yearIn(Date.parse(`${x.outbound}T12:00:00Z`), 'UTC'), BLUE)}
+${dateCard('Updated ETA', dayIn(x.etaMs, tz), timeIn(x.etaMs, tz), AMBER)}
+</tr></table></td></tr>
+<tr><td style="padding:6px 20px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${AMBER_DEEP};border-radius:8px;"><tr><td align="center" style="padding:10px 12px;">
+<div style="font-family:${F};font-size:22px;font-weight:bold;color:${TEXT};">${esc(hm(late))} past usual arrival</div>
+<div style="font-family:${F};font-size:13px;color:${TEXT};">Historical comparison, not a confirmed appointment.</div></td></tr></table></td></tr>
+<tr><td style="padding:6px 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>${idCell('Trip', x.trip)}${idCell('Truck', x.truck)}${idCell('Trailer', x.trailer)}</tr></table></td></tr>
+<tr><td style="padding:6px 20px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${LINE};border-bottom:1px solid ${LINE};"><tr>${ico('route')}<td style="padding:10px 0;">${cap('Miles to customer')}<div style="font-family:${F};font-size:22px;font-weight:bold;color:${TEXT};">${x.miles != null ? `${x.miles.toLocaleString('en-US')} miles` : 'Unavailable'}</div></td></tr></table></td></tr>
+<tr><td style="padding:6px 20px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ${LINE};border-radius:8px;"><tr>${ico('driver')}<td style="padding:10px 10px 10px 0;border-left:1px solid ${LINE};padding-left:12px;">${cap('Driver information')}<table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:4px;">${person('Driver', driver)}${team ? person('Team driver', team) : ''}</table></td></tr></table></td></tr>
+<tr><td style="padding:6px 20px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ${LINE};border-radius:8px;"><tr><td align="center" style="padding:8px;font-family:${F};font-size:15px;color:${TEXT};"><b>Usual arrival:</b> ${esc(shortIn(x.usualMs, tz))}</td></tr></table></td></tr>
+<tr><td style="padding:6px 20px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${LINE};border-bottom:1px solid ${LINE};"><tr>${ico('truck')}<td style="padding:10px 0;">${cap('Truck location')}
+<div style="font-family:${F};font-size:18px;font-weight:bold;color:${TEXT};">${esc(street || 'Unavailable')}</div>${town ? `<div style="font-family:${F};font-size:13px;color:${TEXT};">${esc(town)}</div>` : ''}${gpsMs ? `<div style="font-family:${F};font-size:13px;color:${MUTED};">Updated ${esc(shortIn(gpsMs, 'America/New_York'))}</div>` : ''}</td></tr></table></td></tr>
+<tr><td style="padding:6px 20px 16px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${BLUE};border-radius:8px;"><tr><td width="44" align="center" style="font-family:${F};font-size:18px;color:${NAVY};">&#9432;</td><td style="padding:9px 10px 9px 0;font-family:${F};font-size:12px;color:${TEXT};">${esc(basis)}</td></tr></table></td></tr>
+<tr><td align="center" style="background:${NAVY};padding:12px 20px;"><div style="font-family:${F};font-size:15px;font-weight:bold;color:#FFFFFF;">Jarvis · AI Dispatcher</div><div style="font-family:${F};font-size:13px;color:#C9D6EA;">Florida Beauty Flora</div></td></tr>
+</table></td></tr></table></body></html>`;
+  const text = [
+    'FLORIDA BEAUTY FLORA — JARVIS · DISPATCH ALERT', '', worse ? 'ARRIVAL DELAY UPDATE — LATER STILL' : 'ARRIVAL DELAY UPDATE',
+    String(x.customer).toUpperCase(), sub || null, '',
+    `Outbound date: ${dayIn(Date.parse(`${x.outbound}T12:00:00Z`), 'UTC')}, ${yearIn(Date.parse(`${x.outbound}T12:00:00Z`), 'UTC')}`,
+    `Updated ETA: ${dayIn(x.etaMs, tz)} · ${timeIn(x.etaMs, tz)}`,
+    `${hm(late)} past usual arrival — historical comparison, not a confirmed appointment.`, '',
+    `Trip ${x.trip || 'Not provided'} · Truck ${x.truck || 'Not provided'} · Trailer ${x.trailer || 'Not provided'}`,
+    `Miles to customer: ${x.miles != null ? `${x.miles.toLocaleString('en-US')} miles` : 'Unavailable'}`,
+    `Driver: ${driver && driver.name ? driver.name : 'Not available'}${driver && driver.phone ? ` · ${phoneSaid(driver.phone)}` : ''}`,
+    team ? `Team driver: ${team.name || 'Not available'}${team.phone ? ` · ${phoneSaid(team.phone)}` : ''}` : null,
+    `Usual arrival: ${shortIn(x.usualMs, tz)}`,
+    `Truck location: ${[street, town].filter(Boolean).join(', ') || 'Unavailable'}${gpsMs ? ` (updated ${shortIn(gpsMs, 'America/New_York')})` : ''}`, '',
+    basis, '', 'Jarvis · AI Dispatcher', 'Florida Beauty Flora',
+  ].filter((l) => l !== null).join('\n');
+  return { subject, html, text, attachments };
 }
 
 // For Jarvis: the usual time + how late, for one trip's open stops (from the last cycle). Pure.
