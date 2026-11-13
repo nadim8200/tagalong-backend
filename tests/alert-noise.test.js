@@ -182,3 +182,25 @@ test('rolling email: missing data says so; an unknown stop start is a floor', ()
   const m = renderRollingEmail({ ...ep, stopStartUnknown: true }, { trip: {}, _samsara: {} }, { now: ep.confirmedAt });
   assert.match(m.html, /at least 3h 28m/); assert.match(m.html, /Location not reported/); assert.match(m.html, /No driver reported/); assert.doesNotMatch(m.html, /Open map/); assert.doesNotMatch(m.html, /On time/);
 });
+
+test('a team truck at a shipper / receiver (driver check-in, or the load\'s email thread says so) is loading, not a stop to chase', async () => {
+  const { atCustomerEvidence } = await import('../watchtower.js');
+  const now = Date.parse('2026-11-13T16:19:00Z');
+  // trip 627033: TruckMate was clicked ARRSHIP/DEPSHIP a minute apart while the truck was still at its pre-cons; Giovanni wrote "At shipper now"
+  const precons = { type: 'email', dir: 'in', at: '2026-11-13T12:39:24Z', name: 'Giovanni Di Muro', text: 'The drivers are at their pre-cons now,\nOnce empty, they will head to the shipper\nETA @1:00 PM' };
+  const atShip = { type: 'email', dir: 'in', at: '2026-11-13T13:48:43Z', name: 'Giovanni Di Muro', text: 'At shipper now\nWaiting to get assigned a door to be loaded\nWe\'ll keep you posted.\n***PLEASE REPLY-ALL FOR UPDATES***' };
+  const ev = atCustomerEvidence({ _comms: [atShip, precons] }, {}, now);
+  assert.equal(ev.checkin, false); assert.match(ev.why, /At shipper now/);
+  assert.equal(atCustomerEvidence({ _comms: [precons] }, {}, now), null, '"at their pre-cons, once empty" is not at the shipper');
+  assert.equal(atCustomerEvidence({ _comms: [{ ...atShip, at: '2026-11-13T15:00:00Z', text: 'Loaded and rolling' }, atShip] }, {}, now), null, 'newer word: it left');
+  assert.equal(atCustomerEvidence({ _comms: [atShip] }, {}, now + 13 * 3600000), null, 'old news after 12 hours');
+  assert.equal(atCustomerEvidence({}, { 'at-shipper': { at: '2026-11-13T14:00:00Z' } }, now).checkin, true);
+  assert.equal(atCustomerEvidence({}, { 'at-shipper': { at: '2026-11-13T14:00:00Z' }, loaded: { at: '2026-11-13T15:00:00Z' } }, now), null);
+  // the alert: stopped 3h17m since 9:02 ET with a driver who has 10h left — quiet with the email, raised without it
+  const item = { trip: { tripNumber: '627033', status: 'DEPSHIP', powerUnit: '4562', driver: '0988', driver2: '9807' }, freightBills: [{ billNumber: 'B180949', endZoneDescription: 'DEERFIELD BEACH, FL, 33442' }],
+    _samsara: { lat: 41.96, lng: -71.18, location: '380 South Worcester Street, Norton, MA, 02766', gpsAt: '2026-11-13T16:18:00Z', speedMph: 0, driver1: 'Ferney Urrego', driver2: 'Daniel Fragozo', hos: { status: 'sleeperBed', driveLeftMin: 0, shiftLeftMin: 0 }, hos2: { status: 'sleeperBed', driveLeftMin: 609, shiftLeftMin: 700 } } };
+  const run = (atCustomer) => evaluateBoard({ trips: [item] }, { now, geo: () => null, unitState: () => ({ stoppedSince: Date.parse('2026-11-13T14:02:00Z') }), atCustomer }).filter((a) => a.code === 'stopped');
+  assert.equal(run({}).length, 1, 'without it: team truck stopped');
+  assert.equal(run({ 627033: ev }).length, 0, 'at the shipper per the email thread');
+  assert.equal(run({ 627033: { ...ev, at: Date.parse('2026-11-13T08:00:00Z') } }).length, 1, 'an email from long before this stop does not cover it');
+});

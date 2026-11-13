@@ -21,6 +21,7 @@
 //   • Nothing is sent to drivers/customers from here — people stay in charge.
 //   • Silence is the goal: warnings stay on the board, only criticals push.
 // ---------------------------------------------------------------
+import { CHECKINS } from './checkins.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 
 const MIN = 60000;
@@ -638,6 +639,10 @@ const RULES = [
     const l = f.live;
     if (!isRolling(f.status) || !l || !f.gpsFresh || !f.stoppedMin || notStarted(f.status, f, ctx.now)) return null;
     const mins = f.stoppedMin;
+    // at a shipper or receiver (the driver checked in, or the load's email thread says so): loading / unloading, not a stop to chase.
+    // An email only counts for a stop that began within 3 hours of it (a truck that left and stopped later is a new stop)
+    const atCust = ctx.atCustomer && ctx.atCustomer[f.trip];
+    if (atCust && (atCust.checkin || ctx.now - mins * MIN <= atCust.at + 3 * 3600000)) return null;
     if (leavingFlorida(f) && inFlorida(l) && mins >= 20) return null;   // Miami outbound still in Florida: unscheduledStop covers it
     // Resting = the ELD says off duty / sleeper (or the driver is out of hours).
     // Not resting = on duty or "driving" while parked — that's the one to chase.
@@ -789,6 +794,27 @@ export const MIAMI_TERMINAL = { lat: MIAMI_YARDS[0].lat, lng: MIAMI_YARDS[0].lng
 export const yardMiles = (p) => Math.min(...MIAMI_YARDS.map((y) => haversineMi(p.lat, p.lng, y.lat, y.lng)));
 // Inside Florida (rough border: Georgia line ~30.7°N, Alabama line 31°N west of the Apalachicola).
 export const inFlorida = (p) => !!p && p.lat != null && p.lng > -87.65 && p.lng < -79.8 && (p.lat < 30.71 || (p.lat < 31.0 && p.lng < -85.0));
+
+// Is the truck at a shipper or receiver right now, by what people say (not TruckMate, which dispatch often clicks ahead)?
+//   - the driver tapped "I'm at the shipper / receiver" in the driver app and hasn't tapped out (Loaded & leaving / Delivered);
+//   - or the newest email on the load in the last 12 hours says it's there ("At shipper now, waiting to get assigned a door")
+//     and nothing newer says it left. → { at (ms), why, checkin } | null. Pure.
+const AT_CUSTOMER = /\b(?:at (?:the )?(?:shipper|receiver|consignee|pick ?up|delivery|customer)(?: now)?|waiting (?:to get|for) (?:assigned )?(?:a |the )?(?:door|dock)|assigned a door|(?:being|getting) (?:loaded|unloaded)|loading now|unloading|waiting to (?:load|unload|be loaded|be unloaded)|in (?:a |the )?door)\b/i;
+const LEFT_CUSTOMER = /\b(?:loaded and (?:rolling|leaving|on the way)|departed|left (?:the )?(?:shipper|receiver)|rolling|on the way|en route|empty now|delivered)\b/i;
+export function atCustomerEvidence(item, steps = {}, now = Date.now()) {
+  for (const [k, v] of Object.entries(steps || {})) {
+    const out = k === 'at-shipper' ? 'loaded' : /^arrived:/.test(k) ? `delivered:${k.slice(8)}` : null;
+    if (out && v && v.at && !(steps[out] && steps[out].at)) return { at: Date.parse(v.at), why: k === 'at-shipper' ? 'driver checked in at the shipper' : 'driver checked in at the receiver', checkin: true };
+  }
+  const mails = ((item && item._comms) || []).filter((c) => c && c.type === 'email' && c.dir === 'in' && c.at && now - Date.parse(c.at) < 12 * 3600000)
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  for (const m of mails) {
+    const txt = String(m.text || '').split(/\*\*\*PLEASE|Regards,/i)[0];
+    if (LEFT_CUSTOMER.test(txt) && !AT_CUSTOMER.test(txt)) return null;   // the newest word is that it left
+    if (AT_CUSTOMER.test(txt)) return { at: Date.parse(m.at), why: `${m.name || 'email'}: "${txt.replace(/\s+/g, ' ').trim().slice(0, 80)}"`, checkin: false };
+  }
+  return null;
+}
 
 const TRUCK_CODES = new Set(['hos-low', 'stopped', 'unscheduled-stop', 'check-engine', 'tracking-lost', 'reefer-off', 'reefer-temp', 'reefer-setpoint']);
 export function evaluateBoard(board, ctxIn) {
@@ -1057,6 +1083,7 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     const toPush = []; const toMail = []; const toRoll = []; const toEscalate = [];
     // reported down: a road call open, a breakdown report, the Breakdown switch, or an email saying so
     const roadDown = new Set(openRoadCalls ? await openRoadCalls().catch(() => []) : []);
+    const taps = db && db.enabled ? ((await db.get(CHECKINS('florida-beauty'), {}).catch(() => ({}))) || {}) : {};   // driver-app check-ins (checkins.js)
     const waitingNow = atStopNow ? await atStopNow().catch(() => new Set()) : new Set();   // the waiting clock has them: at a shipper or receiver, not a stop to chase
     for (const it of board.trips || []) { if ((it._breakdown && it._breakdown.on) || (it._hold && it._hold.kind === 'breakdown')) { const t = (it && it.trip) || {}; roadDown.add(String(t.tripNumber)); roadDown.add(norm(t.powerUnit)); } }
     let etasNow = {};
@@ -1097,7 +1124,10 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
         if (us.stopEpisode) followStop(u, us, l, t.tripNumber);
         s.units[u] = us;
       }
-      const ctx = { now, geo, roadMiles, unitState: (unit) => s.units[norm(unit)] };
+      // trucks at a shipper / receiver by the driver's check-in or the load's email thread (atCustomerEvidence)
+      const atCustomer = {};
+      for (const it of board.trips || []) { const n = String(((it && it.trip) || {}).tripNumber || ''); const e = n ? atCustomerEvidence(it, ((taps[n] || {}).steps) || {}, now) : null; if (e) atCustomer[n] = e; }
+      const ctx = { now, geo, roadMiles, unitState: (unit) => s.units[norm(unit)], atCustomer };
       const found = evaluateBoard(board, ctx);
       s.etas = boardEtas(board, ctx);
       etasNow = s.etas;
