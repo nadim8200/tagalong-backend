@@ -76,9 +76,20 @@ export function driverAppView(it, { roster = [], pins = {}, push = {}, app = {},
 const billsOf = (it) => (it && (it.freightBills || it.orders)) || tripOf(it).freightBills || [];
 
 // The driver's loads on the board by their TruckMate driver ID: rolling now, then booked next. Pure.
+// Who the driver is running with on a load and the hours each has left (Samsara ELD clocks, read-only). TruckMate's driver /
+// driver2 codes say who is on the trip; Samsara's driver1 / driver2 names and clocks line up with them. → { team, coDriver, hours } | null. Pure.
+export function crewFor(it, code) {
+  const t = tripOf(it); const s = (it && it._samsara) || {};
+  const slots = [{ code: t.driver, name: s.driver1, hos: s.hos }, { code: t.driver2, name: s.driver2, hos: s.hos2 }];
+  const i = slots.findIndex((x) => x.code && norm(x.code) === norm(code));
+  if (i < 0) return null;
+  const clock = (h) => (h ? { status: h.status || null, driveLeftMin: h.driveLeftMin ?? null, shiftLeftMin: h.shiftLeftMin ?? null, cycleLeftMin: h.cycleLeftMin ?? null, breakInMin: h.breakInMin ?? null, at: h.at || null } : null);
+  const other = slots[1 - i]; const oc = String(other.code || '').trim();
+  return { team: !!oc, coDriver: oc ? { code: oc, name: other.name || null, hours: clock(other.hos) } : null, hours: clock(slots[i].hos) };
+}
 export function loadsFor(code, items = []) {
   const mine = items.filter((it) => [tripOf(it).driver, tripOf(it).driver2].some((c) => c && norm(c) === norm(code)) && !DONE.test(String(tripOf(it).status || '')));
-  const brief = (it) => { const t = tripOf(it); return { trip: tripNo(it), status: t.status || null, truck: t.powerUnit || null, trailer: t.trailer || null, from: t.origZoneDesc || null, to: t.destZoneDesc || null, stops: billsOf(it).slice(0, 20).map((b) => ({ bill: b.billNumber || null, to: b.endZoneDescription || null, customer: b.billToName || null, deliverBy: b.deliverBy || null, pieces: b.pieces != null ? Number(b.pieces) : null, delivered: !!b.actualDelivery })) }; };
+  const brief = (it) => { const t = tripOf(it); return { trip: tripNo(it), status: t.status || null, truck: t.powerUnit || null, trailer: t.trailer || null, from: t.origZoneDesc || null, to: t.destZoneDesc || null, stops: billsOf(it).slice(0, 20).map((b) => ({ bill: b.billNumber || null, to: b.endZoneDescription || null, customer: b.billToName || null, deliverBy: b.deliverBy || null, pieces: b.pieces != null ? Number(b.pieces) : null, delivered: !!b.actualDelivery })), crew: crewFor(it, code) }; };
   return { current: mine.filter((it) => ROLLING.test(String(tripOf(it).status || ''))).map(brief), next: mine.filter((it) => BOOKED.test(String(tripOf(it).status || ''))).map(brief) };
 }
 
@@ -165,6 +176,7 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       if (unreadFor) for (const l of [...loads.current, ...loads.next]) l.unread = await unreadFor(SITE, l.trip).catch(() => 0); // eslint-disable-line no-await-in-loop
       // an LTL load: the trip sheet's stops, each marked done with boxes and signed paperwork (stopflow.js)
       if (stopFlow) { const items = await board(); for (const l of [...loads.current, ...loads.next]) l.ltl = await stopFlow.forDriver(items.find((it) => tripNo(it) === l.trip)); } // eslint-disable-line no-await-in-loop
+      for (const l of [...loads.current, ...loads.next]) if (l.crew && l.crew.coDriver && !l.crew.coDriver.name) { const c = await byCode(l.crew.coDriver.code).catch(() => null); if (c) l.crew.coDriver.name = c.name || null; } // eslint-disable-line no-await-in-loop
       if (trips.length) await db.update(tripsKey(req.driver.code), (cur) => [...new Set([...trips, ...(Array.isArray(cur) ? cur : [])])].slice(0, 300), []);
       // the last time the driver was in the app (dispatch sees it on the load), written at most every 5 minutes
       const seen = (((await db.get(APP, {})) || {}).seen || {})[norm(req.driver.code)];

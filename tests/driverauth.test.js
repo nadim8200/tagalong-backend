@@ -31,6 +31,18 @@ test('a driver\'s loads by TruckMate driver ID: rolling now, booked next, never 
   assert.equal(l.current[0].stops[0].pieces, 12);
 });
 
+test('the driver sees who they run with and the hours each has left (Samsara clocks)', async () => {
+  const { crewFor } = await import('../driverauth.js');
+  const it = { trip: { tripNumber: '626265', driver: '2440', driver2: '0986' }, _samsara: { driver1: 'Christian Arana', driver2: 'Frank U', hos: { status: 'driving', driveLeftMin: 300, shiftLeftMin: 420, cycleLeftMin: 2400, breakInMin: 120, at: 't' }, hos2: { status: 'sleeperBed', driveLeftMin: 660, shiftLeftMin: 840, cycleLeftMin: 3000, breakInMin: 480, at: 't' } } };
+  const c = crewFor(it, '986');
+  assert.equal(c.team, true);
+  assert.deepEqual([c.coDriver.code, c.coDriver.name, c.coDriver.hours.driveLeftMin], ['2440', 'Christian Arana', 300]);
+  assert.equal(c.hours.status, 'sleeperBed'); assert.equal(c.hours.driveLeftMin, 660);
+  const solo = crewFor({ trip: { driver: '0986' }, _samsara: {} }, '0986');
+  assert.deepEqual(solo, { team: false, coDriver: null, hours: null });
+  assert.equal(crewFor({ trip: { driver: '1' } }, '0986'), null);
+});
+
 test('first sign-in makes a PIN; after that the ID, cell and PIN; and they stay signed in', async () => {
   const h = setup();
   const first = await h.call('POST /driver/auth/login', { body: { driverId: '986', phone: '3055550100' } });
