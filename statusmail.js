@@ -31,6 +31,7 @@ import { requiredRange, brokerMayShare } from './temppolicy.js';
 import { fmtLocal } from './localtime.js';
 import { buildUpdateFor } from './updateemail.js';
 import { ltlStops } from './stopflow.js';
+import { holdForDriver } from './checkins.js';
 
 const H = 3600000;
 const PICKED = /^(depship|depshp|pickd|intran|enroute|enrt|arrcons|arrcon|depcons|depcon|delvd|deliv|cmplt|complete)/i;
@@ -38,7 +39,7 @@ const ARRIVE = /^arrcon/i;
 const LOADED = /^(loadedtogo|sptld)/i;          // TruckMate: TRAILER NOW LOADED TO GO / SPOTTED LOADED
 const DONE = /^(delvd|deliv|del$|cmplt|complete)/i;
 const DEAD = /^(canc|void)/i;
-export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, locationEvery: 2.5, routineLocation: false, routineMilestones: false, watchTimes: ['08:00', '12:00', '16:00', '20:00', '00:00', '04:00'], useBroker: true, customers: {}, trips: {} };   // location updates only when someone asks Jarvis (broker watch)   // location updates every 2.5 h — only to the rate con contact (cc its tracking email), on the load's email chain, with a live tracking link
+export const DEFAULTS = { enabled: true, prefixes: ['B', 'R'], everyHours: 3, locationEvery: 2.5, routineLocation: false, routineMilestones: false, watchLocation: false, waitForDriver: true, watchTimes: ['08:00', '12:00', '16:00', '20:00', '00:00', '04:00'], useBroker: true, customers: {}, trips: {} };   // location updates only when someone asks Jarvis (broker watch)   // location updates every 2.5 h — only to the rate con contact (cc its tracking email), on the load's email chain, with a live tracking link
 const MAX_PER_DAY = 15;
 
 const tripOf = (item) => (item && item.trip) || item || {};
@@ -530,6 +531,7 @@ export function renderEvent(ev, item, { geo = () => null, now = Date.now() } = {
     if (next) { const e = etaTo(item, here, next.zip, { geo, now }); row(`Next stop (${next.number} of ${stops.length})`, stopName(next)); row('New ETA', e ? (e.here ? 'Arriving now' : `${fmtLocal(e.atMs, next.key || next.place)} (~${e.miles} mi)`) : 'To follow shortly'); }
     row('Truck / trailer', `${truck} / ${trailer}`);
   } else return null;
+  if (ev.unconfirmed) row('Note', 'Not yet confirmed by the driver: from the truck GPS / dispatch system.');
   const subject = `${title} — ${head}`;
   const html = `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1d2433">
 <p style="margin:0 0 4px;color:#667085">${esc(head)}</p>
@@ -594,6 +596,12 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
       const trackUrl = (ev.kind === 'location' || ev.watch) && track ? await track(site, trip).catch(() => null) : null;
       const u = await buildUpdateFor({ db, docs, site, items: [item], trips: [trip], customer: cust, audience: 'customer', now: now0, extraRef: rc.loadNumber ? `Load ${rc.loadNumber}` : `Trip ${trip}`, trackUrl, ...sop });
       mail = { subject: u.subject, html: u.html, text: u.text };
+      // the driver never tapped this step in the driver app: it went out from GPS / TruckMate 30 minutes later (checkins.js)
+      if (ev.unconfirmed) {
+        const note = 'Not yet confirmed by the driver: from the truck GPS / dispatch system.';
+        const p0 = `<p style="margin:0 0 10px;padding:8px 12px;background:#fff7e0;border:1px solid #f2dfa6;border-radius:8px;color:#7a4b00;font-family:Arial,sans-serif;font-size:13px">${note}</p>`;
+        mail = { ...mail, text: `${note}\n\n${mail.text}`, html: /<body[^>]*>/i.test(mail.html) ? mail.html.replace(/(<body[^>]*>)/i, `$1${p0}`) : `${p0}${mail.html}` };
+      }
       attachIds = u.attachIds || [];
     } else mail = renderEvent(ev, item, ctx);
     if (!mail) return { status: 'skipped' };
@@ -639,7 +647,12 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
       if (!trip) continue;
       const rec = next.trips[trip] || { sent: { stops: {} }, log: [] };
       if (!rec.sent.pickedUp) rec.gps = trackPickup(item, rec.gps, { geo, now });
-      const evs = pendingEvents(item, rec.sent, { now, everyHours: Number(cfg.locationEvery) || 2.5, gps: rec.gps }).filter((ev) => !(ev.kind === 'location' && ((down[trip] && down[trip].on) || cfg.routineLocation !== true)));   // routine location emails only when turned on, never during a breakdown
+      let evs = pendingEvents(item, rec.sent, { now, everyHours: Number(cfg.locationEvery) || 2.5, gps: rec.gps }).filter((ev) => !(ev.kind === 'location' && ((down[trip] && down[trip].on) || cfg.routineLocation !== true)));   // routine location emails only when turned on, never during a breakdown
+      // arrived at the shipper / picked up / arrived / delivered wait for the driver's tap in the driver app (checkins.js);
+      // if they never tap, it goes 30 minutes after TruckMate / GPS showed it, marked "not confirmed by the driver"
+      rec.wait = rec.wait || {};
+      const stopKeys = stopsNow(item).map((x) => x.key);
+      evs = evs.filter((ev) => { if (!MILESTONES.has(ev.kind) || adopting || cfg.waitForDriver === false) return true; const h = holdForDriver(ev, { ms: item._milestones || {}, stopKeys, wait: rec.wait, now }); if (h.unconfirmed) ev.unconfirmed = true; return h.send; });
       const late = down[trip] && down[trip].on ? null : lateNotice(etas[trip], rec.sent.late, { now });
       // a load someone asked Jarvis to keep the broker updated on: current location now, then at the set times
       const watch = watches[trip];
@@ -649,7 +662,7 @@ export function initStatusMail(app, { requireAuth, db, isTraining = async () => 
         const hhmm = new Date(now).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' });
         const done = rec.sent.watchSlots || {};
         const slot = !watch.firstAt ? 'first' : dueWatchSlot(cfg.watchTimes || DEFAULTS.watchTimes, hhmm, (t) => !!done[`${day} ${t}`] || Date.parse(watch.firstAt) > now - 60 * 60000);
-        if (slot && !(down[trip] && down[trip].on)) {
+        if (slot && !(down[trip] && down[trip].on) && (slot === 'first' || cfg.watchLocation === true)) {
           const covered = slot === 'first' ? {} : Object.fromEntries((cfg.watchTimes || DEFAULTS.watchTimes).filter((t) => t <= slot).map((t) => [`${day} ${t}`, new Date(now).toISOString()]));
           rec.sent.watchSlots = Object.fromEntries(Object.entries({ ...done, ...covered }).slice(-40));
           if (slot === 'first') watches[trip] = { ...watch, firstAt: new Date(now).toISOString() };

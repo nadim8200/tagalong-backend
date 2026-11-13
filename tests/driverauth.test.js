@@ -293,3 +293,20 @@ test('the driver list and the console\'s Driver app view are shared, not rebuilt
   t += 70000; await call('GET /truckmate/driver-app');
   assert.equal(boardReads, 2); assert.equal(rosterReads, 2, 'a minute later: fresh');
 });
+
+test('driver check-ins: the stops to tap come with the load; a tap is saved once with the time; a step not on the load is refused', async () => {
+  const h = setup();
+  const token = await h.login();
+  const me = await h.call('GET /driver/me', { token });
+  const l = me.body.current.find((x) => x.trip === '626265');
+  assert.deepEqual(l.checkin.stops.map((s) => [s.number, s.place]), [[1, 'EAST POINT, GA']]);
+  assert.deepEqual(l.checkin.steps, {});
+  const key = l.checkin.stops[0].key;
+  const r = await h.call('POST /driver/me/loads/:trip/checkin', { token, params: { trip: '626265' }, body: { step: 'at-shipper' } });
+  assert.equal(r.status, 200); assert.ok(r.body.steps['at-shipper'].at); assert.equal(r.body.steps['at-shipper'].by, 'Frank U');
+  assert.equal((await h.call('POST /driver/me/loads/:trip/checkin', { token, params: { trip: '626265' }, body: { step: `arrived:${key}` } })).status, 200);
+  assert.equal((await h.call('POST /driver/me/loads/:trip/checkin', { token, params: { trip: '626265' }, body: { step: 'arrived:SOMEWHERE ELSE' } })).status, 400);
+  assert.equal((await h.call('POST /driver/me/loads/:trip/checkin', { token, params: { trip: '626301' }, body: { step: 'loaded' } })).status, 404, 'not their load');
+  const again = await h.call('GET /driver/me', { token });
+  assert.deepEqual(Object.keys(again.body.current.find((x) => x.trip === '626265').checkin.steps).sort(), ['arrived:' + key, 'at-shipper'].sort());
+});

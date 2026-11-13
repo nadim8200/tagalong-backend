@@ -13,6 +13,7 @@
 import { sendMail, mailConfig } from './mailer.js';
 import { recipientFor } from './comms.js';
 import { renderOutboundFollowUp } from './followupmail.js';
+import { CHECKINS, HOLD_MS } from './checkins.js';
 
 const MIN = 60000;
 export const TZ_BY_STATE = { CA: 'America/Los_Angeles', WA: 'America/Los_Angeles', OR: 'America/Los_Angeles', NV: 'America/Los_Angeles', AZ: 'America/Phoenix', TX: 'America/Chicago', IL: 'America/Chicago', TN: 'America/Chicago', AL: 'America/Chicago', MS: 'America/Chicago', LA: 'America/Chicago', MO: 'America/Chicago', MN: 'America/Chicago', WI: 'America/Chicago', IA: 'America/Chicago', AR: 'America/Chicago', OK: 'America/Chicago', KS: 'America/Chicago', NE: 'America/Chicago', CO: 'America/Denver', UT: 'America/Denver', NM: 'America/Denver' };
@@ -275,6 +276,7 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     if (!enabled || !cfg.on) return [];
     const items = ((await getBoard(site)) || {}).trips || [];
     const book = await db.get(key, {});
+    const taps = (await db.get(CHECKINS(site), {})) || {};   // driver-app check-ins (checkins.js)
     const done = [];
     const chains = new Map();   // email id ('' = no chain) → departed / late events for that chain
     const add = (id, ev) => { const k = id || ''; if (!chains.has(k)) chains.set(k, []); chains.get(k).push(ev); };
@@ -327,9 +329,13 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
         done.push({ trip, tmFix: true });
       }
       const fresh = now() - plan.ms < 6 * 60 * MIN;                     // nothing about pickups long gone
-      if (dep && !th.departed) {
+      // the departure reply waits for the driver's "Loaded & leaving" tap in the driver app; without it, 30 min after TruckMate / GPS
+      const tapped = ((((taps[trip] || {}).steps) || {}).loaded) || null;
+      const left = dep || (st.departedAt ? { source: st.departedBy || 'GPS' } : null);   // sticky: slowing in traffic later doesn't undo it
+      if (left && !th.departed && !tapped && !th.depSeen) th.depSeen = new Date(now()).toISOString();
+      if (left && !th.departed && (tapped || now() - Date.parse(th.depSeen) >= HOLD_MS)) {
         th.departed = new Date(now()).toISOString();
-        if ((th.waiting || it._pickupAsk) && now() - plan.ms < 12 * 60 * MIN) add(chainId, { trip, kind: 'departed', plan, source: dep.source, item: it });
+        if ((th.waiting || it._pickupAsk) && now() - plan.ms < 12 * 60 * MIN) add(chainId, { trip, kind: 'departed', plan, source: tapped ? `the driver tapped Loaded & leaving in the driver app (${fmt(Date.parse(tapped.at), plan.tz)})` : `${left.source} — not confirmed by the driver`, item: it });
       } else if (!dep && !th.departed && !st.departedAt) {
         th.waiting = true;
         if (!th.late && fresh && now() > plan.ms + 30 * MIN) {

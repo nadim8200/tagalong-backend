@@ -66,7 +66,7 @@ test('first run adopts silently; later events email the customer list and log on
     sent.push(readSent(opts)); return { ok: true, status: 202, json: async () => ({}) };
   };
   const db = memDb();
-  await db.set('taStatusMailCfg', { routineMilestones: true, customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
+  await db.set('taStatusMailCfg', { routineMilestones: true, waitForDriver: false, customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
   const logged = [];
   const sm = initStatusMail({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, env, fetchFn, comms: { log: async (s, t, e) => logged.push(e) } });
   await sm.process('fb', { trips: [load()] }, { geo, now: NOW });
@@ -93,7 +93,7 @@ test('broker updates only when asked: current location now, then at 8/12/4 AM-PM
   const sent = [];
   const fetchFn = async (url, opts) => { if (url.includes('oauth2')) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) }; sent.push(readSent(opts)); return { ok: true, status: 202, json: async () => ({}) }; };
   const db = memDb();
-  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
+  await db.set('taStatusMailCfg', { watchLocation: true, waitForDriver: false, customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
   const chains = [];
   const sm = initStatusMail({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, env, fetchFn, track: async (site, trip) => `https://mytagalong.app/s/tok${trip}`, chainReply: async (site, trip, m) => { chains.push({ trip, ...m }); return { sent: true, chain: 'msg1' }; } });
   const rc = { _ratecon: { data: { brokerEmail: 'ana@rosebrokers.com', contacts: [{ role: 'tracking', email: 'tracking@rosebrokers.com' }] } } };
@@ -273,7 +273,7 @@ test('by default milestones are not emailed unless someone asked for updates on 
   const sent = [];
   const fetchFn = async (url, opts) => { if (url.includes('oauth2')) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) }; sent.push(readSent(opts)); return { ok: true, status: 202, json: async () => ({}) }; };
   const db = memDb();
-  await db.set('taStatusMailCfg', { customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
+  await db.set('taStatusMailCfg', { waitForDriver: false, customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
   const sm = initStatusMail({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, env, fetchFn, comms: { log: async () => {} } });
   await sm.process('fb', { trips: [load()] }, { geo, now: NOW });
   await sm.process('fb', { trips: [load({ trip: { status: 'DEPSHIP' } })] }, { geo, now: NOW + 60000 });
@@ -414,4 +414,43 @@ test('a breakdown was reported on the load: Notify customers sends that email (c
   assert.match(mails.at(-1).message.body.content, /FULL Road service is on the way\./);
   assert.equal(mails.at(-1).message.subject, 'BROKER BREAKDOWN TRUCK 2403 // TK 2403 TL 5310 TRIP 900200');
   assert.equal(mails.at(-1).message.attachments.length, 1);
+});
+
+test('arrival / departure emails wait for the driver\'s tap in the driver app; without it they go 30 min later, marked not confirmed', async () => {
+  const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
+  const sent = [];
+  const fetchFn = async (url, opts) => { if (url.includes('oauth2')) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) }; sent.push(readSent(opts)); return { ok: true, status: 202, json: async () => ({}) }; };
+  const db = memDb();
+  await db.set('taStatusMailCfg', { routineMilestones: true, customers: { 'FIXTURE FLORAL CO': ['ops@fixture.com'] } });
+  const sm = initStatusMail({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db, env, fetchFn, comms: { log: async () => {} } });
+  await sm.process('fb', { trips: [load()] }, { geo, now: NOW });                     // adopted
+  const picked = load({ trip: { status: 'DEPSHIP' } });
+  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 60000 });
+  assert.equal(sent.length, 0, 'TruckMate says departed: wait for the driver');
+  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 20 * 60000 });
+  assert.equal(sent.length, 0);
+  await sm.process('fb', { trips: [picked] }, { geo, now: NOW + 32 * 60000 });
+  assert.equal(sent.length, 1, 'no tap in 30 min: it goes anyway');
+  const text = (m) => Buffer.from((m.mime.match(/text\/plain[\s\S]*?base64\r\n\r\n([\s\S]*?)\r\n--/) || [])[1].replace(/\r\n/g, ''), 'base64').toString();
+  assert.match(text(sent[0]), /Not yet confirmed by the driver/);
+  // another load: the driver tapped "Loaded & leaving" → right away, no note
+  const tapped = load({ trip: { tripNumber: '900202', status: 'DEPSHIP' }, extra: { _milestones: { departed: { at: 'x', src: 'driver' }, loaded: { at: 'x', src: 'TruckMate + driver' } } } });
+  await sm.process('fb', { trips: [picked, tapped] }, { geo, now: NOW + 33 * 60000 });
+  await sm.process('fb', { trips: [picked, tapped] }, { geo, now: NOW + 34 * 60000 });
+  assert.equal(sent.length, 2);
+  assert.doesNotMatch(text(sent[1]), /Not yet confirmed/);
+});
+
+test('scheduled location replies on a followed load are off by default (only the first "where is it now")', async () => {
+  const { DEFAULTS } = await import('../statusmail.js');
+  assert.equal(DEFAULTS.watchLocation, false);
+  assert.equal(DEFAULTS.waitForDriver, true);
+  const { holdForDriver, validStep, milestoneKeys } = await import('../checkins.js');
+  assert.equal(validStep('arrived:VALDOSTA, GA', ['VALDOSTA, GA']), true);
+  assert.equal(validStep('arrived:ATLANTA', ['VALDOSTA, GA']), false);
+  assert.deepEqual(milestoneKeys('loaded'), ['loaded', 'departed']);
+  const wait = {};
+  assert.deepEqual(holdForDriver({ kind: 'arrived', stop: 'A' }, { wait, now: 0 }), { send: false, unconfirmed: false });
+  assert.deepEqual(holdForDriver({ kind: 'arrived', stop: 'A' }, { wait, now: 31 * 60000 }), { send: true, unconfirmed: true });
+  assert.deepEqual(holdForDriver({ kind: 'delivered' }, { ms: { 'delivered:A': { src: 'driver' } }, stopKeys: ['A'], wait: {}, now: 0 }), { send: true, unconfirmed: false });
 });

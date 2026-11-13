@@ -21,7 +21,7 @@ test('an LTL load leaves with the trip sheet deliveries; broker loads and loads 
   assert.equal(boxCheck(8, null), null);
 });
 
-test('stop by stop: boxes against the trip sheet (mismatch email), signed paperwork to customer service, an issue with photos, then the trip completed with everything', async () => {
+test('stop by stop: boxes against the trip sheet (mismatch email), signed paperwork kept for the end, an issue with photos, then the trip completed with everything', async () => {
   const db = mem(); const mails = []; const stored = []; const logged = [];
   const docs = { enabled: true, storeDocs: async ({ files }) => files.map((f) => { stored.push(f); return { id: String(stored.length) }; }), readDocs: async ({ ids }) => ids.map((id) => ({ id, mediaType: stored[Number(id) - 1].mediaType, data: Buffer.from('x') })) };
   const flow = initStopFlow({ db, docs, getBoard: async () => ({ trips: [LTL] }), sendMail: async (m) => { mails.push(m); }, recipients: async (k) => [`${k}@test`], log: async (s, t, e) => { logged.push(e); }, now: () => Date.parse('2026-11-03T20:00:00Z') });
@@ -29,9 +29,7 @@ test('stop by stop: boxes against the trip sheet (mismatch email), signed paperw
   assert.equal((await flow.stopDone('900500', 's2', { boxes: 'x', by: 'Frank U' })).code, 400);
   // stop 2: right count, a photo of the signed paper (not a scan)
   assert.deepEqual((await flow.stopDone('900500', 's2', { boxes: 10, files: [{ dataBase64: 'eA==', mediaType: 'image/jpeg' }], scan: false, by: 'Frank U' })).check.diff, 0);
-  assert.deepEqual(mails.map((m) => m.to[0]), ['stop_pod@test'], 'matches: no mismatch email, the paperwork goes to customer service');
-  assert.match(mails[0].subject, /^SIGNED PAPERWORK \/\/ SAMPLE FLORIST \/\/ TK 4550 TL 7328 TRIP 900500 \/\/ STOP 2$/);
-  assert.equal(mails[0].attachments.length, 1);
+  assert.deepEqual(mails.map((m) => m.to[0]), [], 'matches: no email per stop — the signed paperwork waits for the trip\'s final email');
   // stop 3: two short, no paperwork
   await flow.stopDone('900500', 's3', { boxes: 22, by: 'Frank U' });
   assert.equal(mails.at(-1).to[0], 'stop_box_mismatch@test');

@@ -7,6 +7,8 @@
 // one, or clear it so the driver makes a new one. A new PIN signs the driver out everywhere. It's kept encrypted, so an admin can read it out.
 // ---------------------------------------------------------------
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from 'node:crypto';
+import { stopsOf } from './statusmail.js';
+import { CHECKINS, validStep } from './checkins.js';
 
 const SITE = 'florida-beauty';
 const PINS = `taDriverPins:${SITE}`;        // driver ID → { enc, setAt, by }
@@ -176,6 +178,14 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       if (unreadFor) for (const l of [...loads.current, ...loads.next]) l.unread = await unreadFor(SITE, l.trip).catch(() => 0); // eslint-disable-line no-await-in-loop
       // an LTL load: the trip sheet's stops, each marked done with boxes and signed paperwork (stopflow.js)
       if (stopFlow) { const items = await board(); for (const l of [...loads.current, ...loads.next]) l.ltl = await stopFlow.forDriver(items.find((it) => tripNo(it) === l.trip)); } // eslint-disable-line no-await-in-loop
+      // check-ins (not on LTL runs, whose stops are marked done instead): the stops to tap and what was tapped already
+      const book = (await db.get(CHECKINS(SITE), {})) || {};
+      const items2 = await board();
+      for (const l of [...loads.current, ...loads.next]) {
+        if (l.ltl) continue;
+        const it = items2.find((x) => tripNo(x) === l.trip);
+        l.checkin = { stops: stopsOf(it).map((x) => ({ key: x.key, number: x.number, name: x.name || (x.customers || [])[0] || null, place: x.place, delivered: !!x.delivered })), steps: (book[l.trip] || {}).steps || {} };
+      }
       for (const l of [...loads.current, ...loads.next]) if (l.crew && l.crew.coDriver && !l.crew.coDriver.name) { const c = await byCode(l.crew.coDriver.code).catch(() => null); if (c) l.crew.coDriver.name = c.name || null; } // eslint-disable-line no-await-in-loop
       if (trips.length) await db.update(tripsKey(req.driver.code), (cur) => [...new Set([...trips, ...(Array.isArray(cur) ? cur : [])])].slice(0, 300), []);
       // the last time the driver was in the app (dispatch sees it on the load), written at most every 5 minutes
@@ -234,6 +244,18 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
   app.post('/driver/me/loads/:trip/complete', requireDriver, async (req, res) => {
     const trip = await mine(req, res); if (!trip) return null;
     try { return answer(res, await stopFlow.complete(trip, { by: req.driver.name })); } catch (e) { return res.status(400).json({ error: e.message || 'Could not complete.' }); }
+  });
+  // "I'm at the shipper" / "Loaded & leaving" / "I'm at the receiver" / "Delivered": the progress emails wait for these (checkins.js)
+  app.post('/driver/me/loads/:trip/checkin', requireDriver, async (req, res) => {
+    const trip = String(req.params.trip);
+    const loads = loadsFor(req.driver.code, await board());
+    if (![...loads.current, ...loads.next].some((l) => l.trip === trip)) return res.status(404).json({ error: 'That load is not yours.' });
+    const step = String((req.body || {}).step || '').slice(0, 160);
+    const it = (await board()).find((x) => tripNo(x) === trip);
+    if (!validStep(step, stopsOf(it).map((x) => x.key))) return res.status(400).json({ error: 'That step is not on this load.' });
+    const at = new Date(now()).toISOString();
+    const next = await db.update(CHECKINS(SITE), (cur) => { const c = { ...(cur || {}) }; const r = c[trip] || { steps: {} }; c[trip] = { ...r, steps: { ...r.steps, [step]: (r.steps || {})[step] || { at, by: req.driver.name } } }; return c; }, {});
+    return res.json({ ok: true, steps: ((next || {})[trip] || {}).steps || {} });
   });
   // the driver opened a load on their phone (the Current load or Next load tab): dispatch sees "Opened"
   app.post('/driver/me/loads/:trip/opened', requireDriver, async (req, res) => {

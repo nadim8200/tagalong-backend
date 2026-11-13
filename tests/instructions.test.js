@@ -93,9 +93,12 @@ test('follow-up loop: 30 min late → one reply in the chain; then departed → 
   assert.equal(sent.length, 1, 'only one late note');
   item.trip.status = 'DEPSHIP';
   clock = plan + 50 * 60000; await f.run();
-  assert.equal(sent.length, 2);
+  assert.equal(sent.length, 1, 'the departure waits for the driver\'s tap in the driver app');
+  clock = plan + 81 * 60000; await f.run();
+  assert.equal(sent.length, 2, 'no tap in 30 min: it goes anyway');
   assert.match(sent[1].text, /Trip 624626 — DEPARTED/);
-  clock = plan + 60 * 60000; await f.run();
+  assert.match(sent[1].text, /not confirmed by the driver/);
+  clock = plan + 90 * 60000; await f.run();
   assert.equal(sent.length, 2, 'departure told once');
 });
 
@@ -127,9 +130,10 @@ test('once departed (GPS 47 mph), slowing to 6 mph in traffic later never sends 
   await f.run();                                                     // waiting at the cooler
   item._samsara = { speedMph: 47, location: 'State Road 7, Palm Beach County, FL' };
   clock = plan - 2 * 60000; await f.run();
-  assert.equal(sent.length, 1); assert.match(sent[0], /DEPARTED/);
+  assert.equal(sent.length, 0, 'waits for the driver\'s tap');
   item._samsara = { speedMph: 6, location: 'I 95, Oakland Park, FL' };   // traffic
   clock = plan + 31 * 60000; await f.run();
+  assert.equal(sent.length, 1); assert.match(sent[0], /DEPARTED/);
   clock = plan + 90 * 60000; await f.run();
   assert.equal(sent.length, 1, 'no "not departed" after it departed');
 });
@@ -212,4 +216,19 @@ test('auto-acknowledgements ("Confirmation reply for…", "Automatic reply:") ar
   assert.equal(autoNotice('emily.cosgrove@chrobinson.com', 'Automatic reply: Location update — Load 569921506'), 'auto_reply');
   assert.equal(autoNotice('ops@broker.com', 'RE: Thank you for contacting us'), 'auto_reply');
   assert.equal(autoNotice('ops@broker.com', 'Re: Load 8192162 — pickup moved'), null);
+});
+
+test('the driver taps "Loaded & leaving" in the driver app → the departure reply goes right away, as confirmed by the driver', async () => {
+  const db = memDb();
+  const plan = Date.parse('2026-10-09T03:30:00Z');
+  const item = { trip: { tripNumber: '624627', status: 'LOADEDTOGO', powerUnit: '2220' }, _samsara: { speedMph: 0 }, _sheetEmail: { id: 'rosa2' }, _manifest: { pickupAt: '2026-10-08T23:30' } };
+  const sent = [];
+  let clock = plan - 20 * 60000;
+  const f = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, getBoard: async () => ({ trips: [item] }), replyInThread: async (site, id, b) => { sent.push(b.text); return { sent: true }; }, env: { NODE_ENV: 'test' }, now: () => clock });
+  await f.run();
+  await db.set('taDriverCheckins:florida-beauty', { 624627: { steps: { loaded: { at: new Date(plan - 5 * 60000).toISOString(), by: 'Frank U' } } } });
+  item._samsara = { speedMph: 47, location: 'State Road 7' };
+  clock = plan - 2 * 60000; await f.run();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /DEPARTED/); assert.match(sent[0], /tapped Loaded & leaving/);
 });

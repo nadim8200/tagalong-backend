@@ -1,5 +1,7 @@
 // ---------------------------------------------------------------
-// Waiting time at a shipper or receiver, on broker loads only: LTL stops from the hubs don't get it. TruckMate marks the truck there, or a person answers the stop email
+// Waiting time at a shipper or receiver, on broker loads only: LTL stops from the hubs don't get it. The driver's check-in in the driver app comes
+// first: "I'm at the shipper" / "I'm at the receiver" starts it and "Loaded & leaving" / "Delivered" ends it (checkins.js). Without a check-in,
+// TruckMate marks the truck there, or a person answers the stop email
 // that it's at the shipper or receiver, or the GPS parks it at the rate con's pickup. The clock starts 3 hours after the appointment, or 3 hours
 // after arrival if the truck got there later, so a truck that came early doesn't count its early hours. While it's there no stop emails go out. When the clock is due, dispatch
 // gets an email and approves it or not. When the truck leaves, approved or unanswered clocks get a total. Internal only: nothing here
@@ -9,6 +11,7 @@ import { makeToken, readToken, page, loadRows } from './breakdownreport.js';
 import { brokerLoad, yardMiles } from './watchtower.js';
 import { stopsLeft } from './loadstops.js';
 import { plannedPickup } from './pickupfollow.js';
+import { CHECKINS } from './checkins.js';
 
 const KEY = (site) => `taWaiting:${site}`;
 const SITE = 'florida-beauty';
@@ -87,6 +90,16 @@ export function stepOf(r, { here, now, gps = 'parked' }) {
   return r.askedAt && r.status !== 'declined' ? 'total' : 'close';
 }
 
+// The driver's check-ins on a load → waiting-time records: in at the tap, out at the matching tap (or null while still there). Pure.
+// steps = { 'at-shipper': { at }, loaded: { at }, 'arrived:<stop>': { at }, 'delivered:<stop>': { at } }
+export function checkinStays(trip, steps = {}) {
+  const out = [];
+  const add = (inStep, outStep, kind, stop) => { const a = steps[inStep]; if (!a || !a.at) return; const b = steps[outStep]; out.push({ key: `${trip}:c:${inStep}`, kind, stop, arrivedMs: Date.parse(a.at), outMs: b && b.at ? Date.parse(b.at) : null }); };
+  add('at-shipper', 'loaded', 'shipper', null);
+  for (const k of Object.keys(steps)) if (/^arrived:/.test(k)) { const stop = k.slice(8); add(k, `delivered:${stop}`, 'receiver', stop); }
+  return out;
+}
+
 export function initWaitingTime(app, { db, secret, send, recipients, getBoard = async () => ({ trips: [] }), etas = async () => ({}), baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const all = async () => (await db.get(KEY(SITE), {})) || {};
@@ -109,6 +122,17 @@ export function initWaitingTime(app, { db, secret, send, recipients, getBoard = 
     const record = (it, key, kind, arrivedMs, extra = {}) => { const t = it.trip || {}; const apptMs = apptOf(it, kind); return { key, trip: tripNo(it), unit: t.powerUnit || null, trailer: t.trailer || null, kind, stop: stopOf(it, kind), arrivedMs, apptMs, startMs: clockStart(arrivedMs, apptMs), status: 'open', ...extra, ...(firstRun ? { closedAt: now(), adopted: true } : {}) }; };   // already there on day one: no email for what we didn't watch
     const counting = new Set(Object.values(stored).filter((r) => !r.closedAt).map((r) => r.trip));
     const open = (r) => { if (!counting.has(r.trip)) { fresh[r.key] = r; counting.add(r.trip); } };
+    // 1) the driver checked in at the shipper / receiver in the driver app: that's when the stay starts (it wins over everything below)
+    const taps = (await db.get(CHECKINS(SITE), {})) || {};
+    for (const it of items) {
+      if (!brokerLoad(it) || atOurYard(it, now())) continue;
+      for (const c of checkinStays(tripNo(it), ((taps[tripNo(it)] || {}).steps) || {})) {
+        if (stored[c.key] || c.outMs || Number.isNaN(c.arrivedMs) || now() - c.arrivedMs > STALE_MS) continue;
+        // a clock TruckMate / GPS opened for this load gives way to the driver's own check-in (closed quietly, no total)
+        for (const r of Object.values(stored)) if (r.trip === tripNo(it) && !r.closedAt && !r.checkin && !r.askedAt) { await patch(r.key, { closedAt: now(), closedWhy: 'replaced by the driver\'s check-in' }); r.closedAt = now(); counting.delete(r.trip); } // eslint-disable-line no-await-in-loop
+        open(record(it, c.key, c.kind, c.arrivedMs, { anchored: true, checkin: true, stopKey: c.stop, source: 'driver checked in (driver app)', ...(c.stop ? { stop: c.stop } : {}) }));
+      }
+    }
     for (const it of items) {
       const at = brokerLoad(it) ? atStop(it) : null;
       if (!at || Number.isNaN(at.arrivedMs) || now() - at.arrivedMs > STALE_MS || atOurYard(it, now())) continue;
@@ -148,15 +172,17 @@ export function initWaitingTime(app, { db, secret, send, recipients, getBoard = 
       // back at our own yard: it isn't waiting at the customer. A clock nobody approved just closes (no total email)
       const home = !!it && atOurYard(it, now());
       if (home && r.status !== 'approved') { await patch(r.key, { closedAt: now(), closedWhy: 'truck at our yard' }); continue; } // eslint-disable-line no-await-in-loop
-      const here = (r.anchored ? !!it : !!(a && a.arrivedMs === r.arrivedMs)) && !gone && !home;
+      // a check-in stay: there until the driver taps out (Loaded & leaving / Delivered); the GPS only ends it if they never do
+      const tapOut = r.checkin ? (((taps[r.trip] || {}).steps || {})[r.kind === 'shipper' ? 'loaded' : `delivered:${r.stopKey}`] || null) : null;
+      const here = r.checkin ? !!it && !tapOut && !gone && !home : (r.anchored ? !!it : !!(a && a.arrivedMs === r.arrivedMs)) && !gone && !home;
       // the appointment may not have been on file when the truck got there
       if (here && !r.askedAt && !r.apptMs && leg && leg.apptMs) { const startMs = clockStart(r.arrivedMs, leg.apptMs); await patch(r.key, { apptMs: leg.apptMs, startMs, stop: r.stop || leg.label }); Object.assign(r, { apptMs: leg.apptMs, startMs, stop: r.stop || leg.label }); } // eslint-disable-line no-await-in-loop
-      const step = stepOf(r, { here, now: now(), gps });
+      const step = stepOf(r, { here, now: now(), gps: r.checkin ? 'parked' : gps });   // the driver said they're there
       if (!step) continue;
       if (step === 'close') { await patch(r.key, { closedAt: now() }); continue; } // eslint-disable-line no-await-in-loop
       try {
         if (step === 'ask') { await patch(r.key, { askedAt: now() }); await send('start', { ...r, askedAt: now() }, it, link(r), await recipients()); continue; } // eslint-disable-line no-await-in-loop
-        const left = (!r.anchored && !r.quick && it && leftAt(it, r.arrivedMs)) || movingAt || now();
+        const left = (tapOut && Date.parse(tapOut.at)) || (!r.anchored && !r.quick && it && leftAt(it, r.arrivedMs)) || movingAt || now();
         const done = { ...r, leftMs: left, waitedMs: Math.max(0, left - r.startMs), closedAt: now() };
         await patch(r.key, done); await send('total', done, it, null, await recipients()); // eslint-disable-line no-await-in-loop
       } catch (e) { console.warn('[waiting-time]', r.key, e.message); }

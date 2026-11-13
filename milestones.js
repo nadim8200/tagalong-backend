@@ -27,6 +27,7 @@ import { haversineMi } from './watchtower.js';
 import { sendMail, mailConfig } from './mailer.js';
 import { geocodePlace } from './meetwatch.js';
 import { fencesFor, isLtlRun, stepFences, nextAsk, fenceText, askKey } from './loadfences.js';
+import { CHECKINS, milestoneKeys } from './checkins.js';
 
 const MIN = 60000;
 const tripOf = (it) => (it && it.trip) || it || {};
@@ -146,7 +147,7 @@ export function applyReply(reply, { lastAsk = null, ms = {}, stops = [] } = {}) 
   return { kind: r.kind, set };
 }
 
-export function initMilestones(app, { requireAuth, db, ringcentral = null, comms = null, driverLinks = null, push = null, pushRules = null, geocode = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initMilestones(app, { requireAuth, db, ringcentral = null, comms = null, driverLinks = null, push = null, pushRules = null, notifyDriver = null, geocode = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const key = (site) => `taMilestones:${site}`;
   const cfgKey = 'taMilestonesCfg';
@@ -173,8 +174,18 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
   }
   const smsLive = async () => { try { const c = ringcentral && ringcentral.configFor ? await ringcentral.configFor('__shared') : null; return !!(c && c.fromNumber); } catch { return false; } };
 
-  async function ask(site, item, text) {
+  async function ask(site, item, text, { fence = null, event = null } = {}) {
     const trip = tripNo(item);
+    // a company driver with the TagAlong driver app: a notification to tap the step in the app (no text)
+    const codes = [tripOf(item).driver, tripOf(item).driver2].filter(Boolean);
+    if (!item._oc && notifyDriver && codes.length && fence) {
+      const where = [fence.name, fence.city ? `in ${fence.city}` : ''].filter(Boolean).join(' ') || (fence.kind === 'pickup' ? 'the shipper' : 'the receiver');
+      const tap = event === 'arrive' ? (fence.kind === 'pickup' ? "I'm at the shipper" : "I'm at the receiver") : (fence.kind === 'pickup' ? 'Loaded & leaving' : 'Delivered');
+      const msg = { title: event === 'arrive' ? `At ${where}?` : `Left ${where}?`, body: `Load ${trip}: tap "${tap}" in TagAlong so dispatch and the customer know.`, data: { tab: 'now', trip } };
+      const rs = [];
+      for (const c of codes) rs.push(await notifyDriver(c, msg).catch(() => null)); // eslint-disable-line no-await-in-loop
+      if (rs.some((r) => r && (r.sent || r.held))) { if (comms && comms.log) await comms.log(site, trip, { type: 'note', kind: 'driver-checkin', text: `App notification to the driver: ${msg.title} ${msg.body}`, by: 'Jarvis (driver check-in)' }); return { via: 'app' }; }
+    }
     if (item._oc && driverLinks && driverLinks.messageDriver) {
       const r = await driverLinks.messageDriver(site, trip, text, 'Jarvis (driver check-in)').catch(() => null);
       if (r && r.sent) return { via: r.via };
@@ -203,6 +214,7 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
     if (cfg.on === false) return;
     const book = (await db.get(key(site), {})) || {};
     const replies = (await db.get(`taTripComms:${site}`, {})) || {};
+    const taps = (await db.get(CHECKINS(site), {})) || {};
     const t0 = now();
     const nowIso = new Date(t0).toISOString();
     const items = (board.trips || []).filter((it) => tripNo(it) && !/^(canc|void)/i.test(S(tripOf(it).status)));
@@ -216,6 +228,10 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
       st.near = o.near;
       // 1) TruckMate / GPS
       for (const [k, src] of Object.entries(o.ms)) if (!st.ms[k]) st.ms[k] = { at: nowIso, src, seenFirst: firstSight || undefined };
+      // 1b) what the driver tapped in the driver app (checkins.js)
+      for (const [step, c] of Object.entries(((taps[trip] || {}).steps) || {})) {
+        for (const k of milestoneKeys(step)) if (!(st.ms[k] && st.ms[k].driverAt)) st.ms[k] = { ...(st.ms[k] || { at: c.at, src: 'driver' }), driverAt: c.at, driverSaid: `tapped in the driver app (${step})` };
+      }
       // 2) what the driver said since we last read
       const said = (replies[trip] || []).filter((e) => e.type === 'reply' && e.text && (!st.lastReadAt || S(e.at) > st.lastReadAt)).sort((a, b) => S(a.at).localeCompare(S(b.at)));
       for (const r of said) {
@@ -262,7 +278,7 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
             if (pick.fence) {
               const name = (item._oc && item._oc.driverName) || (live.driver1Info && live.driver1Info.name) || '';
               let r;
-              try { r = await ask(site, item, fenceText(pick.fence, pick.event, { name, trip })); } catch (e) { r = { error: e.message }; } // eslint-disable-line no-await-in-loop
+              try { r = await ask(site, item, fenceText(pick.fence, pick.event, { name, trip }), { fence: pick.fence, event: pick.event }); } catch (e) { r = { error: e.message }; } // eslint-disable-line no-await-in-loop
               st.fences[pick.fence.key][pick.event] = { at: nowIso, ...r };
               st.asks[askKey(pick.fence, pick.event)] = { at: nowIso, ...r };
               if (r && r.via) st.lastFenceAskAt = nowIso;

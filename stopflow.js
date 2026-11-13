@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------
 // Stop by stop on an LTL outbound load (flowers, from the trip sheet). The driver leaves with the trip sheet's stops and, at each one:
 //   - marks it done with the boxes they delivered: a count that isn't the trip sheet's sends a box-mismatch email;
-//   - scans the paperwork the customer signed: it goes to customer service (cc Saray);
+//   - scans the paperwork the customer signed: kept on the stop, it goes out in the final email (no email per stop);
 //   - can report an issue, with photos, on any stop: customer service and dispatch get it.
 // At the last stop the driver completes the load: one email with every stop (time, boxes, issues) and all the signed paperwork.
 // Broker loads keep their own screen for now. Every email has its own alert key, so who gets it is set in Alert emails.
@@ -106,10 +106,7 @@ export function initStopFlow({ db, docs = null, getBoard, sendMail = null, recip
       const what = check.missing ? `${check.missing} box${check.missing === 1 ? '' : 'es'} missing` : `${check.extra} box${check.extra === 1 ? '' : 'es'} more than the trip sheet`;
       await email('stop_box_mismatch', { subject: `BOX COUNT MISMATCH // ${String(s.customer || 'STOP').toUpperCase()} // DELIVERED ${b} OF ${s.boxes} // ${ids(item, trip)}`, ...mail(`Box count mismatch: ${what}`, `The driver delivered ${b} at ${place(s)}; the trip sheet has ${s.boxes}.`, rows) });
     }
-    if (docIds.length) {
-      const a = await attach(docIds);
-      await email('stop_pod', { subject: `SIGNED PAPERWORK // ${String(s.customer || 'STOP').toUpperCase()} // ${ids(item, trip)} // STOP ${num(s)}`, ...mail('Signed paperwork from the driver', `Stop ${num(s)}: ${place(s)}.`, rows, a.left ? `<p>${a.left} more file${a.left === 1 ? '' : 's'} on the load in the console.</p>` : ''), attachments: a.attachments });
-    }
+    // the signed paperwork is kept on the stop and goes out with the trip's final email (Complete load), not one email per stop
     return { ok: true, check };
   }
 

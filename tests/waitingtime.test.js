@@ -280,3 +280,25 @@ test('trip 626361: a one-minute arrive/depart while rolling opens no clock; park
   assert.equal(r.closedWhy, 'truck at our yard');
   assert.equal(later.sent.length, 0, 'no email');
 });
+
+test('the driver\'s check-in starts the stay: 3 hours later dispatch gets the email, and it counts until the driver taps out', async () => {
+  const { checkinStays } = await import('../waitingtime.js');
+  assert.deepEqual(checkinStays('1', { 'at-shipper': { at: iso(T0) }, loaded: { at: iso(T0 + H) }, 'arrived:CARSON, CA': { at: iso(T0 + 5 * H) } }).map((c) => [c.kind, c.stop, c.arrivedMs, c.outMs]),
+    [['shipper', null, T0, T0 + H], ['receiver', 'CARSON, CA', T0 + 5 * H, null]]);
+  const s = run();
+  await s.w.process({ trips: [] });
+  const truck = () => load([{ status: 'DISP', at: iso(T0 - H) }], 0, iso(s.now()));   // TruckMate says nothing about being there
+  await s.db.set('taDriverCheckins:florida-beauty', { 626218: { steps: { 'at-shipper': { at: iso(T0), by: 'Frank U' } } } });
+  s.at(T0 + 10 * 60000); await s.w.process({ trips: [truck()] });
+  assert.equal(s.sent.length, 0, 'free time');
+  const rec = Object.values(s.db.s['taWaiting:florida-beauty'])[0];
+  assert.deepEqual([rec.kind, rec.checkin, rec.arrivedMs, rec.startMs], ['shipper', true, T0, T0 + 3 * H]);
+  s.at(T0 + 3 * H); await s.w.process({ trips: [truck()] }); await s.w.process({ trips: [truck()] });
+  assert.equal(s.sent.length, 1); assert.equal(s.sent[0][0], 'start');
+  s.at(T0 + 4 * H); await s.w.process({ trips: [truck()] });
+  assert.equal(s.sent.length, 1, 'still counting while they are there');
+  await s.db.set('taDriverCheckins:florida-beauty', { 626218: { steps: { 'at-shipper': { at: iso(T0) }, loaded: { at: iso(T0 + 5 * H) } } } });
+  s.at(T0 + 5.2 * H); await s.w.process({ trips: [truck()] });
+  assert.equal(s.sent.length, 2); assert.equal(s.sent[1][0], 'total');
+  assert.equal(s.sent[1][1].waitedMs, 2 * H, 'from the 3-hour mark to the driver\'s "Loaded & leaving"');
+});

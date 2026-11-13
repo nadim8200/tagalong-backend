@@ -1216,7 +1216,8 @@ driverLinks.useRoadPhotos((site, trip, info) => (roadCalls ? roadCalls.photos(si
 const outreach = initOutreach({ groupEmail: (n) => directory.groupEmail(n), db, getBoard: (site) => truckmate.buildBoard(site), isInternal, env: process.env });
 comms.useOutreach((ev) => outreach.notify(ev));
 voice.useOutreach((ev) => outreach.notify(ev));
-const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, env: process.env });
+let driverNotify = null;   // the driver app's phone notifications (set once driverAuth is up, below)
+const milestones = initMilestones(app, { requireAuth: requireDispatch, db, ringcentral: rc, comms, driverLinks, push, pushRules, notifyDriver: (...a) => (driverNotify ? driverNotify(...a) : Promise.resolve({ skipped: 'not ready' })), env: process.env });
 const flowerReport = initFlowerReport(app, { photos: () => (tempPhotos ? tempPhotos.latestPhotos() : []), requireAuth: requireDispatch, db, env: process.env, getBoard: (site) => truckmate.buildBoard(site) });
 initAssistant(app, { db, env: process.env, buildBoard: truckmate.buildBoard, voice, outbound, flowerReport, stopTimes: etaReport });
 // a trailer change on the same trip (cross-dock after a breakdown, a swap): recorded, emailed to the Truck transfer list once
@@ -1465,6 +1466,7 @@ app.post('/admin/breakdown-report/example', requireCompanyAdmin, async (req, res
 // company drivers sign in with their driver ID and cell; the roster is Samsara's drivers (driverauth.js)
 const driverAuth = initDriverAuth(app, { requireAuth, requireAdmin: requireCompanyAdmin, secret: JWT_SECRET, db, push, training, unreadFor: (site, trip) => driverLinks.unread(site, trip), sign: (u, exp) => jwt.sign(u, JWT_SECRET, { expiresIn: exp }), getBoard: (site) => truckmate.buildBoard(site), docsLink: (site, trip, by) => driverLinks.ensureDocsLink(site, trip, by), sheets: loadSheets, stopFlow,
   roster: async () => { const token = samsaraTokenFrom(process.env); const idx = token ? await getLiveIndex(token) : null; return Object.entries((idx && idx.driversByCode) || {}).map(([code, d]) => ({ code, name: d.name, phone: d.info && d.info.phone })).filter((d) => d.phone); } });
+driverNotify = (...a) => driverAuth.notify(...a);
 // a dispatch message on a load reaches the driver profile's phones too (driverauth.js)
 driverLinks.onDispatchMessage((site, trip, text, by) => driverAuth.notifyTrip(trip, text, by));
 // Phone & Messages: one shared inbox for texts on the company line and driver-app messages
