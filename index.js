@@ -79,6 +79,7 @@ import { nameScore } from './voice.js';
 import { initMilestones } from './milestones.js';
 import { initCommitments, lateMessage } from './commitments.js';
 import { initLtlTempAlert } from './tempalert.js';
+import { initDvr } from './dvr.js';
 import { initEtaReport } from './etareport.js';
 import { initPastLoads } from './pastloads.js';
 import { initArtisWeb } from './artisweb.js';
@@ -1467,6 +1468,8 @@ app.post('/admin/breakdown-report/example', requireCompanyAdmin, async (req, res
 const driverAuth = initDriverAuth(app, { requireAuth, requireAdmin: requireCompanyAdmin, secret: JWT_SECRET, db, push, training, unreadFor: (site, trip) => driverLinks.unread(site, trip), sign: (u, exp) => jwt.sign(u, JWT_SECRET, { expiresIn: exp }), getBoard: (site) => truckmate.buildBoard(site), docsLink: (site, trip, by) => driverLinks.ensureDocsLink(site, trip, by), sheets: loadSheets, stopFlow,
   roster: async () => { const token = samsaraTokenFrom(process.env); const idx = token ? await getLiveIndex(token) : null; return Object.entries((idx && idx.driversByCode) || {}).map(([code, d]) => ({ code, name: d.name, phone: d.info && d.info.phone })).filter((d) => d.phone); } });
 driverNotify = (...a) => driverAuth.notify(...a);
+// the driver vehicle inspection report (DVIR) from the driver app: email to Maintenance + Dispatch, photos / short videos kept in the database
+initDvr(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, requireAuth: requireDispatch, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('dvr'), log: (...a) => comms.log(...a) });
 // a dispatch message on a load reaches the driver profile's phones too (driverauth.js)
 driverLinks.onDispatchMessage((site, trip, text, by) => driverAuth.notifyTrip(trip, text, by));
 // Phone & Messages: one shared inbox for texts on the company line and driver-app messages
