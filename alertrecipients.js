@@ -33,6 +33,7 @@ export const ALERTS = [
   { key: 'dvr', label: 'Driver vehicle inspection report (DVIR)', when: 'A company driver reports something on the truck, trailer or reefer in the driver app that needs attention when it comes back (a truck that can\'t go on is a breakdown, not a DVIR): what they wrote, photos attached and every photo / video as a link.', defaults: ['Carlos Vega', 'Dispatch'] },
   { key: 'ltl_temp', label: 'LTL reefer 5°F off / set point wrong', texts: true, when: 'An LTL / flower load\'s reefer reads more than 5°F above or below its set point or the temperature the load needs (not while unloading at a receiver) — once each time it goes off, again only if 3°F worse; and when ARTIS\'s set point is not the temperature the load needs — once per set point. Texts go to Nadim unless a text list is set here. Never broker loads.', defaults: ['inbound@floridabeauty.us'] },
   { key: 'running_late', label: 'Running late vs usual (LTL)', when: 'An LTL / flower load\'s ETA to a customer runs 1 h 30 min or more past the time our trucks usually get there (learned from the geofence arrivals: days after the outbound day + local time). Once as soon as Jarvis sees it, again only if it gets an hour worse. Never broker loads.', defaults: ['ntellez@floridabeauty.us'] },
+  { key: 'running_late_cc', label: 'Running late vs usual — cc (Saray checks them, Fri–Mon)', when: 'Cc on the running-late emails Friday to Monday (Eastern). Saray replies whether it is right; when she corrects the usual time, Jarvis saves it as the rule and texts Nadim what changed. The only alert email Saray gets.', defaults: ['strujillo@floridabeauty.us'] },
   { key: 'late_commitment', label: 'Late for a committed time', texts: true, when: 'A stop has a date + time committed to the customer (📅 on the stop) and, from the morning after the truck left, the ETA is more than an hour past it: one email + one text per stop. Internal only — you decide who tells the customer.', defaults: ['Dispatch', 'ntellez@floridabeauty.us'] },
   { key: 'artis_missing_call', label: 'Customer asked about a load with boxes not received', when: 'A customer called about their delivery and ARTIS shows boxes for them never received at our terminal (the customer is only told what is loaded).', defaults: ['Frank Ducassi', 'Sebastian Manotas', 'Ronen', 'Nadim'] },
 ];
@@ -79,15 +80,15 @@ export function resolveEntries(entries = [], { people = [], groupEmail = () => n
   return { emails: [...new Set(emails)], unresolved };
 }
 
-// Saray already gets Inbound and Dispatches, so she's taken off the other alert emails. She stays only on the
-// extended stop email (Team truck stopped), and only Friday–Monday (Eastern). Pure.
+// Saray already gets Inbound and Dispatches, so she's taken off every other alert email. The one she gets: the cc on the
+// running-late emails, Friday to Monday (Eastern) — she replies whether they're right, and Jarvis learns the usual times from her. Pure.
 const SARAY = /\bsaray\b/i;
 const ET_DAY = (ms) => new Date(ms).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' });
-export function sarayGetsIt(key, ms = Date.now()) { return key === 'team_stopped' && ['Fri', 'Sat', 'Sun', 'Mon'].includes(ET_DAY(ms)); }
+export function sarayGetsIt(key, ms = Date.now()) { return key === 'running_late_cc' && ['Fri', 'Sat', 'Sun', 'Mon'].includes(ET_DAY(ms)); }
 export function dropSaray(emails = [], { key, people = [], now = Date.now() } = {}) {
   if (sarayGetsIt(key, now)) return emails;
   const hers = new Set(people.filter((p) => SARAY.test(p.name || '') && p.email).map((p) => String(p.email).toLowerCase()));
-  return emails.filter((e) => !hers.has(e) && !/^[^@]*(saray|fabregas)[^@]*@/i.test(e));
+  return emails.filter((e) => !hers.has(e) && !/^[^@]*(saray|fabregas|strujillo)[^@]*@/i.test(e));
 }
 
 export function initAlertRecipients(app, { requireAuth, requireAdmin = null, db, directory, now = () => Date.now() }) {

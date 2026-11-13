@@ -1128,7 +1128,7 @@ let jarvisChat = null;     // dispatchers' chat with Jarvis (notes / transfers o
 // who gets each alert email (Employees → Alert emails in the console)
 const alertRecipients = initAlertRecipients(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, directory });
 // 📅 committed delivery times per stop → late alerts (email + text, internal)
-const etaReport = initEtaReport({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('eta_report'), lateRecipients: () => alertRecipients.resolve('running_late') });
+const etaReport = initEtaReport({ app, requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('eta_report'), lateRecipients: () => alertRecipients.resolve('running_late'), lateCc: () => alertRecipients.resolve('running_late_cc') });
 const pastLoads = initPastLoads({ db, etaReport });
 let brokerFollow = null;
 // LTL reefer 5°F off its set point → email the list (inbound@) + text Nadim (Ronen off by request)

@@ -121,3 +121,39 @@ test('a Ventura load is compared only with Ventura arrivals (trip 627080: Santa 
   const miami = { ...ventura, trip: { tripNumber: '627081', origZoneDesc: 'MIAMI TERMINAL' }, _manifest: { stops: [{ action: 'LOAD', customer: 'MIAMI TERMINAL' }, ventura._manifest.stops[1]] } };
   assert.equal(lc([miami], { 627081: etas[627080] }, learned).length, 1, 'a Miami load still gets compared');
 });
+
+test('a time saved for one outbound weekday (MOBI\'S Carpinteria: Thursday Miami outbounds → Monday 4 AM) wins for that weekday only', async () => {
+  const { usualFor: uf, usualMs: um, parseWeekday, lateCheck: lc } = await import('../usualarrival.js');
+  assert.equal(parseWeekday('Thursday'), 4); assert.equal(parseWeekday('jueves'), 4); assert.equal(parseWeekday('x'), null);
+  const thu = { customer: "MOBI'S", place: 'CARPINTERIA, CA', hub: 'MIAMI', dow: 4, days: 4, min: 240, by: 'Nadim' };
+  const rec = { customer: "MOBI'S", place: 'CARPINTERIA, CA', arrivals: [], fixedByHubDow: { 'MIAMI:4': thu }, fixedByHub: { MIAMI: { ...thu, dow: undefined, days: 3, min: 360 } } };
+  const u = uf(rec, '2026-11-12', 'MIAMI');                      // Thu Nov 12
+  assert.match(u.text, /4 days after the outbound day at 4:00 AM local from Miami \(Thursday outbounds\)/);
+  assert.equal(new Date(um(u, '2026-11-12', 'CARPINTERIA, CA')).toISOString(), '2026-11-16T12:00:00.000Z', 'Mon Nov 16, 4 AM PT');
+  assert.equal(uf(rec, '2026-11-09', 'MIAMI').days, 3, 'a Monday outbound uses the any-day time');
+  // trip 627063: ETA Sun Nov 15 4:50 PM PT is before Monday 4 AM → not late
+  const item = { trip: { tripNumber: '627063', origZoneDesc: 'MIAMI TERMINAL' }, _tb: { date: '2026-11-12', stops: [] }, freightBills: [{ billNumber: 'M1', billToName: "MOBI'S", endZoneDescription: 'CARPINTERIA, CA, 93013' }] };
+  const [x] = lc([item], { 627063: { stops: [{ label: 'CARPINTERIA, CA, 93013', etaMs: Date.parse('2026-11-16T00:50:00Z'), miles: 2189 }] } }, { k: rec });
+  assert.ok(x.lateMin < 0, 'early, no alert');
+});
+
+test('running-late emails: cc Saray (Fri–Mon list), the hub on the email, a reply line Jarvis learns from; Saray may set times', async () => {
+  const { lateEmail: email, maySet } = await import('../usualarrival.js');
+  const x = { trip: '626966', hub: 'MIAMI', truck: '2602', trailer: '7234', outbound: '2026-11-11', label: 'HOUSTON, TX, 77040', customers: ['H&T WHOLESALE FLOWERS HOUSTON INC'], customer: 'H&T WHOLESALE FLOWERS HOUSTON INC',
+    etaMs: Date.parse('2026-11-13T21:46:00Z'), usualMs: Date.parse('2026-11-13T04:27:00Z'), usual: { days: 1, min: 1347, n: 4, of: 4 }, miles: 32, lateMin: 1039 };
+  const m = email(x, { _samsara: {} });
+  assert.match(m.html, /2026 · Miami/);
+  assert.match(m.text, /Is this right\? Reply to this email: "correct", or when Wednesday outbounds from Miami usually get to H&T WHOLESALE FLOWERS HOUSTON INC/);
+  assert.equal(maySet({ name: 'Saray Fabregas' }), true); assert.equal(maySet({ email: 'strujillo@floridabeauty.us' }), true);
+  assert.equal(maySet({ name: 'Andres Leon', email: 'aleon@floridabeauty.us' }), false);
+  const { initEtaReport } = await import('../etareport.js');
+  const kv = {}; const db = { enabled: true, get: async (k, d) => (k in kv ? JSON.parse(JSON.stringify(kv[k])) : d), set: async (k, v) => { kv[k] = v; }, update: async (k, f, d) => { kv[k] = f(k in kv ? JSON.parse(JSON.stringify(kv[k])) : d); return kv[k]; } };
+  const { stopKey } = await import('../usualarrival.js');
+  const arr = (t, iso, out) => ({ trip: t, ms: Date.parse(iso), outbound: out, dow: 3, days: 1, min: 1347, hub: 'MIAMI' });
+  kv['taUsualArrival:florida-beauty'] = { stops: { [stopKey('H&T WHOLESALE FLOWERS HOUSTON INC', 'HOUSTON, TX')]: { customer: 'H&T WHOLESALE FLOWERS HOUSTON INC', place: 'HOUSTON, TX', arrivals: [arr('a', '2026-10-22T04:27:00Z', '2026-10-21'), arr('b', '2026-10-29T04:27:00Z', '2026-10-28'), arr('c', '2026-11-05T04:27:00Z', '2026-11-04')] } } };
+  kv['taWatch:florida-beauty'] = { etas: { 626966: { stops: [{ label: 'HOUSTON, TX, 77040', etaMs: x.etaMs, miles: 32 }] } } };
+  const sent = [];
+  const r = initEtaReport({ db, sendMail: async (msg) => sent.push(msg), lateRecipients: async () => ['ntellez@floridabeauty.us'], lateCc: async () => ['strujillo@floridabeauty.us'], now: () => Date.parse('2026-11-13T21:15:00Z') });
+  await r.process('florida-beauty', { trips: [{ trip: { tripNumber: '626966', origZoneDesc: 'MIAMI TERMINAL', powerUnit: '2602' }, _tb: { date: '2026-11-11', stops: [] }, freightBills: [{ billNumber: 'M1', billToName: 'H&T WHOLESALE FLOWERS HOUSTON INC', endZoneDescription: 'HOUSTON, TX, 77040' }] }] });
+  assert.equal(sent.length, 1); assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']); assert.deepEqual(sent[0].cc, ['strujillo@floridabeauty.us']);
+});

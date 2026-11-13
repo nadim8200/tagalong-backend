@@ -22,7 +22,7 @@ test('admins change the lists in the console; the alert uses the saved list', as
   await routes['PUT /truckmate/alert-recipients'].at(-1)({ body: { alerts: { artis_left_short: ['Dispatch', 'Frank Ducassi'] } } }, { json: () => {}, status: () => ({ json: () => {} }) });
   assert.deepEqual(await ar.resolve('artis_left_short'), ['dispatches@floridabeauty.us', 'fducassi@floridabeauty.us']);
   let out; await routes['GET /truckmate/alert-recipients'].at(-1)({}, { json: (j) => { out = j; } });
-  assert.equal(out.alerts.length, 27); assert.deepEqual(out.groups, ['Dispatch']);
+  assert.equal(out.alerts.length, 28); assert.deepEqual(out.groups, ['Dispatch']);
 });
 
 test('loading-temperature emails have their own list: warehouse + outbound, separate from the reefer list', () => {
@@ -31,15 +31,17 @@ test('loading-temperature emails have their own list: warehouse + outbound, sepa
   assert.ok(ALERTS.find((a) => a.key === 'reefer_temp').defaults.includes('Dispatch'));
 });
 
-test('Saray: only on the extended stop email, and only Friday–Monday (Eastern); she already gets Inbound and Dispatches', () => {
+test('Saray: only the cc on the running-late emails, Friday to Monday (Eastern); off every other alert, the extended stop email too', () => {
   const ppl = [{ name: 'Saray Fabregas', email: 'sfabregas@floridabeauty.us' }];
   const list = ['dispatches@floridabeauty.us', 'sfabregas@floridabeauty.us', 'inbound-dispatch@floridabeauty.us'];
   const fri = Date.parse('2026-11-06T15:00:00Z'); const mon = Date.parse('2026-11-09T15:00:00Z'); const wed = Date.parse('2026-11-04T15:00:00Z');
   const tueLateNightEt = Date.parse('2026-11-10T03:30:00Z'); // still Monday 10:30 PM in Miami
-  assert.deepEqual(dropSaray(list, { key: 'team_stopped', people: ppl, now: fri }), list);
-  assert.deepEqual(dropSaray(list, { key: 'team_stopped', people: ppl, now: mon }), list);
-  assert.equal(sarayGetsIt('team_stopped', tueLateNightEt), true);
-  assert.deepEqual(dropSaray(list, { key: 'team_stopped', people: ppl, now: wed }), ['dispatches@floridabeauty.us', 'inbound-dispatch@floridabeauty.us']);
-  assert.deepEqual(dropSaray(list, { key: 'breakdown_report', people: ppl, now: fri }), ['dispatches@floridabeauty.us', 'inbound-dispatch@floridabeauty.us']);
+  assert.deepEqual(dropSaray(['strujillo@floridabeauty.us'], { key: 'running_late_cc', now: fri }), ['strujillo@floridabeauty.us']);
+  assert.deepEqual(dropSaray(['strujillo@floridabeauty.us'], { key: 'running_late_cc', now: mon }), ['strujillo@floridabeauty.us']);
+  assert.equal(sarayGetsIt('running_late_cc', tueLateNightEt), true);
+  assert.deepEqual(dropSaray(['strujillo@floridabeauty.us'], { key: 'running_late_cc', now: wed }), [], 'not Tuesday–Thursday');
+  assert.equal(sarayGetsIt('team_stopped', fri), false);
+  assert.deepEqual(dropSaray(list, { key: 'team_stopped', people: ppl, now: fri }), ['dispatches@floridabeauty.us', 'inbound-dispatch@floridabeauty.us'], 'not on the extended stop email any more');
   assert.deepEqual(dropSaray(['saray.f@floridabeauty.us', 'a@x.com'], { key: 'transfer', now: fri }), ['a@x.com'], 'her address even when not on Employees');
+  assert.deepEqual(ALERTS.find((a) => a.key === 'running_late_cc').defaults, ['strujillo@floridabeauty.us']);
 });

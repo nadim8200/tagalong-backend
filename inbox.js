@@ -1059,7 +1059,9 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     // photos sent on a breakdown chain go on that breakdown
     if (breakdownPhotos && e.subject && /breakdown/i.test(e.subject) && isInternal(e.from.address, env) && (e.trips || []).length === 1 && photosOf(e).length && !done.some((r) => r.kind === 'report_breakdown')) await breakdownPhotos({ trip: e.trips[0], photos: photosOf(e), by: e.from.name || e.from.address }).catch((err) => console.warn('[inbox] breakdown photos:', err.message));
     const handledHere = done.some((r) => r.kind === 'send_documents' || r.kind === 'broker_updates' || (['report_breakdown', 'breakdown_fixed', 'transfer_plan', 'transfer_completed', 'transfer_cancelled', 'stop_authorized', 'stop_unauthorized'].includes(r.kind) && r.sent));   // already answered by doing it
-    if (staff && !handledHere && askJarvis && e.reply && e.reply.needed && e.status === 'new' && !e.packet && mailConfig(env).ready) {
+    // a reply to Jarvis' own running-late email (Saray checks them): always to Jarvis — "correct", or the real usual time to save
+    const lateReply = staff && /\b(running late|later still): trip \d+/i.test(String(e.subject || ''));
+    if (staff && !handledHere && askJarvis && ((e.reply && e.reply.needed) || lateReply) && e.status === 'new' && !e.packet && mailConfig(env).ready) {
       let r = null;
       try { r = await ask('staff_email'); } catch (err) { console.warn('[inbox] ask Jarvis:', err.message); }
       if (r && r.answer) {

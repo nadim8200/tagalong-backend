@@ -208,6 +208,7 @@ function tools(base, transferNumber) {
     fn('set_delivery_time', 'ONLY when the caller is Nadim or Ronen and asks to add / set a delivery time for a customer (when our truck is set to get there). Follow the delivery-time script: ask the customer, the hub (Miami or Ventura), and the time + day (second or third day after the outbound day; early morning, day or night), repeat it back, and call this only after they say yes. Without time it just tells what is saved / learned for that customer.', {
       customer_name: { type: 'string' }, city: { type: 'string' }, hub: { type: 'string', enum: ['Miami', 'Ventura'] },
       time: { type: 'string', description: 'Local time at the customer, e.g. 4 AM, 8 PM' }, days_after_outbound: { type: 'number', description: '2 = second day, 3 = third day' },
+      outbound_weekday: { type: 'string', description: 'Only if they say it is for one outbound day ("Thursday outbounds get there Monday") — e.g. Thursday' },
     }, ['customer_name']),
     fn('eta_vs_actual', 'STAFF ONLY: the ETA we gave vs when the truck actually got there, per stop — first / last ETA we gave, ARTIS ETA, actual arrival, how far off, time at the stop — for a trip (on the board or finished) or a customer.', {
       trip_number: { type: 'string' }, customer: { type: 'string' }, delivered_day: { type: 'string', description: 'optional: "this week", "Thursday", "10/22"' },
@@ -1279,7 +1280,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
       }
       if (!ok) return res.json({ ok: false, say: 'Only Nadim or Ronen can set delivery times. Say so politely.' });
       if (!a.hub) return res.json({ ok: false, say: 'Ask which hub the load leaves from — Miami or Ventura.' });
-      const r = await stopTimes.setUsual({ customer: a.customer_name, city: a.city || null, hub: a.hub, time: a.time, daysAfter: a.days_after_outbound, by: `${by} (call)` });
+      const r = await stopTimes.setUsual({ customer: a.customer_name, city: a.city || null, hub: a.hub, weekday: a.outbound_weekday || null, time: a.time, daysAfter: a.days_after_outbound, by: `${by} (call)` });
       if (r.ok) return res.json({ ok: true, saved: r.saved, say: `Saved. Say: "${sayStates(String(r.saved.customer))}, from ${r.saved.hub === 'VENTURA' ? 'Ventura' : 'Miami'}: ${r.saved.usual.replace(/ \(set by.*\)$/, '')}. I'll alert if a truck is running an hour and a half past that."` });
       return res.json({ ok: false, ...r, say: r.several ? `Several places match: ${r.several.join('; ')}. Ask which city.` : r.note || r.error || 'Could not save that.' });
     } catch (e) { return res.json({ ok: false, say: 'Could not save that right now.' }); }

@@ -10,7 +10,7 @@
 import { localToUtcMs } from './watchtower.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 import { outboundDate, nameScore } from './voice.js';
-import { learn, lateCheck, shouldAlert, lateEmail, usualView, usualFor as usualOf, parseClock, learnedDays, stopKey, hubKey, hubOf } from './usualarrival.js';
+import { learn, lateCheck, shouldAlert, lateEmail, usualView, usualFor as usualOf, parseClock, parseWeekday, learnedDays, stopKey, hubKey, hubOf } from './usualarrival.js';
 
 const SITE = 'florida-beauty';
 const LOG = (site) => `taEtaLog:${site}`;
@@ -163,7 +163,7 @@ export function stopTimesFrom(visitsByTrip = {}, items = [], have = {}) {
 }
 
 const MAIL_ON = (site) => `taEtaReportMail:${site}`;
-export function initEtaReport({ app = null, requireAuth = null, db, sendMail = null, recipients = async () => [], lateRecipients = async () => [], now = () => Date.now() }) {
+export function initEtaReport({ app = null, requireAuth = null, db, sendMail = null, recipients = async () => [], lateRecipients = async () => [], lateCc = async () => [], now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   // after each Watchtower cycle: log this cycle's ETAs
   async function process(site, board) {
@@ -225,11 +225,12 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     if (!due.length) return;
     const to = await lateRecipients();
     if (!to.length) return;
+    const cc = (await lateCc().catch(() => [])).filter((x) => !to.includes(x));   // Saray checks them and replies (Jarvis learns from it)
     const byN = new Map(items.map((it) => [tripNo(it), it]));
     for (const x of due) {
       const k = `${x.trip}|${x.label}`;
       const m = lateEmail(x, byN.get(x.trip), { worse: !!sent[k] });
-      await sendMail({ to, subject: m.subject, html: m.html, text: m.text, attachments: m.attachments || [] }); // eslint-disable-line no-await-in-loop
+      await sendMail({ to, cc, subject: m.subject, html: m.html, text: m.text, attachments: m.attachments || [] }); // eslint-disable-line no-await-in-loop
       sent[k] = { lateMin: x.lateMin, at: new Date(now()).toISOString() };
       console.log(`[usual-arrival] late alert: trip ${x.trip} ${x.label} +${x.lateMin} min`);
     }
@@ -242,7 +243,8 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     for (const [k0, f] of Object.entries(set || {})) {
       const k = k0.split('#')[0];
       const r = { ...(out[k] || { customer: f.customer, place: f.place, arrivals: [] }) };
-      if (f.hub) r.fixedByHub = { ...(r.fixedByHub || {}), [f.hub]: f }; else r.fixed = f;
+      if (f.hub && f.dow != null) r.fixedByHubDow = { ...(r.fixedByHubDow || {}), [`${f.hub}:${f.dow}`]: f };
+      else if (f.hub) r.fixedByHub = { ...(r.fixedByHub || {}), [f.hub]: f }; else r.fixed = f;
       out[k] = r;
     }
     return out;
@@ -254,7 +256,7 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     return Object.entries(all).filter(([, r]) => fit(customer, r.customer || '')).map(([key, r]) => ({ key, ...r }));
   }
   // staff: "Pyramid Oxnard usually delivers 4 AM" → saved; the days after the outbound day from what was learned when not said
-  async function setUsual({ customer, city = null, state = null, hub = null, time, daysAfter = null, by = 'dispatch', site = SITE } = {}) {
+  async function setUsual({ customer, city = null, state = null, hub = null, weekday = null, time, daysAfter = null, by = 'dispatch', site = SITE } = {}) {
     if (!enabled) return { ok: false, error: 'no database' };
     const min = parseClock(time);
     if (min == null) return { ok: false, error: `I could not read the time "${time}" — say it like 4 AM or 16:30.` };
@@ -268,8 +270,11 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     const days = daysAfter != null && daysAfter !== '' ? Number(daysAfter) : learnedDays(rec);
     if (days == null || !Number.isFinite(days) || days < 0 || days > 8) return { ok: false, note: `How many days after the outbound day does the truck usually get to ${rec.customer}? (e.g. Monday outbound → Thursday = 3)` };
     const H = hubKey(hub);
-    const f = { customer: rec.customer, place: rec.place, ...(H ? { hub: H } : {}), days, min, by, at: new Date(now()).toISOString() };
-    await db.update(SET(site), (cur) => ({ ...(cur || {}), [H ? `${key}#${H}` : key]: f }), {});
+    const dow = parseWeekday(weekday);
+    if (weekday != null && weekday !== '' && dow == null) return { ok: false, note: `I could not read the outbound day "${weekday}" — say it like Thursday.` };
+    if (dow != null && !H) return { ok: false, note: 'Say the hub too (Miami or Ventura) for a time on one outbound day.' };
+    const f = { customer: rec.customer, place: rec.place, ...(H ? { hub: H } : {}), ...(dow != null ? { dow } : {}), days, min, by, at: new Date(now()).toISOString() };
+    await db.update(SET(site), (cur) => ({ ...(cur || {}), [H ? `${key}#${H}${dow != null ? `#${dow}` : ''}` : key]: f }), {});
     return { ok: true, saved: { customer: f.customer, place: f.place, hub: H, usual: usualOf({ fixed: f }, null).text } };
   }
   // what Jarvis knows about a customer's usual arrival (learned or set)
@@ -277,7 +282,8 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     if (!enabled) return [];
     return (await placesFor(customer, site)).map((r) => {
       const per = ['MIAMI', 'VENTURA'].map((h) => { const u = usualOf(r, null, h); return u ? `${h === 'VENTURA' ? 'Ventura' : 'Miami'} loads: ${u.text}` : null; }).filter(Boolean);
-      return { customer: r.customer, place: r.place, arrivals: (r.arrivals || []).length, usual: per.length ? per.join(' · ') : 'not known yet (needs 3 arrivals from the same hub that agree, or set it)' };
+      const days = Object.values(r.fixedByHubDow || {}).map((f) => `${f.hub === 'VENTURA' ? 'Ventura' : 'Miami'} loads: ${usualOf({ fixedByHubDow: { [`${f.hub}:${f.dow}`]: f } }, `2026-11-${String(1 + f.dow).padStart(2, '0')}`, f.hub).text}`);
+      return { customer: r.customer, place: r.place, arrivals: (r.arrivals || []).length, usual: [...per, ...days].length ? [...per, ...days].join(' · ') : 'not known yet (needs 3 arrivals from the same hub that agree, or set it)' };
     });
   }
   // for Jarvis: this trip's open stops vs their usual time; and a customer's usual time
@@ -300,7 +306,7 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     // set a customer's usual time: { customer, city?, state?, time: '4 AM', daysAfter? }
     app.post('/truckmate/usual-arrivals/set', requireAuth, async (req, res) => {
       const b = req.body || {};
-      res.json(await setUsual({ customer: b.customer, city: b.city || null, state: b.state || null, hub: b.hub || null, time: b.time, daysAfter: b.daysAfter, by: (req.user && (req.user.name || req.user.email)) || 'dispatch', site: String(req.query.site || SITE) }));
+      res.json(await setUsual({ customer: b.customer, city: b.city || null, state: b.state || null, hub: b.hub || null, weekday: b.weekday ?? null, time: b.time, daysAfter: b.daysAfter, by: (req.user && (req.user.name || req.user.email)) || 'dispatch', site: String(req.query.site || SITE) }));
     });
     app.post('/truckmate/usual-arrivals/settings', requireAuth, async (req, res) => {
       if (!enabled) return res.status(503).json({ error: 'no database' });
