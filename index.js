@@ -80,6 +80,7 @@ import { initMilestones } from './milestones.js';
 import { initCommitments, lateMessage } from './commitments.js';
 import { initLtlTempAlert } from './tempalert.js';
 import { initDvr } from './dvr.js';
+import { initStaffMail } from './staffmail.js';
 import { initEtaReport } from './etareport.js';
 import { initPastLoads } from './pastloads.js';
 import { initArtisWeb } from './artisweb.js';
@@ -1470,6 +1471,8 @@ const driverAuth = initDriverAuth(app, { requireAuth, requireAdmin: requireCompa
 driverNotify = (...a) => driverAuth.notify(...a);
 // the driver vehicle inspection report (DVIR) from the driver app: email to Maintenance + Dispatch, photos / short videos kept in the database
 initDvr(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, requireAuth: requireDispatch, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('dvr'), log: (...a) => comms.log(...a) });
+// emails from Jarvis to our own people: a copy to the admin first, then the real send (staff addresses only)
+initStaffMail(app, { requireAdmin: requireCompanyAdmin, db, sendMail: (m, o = {}) => sendMail(m, { env: process.env, direct: true, noCopy: o.copy === false }) });
 // a dispatch message on a load reaches the driver profile's phones too (driverauth.js)
 driverLinks.onDispatchMessage((site, trip, text, by) => driverAuth.notifyTrip(trip, text, by));
 // Phone & Messages: one shared inbox for texts on the company line and driver-app messages
