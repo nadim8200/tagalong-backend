@@ -2,8 +2,8 @@
 // "Rolling to your next pickup?" — asked in the driver app. When a driver finishes an LTL run in the app (the load
 // completed, or every stop marked done) and the truck starts rolling again, Jarvis asks them through a push notification
 // and a Yes / No pop-up in the app about their next load's pickup. No asks for a reason (a comment box). Either answer goes to
-// dispatch as the pickup follow-up email (pickupfollow.js driverAnswered). Asked once per next load; the question stays in the app
-// for 12 hours.
+// dispatch as the pickup follow-up email (pickupfollow.js driverAnswered). Also asked about any load an hour before its pickup, when
+// the crew hasn't checked in at the shipper. Asked once per load; the question stays in the app for 12 hours.
 // ---------------------------------------------------------------
 import { isLtl } from './usualarrival.js';
 import { loadsFor } from './driverauth.js';
@@ -63,6 +63,20 @@ export function dueAsks(items = [], state = {}, now = Date.now()) {
     const plan = it ? plannedPickup(it) : null;
     out.push({ trip: next, afterTrip, codes: d.codes, place: (plan && plan.place) || null, when: plan && plan.ms ? fmt(plan.ms, plan.tz) : null });
   }
+  // any load an hour before its pickup: the crew hasn't checked in at the shipper and TruckMate doesn't show it started
+  const taps = state.taps || {};
+  for (const it of items) {
+    const n = tripNo(it); const codes = codesOf(it);
+    if (!n || !codes.length || asked[n] || out.some((a) => a.trip === n)) continue;
+    if (/^(ARRSHIP|DEPSHIP|ARRCONS|DEPCONS|DELV|INTRAN|ENROUTE|SPT)/i.test(String(tripOf(it).status || ''))) continue;
+    const st = (taps[n] || {}).steps || {};
+    if (st['at-shipper'] || st.loaded) continue;
+    const plan = plannedPickup(it);
+    if (!plan || !plan.ms) continue;
+    const left = plan.ms - now;
+    if (left > 60 * MIN || left < -30 * MIN) continue;
+    out.push({ trip: n, afterTrip: null, codes, place: plan.place || null, when: fmt(plan.ms, plan.tz), before: true });
+  }
   for (const k of Object.keys(done)) if (now - Date.parse(done[k].at) > 3 * 86400000) delete done[k];
   return { done, asks: out };
 }
@@ -73,19 +87,19 @@ export function initPickupAsk(app, { db, requireDriver = null, getBoard, notify 
     if (!enabled) return [];
     const items = ((await getBoard(site)) || {}).trips || [];
     const st = (await db.get(KEY(site), {})) || {};
-    const { done, asks } = dueAsks(items, st, now());
+    const { done, asks } = dueAsks(items, { ...st, taps: (await db.get(`taDriverCheckins:${site}`, {})) || {} }, now());
     const at = new Date(now()).toISOString();
     const nextAsks = { ...(st.asks || {}) };
     for (const a of asks) {
       nextAsks[a.trip] = { afterTrip: a.afterTrip, codes: a.codes, askedAt: at, place: a.place, when: a.when, answer: null };
-      done[a.afterTrip] = { ...done[a.afterTrip], askedFor: a.trip };
+      if (a.afterTrip) done[a.afterTrip] = { ...done[a.afterTrip], askedFor: a.trip };
     }
     for (const [k, v] of Object.entries(nextAsks)) if (now() - Date.parse(v.askedAt) > 3 * 86400000) delete nextAsks[k];
     await db.set(KEY(site), { done, asks: nextAsks });
     for (const a of asks) {
       const body = `Load ${a.trip}${a.place ? ` · pickup ${a.place}` : ''}${a.when ? ` · ${a.when}` : ''}. Tap Yes or No.`;
-      for (const c of a.codes) if (notify) await notify(c, { title: 'Rolling to your next pickup?', body, data: { tab: 'now', ask: 'pickup', trip: a.trip } }).catch((e) => console.warn('[pickup-ask] push:', e.message)); // eslint-disable-line no-await-in-loop
-      console.log(`[pickup-ask] trip ${a.trip}: asked ${a.codes.join(', ')} after LTL ${a.afterTrip}`);
+      for (const c of a.codes) if (notify) await notify(c, { title: a.before ? 'Rolling to your pickup?' : 'Rolling to your next pickup?', body, data: { tab: 'now', ask: 'pickup', trip: a.trip } }).catch((e) => console.warn('[pickup-ask] push:', e.message)); // eslint-disable-line no-await-in-loop
+      console.log(`[pickup-ask] trip ${a.trip}: asked ${a.codes.join(', ')} ${a.afterTrip ? `after LTL ${a.afterTrip}` : '1 h before pickup'}`);
     }
     return asks;
   }

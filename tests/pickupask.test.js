@@ -37,3 +37,24 @@ test('the driver answers in the app: Yes, or No with why (required) → saved on
   assert.equal((await a.answer('627200', '9450', { rolling: true })).already, true, 'the co-driver can\'t answer twice');
   assert.equal(await a.openFor('9450'), null, 'answered: the pop-up goes away');
 });
+
+test('an hour before any pickup the crew is asked in the app too (not when they already checked in at the shipper)', () => {
+  const at = (min) => NOW + min * 60000;
+  const load = { trip: { tripNumber: '627300', powerUnit: '2216', driver: '9001', status: 'DISP' }, freightBills: [{ billNumber: 'B1' }], _ratecon: { pickups: [{ name: 'Home Market Foods', city: 'Norton', state: 'MA', date: '2026-11-14', time: '10:40' }] } };
+  assert.equal(dueAsks([load], {}, at(-60)).asks.length, 0, 'more than an hour out');
+  const r = dueAsks([load], {}, NOW);
+  assert.deepEqual(r.asks.map((a) => [a.trip, a.before, a.afterTrip]), [['627300', true, null]]);
+  assert.equal(dueAsks([load], { taps: { 627300: { steps: { 'at-shipper': { at: iso(NOW) } } } } }, NOW).asks.length, 0, 'already at the shipper');
+  assert.equal(dueAsks([load], { asks: { 627300: { askedAt: iso(NOW) } } }, NOW).asks.length, 0, 'once');
+});
+
+test('the load card shows what the driver last said in the app', async () => {
+  const { appStatus } = await import('../pickupfollow.js');
+  assert.equal(appStatus({}, {}, null), null);
+  assert.equal(appStatus({}, {}, { answer: { rolling: true, at: iso(NOW - 60000), by: 'Wilson' } }).label, 'Heading to pickup');
+  const s = appStatus({}, { 'at-shipper': { at: iso(NOW), by: 'Wilson' } }, { answer: { rolling: true, at: iso(NOW - 60000) } });
+  assert.deepEqual([s.label, s.tone, s.src], ['At shipper', 'wait', 'driver app']);
+  assert.equal(appStatus({}, { 'at-shipper': { at: iso(NOW - 9e5) }, loaded: { at: iso(NOW) } }).label, 'Loaded & leaving');
+  assert.equal(appStatus({ _stopFlow: { total: 9, done: 3, stops: [{ doneAt: iso(NOW) }] } }, {}).label, 'Stop 3 of 9 done');
+  assert.equal(appStatus({}, { 'arrived:BOSTON': { at: iso(NOW - 9e5) }, 'delivered:BOSTON': { at: iso(NOW) } }).label, 'Delivered');
+});

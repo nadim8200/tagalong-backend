@@ -15,6 +15,7 @@ import { recipientFor } from './comms.js';
 import { renderOutboundFollowUp } from './followupmail.js';
 import { CHECKINS, HOLD_MS } from './checkins.js';
 import { pickupEmail, imageBytes } from './pickupmail.js';
+import { dropSaray } from './alertrecipients.js';
 
 const MIN = 60000;
 export const TZ_BY_STATE = { CA: 'America/Los_Angeles', WA: 'America/Los_Angeles', OR: 'America/Los_Angeles', NV: 'America/Los_Angeles', AZ: 'America/Phoenix', TX: 'America/Chicago', IL: 'America/Chicago', TN: 'America/Chicago', AL: 'America/Chicago', MS: 'America/Chicago', LA: 'America/Chicago', MO: 'America/Chicago', MN: 'America/Chicago', WI: 'America/Chicago', IA: 'America/Chicago', AR: 'America/Chicago', OK: 'America/Chicago', KS: 'America/Chicago', NE: 'America/Chicago', CO: 'America/Denver', UT: 'America/Denver', NM: 'America/Denver' };
@@ -126,12 +127,25 @@ export function followEmail({ item, plan, outcome, convo, images = 'cid' }) {
 }
 
 // Did the load leave? TruckMate departed / rolling, or the truck moving on GPS from 15 min before pickup on. Pure.
-export function departedNow(item, plan, now) {
+// For a shipper on the rate con, the GPS only counts once the truck was seen parked there: a late truck still rolling TO the shipper
+// has not departed it (trip 627029 was moving toward Norton at 10:52 PM with TruckMate already on ARRSHIP). atPickup: false = not
+// seen at that shipper yet. Loads leaving our own yard (trip sheet) keep the plain GPS check. Pure.
+export function departedNow(item, plan, now, { atPickup = true } = {}) {
   const st = String(tripOf(item).status || '');
   if (STARTED.test(st)) return { source: `TruckMate: ${st}` };
   const live = (item && item._samsara) || {};
-  if (plan && now >= plan.ms - 15 * MIN && (live.speedMph || 0) > 25) return { source: `GPS: truck moving ${Math.round(live.speedMph)} mph` };
+  if (atPickup && plan && now >= plan.ms - 15 * MIN && (live.speedMph || 0) > 25) return { source: `GPS: truck moving ${Math.round(live.speedMph)} mph after being at the pickup` };
   return null;
+}
+// The truck parked at the rate con's pickup right now (its GPS place names the pickup's city and state, or ZIP). Pure.
+export const rcPickups = (item) => { const rc = item && item._ratecon && (item._ratecon.data || item._ratecon); return ((rc && rc.pickups) || []).filter((p) => p && (p.zip || (p.city && p.state))); };
+export function parkedAtPickupNow(item) {
+  const live = (item && item._samsara) || {};
+  if ((Number(live.speedMph) || 0) > 3) return false;
+  const where = String(live.location || '').toUpperCase();
+  const rc = item && item._ratecon && (item._ratecon.data || item._ratecon);
+  if (!where || !rc) return false;
+  return (rc.pickups || []).some((p) => p && ((p.zip && where.includes(String(p.zip).slice(0, 5))) || (p.city && p.state && where.includes(`${String(p.city).toUpperCase()}, ${String(p.state).toUpperCase()}`))));
 }
 
 // One reply for an email chain: the loads that departed / are 30+ min past pickup and not departed. Pure.
@@ -166,6 +180,29 @@ export function tmFixNote({ item, plan, dep, now }) {
     need: null, details: [`Truck ${t.powerUnit || '—'} · trailer ${t.trailer || '—'}${driver ? ` · driver ${driver}` : ''}`, `Checked ${fmt(now, plan.tz)}`],
   }] });
   return { subject: `Update TruckMate: trip ${tripNo(item)} departed — status still ${t.status || 'blank'}`, html: out.html, text: out.text };
+}
+
+// The driver's latest word in the app, for the load's card: Heading to pickup / Not heading yet / At shipper / Loaded & leaving /
+// At receiver / Delivered, or an LTL run's stops done. The newest one wins; null when the driver hasn't said anything. Pure.
+export function appStatus(item, steps = {}, ask = null) {
+  const ev = [];
+  const add = (at, label, tone, by) => { const ms = Date.parse(at || ''); if (Number.isFinite(ms)) ev.push({ ms, at, label, tone, by: by || null }); };
+  if (ask && ask.answer) add(ask.answer.at, ask.answer.rolling ? 'Heading to pickup' : 'Not heading to pickup yet', ask.answer.rolling ? 'go' : 'bad', ask.answer.by);
+  for (const [k, v] of Object.entries(steps || {})) {
+    if (!v || !v.at) continue;
+    if (k === 'at-shipper') add(v.at, 'At shipper', 'wait', v.by);
+    else if (k === 'loaded') add(v.at, 'Loaded & leaving', 'go', v.by);
+    else if (/^arrived:/.test(k)) add(v.at, 'At receiver', 'wait', v.by);
+    else if (/^delivered:/.test(k)) add(v.at, 'Delivered', 'done', v.by);
+  }
+  const f = item && item._stopFlow;
+  if (f && f.total) {
+    const last = (f.stops || []).map((r) => r.doneAt).filter(Boolean).sort().pop();
+    if (f.completedAt) add(f.completedAt, 'Run completed', 'done', f.completedBy);
+    else if (last) add(last, `Stop ${f.done} of ${f.total} done`, 'go', null);
+  }
+  const top = ev.sort((a, b) => b.ms - a.ms)[0];
+  return top ? { label: top.label, tone: top.tone, at: top.at, by: top.by, src: 'driver app' } : null;
 }
 
 export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral = null, comms = null, voice = null, docs = null, driverLinks = null, replyInThread = null, groupEmail = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
@@ -260,7 +297,7 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     const gCs = groupEmail ? await groupEmail('customer service').catch(() => null) : null;
     const cs = gCs ? [gCs] : teams.filter((tm) => tm && tm.active !== false && /customer.?serv/i.test(`${tm.id} ${tm.name}`)).flatMap((tm) => [tm.email, ...(tm.members || []).map((m) => m && m.email)]);
     const dir = gCs ? [] : (((await db.get('taStaffDirectory', {})) || {}).people || []).filter((p) => p && p.active !== false && /customer.?serv/i.test(p.department || '')).map((p) => p.email);
-    return [...new Set([...(cfg.tmFixTo || []), gDispatch, ...cs, ...dir].map((a) => String(a || '').trim().toLowerCase()).filter(ours))];
+    return dropSaray([...new Set([...(cfg.tmFixTo || []), gDispatch, ...cs, ...dir].map((a) => String(a || '').trim().toLowerCase()).filter(ours))], { key: 'tm_fix' });   // Saray only gets the running-late emails
   }
 
   // One pass over the board.
@@ -309,11 +346,13 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
       // reply when it departs, and once if it is 30+ min past pickup and has not left
       const chainId = (it._pickupAsk && it._pickupAsk.emailId) || (it._sheetEmail && it._sheetEmail.id) || null;
       const th = st.thread && st.thread.emailId === chainId && st.thread.plannedAt === plan.ms ? st.thread : { emailId: chainId, plannedAt: plan.ms, waiting: false, departed: null, late: null };
-      const dep = departedNow(it, plan, now());
+      if (!st.atPickupAt && parkedAtPickupNow(it)) st = { ...st, atPickupAt: new Date(now()).toISOString() };
+      const dep = departedNow(it, plan, now(), { atPickup: !rcPickups(it).length || !!st.atPickupAt });
       // departure is sticky for this pickup: a truck slowing down in traffic later has NOT "not departed"
       if (dep && !st.departedAt) st = { ...st, departedAt: new Date(now()).toISOString(), departedBy: dep.source };
       // GPS says it left but TruckMate still doesn't → ask dispatch + customer service to fix it (once per pickup)
-      if (dep && /^GPS/.test(dep.source) && !STARTED.test(String(tripOf(it).status || '')) && !st.tmFixAt && now() - plan.ms < 12 * 60 * MIN) {
+      // off since Nov 14: the driver's own check-ins in the app put the status on the load's card instead (tmFixEmails: true brings it back)
+      if (cfg.tmFixEmails === true && dep && /^GPS/.test(dep.source) && !STARTED.test(String(tripOf(it).status || '')) && !st.tmFixAt && now() - plan.ms < 12 * 60 * MIN) {
         st = { ...st, tmFixAt: new Date(now()).toISOString() };
         try {
           const to = await tmFixTo(); // eslint-disable-line no-await-in-loop
@@ -390,6 +429,10 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
   // board overlay: what Jarvis is doing for the pickup
   async function overlay(s, trips) {
     if (!enabled) return;
+    // what the driver last told us in the app → the status on the load's card (Active Loads)
+    const taps = (await db.get(CHECKINS(site), {})) || {};
+    const asks = ((await db.get(`taPickupAsk:${site}`, {})) || {}).asks || {};
+    for (const it of trips) { const a = appStatus(it, (taps[tripNo(it)] || {}).steps || {}, asks[tripNo(it)] || null); if (a) it._appStatus = a; }
     const book = await db.get(key, {});
     for (const it of trips) { const st = book[tripNo(it)]; if (st) it._pickupFollow = { plannedAt: st.plannedAt, steps: Object.keys(st.steps || {}), outcome: st.outcome ? { status: st.outcome.status, eta: st.outcome.eta || null, source: st.outcome.source } : null, emailed: !!(st.reported && st.reported.emailed) }; }
   }

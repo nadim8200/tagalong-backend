@@ -57,11 +57,17 @@ test('each load replies in the chain its trip sheet came in (newest staff email 
   assert.equal(c['624620'], undefined);
 });
 
-test('departed = TruckMate departed, or moving on GPS from 15 min before pickup', () => {
+test('departed = TruckMate departed, or moving on GPS from 15 min before pickup', async () => {
   const plan = { ms: Date.parse('2026-10-09T03:00:00Z') };
   assert.ok(departedNow({ trip: { status: 'DEPSHIP' } }, plan, 0));
   assert.equal(departedNow({ trip: { status: 'DISP' }, _samsara: { speedMph: 50 } }, plan, plan.ms - 60 * 60000), null);
   assert.ok(departedNow({ trip: { status: 'DISP' }, _samsara: { speedMph: 50 } }, plan, plan.ms - 10 * 60000));
+  // a rate-con shipper the truck never reached: moving is still heading TO it (trip 627029)
+  assert.equal(departedNow({ trip: { status: 'ARRSHIP' }, _samsara: { speedMph: 40 } }, plan, plan.ms + 10 * 3600000, { atPickup: false }), null);
+  const { parkedAtPickupNow } = await import('../pickupfollow.js');
+  const rc = { pickups: [{ name: 'Home Market Foods', city: 'Norton', state: 'MA' }] };
+  assert.equal(parkedAtPickupNow({ _ratecon: rc, _samsara: { speedMph: 40, location: 'Mashapaug Road, Sturbridge, MA, 01521' } }), false);
+  assert.equal(parkedAtPickupNow({ _ratecon: rc, _samsara: { speedMph: 0, location: '140 Morse St, Norton, MA, 02766' } }), true);
 });
 
 test('the not-departed note says what has not happened and asks for a new time', () => {
@@ -150,6 +156,11 @@ test('GPS departed but TruckMate still LOADEDTOGO → one email to dispatches@ +
   const env = { NODE_ENV: 'test', MS_TENANT_ID: 't', MS_CLIENT_ID: 'c', MS_CLIENT_SECRET: 's', MAIL_FROM: 'jarvis@floridabeauty.us' };
   const fetchFn = async (url, o) => { if (/token/.test(url)) return { ok: true, json: async () => ({ access_token: 'x', expires_in: 3600 }) }; mails.push(o.body); return { ok: true, status: 202, json: async () => ({}) }; };
   const groups = { dispatch: 'dispatches@floridabeauty.us' };
+  // off by default since Nov 14 (the driver app puts the status on the card): nothing goes out
+  const f0 = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db: memDb(), groupEmail: async (n) => groups[n] || null, getBoard: async () => ({ trips: [{ ...item, _samsara: { speedMph: 47, location: 'State Road 7, Palm Beach County, FL' } }] }), env, fetchFn, now: () => plan - 2 * 60000 });
+  await f0.run();
+  assert.equal(mails.length, 0, 'no fix-TruckMate email unless turned back on');
+  await db.set('taPickupFollowCfg', { tmFixEmails: true });
   const f = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, groupEmail: async (n) => groups[n] || null, getBoard: async () => ({ trips: [item] }), env, fetchFn, now: () => clock });
   await f.run();
   assert.equal(mails.length, 0);
@@ -157,12 +168,12 @@ test('GPS departed but TruckMate still LOADEDTOGO → one email to dispatches@ +
   const fixes = () => mails.map((m) => Buffer.from(m, 'base64').toString('utf8')).filter((m) => /Subject: =\?UTF-8\?B\?/.test(m) && /Update TruckMate/.test(Buffer.from((m.match(/^Subject: =\?UTF-8\?B\?([^?]+)/m) || [])[1] || '', 'base64').toString()));
   clock = plan - 2 * 60000; await f.run();
   assert.equal(fixes().length, 1);
-  assert.match(fixes()[0], /^To: dispatches@floridabeauty\.us, saray@floridabeauty\.us$/m);
+  assert.match(fixes()[0], /^To: dispatches@floridabeauty\.us$/m, 'Saray only gets the running-late emails');
   clock = plan + 10 * 60000; await f.run();
   assert.equal(fixes().length, 1, 'once per pickup');
   // with a Customer Service email group, the group gets it — not the people one by one
   groups['customer service'] = 'customerservice@floridabeauty.us';
-  const db2 = memDb(); await db2.set('taHelpCfg', await db.get('taHelpCfg', {}));
+  const db2 = memDb(); await db2.set('taHelpCfg', await db.get('taHelpCfg', {})); await db2.set('taPickupFollowCfg', { tmFixEmails: true });
   const item2 = { ...item, trip: { ...item.trip, tripNumber: '624626', status: 'LOADEDTOGO' } };
   const f2 = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db: db2, groupEmail: async (n) => groups[n] || null, getBoard: async () => ({ trips: [item2] }), env, fetchFn, now: () => clock });
   clock = plan - 2 * 60000; await f2.run();
