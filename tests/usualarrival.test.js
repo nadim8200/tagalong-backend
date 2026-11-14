@@ -182,3 +182,12 @@ test('one late email per load (first late stop), again only 3 h worse and 6 h la
   assert.equal(lateCheck([item], etas, learned).length, 0, 'Wednesday load vs Monday arrivals');
   assert.equal(lateCheck([{ ...item, _tb: { date: '2026-11-09', stops: [] } }], etas, learned).length, 1, 'Monday load vs Monday arrivals');
 });
+
+test('a truck already at the customer (within 3 miles) is never "running late" — its ETA is just now', () => {
+  const learned = learn({}, rows, (n) => outbound[n] || null, () => 'MIAMI');
+  const item = { trip: { tripNumber: '627065', powerUnit: '4550', trailer: '2077', origZoneDesc: 'MIAMI TERMINAL' }, _tb: { date: '2026-11-09', stops: [] },
+    _manifest: { stops: [{ action: 'DELIVER', customer: 'DIRECT FLOWERS OF BOSTON INC', city: 'CHELSEA', state: 'MA' }] }, freightBills: [{ billNumber: 'M1', billToName: 'DIRECT FLOWERS OF BOSTON INC', endZoneDescription: 'CHELSEA, MA, 02150' }] };
+  const at = (miles) => ({ 627065: { stops: [{ label: 'CHELSEA, MA, 02150', miles, etaMs: Date.parse('2026-11-11T14:10:00Z') }] } });
+  assert.equal(lateCheck([item], at(1), learned).length, 0, 'there already');
+  assert.equal(lateCheck([item], at(40), learned).length, 1, '40 miles out and past the usual time: late');
+});

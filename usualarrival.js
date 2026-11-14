@@ -140,6 +140,7 @@ export const isLtl = (it) => !!it && isFlowerLoad(it) && loadLabel(it) !== 'BROK
 
 // Each open stop on the LTL loads: its ETA vs the customers' usual time there. → [{ trip, label, customers, etaMs, usual,
 // usualMs, lateMin }] (lateMin > 0 = later than usual). Pure.
+export const AT_STOP_MILES = 3;
 export function lateCheck(items = [], etas = {}, learned = {}) {
   const out = [];
   for (const it of items) {
@@ -149,6 +150,9 @@ export function lateCheck(items = [], etas = {}, learned = {}) {
     const sheet = ((it._manifest && it._manifest.stops) || []).filter((x) => /DELIVER/i.test(x.action || ''));
     for (const s of ((etas[n] && etas[n].stops) || [])) {
       if (!s.etaMs || !s.label) continue;
+      // the truck is already there (within 3 miles): its "ETA" is just now — it arrived earlier, so it isn't running late
+      // (627065 / 627066 sat at Fall River from early morning and got late emails at 6:10 AM)
+      if (s.miles != null && Number.isFinite(Number(s.miles)) && Number(s.miles) <= AT_STOP_MILES) continue;
       const names = new Set([
         ...sheet.filter((x) => town(x.city) === town(s.label) || town(x.tmPlace) === town(s.label)).map((x) => x.customer),
         ...billsOf(it).filter((b) => town(b.endZoneDescription) === town(s.label) && !b.actualDelivery).map((b) => String(b.billToName || '').replace(/\s*\*$/, '')),
