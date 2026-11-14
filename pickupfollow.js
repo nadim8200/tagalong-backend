@@ -14,6 +14,7 @@ import { sendMail, mailConfig } from './mailer.js';
 import { recipientFor } from './comms.js';
 import { renderOutboundFollowUp } from './followupmail.js';
 import { CHECKINS, HOLD_MS } from './checkins.js';
+import { pickupEmail, imageBytes } from './pickupmail.js';
 
 const MIN = 60000;
 export const TZ_BY_STATE = { CA: 'America/Los_Angeles', WA: 'America/Los_Angeles', OR: 'America/Los_Angeles', NV: 'America/Los_Angeles', AZ: 'America/Phoenix', TX: 'America/Chicago', IL: 'America/Chicago', TN: 'America/Chicago', AL: 'America/Chicago', MS: 'America/Chicago', LA: 'America/Chicago', MO: 'America/Chicago', MN: 'America/Chicago', WI: 'America/Chicago', IA: 'America/Chicago', AR: 'America/Chicago', OK: 'America/Chicago', KS: 'America/Chicago', NE: 'America/Chicago', CO: 'America/Denver', UT: 'America/Denver', NM: 'America/Denver' };
@@ -112,27 +113,16 @@ export function textFor(step, { name, trip, plan, moved }) {
   return `${hi} Checking again on load ${trip} — pickup ${when}. Are you on the way? Reply with your ETA. Reply STOP to opt out.`;
 }
 
-const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const WORDS = { rolling: 'rolling to pickup', delayed: 'pickup will be late', issue: 'has a problem', not_yet: 'not rolling yet' };
+const WORDS = { rolling: 'rolling to pickup', delayed: 'pickup will be late', issue: 'has a problem', not_yet: 'not rolling yet', not_rolling: 'not rolling to pickup' };
 
-// The email to dispatch. Pure.
-export function followEmail({ item, plan, outcome, convo, summary, link }) {
+// The email to dispatch (pickupmail.js, the approved "JARVIS · PICKUP UPDATE" design). images: 'cid' for a new email, the https
+// base for a reply inside an email chain. Pure.
+export function followEmail({ item, plan, outcome, convo, images = 'cid' }) {
   const t = tripOf(item); const live = item._samsara || {};
-  const driver = (live.driver1Info && live.driver1Info.name) || live.driver1 || (item._oc && item._oc.driverName) || 'the driver';
-  const subject = `Trip ${tripNo(item)} — ${driver}: ${WORDS[outcome.status] || 'update'}${outcome.eta ? ` (${outcome.eta})` : ''}`;
-  const map = live.lat != null ? `https://maps.google.com/?q=${live.lat},${live.lng}` : null;
-  const rows = convo.map((c) => `<tr><td style="padding:3px 8px;color:#666;white-space:nowrap;vertical-align:top">${esc(fmt(Date.parse(c.at)))}</td><td style="padding:3px 8px;vertical-align:top"><b>${esc(c.who)}</b> (${esc(c.how)}): ${esc(c.text)}</td></tr>`).join('');
-  const html = `<div style="font-family:Arial,sans-serif;font-size:14px">
-<p>Good day,</p>
-<p>${esc(summary)}</p>
-<p><b>Trip ${esc(tripNo(item))}</b> · truck ${esc(t.powerUnit || '—')} · trailer ${esc(t.trailer || '—')} · driver ${esc(driver)}<br>
-Pickup: ${esc(plan.place || '—')} · ${esc(fmt(plan.ms, plan.tz))} (from ${esc(plan.source)})<br>
-Status: <b>${esc(WORDS[outcome.status] || outcome.status)}</b>${outcome.eta ? ` · ETA ${esc(outcome.eta)}` : ''} — from ${esc(outcome.source)}</p>
-<p><b>Tracking</b>: ${live.location ? `${esc(live.location)}${live.gpsAt ? ` (as of ${esc(fmt(Date.parse(live.gpsAt)))})` : ''}` : 'no GPS right now'}${live.speedMph != null ? ` · ${live.speedMph > 5 ? `${Math.round(live.speedMph)} mph` : 'stopped'}` : ''}${map ? ` · <a href="${map}">map</a>` : ''}${link ? ` · <a href="${esc(link)}">live tracking link</a>` : ''}</p>
-${rows ? `<p><b>What was said</b></p><table cellspacing="0" style="font-size:13px">${rows}</table>` : ''}
-<p>The trip sheet is attached when we have it.</p>
-<p>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>`;
-  return { subject, html };
+  const driver = (live.driver1Info && live.driver1Info.name) || live.driver1 || (item._oc && item._oc.driverName) || null;
+  const subject = `Trip ${tripNo(item)} — ${driver || 'the driver'}: ${WORDS[outcome.status] || 'update'}${outcome.eta ? ` (${outcome.eta})` : ''}`;
+  return pickupEmail({ trip: tripNo(item), truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null, driver, plan, outcome, live, subject, images,
+    convo: (convo || []).map((c) => ({ ...c, when: c.at ? fmt(Date.parse(c.at)) : '' })) });
 }
 
 // Did the load leave? TruckMate departed / rolling, or the truck moving on GPS from 15 min before pickup on. Pure.
@@ -182,6 +172,9 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
   const enabled = !!(db && db.enabled);
   const site = 'florida-beauty';
   const key = `taPickupFollow:${site}`;
+  // the email's pictures for replies inside a chain (those can't carry attachments): logo, Jarvis, icons — nothing else
+  const IMG_BASE = String(env.PUBLIC_API_URL || 'https://tagalong-backend-fdzx.onrender.com').replace(/\/+$/, '');
+  if (app) app.get('/email/img/:f', (req, res) => { const b = imageBytes(String(req.params.f)); if (!b) return res.status(404).end(); res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=604800' }); return res.end(b); });
   const cfgKey = 'taPickupFollowCfg';
   const DEFAULTS = { on: true, to: [], callWhenNoText: true, tmFixTo: [] };
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
@@ -243,15 +236,15 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     const trip = tripNo(item);
     const convo = await conversation(trip, Date.parse(state.startedAt || 0) || 0);
     const summary = outcome.summary || `${(item._samsara && item._samsara.driver1) || 'The driver'} is ${WORDS[outcome.status] || 'updated'} for trip ${trip}${outcome.eta ? ` — ETA ${outcome.eta}` : ''} (${outcome.source}).`;
-    const link = item._driverLink && !['revoked', 'completed', 'expired'].includes(item._driverLink.status) ? item._driverLink.url : null;
-    const { subject, html } = followEmail({ item, plan, outcome, convo, summary, link });
+    const o = { ...outcome, summary };
     const chainId = (item._pickupAsk && item._pickupAsk.emailId) || (item._sheetEmail && item._sheetEmail.id);
-    if (chainId && replyInThread) { const r = await replyInThread(site, chainId, { text: summary, html }).catch(() => null); if (r && r.sent) return { emailed: true, subject, chain: chainId }; }
+    if (chainId && replyInThread) { const m = followEmail({ item, plan, outcome: o, convo, images: IMG_BASE }); const r = await replyInThread(site, chainId, { text: m.text, html: m.html }).catch(() => null); if (r && r.sent) return { emailed: true, subject: m.subject, chain: chainId }; }
+    const { subject, html, text, attachments: pics } = followEmail({ item, plan, outcome: o, convo });
     const toList = cfg.to.length ? cfg.to : (groupEmail ? [await groupEmail('dispatch').catch(() => null)].filter(Boolean) : []);
     if (!toList.length || !mailConfig(env).ready) return { emailed: false, subject };
     const ids = ((item._manifest && item._manifest.docIds) || []).slice(0, 3);
     const files = docs && docs.readDocs && ids.length ? await docs.readDocs({ site, ids }) : [];
-    await sendMail({ to: toList, subject, html, attachments: files.map((f, i) => ({ name: `trip-sheet-${trip}${files.length > 1 ? `-${i + 1}` : ''}.${/pdf/.test(f.mediaType) ? 'pdf' : 'jpg'}`, contentType: f.mediaType, bytes: f.data })) }, { env, fetchFn });
+    await sendMail({ to: toList, subject, html, text: files.length ? null : text, attachments: [...pics, ...files.map((f, i) => ({ name: `trip-sheet-${trip}${files.length > 1 ? `-${i + 1}` : ''}.${/pdf/.test(f.mediaType) ? 'pdf' : 'jpg'}`, contentType: f.mediaType, bytes: f.data }))] }, { env, fetchFn });
     return { emailed: true, subject };
   }
 
@@ -299,7 +292,7 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
           if (lastWords && lastWords.at !== st.lastReadAt) {
             st.lastReadAt = lastWords.at;
             const u = await understand(lastWords.text); // eslint-disable-line no-await-in-loop
-            if (u.status && u.status !== 'not_yet') st.outcome = { status: u.status, eta: u.eta, summary: u.summary, source: lastWords.how === 'phone' ? 'Jarvis call' : 'driver text', at: lastWords.at, newPickupAt: u.newPickupAt || null };
+            if (u.status && u.status !== 'not_yet') st.outcome = { status: u.status, eta: u.eta, summary: u.summary, source: lastWords.how === 'phone' ? 'Jarvis call' : 'driver text', at: lastWords.at, newPickupAt: u.newPickupAt || null, driverSaid: lastWords.how === 'phone' ? (u.summary || null) : String(lastWords.text || '').slice(0, 1000) };
           }
         }
         if (st.outcome && !engaged && st.outcome.source !== 'driver text' && st.outcome.source !== 'Jarvis call') st.outcome.silent = true;
@@ -376,6 +369,24 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     if (t.unref) t.unref();
   }
 
+  // the driver answered "Rolling to your next pickup?" in the driver app (pickupask.js): Yes, or No with why → dispatch gets the email now
+  async function driverAnswered(trip, ans) {
+    if (!enabled) return { emailed: false };
+    const it = (((await getBoard(site)) || {}).trips || []).find((x) => tripNo(x) === String(trip));
+    if (!it) return { emailed: false, error: 'load not on the board' };
+    const plan = plannedPickup(it) || { ms: null, place: null, tz: 'America/New_York', source: null };
+    const who = ans.by || 'The driver';
+    const outcome = ans.rolling
+      ? { status: 'rolling', source: 'driver app', at: ans.at, driverSaid: ans.comment || null, summary: `${who} answered in the driver app: yes, rolling to the pickup for trip ${trip}.${ans.comment ? ` Note: "${ans.comment}"` : ''}` }
+      : { status: 'not_rolling', source: 'driver app', at: ans.at, driverSaid: ans.comment || null, summary: `${who} answered in the driver app: not rolling to the pickup for trip ${trip}. Why: "${ans.comment}"` };
+    const book = await db.get(key, {});
+    const st = { ...(book[trip] || { plannedAt: plan.ms, steps: {}, startedAt: new Date(now()).toISOString() }), outcome };
+    let reported;
+    try { reported = await report(it, plan, st, outcome); } catch (e) { reported = { emailed: false, error: e.message }; }
+    await db.update(key, (cur) => ({ ...(cur || {}), [trip]: { ...((cur || {})[trip] || st), outcome, reported } }), {});
+    return reported;
+  }
+
   // board overlay: what Jarvis is doing for the pickup
   async function overlay(s, trips) {
     if (!enabled) return;
@@ -391,5 +402,5 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
     res.json(await db.update(cfgKey, (cur) => ({ ...(cur || {}), to, ...(tmFix ? { tmFixTo: tmFix } : {}), on: b.on !== false, ...(b.emails != null ? { emails: b.emails !== false } : {}), callWhenNoText: b.callWhenNoText !== false, updatedBy: who(req), updatedAt: new Date().toISOString() }), {}));
   });
   console.log(`[pickup-follow] driver pickup follow-up ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { run, overlay };
+  return { run, overlay, driverAnswered };
 }

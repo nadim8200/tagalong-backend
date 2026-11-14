@@ -61,7 +61,8 @@ test('end to end: texts the driver, reads "rolling", emails dispatch with the wo
   const m = mails[0].message;
   assert.match(m.subject, /^Trip 624520 — Frankie Patterson: rolling to pickup/);
   assert.match(m.body.content, /Rolling now, 20 min out/); assert.match(m.body.content, /maps\.google\.com\/\?q=25\.8,-80\.33/);
-  assert.equal(m.attachments[0].name, 'trip-sheet-624520.jpg');
+  assert.ok(m.attachments.some((a) => a.name === 'trip-sheet-624520.jpg'), 'the trip sheet');
+  assert.match(m.body.content, /JARVIS · PICKUP UPDATE/); assert.match(m.body.content, /DRIVER RESPONSE · YES/); assert.match(m.body.content, /Confirmed by text/);
   clock = Date.parse('2026-10-09T00:05:00Z');                              // 25 min before: already known, no more texts
   await f.run();
   assert.equal(texts.length, 2);
