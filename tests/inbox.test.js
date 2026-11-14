@@ -455,3 +455,19 @@ test('the broker footer never reaches the AI', () => {
   assert.equal(withoutFooter('Fixed and ready to roll\n***PLEASE REPLY-ALL FOR UPDATES***\nPLEASE ADD YOUR TRACKING TEAM TO THIS EMAIL CHAIN FOR UPDATES\nPLEASE ONLY USE THIS EMAIL CHAIN FOR UPDATES!!\nRegards'), 'Fixed and ready to roll\nRegards');
   assert.equal(withoutFooter('Truck is rolling'), 'Truck is rolling');
 });
+
+test('while Jarvis learns: Nadim gets a copy of staff emails meant for Jarvis (instruction, question, reply to Jarvis) — never broker threads', async () => {
+  const { copyReason, reviewNote } = await import('../inbox.js');
+  assert.equal(copyReason({ instructions: [{ kind: 'text_driver' }] }, { staff: true }), 'instruction');
+  assert.equal(copyReason({ subject: 'Re: Later still: trip 626966 — H&T', instructions: [] }, { staff: true }), 'reply');
+  assert.equal(copyReason({ subject: 'RE: Miami Trip 626966' }, { staff: true, sentByJarvis: true }), 'reply');
+  assert.equal(copyReason({ subject: 'Where is 2602?', toJarvis: true, reply: { needed: true } }, { staff: true }), 'question');
+  assert.equal(copyReason({ subject: 'Re: ARRIVE LOGISTICS 9926793', instructions: [] }, { staff: false, sentByJarvis: true }), null, 'brokers never');
+  assert.equal(copyReason({ subject: 'Re: Miami Trip 626966' }, { staff: true }), null, 'a staff thread Jarvis never wrote in');
+  assert.equal(copyReason({ subject: 'OUTBOUND TRIP SHEETS', packet: true, toJarvis: true, instructions: [{ kind: 'note' }] }, { staff: true }), null, 'trip-sheet packets');
+  const n = reviewNote({ from: { name: 'Saray Trujillo' }, instructionResults: [{ kind: 'text_driver', trip: '626966', sent: 'texted the driver' }, { kind: 'email_group', skipped: 'no email group "Billing"' }], replies: [{}] }, 'instruction');
+  assert.match(n, /Saray Trujillo sent an instruction for Jarvis/);
+  assert.match(n, /text_driver \(trip 626966\): texted the driver/);
+  assert.match(n, /email_group: not done — no email group &quot;Billing&quot;/);
+  assert.match(n, /replied in the thread/);
+});

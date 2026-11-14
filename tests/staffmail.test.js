@@ -25,3 +25,20 @@ test('staff email: our addresses only; plain text → paragraphs + list; review 
   assert.equal(s.out.ok, true); assert.deepEqual(sent[1].to, ['strujillo@floridabeauty.us']); assert.equal(sent[1].subject, 'Sorry');
   assert.equal((await call('POST /truckmate/staff-email/:id/send', { params: { id: d.out.id } })).out.already, true, 'never twice');
 });
+
+test('"A note from Jarvis" template: category, headline, greeting, update rows where {{updates}} is, closing, signature; unused parts left out; text escaped', async () => {
+  const { staffEmail, fields } = await import('../staffmail.js');
+  const m = staffEmail({ subject: 'S', category: 'Team update', headline: 'Fewer <alerts>', greeting: 'Hi Saray,', body: 'First.\n\n{{updates}}\n\nAfter.',
+    updates: [{ icon: 'mail', title: 'One email per load', text: 'Instead of one per stop.' }, { icon: 'evil', title: 'X', text: 'Y' }] });
+  assert.match(m.html, /A NOTE FROM JARVIS/); assert.match(m.html, />TEAM UPDATE</); assert.match(m.html, /Fewer &lt;alerts&gt;/);
+  assert.ok(m.html.indexOf('First.') < m.html.indexOf('One email per load') && m.html.indexOf('One email per load') < m.html.indexOf('After.'), 'box where {{updates}} is');
+  assert.match(m.html, /cid:sm-mail/); assert.doesNotMatch(m.html, /cid:sm-evil/);
+  assert.match(m.html, />Jarvis</); assert.match(m.html, /Your AI Dispatcher/); assert.match(m.html, /Internal team communication/);
+  assert.match(m.text, /^TEAM UPDATE\n\nFewer <alerts>\n\nHi Saray,\n\nFirst\.\n\n- One email per load: Instead of one per stop\.\n- X: Y\n\nAfter\.\n\nThank you,\n\nJarvis\nYour AI Dispatcher/);
+  assert.deepEqual(m.attachments.map((a) => a.cid).filter((c) => c !== 'sm-mark' && c !== 'sm-avatar'), ['sm-mail']);
+  const short = staffEmail({ subject: 'S', body: 'Just a note.' });
+  assert.doesNotMatch(short.html, /<h1|#EAF2FC|letter-spacing:2px;color:#1D63C8/, 'no headline, no box, no category');
+  assert.equal(short.text.split('\n\n')[0], 'Just a note.');
+  assert.equal(fields({ closing: '' }).closing, null); assert.equal(fields({}).closing, 'Thank you,');
+  assert.deepEqual(fields({ updates: [{ icon: 'x', title: ' A ' }] }).updates, [{ icon: null, title: 'A', text: null }]);
+});

@@ -203,6 +203,27 @@ export function senderCheck(headers) {
   if (/\b(dmarc|compauth)=pass\b/i.test(results)) return 'ok';
   return authAs || results ? 'failed' : 'unknown';
 }
+// Is this email one Nadim gets a copy of while Jarvis learns? Only our own staff, and only when it's meant for Jarvis:
+// an instruction, a question Jarvis answers, or a reply to an email Jarvis sent. → 'instruction' | 'question' | 'reply' | null. Pure.
+const JARVIS_SUBJECTS = /\b(running late|later still): trip \d+|\bA note from Jarvis\b|\[JV-[a-z0-9]{4,}\]|\bJarvis\b/i;
+export function copyReason(e, { staff = false, sentByJarvis = false } = {}) {
+  if (!e || !staff || e.packet || e.rateConFlow || e.auto === 'load-sheet') return null;
+  if ((e.instructions || []).length) return 'instruction';
+  const re = /^\s*(re|rv|aw)\s*:/i.test(String(e.subject || ''));
+  if (re && (sentByJarvis || JARVIS_SUBJECTS.test(String(e.subject || '')))) return 'reply';
+  if (e.toJarvis && e.reply && e.reply.needed) return 'question';
+  return null;
+}
+// The note on top of the forwarded copy: why it came, and what Jarvis did (only what was recorded). Pure.
+export function reviewNote(e, why) {
+  const h = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const label = { instruction: 'an instruction for Jarvis', question: 'a question for Jarvis', reply: 'a reply to an email Jarvis sent' }[why] || 'an email for Jarvis';
+  const did = (e.instructionResults || []).map((r) => `${r.kind}${r.trip ? ` (trip ${r.trip})` : ''}: ${r.sent || (r.skipped ? `not done — ${r.skipped}` : r.error ? `failed — ${r.error}` : 'noted')}`);
+  if ((e.replies || []).length) did.push(`replied in the thread (${(e.replies || []).length}) — your copy of the reply is in your inbox`);
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1F2937"><p><b>Copy for review</b> — ${h(e.from && (e.from.name || e.from.address))} sent ${label}.</p>`
+    + `<p><b>What Jarvis did:</b><br>${did.length ? did.map(h).join('<br>') : 'Nothing yet (read and filed it).'}</p>`
+    + '<p style="color:#6B7280">Tell me if Jarvis should handle this kind of email differently.</p></div>';
+}
 export function isInternal(address, env = process.env) {
   if (SYSTEM_SENDER.test(String(address || '').split('@')[0])) return false;   // our mail system's notices are not staff
   const dom = String(address || '').toLowerCase().split('@')[1] || '';
@@ -598,6 +619,7 @@ export function initInbox(app, { ocLoads = null, requireAuth, db, stopReview = n
       if (m.hasAttachments || /cid:/i.test(String((m.body && m.body.content) || ''))) { try { attachments = await saveAttachments(site, m.id, trips[0] || null, { store: !packetLike, sift: !packetLike, html: m.body && m.body.contentType === 'html' ? m.body.content : '' }); } catch (e) { console.warn('[inbox] attachments:', e.message); } } // eslint-disable-line no-await-in-loop
       if (attachments.length && trips.length > 1 && docs.linkDocs) await docs.linkDocs({ site, kind: 'email', links: attachments.map((a) => ({ docId: a.docId, trips })) }); // eslint-disable-line no-await-in-loop
       const email = { id: m.id, conversationId: m.conversationId || null, from, subject: String(m.subject || '').slice(0, 300), at: m.receivedDateTime, text, attachments: attachments.map(({ bytes, ...a }) => a), trips, why: matches.map((x) => x.why), status: 'new', replies: [] };
+      email.toJarvis = (m.toRecipients || []).some((r) => String((r && r.emailAddress && r.emailAddress.address) || '').toLowerCase() === String(mailConfig(env).from || '').toLowerCase());
       email.rcBatch = !isPacketEmail(email.subject, attachments) && isRateConBatch(from.address, email.subject, text, attachments, env);
       // Gus's scanner puts a whole batch in one PDF: more than one page is read as a batch, page by page, never as one rate con
       if (!email.rcBatch && !isPacketEmail(email.subject, attachments) && NEXT_LOAD_SENDERS(env).includes(from.address.toLowerCase()) && attachments.length === 1 && /pdf/i.test(attachments[0].contentType || '')) {
@@ -762,8 +784,29 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     // save (and drop any duplicate entries an older version left behind)
     if (fresh.length) await db.update(key(site), (cur) => { const seen = new Set(); const all = [...fresh.reverse(), ...((cur && cur.list) || [])].filter((e) => (seen.has(e.id) ? false : seen.add(e.id))); return { ...(cur || {}), list: keepEmails(all) }; }, { list: [] });
     for (const e of fresh) { try { await afterArrival(site, e, items); } catch (err) { console.warn('[inbox] reply / instructions:', err.message); } } // eslint-disable-line no-await-in-loop
+    for (const e of fresh) { try { await copyForReview(site, e.id); } catch (err) { console.warn('[inbox] copy to Nadim:', err.message); } } // eslint-disable-line no-await-in-loop
     for (const j of packetJobs) queuePacket(site, j);
     return fresh.length;
+  }
+
+  // ---- while Jarvis learns: Nadim gets every staff email meant for Jarvis (an instruction, a question, a reply to a Jarvis
+  // email), forwarded with what Jarvis did about it. Never broker / customer threads or group mail Jarvis only reads. ----
+  async function copyForReview(site, id) {
+    const e = ((((await db.get(key(site), { list: [] })) || {}).list) || []).find((x) => x.id === id);
+    if (!e || e.copiedForReview || !mailConfig(env).ready) return;
+    const to = mailCopy(env, [e.from && e.from.address].filter(Boolean)).map((r) => r.emailAddress.address);
+    if (!to.length) return;
+    const staff = isInternal(e.from && e.from.address, env);
+    let sentByJarvis = false;
+    if (staff && e.conversationId && /^\s*(re|rv|aw)\s*:/i.test(String(e.subject || '')) && !(e.instructions || []).length) {
+      // a reply on a chain Jarvis wrote in: Jarvis has a sent email in the same conversation
+      try { const r = await g(`/mailFolders/sentitems/messages?$filter=${encodeURIComponent(`conversationId eq '${String(e.conversationId).replace(/'/g, "''")}'`)}&$top=1&$select=id`); sentByJarvis = !!(r && (r.value || []).length); } catch { /* can't tell — the subject check still works */ }
+    }
+    const why = copyReason(e, { staff, sentByJarvis });
+    if (!why) return;
+    const n = reviewNote(e, why);
+    await g(`/messages/${encodeURIComponent(e.id)}/forward`, { method: 'POST', body: { comment: n, toRecipients: to.map((address) => ({ emailAddress: { address } })) } });
+    await update(site, e.id, (x) => ({ ...x, copiedForReview: new Date().toISOString() }));
   }
 
   // ---- what Jarvis does once an email is in ----
