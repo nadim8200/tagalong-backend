@@ -157,7 +157,9 @@ export function lateCheck(items = [], etas = {}, learned = {}) {
       let best = null;
       for (const c of names) {
         const rec = learned[stopKey(c, s.label)] || Object.values(learned).find((r) => custKey(r.customer) === custKey(c) && town(r.place) === town(s.label));
-        const u = usualFor(rec, od, hubOf(it)); const ms = usualMs(u, od, s.label);
+        // routes change by outbound weekday (Wednesday's truck reaches Phoenix after Texas, Friday's after El Paso), so a
+        // load is judged only against arrivals from its own outbound weekday, or a time staff set
+        const u = usualFor(rec, od, hubOf(it)); const ms = u && (u.set || u.byWeekday) ? usualMs(u, od, s.label) : null;
         if (u && ms && (!best || ms < best.usualMs)) best = { customer: c, usual: u, usualMs: ms };
       }
       if (!best) continue;
@@ -172,6 +174,24 @@ export function lateCheck(items = [], etas = {}, learned = {}) {
 export function shouldAlert(prev, lateMin, limit = 90) {
   if (lateMin < limit) return false;
   return !prev || lateMin - prev.lateMin >= 60;
+}
+
+// One email per load, not one per stop: the first stop running late is the news (the stops after it are late because of
+// it). Again only when it's 3 h worse than the last email and 6 h have passed. sent = { 'trip:N': { lateMin, at, label } }
+// (older 'N|stop' keys count too). → [{ row, worse }]. Pure.
+export const WORSE_MIN = 180;
+export const GAP_MS = 6 * 3600000;
+export function dueByTrip(rows = [], sent = {}, limit = 90, now = Date.now()) {
+  const first = new Map();
+  for (const x of rows) if (x.lateMin >= limit && !first.has(x.trip)) first.set(x.trip, x);
+  const out = [];
+  for (const [trip, x] of first) {
+    const old = Object.entries(sent).filter(([k]) => k.startsWith(`${trip}|`)).map(([, v]) => v);
+    const prev = sent[`trip:${trip}`] || old.sort((a, b) => Date.parse(b.at || 0) - Date.parse(a.at || 0))[0] || null;
+    if (!prev) { out.push({ row: x, worse: false }); continue; }
+    if (x.lateMin - prev.lateMin >= WORSE_MIN && now - Date.parse(prev.at || 0) >= GAP_MS) out.push({ row: x, worse: true });
+  }
+  return out;
 }
 
 const hm = (m) => (m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}` : `${m} min`);

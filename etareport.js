@@ -10,7 +10,7 @@
 import { localToUtcMs } from './watchtower.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 import { outboundDate, nameScore } from './voice.js';
-import { learn, lateCheck, shouldAlert, lateEmail, usualView, usualFor as usualOf, parseClock, parseWeekday, learnedDays, stopKey, hubKey, hubOf } from './usualarrival.js';
+import { learn, lateCheck, dueByTrip, lateEmail, usualView, usualFor as usualOf, parseClock, parseWeekday, learnedDays, stopKey, hubKey, hubOf } from './usualarrival.js';
 
 const SITE = 'florida-beauty';
 const LOG = (site) => `taEtaLog:${site}`;
@@ -221,17 +221,16 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     const cfg = { on: true, limitMin: 90, ...((await db.get(LATE_CFG, {})) || {}) };
     if (!cfg.on || !sendMail) return;
     const sent = (await db.get(LATE_SENT(site), {})) || {};
-    const due = rows.filter((x) => shouldAlert(sent[`${x.trip}|${x.label}`], x.lateMin, cfg.limitMin));
+    const due = dueByTrip(rows, sent, cfg.limitMin, now());
     if (!due.length) return;
     const to = await lateRecipients();
     if (!to.length) return;
     const cc = (await lateCc().catch(() => [])).filter((x) => !to.includes(x));   // Saray checks them and replies (Jarvis learns from it)
     const byN = new Map(items.map((it) => [tripNo(it), it]));
-    for (const x of due) {
-      const k = `${x.trip}|${x.label}`;
-      const m = lateEmail(x, byN.get(x.trip), { worse: !!sent[k] });
+    for (const { row: x, worse } of due) {
+      const m = lateEmail(x, byN.get(x.trip), { worse });
       await sendMail({ to, cc, subject: m.subject, html: m.html, text: m.text, attachments: m.attachments || [] }); // eslint-disable-line no-await-in-loop
-      sent[k] = { lateMin: x.lateMin, at: new Date(now()).toISOString() };
+      sent[`trip:${x.trip}`] = { lateMin: x.lateMin, label: x.label, at: new Date(now()).toISOString() };
       console.log(`[usual-arrival] late alert: trip ${x.trip} ${x.label} +${x.lateMin} min`);
     }
     await db.set(LATE_SENT(site), Object.fromEntries(Object.entries(sent).slice(-1000)));

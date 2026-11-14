@@ -157,3 +157,28 @@ test('running-late emails: cc Saray (Fri–Mon list), the hub on the email, a re
   await r.process('florida-beauty', { trips: [{ trip: { tripNumber: '626966', origZoneDesc: 'MIAMI TERMINAL', powerUnit: '2602' }, _tb: { date: '2026-11-11', stops: [] }, freightBills: [{ billNumber: 'M1', billToName: 'H&T WHOLESALE FLOWERS HOUSTON INC', endZoneDescription: 'HOUSTON, TX, 77040' }] }] });
   assert.equal(sent.length, 1); assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']); assert.deepEqual(sent[0].cc, ['strujillo@floridabeauty.us']);
 });
+
+test('one late email per load (first late stop), again only 3 h worse and 6 h later; any-weekday usual never alerts', async () => {
+  const { dueByTrip } = await import('../usualarrival.js');
+  const T0 = Date.parse('2026-11-13T18:00:00Z');
+  const rows = [
+    { trip: '626966', label: 'HOUSTON, TX, 77040', lateMin: 1039 },
+    { trip: '626966', label: 'PHOENIX, AZ, 85043', lateMin: 1183 },
+    { trip: '627130', label: 'PHOENIX, AZ, 85043', lateMin: 60 },
+  ];
+  const d = dueByTrip(rows, {}, 90, T0);
+  assert.deepEqual(d.map((x) => [x.row.trip, x.row.label, x.worse]), [['626966', 'HOUSTON, TX, 77040', false]]);
+  const sent = { 'trip:626966': { lateMin: 1039, at: new Date(T0).toISOString() } };
+  assert.equal(dueByTrip([{ trip: '626966', label: 'PHOENIX, AZ, 85043', lateMin: 1150 }], sent, 90, T0 + 7 * 3600000).length, 0, 'next stop just as late: no email');
+  assert.equal(dueByTrip([{ trip: '626966', label: 'PHOENIX, AZ, 85043', lateMin: 1300 }], sent, 90, T0 + 2 * 3600000).length, 0, '3 h worse but too soon');
+  assert.equal(dueByTrip([{ trip: '626966', label: 'PHOENIX, AZ, 85043', lateMin: 1300 }], sent, 90, T0 + 7 * 3600000)[0].worse, true);
+  assert.equal(dueByTrip(rows, { '626966|HOUSTON, TX, 77040': { lateMin: 1039, at: new Date(T0).toISOString() } }, 90, T0 + 3600000).length, 0, 'older per-stop record counts');
+  // H&T Phoenix learned from other weekdays' routes (2 days) → a Wednesday load isn't judged against it
+  const arr = [1, 2, 3, 4].map((i) => ({ trip: `9${i}`, days: 2, min: 1226, dow: 1, hub: 'MIAMI', outbound: '2026-11-02', ms: i }));
+  const learned = { [stopKey('H&T WHOLESALE FLOWERS INC', 'PHOENIX, AZ')]: { customer: 'H&T WHOLESALE FLOWERS INC', place: 'PHOENIX, AZ', arrivals: arr } };
+  const item = { trip: { tripNumber: '626966', powerUnit: '2602', origZoneDesc: 'MIAMI TERMINAL' }, _tb: { date: '2026-11-11', stops: [] },
+    _manifest: { stops: [{ action: 'DELIVER', customer: 'H&T WHOLESALE FLOWERS INC', city: 'PHOENIX', state: 'AZ' }] }, freightBills: [{ billNumber: 'M1', billToName: 'H&T WHOLESALE FLOWERS INC*', endZoneDescription: 'PHOENIX, AZ, 85043' }] };
+  const etas = { 626966: { stops: [{ label: 'PHOENIX, AZ, 85043', etaMs: Date.parse('2026-11-15T00:00:00Z') }] } };
+  assert.equal(lateCheck([item], etas, learned).length, 0, 'Wednesday load vs Monday arrivals');
+  assert.equal(lateCheck([{ ...item, _tb: { date: '2026-11-09', stops: [] } }], etas, learned).length, 1, 'Monday load vs Monday arrivals');
+});
