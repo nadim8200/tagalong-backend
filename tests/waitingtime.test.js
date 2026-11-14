@@ -36,7 +36,7 @@ test('what happens next', () => {
 const load = (history, mph = 0, at = null) => ({ trip: { tripNumber: '626218', powerUnit: '2205', trailer: '7262' }, freightBills: [{ billNumber: 'B180607' }], _times: { statusHistory: history }, _samsara: { speedMph: mph, gpsAt: at } });
 const run = () => {
   const db = mem(); let clock = T0; const sent = [];
-  const w = initWaitingTime(null, { db, secret: 's', etas: async () => ({ 626218: { stops: [{ label: 'CARSON, CA', apptMs: T0 + H }] } }), recipients: async () => ['a@floridabeauty.us'], send: async (kind, r) => sent.push([kind, r]), now: () => clock });
+  const w = initWaitingTime(null, { checkinOnly: false, db, secret: 's', etas: async () => ({ 626218: { stops: [{ label: 'CARSON, CA', apptMs: T0 + H }] } }), recipients: async () => ['a@floridabeauty.us'], send: async (kind, r) => sent.push([kind, r]), now: () => clock });
   return { w, db, sent, at: (ms) => { clock = ms; }, now: () => clock };
 };
 
@@ -143,7 +143,7 @@ test('a truck that rolls off with no departure marked gets its total from when i
 
 test('an appointment that shows up later moves the clock', async () => {
   const db = mem(); let clock = T0; const sent = []; let legs = {};
-  const w = initWaitingTime(null, { db, secret: 's', etas: async () => legs, recipients: async () => ['a@floridabeauty.us'], send: async (k, r) => sent.push(r), now: () => clock });
+  const w = initWaitingTime(null, { checkinOnly: false, db, secret: 's', etas: async () => legs, recipients: async () => ['a@floridabeauty.us'], send: async (k, r) => sent.push(r), now: () => clock });
   await w.process({ trips: [] });
   const hist = [{ status: 'ARRCONS', at: iso(T0) }];
   await w.process({ trips: [load(hist, 0, iso(T0))] });
@@ -204,7 +204,7 @@ test('parked at the rate con\'s pickup by city or ZIP', () => {
 
 const truck2606 = (over = {}) => ({ trip: { tripNumber: '626289', powerUnit: '2606', trailer: '7317', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'B180767' }], _times: { statusHistory: [{ status: 'ARRSHIP', at: iso(T0 - 2 * H) }, { status: 'DEPSHIP', at: iso(T0 - H) }] }, _samsara: { speedMph: 0, gpsAt: iso(T0), location: 'Rochelle, IL, 61068' }, ...over });
 const gio = (reason = 'Still at the shipper Getting loaded', status = 'authorized') => ({ units: { 2606: { stopEpisode: { unit: '2606', trip: '626289', stoppedSinceMs: T0 - H, review: { status, reason, by: 'Gio' } } } } });
-const started = () => { const db = mem(); db.s['taWaiting:florida-beauty:began'] = 1; let clock = T0; const sent = []; const w = initWaitingTime(null, { db, secret: 's', etas: async () => ({ 626289: { stops: [{ label: 'MIAMI, FL', miles: 1440, apptMs: T0 + 40 * H }] } }), recipients: async () => ['a@floridabeauty.us'], send: async (kind, r) => sent.push([kind, r]), now: () => clock }); return { db, w, sent, at: (ms) => { clock = ms; } }; };
+const started = () => { const db = mem(); db.s['taWaiting:florida-beauty:began'] = 1; let clock = T0; const sent = []; const w = initWaitingTime(null, { checkinOnly: false, db, secret: 's', etas: async () => ({ 626289: { stops: [{ label: 'MIAMI, FL', miles: 1440, apptMs: T0 + 40 * H }] } }), recipients: async () => ['a@floridabeauty.us'], send: async (kind, r) => sent.push([kind, r]), now: () => clock }); return { db, w, sent, at: (ms) => { clock = ms; } }; };
 
 test('Gio says it is at the shipper: the clock runs from when it stopped, and the delivery 1,440 miles away has no say', async () => {
   const h = started();
@@ -301,4 +301,19 @@ test('the driver\'s check-in starts the stay: 3 hours later dispatch gets the em
   s.at(T0 + 5.2 * H); await s.w.process({ trips: [truck()] });
   assert.equal(s.sent.length, 2); assert.equal(s.sent[1][0], 'total');
   assert.equal(s.sent[1][1].waitedMs, 2 * H, 'from the 3-hour mark to the driver\'s "Loaded & leaving"');
+});
+
+test('check-in only (the default): TruckMate arrive / GPS never start a clock; an un-asked old one closes quietly; the check-in still does', async () => {
+  const db = mem(); let clock = T0; const sent = [];
+  db.s['taWaiting:florida-beauty:began'] = 1;
+  db.s['taWaiting:florida-beauty'] = { '626218:old': { key: '626218:old', trip: '626218', kind: 'shipper', arrivedMs: T0 - H, startMs: T0 + 2 * H } };
+  const w = initWaitingTime(null, { db, secret: 's', etas: async () => ({}), recipients: async () => ['a@floridabeauty.us'], send: async (k, r) => sent.push([k, r]), now: () => clock });
+  const hist = [{ status: 'ARRSHIP', at: iso(T0) }];
+  clock = T0 + 5 * H; await w.process({ trips: [load(hist, 0, iso(clock))] });
+  assert.equal(sent.length, 0, 'no email from TruckMate / GPS');
+  assert.match(db.s['taWaiting:florida-beauty']['626218:old'].closedWhy, /check-in/);
+  db.s['taDriverCheckins:florida-beauty'] = { 626218: { steps: { 'at-shipper': { at: iso(T0 + 5 * H) } } } };
+  await w.process({ trips: [load(hist, 0, iso(clock))] });
+  clock = T0 + 8.1 * H; await w.process({ trips: [load(hist, 0, iso(clock))] });
+  assert.equal(sent.length, 1); assert.equal(sent[0][0], 'start'); assert.equal(sent[0][1].checkin, true);
 });

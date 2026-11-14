@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------
 // Waiting time at a shipper or receiver, on broker loads only: LTL stops from the hubs don't get it. The driver's check-in in the driver app comes
-// first: "I'm at the shipper" / "I'm at the receiver" starts it and "Loaded & leaving" / "Delivered" ends it (checkins.js). Without a check-in,
-// TruckMate marks the truck there, or a person answers the stop email
-// that it's at the shipper or receiver, or the GPS parks it at the rate con's pickup. The clock starts 3 hours after the appointment, or 3 hours
+// first: "I'm at the shipper" / "I'm at the receiver" starts it and "Loaded & leaving" / "Delivered" ends it (checkins.js). Since Nov 14
+// the check-in is the only start (checkinOnly): TruckMate's arrive status, a person's answer on the stop email and the GPS at the
+// pickup no longer open a clock (they still can with checkinOnly: false). The clock starts 3 hours after the appointment, or 3 hours
 // after arrival if the truck got there later, so a truck that came early doesn't count its early hours. While it's there no stop emails go out. When the clock is due, dispatch
 // gets an email and approves it or not. When the truck leaves, approved or unanswered clocks get a total. Internal only: nothing here
 // reaches a customer, a broker or a driver, and it is never a bill by itself.
@@ -100,7 +100,7 @@ export function checkinStays(trip, steps = {}) {
   return out;
 }
 
-export function initWaitingTime(app, { db, secret, send, recipients, getBoard = async () => ({ trips: [] }), etas = async () => ({}), baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
+export function initWaitingTime(app, { db, secret, send, recipients, getBoard = async () => ({ trips: [] }), etas = async () => ({}), baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now(), checkinOnly = true }) {
   const enabled = !!(db && db.enabled);
   const all = async () => (await db.get(KEY(SITE), {})) || {};
   const patch = (k, fields) => db.update(KEY(SITE), (cur) => ({ ...(cur || {}), [k]: { ...(cur || {})[k], ...fields } }), {});
@@ -133,7 +133,8 @@ export function initWaitingTime(app, { db, secret, send, recipients, getBoard = 
         open(record(it, c.key, c.kind, c.arrivedMs, { anchored: true, checkin: true, stopKey: c.stop, source: 'driver checked in (driver app)', ...(c.stop ? { stop: c.stop } : {}) }));
       }
     }
-    for (const it of items) {
+    // 2–4) without a check-in (only when checkinOnly is off): TruckMate's status, a person's answer, the GPS at the pickup
+    for (const it of checkinOnly ? [] : items) {
       const at = brokerLoad(it) ? atStop(it) : null;
       if (!at || Number.isNaN(at.arrivedMs) || now() - at.arrivedMs > STALE_MS || atOurYard(it, now())) continue;
       // arrived and departed a minute apart: someone clicking ahead in TruckMate. It only counts if the truck is really stopped there
@@ -143,14 +144,14 @@ export function initWaitingTime(app, { db, secret, send, recipients, getBoard = 
     }
     // a person said it's there: "Still at the shipper getting loaded" on the stop email
     const units = ((await db.get(`taWatch:${SITE}`, {})) || {}).units || {};
-    for (const ep of Object.values(units).map((u) => u && u.stopEpisode).filter((x) => x && x.review && x.review.status === 'authorized' && x.stoppedSinceMs)) {
+    for (const ep of checkinOnly ? [] : Object.values(units).map((u) => u && u.stopEpisode).filter((x) => x && x.review && x.review.status === 'authorized' && x.stoppedSinceMs)) {
       const kind = kindFromAnswer(ep.review.reason); const it = kind && items.find((x) => tripNo(x) === String(ep.trip));
       if (!it || !brokerLoad(it) || atOurYard(it, now())) continue;
       const key = `${ep.trip}:a${ep.stoppedSinceMs}`;
       if (!stored[key]) open(record(it, key, kind, ep.stoppedSinceMs, { anchored: true, source: `${ep.review.by}: ${oneLine(ep.review.reason, 120)}` }));
     }
     // the GPS has it parked at the rate con's pickup, whatever the status says
-    for (const it of items) {
+    for (const it of checkinOnly ? [] : items) {
       if (!brokerLoad(it) || atOurYard(it, now())) continue;
       const i = parkedAtPickup(it, gpsSays(it, null, now()));
       if (i == null) continue;
@@ -159,6 +160,8 @@ export function initWaitingTime(app, { db, secret, send, recipients, getBoard = 
     }
     if (Object.keys(fresh).length) await db.update(KEY(SITE), (cur) => ({ ...fresh, ...(cur || {}) }), {});
     if (firstRun) await db.set(`${KEY(SITE)}:began`, now());
+    // check-in only: a clock TruckMate / GPS opened before, not asked about yet, closes quietly (no email, no total)
+    if (checkinOnly) for (const r of Object.values(stored)) if (!r.closedAt && !r.checkin && !r.askedAt) { await patch(r.key, { closedAt: now(), closedWhy: 'waiting time starts only from the driver\'s check-in' }); r.closedAt = now(); } // eslint-disable-line no-await-in-loop
     const list = Object.values({ ...fresh, ...stored }).filter((r) => !r.closedAt);
     for (const r of list) {
       const it = items.find((x) => tripNo(x) === r.trip) || null;
