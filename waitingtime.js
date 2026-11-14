@@ -160,8 +160,8 @@ export function initWaitingTime(app, { db, secret, send, recipients, getBoard = 
     }
     if (Object.keys(fresh).length) await db.update(KEY(SITE), (cur) => ({ ...fresh, ...(cur || {}) }), {});
     if (firstRun) await db.set(`${KEY(SITE)}:began`, now());
-    // check-in only: a clock TruckMate / GPS opened before, not asked about yet, closes quietly (no email, no total)
-    if (checkinOnly) for (const r of Object.values(stored)) if (!r.closedAt && !r.checkin && !r.askedAt) { await patch(r.key, { closedAt: now(), closedWhy: 'waiting time starts only from the driver\'s check-in' }); r.closedAt = now(); } // eslint-disable-line no-await-in-loop
+    // check-in only: every clock TruckMate / GPS opened before closes quietly — asked about or not, no total email
+    if (checkinOnly) for (const r of Object.values(stored)) if (!r.closedAt && !r.checkin) { await patch(r.key, { closedAt: now(), closedWhy: 'waiting time starts only from the driver\'s check-in' }); r.closedAt = now(); } // eslint-disable-line no-await-in-loop
     const list = Object.values({ ...fresh, ...stored }).filter((r) => !r.closedAt);
     for (const r of list) {
       const it = items.find((x) => tripNo(x) === r.trip) || null;

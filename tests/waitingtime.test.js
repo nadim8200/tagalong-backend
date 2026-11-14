@@ -306,12 +306,13 @@ test('the driver\'s check-in starts the stay: 3 hours later dispatch gets the em
 test('check-in only (the default): TruckMate arrive / GPS never start a clock; an un-asked old one closes quietly; the check-in still does', async () => {
   const db = mem(); let clock = T0; const sent = [];
   db.s['taWaiting:florida-beauty:began'] = 1;
-  db.s['taWaiting:florida-beauty'] = { '626218:old': { key: '626218:old', trip: '626218', kind: 'shipper', arrivedMs: T0 - H, startMs: T0 + 2 * H } };
+  db.s['taWaiting:florida-beauty'] = { '626218:old': { key: '626218:old', trip: '626218', kind: 'shipper', arrivedMs: T0 - H, startMs: T0 + 2 * H }, '626219:asked': { key: '626219:asked', trip: '626219', kind: 'receiver', arrivedMs: T0 - H, startMs: T0 + 2 * H, askedAt: T0 + 2 * H } };
   const w = initWaitingTime(null, { db, secret: 's', etas: async () => ({}), recipients: async () => ['a@floridabeauty.us'], send: async (k, r) => sent.push([k, r]), now: () => clock });
   const hist = [{ status: 'ARRSHIP', at: iso(T0) }];
   clock = T0 + 5 * H; await w.process({ trips: [load(hist, 0, iso(clock))] });
   assert.equal(sent.length, 0, 'no email from TruckMate / GPS');
   assert.match(db.s['taWaiting:florida-beauty']['626218:old'].closedWhy, /check-in/);
+  assert.ok(db.s['taWaiting:florida-beauty']['626219:asked'].closedAt, 'already asked about: closes too, no total');
   db.s['taDriverCheckins:florida-beauty'] = { 626218: { steps: { 'at-shipper': { at: iso(T0 + 5 * H) } } } };
   await w.process({ trips: [load(hist, 0, iso(clock))] });
   clock = T0 + 8.1 * H; await w.process({ trips: [load(hist, 0, iso(clock))] });
