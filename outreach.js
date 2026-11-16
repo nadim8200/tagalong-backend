@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------
 // Every time Jarvis reaches out to a driver (text, TagAlong app message or call), dispatch
-// gets a short email: which load / driver, how, and what was asked. Our staff only.
+// gets a short email: which load / driver, how, and what was asked. Our staff only. OFF since Nov 16, 2026 (taOutreachCfg.emails).
 // ---------------------------------------------------------------
 import { sendMail, mailConfig } from './mailer.js';
 
@@ -36,7 +36,10 @@ export function initOutreach({ db, getBoard, groupEmail = null, isInternal = () 
     return list.filter((a) => isInternal(a, env));
   };
   async function notify(ev) {
-    if (!enabled || !ev || !ev.trip || !mailConfig(env).ready) return { emailed: false };
+    // off since Nov 16, 2026: drivers answer in the driver app and it shows on the load's card — no email per contact
+    // (taOutreachCfg { emails: true } brings it back)
+    if (!enabled || !(((await db.get('taOutreachCfg', {})) || {}).emails === true)) return { emailed: false, off: true };
+    if (!ev || !ev.trip || !mailConfig(env).ready) return { emailed: false };
     if (/^temp-photo/.test(String(ev.kind || ''))) return { emailed: false, own: 'reefer photo thread' };   // those have their own email thread per check
     const to = await dispatchTo();
     if (!to.length) return { emailed: false };

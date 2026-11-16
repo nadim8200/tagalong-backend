@@ -3,7 +3,8 @@
 //      20:30", or a dispatcher's email moving it), Jarvis texts the driver: got it,
 //      pickup at <place> <time>, I'll check in before then.
 //   2. One hour before, and again 30 minutes before (only if still unknown), Jarvis
-//      checks in: are you rolling? Text when texting is live, otherwise a Jarvis call.
+//      checks in: are you rolling? Outside carriers: a TagAlong app message. Company drivers: no texts or calls since
+//      Nov 16, 2026 — the driver app asks them (pickupask.js) and their answer emails dispatch.
 //   3. Once it knows (the driver's reply, the call, TruckMate departed shipper, or the
 //      truck moving on GPS), it emails dispatch: what the driver said (with the texts /
 //      call transcript), a short summary, where the truck is (tracking), and the trip
@@ -244,6 +245,8 @@ export function initPickupFollow(app, { requireAuth, db, getBoard, ringcentral =
 
   async function contact(item, step, plan, state) {
     const trip = tripNo(item);
+    // company drivers: the driver app asks ("Rolling to your pickup?" 1 h before, pickupask.js) — no texts or calls
+    if (!item._oc) return { skipped: 'the driver app asks' };
     // outside carriers with the TagAlong app: the check-in goes to the app (push notification) — no texting needed
     if (item._oc && driverLinks && driverLinks.messageDriver) {
       const name = item._oc.driverName || '';

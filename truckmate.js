@@ -674,7 +674,8 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     try { unclosed = (await finished.sweep(site, trips, store.trips || {})).unclosed || []; } catch (e) { console.warn('[truckmate] finished:', e.message); }
     mark('finished sweep');
     // the load's temperature on every card: what it needs (rate con → dispatcher trip sheet → TruckMate) and what the reefer
-    // reads now (Samsara's return air when fresh, else TruckMate's Thermo King reading, else ARTIS's on an LTL run), checked against it
+    // reads now (Samsara's return air when fresh, else Thermo King's web service, else TruckMate's Thermo King reading, else ARTIS's on
+    // an LTL run), checked against it
     for (const item of trips) {
       try {
         const target = loadTarget(item);
@@ -686,9 +687,12 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         const toF = (v) => (v == null || !Number.isFinite(Number(v)) ? null : (tk.tempUnits === 'C' ? Math.round(Number(v) * 9 / 5 + 32) : Number(v)));
         const c1 = tk && Array.isArray(tk.compartments) ? tk.compartments[0] || {} : {};
         const tkRet = tk ? toF(tk.returnTemp != null ? tk.returnTemp : c1.return) : null;
-        const tkm = !sam && tkRet != null ? { source: 'TruckMate (Thermo King)', readingF: tkRet, returnF: tkRet, currentF: toF(tk.sensorTemp) != null && toF(tk.sensorTemp) !== 0 ? toF(tk.sensorTemp) : tkRet, supplyF: toF(tk.supplyTemp != null ? tk.supplyTemp : c1.supply), setF: toF(tk.setTemp != null ? tk.setTemp : c1.set), at: item._tkReefer.at || null, powerOn: tk.powerOn, alarm: tk.latestAlarm || null } : null;
-        const art = !sam && !tkm && a && a.check && a.check.readingF != null ? { source: 'ARTIS', readingF: a.check.readingF, currentF: a.check.readingF, returnF: null, supplyF: null, setF: a.check.setF, at: a.tempAt || a.readAt || null } : null;
-        const current = sam || tkm || art;
+        // Thermo King's own web service (thermoking.js, every 15 min): return air is the load temp
+        const tka = item._tkApi || null;
+        const tkapi = !sam && tka && tka.returnF != null ? { source: 'Thermo King', readingF: tka.returnF, currentF: tka.returnF, returnF: tka.returnF, supplyF: tka.supplyF, setF: tka.setF, at: tka.at, powerOn: tka.powerOn, alarm: (tka.alarms && tka.alarms[0] && tka.alarms[0].text) || null } : null;
+        const tkm = !sam && !tkapi && tkRet != null ? { source: 'TruckMate (Thermo King)', readingF: tkRet, returnF: tkRet, currentF: toF(tk.sensorTemp) != null && toF(tk.sensorTemp) !== 0 ? toF(tk.sensorTemp) : tkRet, supplyF: toF(tk.supplyTemp != null ? tk.supplyTemp : c1.supply), setF: toF(tk.setTemp != null ? tk.setTemp : c1.set), at: item._tkReefer.at || null, powerOn: tk.powerOn, alarm: tk.latestAlarm || null } : null;
+        const art = !sam && !tkapi && !tkm && a && a.check && a.check.readingF != null ? { source: 'ARTIS', readingF: a.check.readingF, currentF: a.check.readingF, returnF: null, supplyF: null, setF: a.check.setF, at: a.tempAt || a.readAt || null } : null;
+        const current = sam || tkapi || tkm || art;
         if (target || current) item._loadTemp = { target, current, check: current ? checkReading({ currentTemp: current.readingF, setPoint: current.setF }, target) : null };
       } catch { /* per-trip skip */ }
     }

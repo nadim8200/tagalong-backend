@@ -29,7 +29,7 @@ test('the timeline: got-it text, 1 hour before, 30 minutes before (only if still
 
 function memDb() { const m = new Map(); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; }, _m: m }; }
 
-test('end to end: texts the driver, reads "rolling", emails dispatch with the words, tracking and the trip sheet', async () => {
+test('end to end: company driver gets no texts (the driver app asks); a reply they send anyway is read and emails dispatch with the words, tracking and the trip sheet', async () => {
   const db = memDb();
   await db.set('taSmsConsent:florida-beauty', { 7866964090: { by: 'Rosa', at: '2026-10-01' } });
   await db.set('taPickupFollowCfg', { to: ['dispatch@floridabeauty.us'] });
@@ -49,10 +49,10 @@ test('end to end: texts the driver, reads "rolling", emails dispatch with the wo
   const docs = { readDocs: async () => [{ id: '77', mediaType: 'image/jpeg', data: Buffer.from('jpg') }] };
   const f = initPickupFollow({ get: () => {}, put: () => {} }, { requireAuth: () => {}, db, getBoard: async () => board, ringcentral, comms, docs, env, fetchFn, now: () => clock });
   await f.run();
-  assert.equal(texts.length, 1); assert.match(texts[0].text, /Got the trip sheet for load 624520/);
+  assert.equal(texts.length, 0, 'no texts to company drivers');
   clock = Date.parse('2026-10-08T23:35:00Z');                              // 55 min before
   await f.run();
-  assert.equal(texts.length, 2); assert.match(texts[1].text, /in about 1 hour/);
+  assert.equal(texts.length, 0);
   // the driver answers
   await comms.log('florida-beauty', '624520', { type: 'reply', from: '7866964090', text: 'Rolling now, 20 min out', at: new Date(clock + 2 * MIN).toISOString() });
   clock += 4 * MIN;
@@ -63,9 +63,9 @@ test('end to end: texts the driver, reads "rolling", emails dispatch with the wo
   assert.match(m.body.content, /Rolling now, 20 min out/); assert.match(m.body.content, /maps\.google\.com\/\?q=25\.8,-80\.33/);
   assert.ok(m.attachments.some((a) => a.name === 'trip-sheet-624520.jpg'), 'the trip sheet');
   assert.match(m.body.content, /JARVIS · PICKUP UPDATE/); assert.match(m.body.content, /DRIVER RESPONSE · YES/); assert.match(m.body.content, /Confirmed by text/);
-  clock = Date.parse('2026-10-09T00:05:00Z');                              // 25 min before: already known, no more texts
+  clock = Date.parse('2026-10-09T00:05:00Z');
   await f.run();
-  assert.equal(texts.length, 2);
+  assert.equal(texts.length, 0);
 });
 
 test('no consent → no texts; already rolling loads never trigger an email', async () => {
