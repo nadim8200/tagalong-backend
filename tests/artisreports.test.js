@@ -21,7 +21,7 @@ test('ARTIS page data, units seen recently, approaching yard, door temps off the
   assert.equal(d.length, 1); assert.deepEqual([d[0].trailer, d[0].set, d[0].actual, d[0].photos], ['7333', 35, 64, 2]);
 });
 
-test('every 30 min: door-temp alert once (with the trip), ARTIS positions on the board, reports for Jarvis', async () => {
+test('reports: no loading-door temps from ARTIS any more (Thermo King has the temps), ARTIS positions on the board, reports for Jarvis', async () => {
   const db = memDb(); const mails = [];
   const artisWeb = { ready: () => true,
     fetchJson: async (p) => (/trailer\/temps/.test(p) ? DOOR : /rejects/.test(p) ? { rejects: [{ returnedOnStr: '10/22', consigneeName: 'FALL RIVER FLORIST SUPPLY', shipperName: 'AMERICAN FLORAL CARGO', reasonTitle: 'Crushed  boxe(s)', pieces: 5, comments: [{ comment: 'Enter Comment' }] }, { consigneeName: 'OTHER', shipperName: 'X', reasonTitle: 'Wet' }] } : { kpis: { onTimePct: 100 }, groupings: { consignee: [{ name: 'STEMLINE WHOLESALE INC', stats: { avgDeliveryDays: 2 } }] }, weekdayMatrix: [] }),
@@ -30,14 +30,9 @@ test('every 30 min: door-temp alert once (with the trip), ARTIS positions on the
   const it = { trip: { tripNumber: '625549', powerUnit: '2604', trailer: '7333', destZoneDesc: 'SANTA ROSA, CA' } };
   const r = initArtisReports({ db, artisWeb, getBoard: async () => ({ trips: [it] }), sendMail: async (m) => mails.push(m), tempTeam: async () => ['dispatch@floridabeauty.us'], now: () => NOW });
   const out = await r.refresh();
-  assert.equal(out.doorIssues, 1); assert.equal(mails.length, 1);
-  assert.match(mails[0].subject, /Trailer 7333 was loaded at 64°F — set 35°F \(\+29°F\) — trip 625549/);
-  assert.equal(mails[0].attachments.length, 2, 'both door photos');
-  assert.deepEqual(mails[0].attachments.map((p) => [p.cid, p.contentType]), [['door1', 'image/jpeg'], ['door2', 'image/jpeg']]);
-  assert.match(mails[0].html, /<img src="cid:door1"/);
-  await r.refresh(); assert.equal(mails.length, 1, 'once per check');
+  assert.equal(out.doorIssues, 0); assert.equal(mails.length, 0, 'no door-temp read, no door-temp email');
   const b = { trip: { tripNumber: '625549', powerUnit: '2604', trailer: '7333' } }; await r.overlay('florida-beauty', [b]);
-  assert.equal(b._artisLoc.truck.location, '2M N of Houston'); assert.equal(b._artisDoorTemp.actual, 64);
+  assert.equal(b._artisLoc.truck.location, '2M N of Houston'); assert.equal(b._artisDoorTemp, undefined);
   const rej = await r.report({ which: 'warehouse_rejects', customer: 'Fall River' });
   assert.equal(rej.total, 1); assert.equal(rej.rows[0].reason, 'Crushed boxe(s)'); assert.deepEqual(rej.rows[0].comments, []);
   const perf = await r.report({ which: 'delivery_performance', customer: 'Stemline' });

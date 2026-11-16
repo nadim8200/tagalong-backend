@@ -1,6 +1,7 @@
 // ---------------------------------------------------------------
 // The rest of ARTIS (floridabeauty.com), read-only with the same web login (artisweb.js):
-//  • every 2 hours, 6 AM–10 PM ET (every 30 min until Nov 16 — too much load on ARTIS): trailer temps at the loading door (alert when a trailer was loaded far off its set temp),
+//  • every 2 hours, 6 AM–10 PM ET (every 30 min until Nov 16 — too much load on ARTIS); the loading-door temps are no longer read
+//    (Thermo King has the temperatures) — (alert when a trailer was loaded far off its set temp),
 //    tractor + trailer locations (a second GPS source when Samsara is stale), trucks approaching the yards.
 //  • on demand (Jarvis): box temps at receiving, warehouse rejects, wrong-pallet boxes, boxes not built,
 //    mismatched arrivals, delivery performance, Synergize documents (PODs) on a trip.
@@ -62,7 +63,8 @@ export function initArtisReports({ db, artisWeb, getBoard = null, sendMail = nul
   async function refresh() {
     const today = ymd(now()); const yday = ymd(now() - 86400000);
     const out = { at: new Date(now()).toISOString() }; const errors = [];
-    try { out.doorTemps = await artisWeb.fetchJson(`/artis-app/trailer/temps?startDate=${yday}&endDate=${today}`); } catch (e) { errors.push(`door temps: ${e.message}`); }
+    // loading-door temps: no longer read from ARTIS (Nov 16, 2026) — reefer temperatures come from Thermo King
+    void yday; void today;
     try { out.tractors = slimAssets(pageVar(await artisWeb.fetchText('/reports/tractorLocations'), 'assets'), now()); } catch (e) { errors.push(`tractors: ${e.message}`); }
     try { out.trailers = slimAssets(pageVar(await artisWeb.fetchText('/reports/trailerLocations'), 'assets'), now()); } catch (e) { errors.push(`trailers: ${e.message}`); }
     out.approaching = {};

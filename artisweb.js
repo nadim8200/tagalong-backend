@@ -168,7 +168,8 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
   async function clientIdFor({ name, city, state }) { return name ? pickConsignee(await consignees(), { name, city, state }) : null; }
 
   const TEMPS = `taArtisTemps:${SITE}`;
-  // the twice-a-day read (10 AM, 4 PM ET): ARTIS's ETA — and the reefer reading — for every customer stop on the active ARTIS runs
+  // the twice-a-day read (10 AM, 4 PM ET): ARTIS's ETA for every customer stop on the active ARTIS runs. No temperatures from
+  // ARTIS since Nov 16, 2026 — Thermo King's web service has them live (thermoking.js)
   async function readEtas() {
     const board = getBoard ? await getBoard(SITE) : { trips: [] };
     const items = ((board && board.trips) || []).filter((it) => it._tb && (it._tb.stops || []).length);
@@ -176,10 +177,9 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
     for (const it of items) for (const s of it._tb.stops) if (s.consigneeId) { const d = it._tb.date || ymd(now()); if (!want.has(s.consigneeId) || d < want.get(s.consigneeId)) want.set(s.consigneeId, d); }
     const trips = {}; let read = 0; const errors = [];
     const active = new Set(items.map(tripNo));
-    const temps = {};
     for (const [clientId, d] of want) {
       try {
-        const list = await tripStatus(clientId, ymd(Date.parse(`${d}T12:00:00Z`) - 2 * 86400000), ymd(now() + 3 * 86400000), { temps }); // eslint-disable-line no-await-in-loop
+        const list = await tripStatus(clientId, ymd(Date.parse(`${d}T12:00:00Z`) - 2 * 86400000), ymd(now() + 3 * 86400000)); // eslint-disable-line no-await-in-loop -- ETAs only: temps come from Thermo King
         read += 1;
         for (const x of list) if (x.trip && active.has(x.trip)) trips[x.trip] = { ...(trips[x.trip] || {}), [x.clientId]: x };
       } catch (e) { errors.push(`${clientId}: ${e.message}`); if (/sign-in|session/i.test(e.message)) break; }
@@ -187,9 +187,7 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
     }
     const at = new Date(now()).toISOString();
     await db.update(KEY, (cur) => ({ ...(cur || {}), at, trips: { ...((cur && cur.trips) || {}), ...trips }, last: { at, customers: want.size, read, errors: errors.slice(0, 10) } }), {});
-    const withTemp = Object.fromEntries(Object.entries(temps).filter(([n]) => active.has(n)));
-    await db.set(TEMPS, { at, trips: withTemp, last: { at, loads: active.size, customers: want.size, read, withTemp: Object.keys(withTemp).length, errors: errors.slice(0, 5), from: 'the ETA read' } });
-    return { customers: want.size, read, trips: Object.keys(trips).length, temps: Object.keys(withTemp).length, errors };
+    return { customers: want.size, read, trips: Object.keys(trips).length, errors };
   }
   // the temperature read on its own (hourly until Nov 16 — it opened one Trip Status page per customer every hour and
   // slowed ARTIS for everyone). Now only on request; the twice-a-day ETA read keeps the readings.
@@ -223,7 +221,7 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
     const tt = (await db.get(TEMPS, {})) || {};
     for (const it of list) {
       const x = (st.trips || {})[tripNo(it)]; if (x) it._artisEta = { at: st.at || null, stops: Object.values(x) };
-      const r = (tt.trips || {})[tripNo(it)]; if (r) { const { trailer, ...reefer } = r; it._artisTemp = { ...r, readAt: tt.at, check: checkReading(reefer, loadTarget(it)) }; }
+      void tt;   // ARTIS temperatures no longer used (Thermo King)
     }
   }
 
