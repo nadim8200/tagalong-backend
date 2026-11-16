@@ -34,7 +34,7 @@ export function slimTk(v) {
     powerOn: v.powerOn == null ? null : !!v.powerOn, controller: v.controllerStatus || null, mode: v.operatingMode1 || null,
     doorOpen: v.zone1DoorOpen == null ? null : !!v.zone1DoorOpen,
     alarms: (Array.isArray(v.alarms) ? v.alarms : []).slice(0, 6).map((a) => ({ code: a.alarmCode, text: a.alarmDescription || null, severity: a.alarmSeverity || null })),
-    location: v.locationDescription || null, lat: v.latitude ?? null, lng: v.longitude ?? null,
+    location: v.locationDescription || null, lat: v.latitude ?? null, lng: v.longitude ?? null, mph: v.speed == null ? null : Math.round(Number(v.speed) * 0.621371),
   };
 }
 // The newest reading per trailer in an API answer (v1 is a list, v2 has it under "data"). Pure.
@@ -48,6 +48,36 @@ export function latestByTrailer(answer) {
   }
   return out;
 }
+// Every reading per trailer in an API answer, oldest first. Pure.
+export function readingsByTrailer(answer) {
+  const list = Array.isArray(answer) ? answer : ((answer && answer.data) || []);
+  const out = {};
+  for (const v of list) { const r = slimTk(v || {}); if (r.trailer && r.at && r.lat != null && r.lng != null) (out[r.trailer] = out[r.trailer] || []).push(r); }
+  for (const k of Object.keys(out)) out[k].sort((a, b) => a.at.localeCompare(b.at));
+  return out;
+}
+const MOVE_MI = 0.5;
+const miles = (a, b) => { const R = 3958.8; const r = (d) => (d * Math.PI) / 180; const dLat = r(b.lat - a.lat); const dLng = r(b.lng - a.lng); const x = Math.sin(dLat / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dLng / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(x)); };
+// Since when the trailer has sat where it is now: walking back through its readings while it stays within half a mile and
+// isn't moving. atLeast = it was already parked at the oldest reading we have. Pure. → { parkedSince, atLeast }
+export function parkedSinceOf(readings = []) {
+  if (!readings.length) return null;
+  const last = readings[readings.length - 1];
+  let since = last.at; let atLeast = true;
+  for (let i = readings.length - 1; i >= 0; i -= 1) {
+    const r = readings[i];
+    if (miles(r, last) > MOVE_MI || (r.mph || 0) > 5) { atLeast = false; break; }
+    since = r.at;
+  }
+  return { parkedSince: since, atLeast };
+}
+// The next reading: still parked → keeps its parked-since; moved → parked since this reading. Pure.
+export function nextParked(prev, x) {
+  if (!prev || prev.lat == null || x.lat == null) return { parkedSince: x.at, atLeast: true };
+  if (miles(prev, x) > MOVE_MI || (x.mph || 0) > 5) return { parkedSince: x.at, atLeast: false };
+  return { parkedSince: prev.parkedSince || prev.at, atLeast: prev.parkedSince ? !!prev.atLeast : true };
+}
+
 // A new login? Only when there's no token, it's a day old, or the refresh token runs out within 6 hours — never past the
 // daily cap, never while Thermo King has us blocked. Pure.
 export function needLogin(tok = {}, now = Date.now(), day = '') {
@@ -95,12 +125,25 @@ export function initThermoKing({ app = null, requireAuth = null, db, env = proce
     if (!r.ok) { await db.set(KEY, { ...st, lastPoll: new Date(end).toISOString(), error: `HTTP ${r.status}` }); return { error: `HTTP ${r.status}` }; }
     const fresh = latestByTrailer(await r.json().catch(() => []));
     const units = { ...(st.units || {}) }; const history = { ...(st.history || {}) };
+    // one time: the last 3 days (3 requests of 24 h — Thermo King's limit), to know how long each trailer has been parked
+    if (!st.backfilledAt) {
+      const all = {};
+      for (let d = 3; d >= 1; d -= 1) {
+        const a = end - d * DAY; const b = end - (d - 1) * DAY;
+        try {
+          const rr = await fetchFn(`${c.base}/getTemperatureDataForVehicles/${encodeURIComponent(tkStamp(a))}/${encodeURIComponent(tkStamp(b))}/`, { headers: { 'X-External-ID': c.customer, 'X-OAuth2-Token': tk, 'Content-Type': 'application/json' } }); // eslint-disable-line no-await-in-loop
+          if (rr.ok) for (const [t, l] of Object.entries(readingsByTrailer(await rr.json().catch(() => [])))) (all[t] = all[t] || []).push(...l); // eslint-disable-line no-await-in-loop
+        } catch { /* that day stays unknown */ }
+      }
+      for (const [t, l] of Object.entries(all)) { l.sort((p, q) => p.at.localeCompare(q.at)); const ps = parkedSinceOf(l); const last = l[l.length - 1]; if (ps) units[t] = { ...(units[t] || {}), ...last, ...ps }; }
+      st.backfilledAt = new Date(end).toISOString();
+    }
     for (const [t, x] of Object.entries(fresh)) {
-      if (!units[t] || x.at >= units[t].at) units[t] = x;
+      if (!units[t] || x.at >= units[t].at) units[t] = { ...x, ...nextParked(units[t], x) };
       history[t] = [...(history[t] || []).filter((h) => h.at !== x.at), { at: x.at, returnF: x.returnF, setF: x.setF }].slice(-48);
     }
     for (const [t, x] of Object.entries(units)) if (end - Date.parse(x.at) > 3 * DAY) { delete units[t]; delete history[t]; }
-    await db.set(KEY, { units, history, lastEnd: end, lastPoll: new Date(end).toISOString(), error: null, lastCount: Object.keys(fresh).length });
+    await db.set(KEY, { units, history, lastEnd: end, lastPoll: new Date(end).toISOString(), error: null, lastCount: Object.keys(fresh).length, backfilledAt: st.backfilledAt || null });
     return { units: Object.keys(fresh).length };
   }
 

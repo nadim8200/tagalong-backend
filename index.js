@@ -81,6 +81,7 @@ import { initCommitments, lateMessage } from './commitments.js';
 import { initLtlTempAlert } from './tempalert.js';
 import { initDvr } from './dvr.js';
 import { initThermoKing } from './thermoking.js';
+import { initYardReport } from './yardreport.js';
 import { initPickupAsk } from './pickupask.js';
 import { initStaffMail } from './staffmail.js';
 import { initEtaReport } from './etareport.js';
@@ -1476,6 +1477,8 @@ driverNotify = (...a) => driverAuth.notify(...a);
 initDvr(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, requireAuth: requireDispatch, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('dvr'), log: (...a) => comms.log(...a) });
 // Thermo King TracKing (read only, every 15 min): live reefer readings for the cards and temp alerts — THERMOKING_* in Render
 thermoKing = initThermoKing({ app, requireAuth: requireDispatch, db, env: process.env });
+// yard report: trailers at each hub yard (Thermo King GPS) + what's coming down to Florida
+initYardReport(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site) });
 // LTL run done in the app + truck rolling again → "Rolling to your next pickup?" in the driver app; the answer emails dispatch
 initPickupAsk(app, { db, requireDriver: driverAuth.requireDriver, getBoard: (site) => truckmate.buildBoard(site), notify: (code, m) => driverAuth.notify(code, m), onAnswer: (trip, a) => (pickupFollow ? pickupFollow.driverAnswered(trip, a) : null), env: process.env });
 // emails from Jarvis to our own people: a copy to the admin first, then the real send (staff addresses only)

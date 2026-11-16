@@ -39,8 +39,9 @@ test('poll: one login, then readings with the token; a 423 stops logins for 24 h
   await tk.poll(); clock += 15 * 60000; await tk.poll();
   assert.equal(calls.filter((c) => /obtainToken/.test(c.url)).length, 1, 'one login');
   const reads = calls.filter((c) => /getTemperatureDataForVehicles/.test(c.url));
-  assert.equal(reads.length, 2); assert.equal(reads[1].h['X-OAuth2-Token'], 'TOK'); assert.equal(reads[1].h['X-External-ID'], 'C-1');
+  assert.equal(reads.length, 5, '3 one-time days back + 2 regular reads'); assert.equal(reads[4].h['X-OAuth2-Token'], 'TOK'); assert.equal(reads[4].h['X-External-ID'], 'C-1');
   assert.match(reads[0].url, /getTemperatureDataForVehicles\/2026-11-16%2016%3A00%3A00\/2026-11-16%2018%3A00%3A00\/$/);
+  assert.match(reads[1].url, /getTemperatureDataForVehicles\/2026-11-13%2018%3A00%3A00\/2026-11-14%2018%3A00%3A00\/$/, 'backfill: 24 h windows');
   assert.ok(!calls.some((c) => /command/i.test(c.url)), 'never the Command API');
   const trips = [{ trip: { tripNumber: '627130', trailer: '7200' } }, { trip: { tripNumber: '1', trailer: '9999' } }];
   await tk.overlay('s', trips);
@@ -50,4 +51,14 @@ test('poll: one login, then readings with the token; a 423 stops logins for 24 h
   await tk.poll().catch(() => {}); await tk.poll().catch(() => {});
   assert.equal(calls.filter((c) => /obtainToken/.test(c.url)).length, 2, 'one try, then waits');
   assert.ok(m.get('taThermoKingToken').blockedUntil > clock);
+});
+
+test('parked since: from the readings — stays within half a mile and still → keeps the time; moves → starts over', async () => {
+  const { parkedSinceOf, nextParked } = await import('../thermoking.js');
+  const r = (at, lat, lng, mph = 0) => ({ at, lat, lng, mph });
+  assert.deepEqual(parkedSinceOf([r('2026-11-13T10:00:00Z', 33.0, -84.0, 60), r('2026-11-13T12:00:00Z', 33.5, -84.2), r('2026-11-15T12:00:00Z', 33.5001, -84.2001)]), { parkedSince: '2026-11-13T12:00:00Z', atLeast: false });
+  assert.deepEqual(parkedSinceOf([r('2026-11-13T12:00:00Z', 33.5, -84.2), r('2026-11-15T12:00:00Z', 33.5, -84.2)]), { parkedSince: '2026-11-13T12:00:00Z', atLeast: true }, 'parked at our oldest reading');
+  const prev = { at: '2026-11-15T12:00:00Z', lat: 33.5, lng: -84.2, parkedSince: '2026-11-13T12:00:00Z', atLeast: false };
+  assert.equal(nextParked(prev, r('2026-11-16T12:00:00Z', 33.5, -84.2)).parkedSince, '2026-11-13T12:00:00Z');
+  assert.equal(nextParked(prev, r('2026-11-16T12:00:00Z', 34.0, -84.2)).parkedSince, '2026-11-16T12:00:00Z');
 });
