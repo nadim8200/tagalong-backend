@@ -120,10 +120,12 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
   }
 
   // one customer's trips on ARTIS between two dates
-  async function tripStatus(clientId, fromDate, toDate) {
+  async function tripStatus(clientId, fromDate, toDate, { temps = null } = {}) {
     const html = await (await get(`/shipment/eta?clientId=${encodeURIComponent(clientId)}&fromDate=${fromDate}&toDate=${toDate}`)).text();
     const stops = parseTripStatus(html);
     if (!stops) throw new Error('ARTIS Trip Status page had no data (session?)');
+    // the same page carries the reefer reading: kept here, so temps need no reads of their own
+    if (temps) for (const c of stops) for (const t of (c.tripStatuses || [])) { const n = String(t.tripNumber || ''); const r = reeferOf(t); if (n && r && !temps[n]) temps[n] = { ...r, trailer: t.trailer || null }; }
     return stops.flatMap((c) => (c.tripStatuses || []).map((t) => slimStatus(t, c.clientId)));
   }
   // the Trip Manifest PDF for one customer on one trip → Buffer
@@ -165,7 +167,8 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
   }
   async function clientIdFor({ name, city, state }) { return name ? pickConsignee(await consignees(), { name, city, state }) : null; }
 
-  // the twice-a-day read: ARTIS's ETA for every customer stop on the active ARTIS runs
+  const TEMPS = `taArtisTemps:${SITE}`;
+  // the twice-a-day read (10 AM, 4 PM ET): ARTIS's ETA — and the reefer reading — for every customer stop on the active ARTIS runs
   async function readEtas() {
     const board = getBoard ? await getBoard(SITE) : { trips: [] };
     const items = ((board && board.trips) || []).filter((it) => it._tb && (it._tb.stops || []).length);
@@ -173,9 +176,10 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
     for (const it of items) for (const s of it._tb.stops) if (s.consigneeId) { const d = it._tb.date || ymd(now()); if (!want.has(s.consigneeId) || d < want.get(s.consigneeId)) want.set(s.consigneeId, d); }
     const trips = {}; let read = 0; const errors = [];
     const active = new Set(items.map(tripNo));
+    const temps = {};
     for (const [clientId, d] of want) {
       try {
-        const list = await tripStatus(clientId, ymd(Date.parse(`${d}T12:00:00Z`) - 2 * 86400000), ymd(now() + 3 * 86400000)); // eslint-disable-line no-await-in-loop
+        const list = await tripStatus(clientId, ymd(Date.parse(`${d}T12:00:00Z`) - 2 * 86400000), ymd(now() + 3 * 86400000), { temps }); // eslint-disable-line no-await-in-loop
         read += 1;
         for (const x of list) if (x.trip && active.has(x.trip)) trips[x.trip] = { ...(trips[x.trip] || {}), [x.clientId]: x };
       } catch (e) { errors.push(`${clientId}: ${e.message}`); if (/sign-in|session/i.test(e.message)) break; }
@@ -183,10 +187,12 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
     }
     const at = new Date(now()).toISOString();
     await db.update(KEY, (cur) => ({ ...(cur || {}), at, trips: { ...((cur && cur.trips) || {}), ...trips }, last: { at, customers: want.size, read, errors: errors.slice(0, 10) } }), {});
-    return { customers: want.size, read, trips: Object.keys(trips).length, errors };
+    const withTemp = Object.fromEntries(Object.entries(temps).filter(([n]) => active.has(n)));
+    await db.set(TEMPS, { at, trips: withTemp, last: { at, loads: active.size, customers: want.size, read, withTemp: Object.keys(withTemp).length, errors: errors.slice(0, 5), from: 'the ETA read' } });
+    return { customers: want.size, read, trips: Object.keys(trips).length, temps: Object.keys(withTemp).length, errors };
   }
-  // the hourly temperature read: only the loads on the board, only their latest reefer reading (replaced each time)
-  const TEMPS = `taArtisTemps:${SITE}`;
+  // the temperature read on its own (hourly until Nov 16 — it opened one Trip Status page per customer every hour and
+  // slowed ARTIS for everyone). Now only on request; the twice-a-day ETA read keeps the readings.
   async function readTemps() {
     const board = getBoard ? await getBoard(SITE) : { trips: [] };
     // ARTIS only has the LTL runs from the hubs — a broker load is never read
@@ -239,7 +245,7 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
       await db.update(TEMPS, (cur) => ({ ...(cur || {}), slot }), {});
       console.log(`[artis-temps] ${slot}: ${r.withTemp}/${r.loads} loads with a reading (${r.read} pages)${r.errors.length ? `, ${r.errors.length} errors` : ''}`);
     };
-    const t2 = setInterval(() => { tempTick().catch((e) => console.warn('[artis-temps]', e.message)); }, 10 * MIN); if (t2.unref) t2.unref();
+    void tempTick;   // no hourly temperature read any more (see readTemps)
   }
 
   // the console: the Trip Manifest PDF for a stop (fetched from ARTIS, kept on the trip)

@@ -86,8 +86,8 @@ export function syncSlotDue(state = {}, now = Date.now()) {
   return k && !(state.done || {})[k] ? k : null;
 }
 
-// Broker loads to check now: never checked, or last checked 2+ h ago — only 6 AM–10 PM Miami. Pure.
-export function brokerDue(items = [], checked = {}, now = Date.now(), every = 2 * 60 * MIN) {
+// Broker loads to check now: never checked, or last checked 4+ h ago — only 6 AM–10 PM Miami. Pure.
+export function brokerDue(items = [], checked = {}, now = Date.now(), every = 4 * 60 * MIN) {   // each load every 4 h (was 2) — easy on ARTIS
   const h = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', hourCycle: 'h23' }).format(new Date(now)));
   if (h < 6 || h >= 22) return [];
   return items.filter((it) => brokerLoad(it) && !it._oc && now - (checked[tripNo(it)] || 0) >= every);

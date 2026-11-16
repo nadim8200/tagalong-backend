@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------
 // The rest of ARTIS (floridabeauty.com), read-only with the same web login (artisweb.js):
-//  • every 30 min: trailer temps at the loading door (alert when a trailer was loaded far off its set temp),
+//  • every 2 hours, 6 AM–10 PM ET (every 30 min until Nov 16 — too much load on ARTIS): trailer temps at the loading door (alert when a trailer was loaded far off its set temp),
 //    tractor + trailer locations (a second GPS source when Samsara is stale), trucks approaching the yards.
 //  • on demand (Jarvis): box temps at receiving, warehouse rejects, wrong-pallet boxes, boxes not built,
 //    mismatched arrivals, delivery performance, Synergize documents (PODs) on a trip.
@@ -197,7 +197,7 @@ export function initArtisReports({ db, artisWeb, getBoard = null, sendMail = nul
 
   if (enabled()) {
     let last = 0;
-    const t = setInterval(() => { if (now() - last < 29 * MIN) return; last = now(); refresh().then((r) => console.log(`[artis-reports] ${r.tractors} tractors, ${r.trailers} trailers, ${r.approaching} approaching, ${r.doorIssues} door-temp issues${r.errors.length ? `, errors: ${r.errors.join('; ')}` : ''}`)).catch((e) => console.warn('[artis-reports]', e.message)); }, 5 * MIN);
+    const t = setInterval(() => { const h = Number(new Date(now()).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' })); if (now() - last < 119 * MIN || h < 6 || h >= 22) return; last = now(); refresh().then((r) => console.log(`[artis-reports] ${r.tractors} tractors, ${r.trailers} trailers, ${r.approaching} approaching, ${r.doorIssues} door-temp issues${r.errors.length ? `, errors: ${r.errors.join('; ')}` : ''}`)).catch((e) => console.warn('[artis-reports]', e.message)); }, 5 * MIN);
     if (t.unref) t.unref();
   }
   return { refresh, overlay, report, resendDoorTemp };

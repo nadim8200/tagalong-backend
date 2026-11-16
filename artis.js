@@ -251,8 +251,8 @@ export function initArtis(app, { requireAuth, requireAdmin = null, db = null, se
   async function refresh() {
     if (!artisConfig(env).ready) return;
     const t = now();
-    // today / tomorrow / yesterday every time; the older days (held boxes riding later trucks) once an hour
-    const older = !refresh.olderAt || t - refresh.olderAt > 60 * MIN;
+    // today / tomorrow / yesterday every time; the older days (held boxes riding later trucks) every 6 hours
+    const older = !refresh.olderAt || t - refresh.olderAt > 6 * 60 * MIN;
     if (older) refresh.olderAt = t;
     const days = [0, 1, -1, ...(older ? [-2, -3, -4, -5, -6] : [])];
     for (const d of days.map((k) => ymd(new Date(t + k * 86400000)))) {
@@ -262,7 +262,7 @@ export function initArtis(app, { requireAuth, requireAdmin = null, db = null, se
   }
   if (env.NODE_ENV !== 'test') {
     setTimeout(() => { refresh().catch(() => {}); }, 30000).unref?.();
-    const tick = setInterval(() => { refresh().catch(() => {}); }, 10 * MIN); if (tick.unref) tick.unref();
+    const tick = setInterval(() => { refresh().catch(() => {}); }, 30 * MIN); if (tick.unref) tick.unref();   // every 30 min (was 10) — easy on ARTIS
   }
   // a truck that left short → one email per trip (to the "Truck left with missing boxes" list — Employees → Alert emails)
   const leftTo = async () => (recipients ? recipients('artis_left_short') : ['ntellez@floridabeauty.us']);

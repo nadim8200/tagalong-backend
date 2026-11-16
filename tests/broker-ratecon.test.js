@@ -23,11 +23,12 @@ test('no rate con on a broker load → ask dispatch; gone once it is on file or 
   assert.equal(rc({ ...BROKER, trip: { ...BROKER.trip, status: 'ASSGN', powerUnit: '' } }).length, 0, 'just booked, no truck yet');
 });
 
-test('broker loads are checked in Synergize right away, then every 2 h, 6 AM–10 PM', () => {
+test('broker loads are checked in Synergize right away, then every 4 h, 6 AM–10 PM', () => {
   const at = Date.parse('2026-10-23T15:00:00Z');   // 11 AM ET
   assert.equal(brokerDue([BROKER], {}, at).length, 1);
   assert.equal(brokerDue([BROKER], { 625658: at - 30 * 60000 }, at).length, 0);
-  assert.equal(brokerDue([BROKER], { 625658: at - 2 * 3600000 }, at).length, 1);
+  assert.equal(brokerDue([BROKER], { 625658: at - 2 * 3600000 }, at).length, 0, '2 h: not yet');
+  assert.equal(brokerDue([BROKER], { 625658: at - 4 * 3600000 }, at).length, 1);
   assert.equal(brokerDue([BROKER], {}, Date.parse('2026-10-24T04:00:00Z')).length, 0, 'midnight ET');
 });
 
