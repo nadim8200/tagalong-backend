@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------
 // ARTIS Synergize documents (POD, BOL, invoice, rate con, manifest) — looked up by BILL NUMBER, any bill type.
 // Scans come as TIFF (or PDF); TIFFs are turned into a PDF so they open anywhere, then kept on the trip
-// (kind "artisdoc"). Read-only, same ARTIS web login.
+// (kind "artisdoc"). Read-only, same ARTIS web login. OFF since Nov 16, 2026 (too much load on ARTIS) — env SYNERGIZE=on to use it again.
 //  • twice a day (11 AM / 5 PM Miami) for loads with a few bills (broker / produce loads) — while active and for
 //    5 days after they leave the board (documents arrive after delivery);
 //  • BROKER loads (B bills) every 2 hours 6 AM–10 PM while on the board (first check right when they show up);
@@ -210,7 +210,8 @@ ${section(`<div style="font-family:${FONT};font-size:17px;line-height:1.4;font-w
 }
 
 export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs, artisWeb, getBoard = null, nameFits = null, onRateCon = null, onBillingDocs = null, now = () => Date.now() }) {
-  const enabled = () => !!(db && db.enabled && artisWeb && artisWeb.ready && artisWeb.ready() && docs && docs.storeDocs);
+  // OFF since Nov 16, 2026 (Nadim): no Synergize reads on ARTIS at all — scheduled, broker, on-demand or Jarvis. SYNERGIZE=on in Render brings it back.
+  const enabled = () => process.env.SYNERGIZE === 'on' && !!(db && db.enabled && artisWeb && artisWeb.ready && artisWeb.ready() && docs && docs.storeDocs);
   const st = async () => (await db.get(KEY, null)) || { trips: {}, docs: {}, watch: {}, done: {} };
 
   async function listDocs(bill) {
@@ -220,6 +221,7 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
   }
   // check these bills of a trip; store any document not stored yet → the trip's ARTIS documents
   async function checkBills(trip, bills, by = 'Jarvis (Synergize)') {
+    if (!enabled()) return [];
     const s = await st();
     const known = s.docs || {};
     const found = [];
@@ -256,6 +258,7 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
 
   // twice a day: loads with a few bills, while on the board and 5 days after
   async function sync() {
+    if (!enabled()) return { trips: 0, documents: 0, off: true };
     const items = getBoard ? (((await getBoard(SITE)) || {}).trips || []) : [];
     const s = await st();
     const watch = { ...(s.watch || {}) };
@@ -316,7 +319,7 @@ export function initSynergize(app, { requireAuth, requireAdmin = null, db, docs,
 
   // the console: check a stop's bills (or the whole small load) now
   app.post('/truckmate/artis/documents/:trip', requireAuth, async (req, res) => {
-    if (!enabled()) return res.status(503).json({ error: 'ARTIS web login is not set up.' });
+    if (!enabled()) return res.status(503).json({ error: 'Reading Synergize on ARTIS is turned off.' });
     try {
       const trip = String(req.params.trip || '').replace(/\D/g, '');
       const bills = (Array.isArray(req.body && req.body.bills) ? req.body.bills : []).map((b) => String(b).replace(/[^\w-]/g, '')).filter(Boolean).slice(0, 60);

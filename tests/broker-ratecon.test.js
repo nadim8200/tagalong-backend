@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { brokerLoad, evaluateBoard } from '../watchtower.js';
 import { brokerDue, initSynergize } from '../synergize.js';
 
+// Synergize reading is off in production since Nov 16 (SYNERGIZE=on brings it back); these tests check how it works when on
+process.env.SYNERGIZE = 'on';
+
 const BROKER = { trip: { tripNumber: '625658', status: 'INTRAN', powerUnit: '2601' }, freightBills: [{ billNumber: 'B180626', billToName: 'ARRIVE LOGISTICS LLC' }] };
 
 test('a broker load is B bills off the Truck Builder (or has a rate con); LTL runs are not', () => {

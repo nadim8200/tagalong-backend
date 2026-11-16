@@ -187,6 +187,7 @@ export function initArtisReports({ db, artisWeb, getBoard = null, sendMail = nul
         return { from: d1, to: d2, overall: j.kpis || null, byWeekday: (j.weekdayMatrix || []).map((w) => ({ day: w.weekdayName, ...w.stats })), ...(customer ? { matches: groups.slice(0, 10) } : {}), note: 'Boxes received in the warehouse in this window and how they were delivered (delivery days, on time where a target is set).' };
       }
       case 'trip_documents': {
+        if (process.env.SYNERGIZE !== 'on') return { trip: String(trip || ''), off: true, note: 'Reading Synergize documents on ARTIS is turned off.' };
         const legs = pageVar(await artisWeb.fetchText(`/shipment/tripDetails?tripId=${encodeURIComponent(String(trip || '').replace(/\D/g, ''))}`), 'tripLegs') || [];
         const docs = legs.flatMap((l) => (l.documents || []).map((d) => ({ bill: l.bill_number, ...d })));
         return { trip: String(trip || ''), bills: legs.length, documents: docs.slice(0, 20), note: docs.length ? 'Synergize documents (BOL / POD) on the trip.' : 'No Synergize documents (BOL / POD) on this trip in ARTIS.' };

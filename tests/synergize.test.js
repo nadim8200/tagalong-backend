@@ -44,6 +44,9 @@ test('documents by bill are stored once on the trip; small loads checked twice a
 });
 
 import { pagePixels } from '../synergize.js';
+
+// Synergize reading is off in production since Nov 16 (SYNERGIZE=on brings it back); these tests check how it works when on
+process.env.SYNERGIZE = 'on';
 test('scanned pages are kept small: ~150 dpi, fax → grayscale PNG, colour → JPEG', () => {
   const w = 1700; const h = 2200; const rgba = new Uint8Array(w * h * 4).fill(255);
   for (let i = 0; i < rgba.length; i += 997 * 4) { rgba[i] = 0; rgba[i + 1] = 0; rgba[i + 2] = 0; }
@@ -51,4 +54,16 @@ test('scanned pages are kept small: ~150 dpi, fax → grayscale PNG, colour → 
   assert.equal(fax.w, 1275); assert.equal(fax.jpeg, false); assert.equal(fax.bytes.slice(1, 4).toString(), 'PNG');
   const photo = pagePixels(rgba, w, h, 7);
   assert.equal(photo.jpeg, true); assert.equal(photo.bytes[0], 0xff); assert.ok(photo.bytes.length < 600000, `jpeg ${photo.bytes.length} bytes`);
+});
+
+test('Synergize reading is off unless SYNERGIZE=on: no ARTIS reads at all', async () => {
+  const { initSynergize } = await import('../synergize.js');
+  const was = process.env.SYNERGIZE; delete process.env.SYNERGIZE;
+  let reads = 0;
+  const artisWeb = { ready: () => true, fetchText: async () => { reads += 1; return ''; }, fetchBuffer: async () => { reads += 1; return { buf: Buffer.from(''), type: 'application/pdf' }; } };
+  const db = { enabled: true, get: async (k, fb) => fb, set: async () => {}, update: async (k, fn, fb) => fn(fb) };
+  const s = initSynergize({ get: () => {}, post: () => {} }, { requireAuth: () => {}, db, docs: { storeDocs: async () => [] }, artisWeb, getBoard: async () => ({ trips: [{ trip: { tripNumber: '1' }, freightBills: [{ billNumber: 'B1' }] }] }) });
+  const r = await s.sync();
+  assert.equal(r.off, true); assert.equal(reads, 0);
+  process.env.SYNERGIZE = was;
 });

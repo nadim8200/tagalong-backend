@@ -4,6 +4,9 @@ import { renderDoorTempEmail, imageSize } from '../reefermail.js';
 import { redirectEmail } from '../training.js';
 import { TRAINING_SLOT } from '../latemail.js';
 
+// Synergize reading is off in production since Nov 16 (SYNERGIZE=on brings it back); these tests check how it works when on
+process.env.SYNERGIZE = 'on';
+
 const X = { id: 7100, trailer: '7141', door: '15', set: 35, actual: 61, atText: '10/26/2026 04:22:12 PM EDT', by: 'Melvis Rodriguez', warehouse: 'Miami', photos: 2 };
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]), Buffer.from([0, 0, 0x03, 0x20, 0, 0, 0x02, 0x58]), Buffer.alloc(40)]);   // 800 × 600
 const TRIP = { number: '625598', truck: '936', destination: 'NORWOOD, MA, 02062' };
