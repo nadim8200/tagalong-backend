@@ -15,6 +15,9 @@ export const HUB_MILES = 1;
 // Yards pinned where our trucks actually park (the street-address lookup for Bartow landed over a mile away, so the Central Florida
 // yard showed 0 while Darwin's inventory had trucks and trailers there — Nov 16: truck 2405 parked at 27.9181, -81.7260)
 export const PINNED = { BARTOW: [{ lat: 27.9181, lng: -81.7260, miles: 1 }] };
+// added to a hub's looked-up point (both count): Memphis's address point misses the yard Thermo King calls "MEMPHIS YARD"
+// — trailer 7135 at 35.0668, -90.0162 is "0.70 km South West of MEMPHIS YARD" (Nov 17)
+export const EXTRA_POINTS = { MEMPHIS: [{ lat: 35.0712, lng: -90.0108, miles: 1 }] };
 export const PARKED_MS = 2 * 86400000;   // parked away from the hubs this long shows on the Parked tab
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
@@ -155,6 +158,7 @@ export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => ge
       const g = y ? await geo(y.address).catch(() => null) : null; // eslint-disable-line no-await-in-loop
       if (g && g.lat != null) { out[h] = [{ lat: g.lat, lng: g.lng }]; await db.update(POINTS, (cur) => ({ ...(cur || {}), [h]: out[h] }), {}); } // eslint-disable-line no-await-in-loop
     }
+    for (const [h, list] of Object.entries(EXTRA_POINTS)) out[h] = [...(out[h] || []), ...list];
     return out;
   }
   async function report() {

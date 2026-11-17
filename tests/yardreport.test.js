@@ -64,3 +64,9 @@ test('Bartow yard is pinned where the trucks park (Rifle Range Road): truck 2405
   const r = truckReport({ idx, points: { ...points, ...PINNED }, now: NOW });
   assert.equal(r.hubs.find((h) => h.key === 'BARTOW').count, 1);
 });
+
+test('Memphis: trailer 7135 "0.70 km South West of MEMPHIS YARD" counts at the Memphis yard (pinned point added)', async () => {
+  const { hubAt, EXTRA_POINTS } = await import('../yardreport.js');
+  assert.equal(hubAt({ lat: 35.066755, lng: -90.01618 }, { MEMPHIS: [{ lat: 35.15, lng: -89.9 }, ...EXTRA_POINTS.MEMPHIS] }), 'MEMPHIS');
+  assert.equal(hubAt({ lat: 35.2, lng: -90.2 }, { MEMPHIS: EXTRA_POINTS.MEMPHIS }), null, 'miles away: not at the yard');
+});
