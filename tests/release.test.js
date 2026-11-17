@@ -68,3 +68,19 @@ test('the release hub comes from where the load is headed: South Florida → Mia
   assert.equal(at('OXNARD, CA, 93030'), 'VENTURA'); assert.equal(at('ROCK HILL, SC, 29730'), null);
   assert.equal(hubForDest({ trip: { destZoneDesc: 'ORLANDO, FL' }, freightBills: [{ endZoneDescription: 'BOCA RATON, FL, 33431' }] }), 'MIAMI', 'the last delivery wins');
 });
+
+test('no rate con on the load: the release fills from the truck\'s next-load batch rate con (and attaches it), and says so', async () => {
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
+  m.set('taRateConPending:florida-beauty', [{ id: 'p1', record: { broker: 'DM Trans, LLC dba Arrive Logistics', loadNumber: '9981663', tempSetting: '-10°F', commodity: 'Frozen food', pickups: [{ name: 'NOVOLEX' }], deliveries: [{ name: 'LINEAGE', address: '1 Cold St', city: 'FONTANA', state: 'CA', zip: '92335', date: '11/22/2026', time: '08:00' }], docIds: ['rc9'] } }]);
+  const item = { trip: { tripNumber: '627178', powerUnit: '733', trailer: '262045', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M5063124' }], _nextLoad: [{ pendingId: 'p1', rc: { broker: 'DM Trans, LLC dba Arrive Logistics', loadNumber: '9981663', docIds: ['rc9'] }, verified: null }] };
+  const routes = {}; const app = { get: (p, g, h) => { routes[`GET ${p}`] = h; }, post: (p, g, h) => { routes[`POST ${p}`] = h; } };
+  const sent = []; const read = [];
+  initRelease(app, { requireAuth: () => {}, db, docs: { readDocs: async ({ ids }) => { read.push(ids); return [{ mediaType: 'application/pdf', data: Buffer.from('%PDF') }]; } }, getBoard: async () => ({ trips: [item] }), sendMail: async (x) => sent.push(x) });
+  let out; await routes['GET /truckmate/release/:trip']({ user: { name: 'Nadim' }, params: { trip: '627178' } }, { status: () => ({ json: () => {} }), json: (j) => { out = j; } });
+  assert.match(out.filledFrom, /next load's rate con — DM Trans, LLC dba Arrive Logistics 9981663 \(not in TruckMate yet\)/);
+  assert.equal(out.form.broker, 'DM Trans, LLC dba Arrive Logistics'); assert.equal(out.form.shipper, 'NOVOLEX'); assert.equal(out.form.temp, '-10°F');
+  assert.deepEqual([out.form.stops[0].consignee, out.form.stops[0].city, out.form.stops[0].zip], ['LINEAGE', 'FONTANA', '92335']);
+  assert.equal(out.hasRateCon, true);
+  let r; await routes['POST /truckmate/release/:trip']({ user: { name: 'Nadim' }, params: { trip: '627178' }, body: { form: { ...out.form, hub: 'MIAMI' }, to: 'yard_dispatch@floridabeauty.us' } }, { status: () => ({ json: () => {} }), json: (j) => { r = j; } });
+  assert.equal(r.rateCon, true); assert.deepEqual(read[0], ['rc9']);
+});

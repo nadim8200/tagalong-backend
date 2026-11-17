@@ -136,6 +136,22 @@ export function releaseMark(list = []) {
   return { at: r.at, by: r.by || null, hub, hubName: hub ? HUB_NAMES[hub] || hub : null, count: list.length };
 }
 
+// The rate con the release is filled from (Nov 17): the load's own (manual upload, email, a batch filed to this trip), else
+// the truck's next load from a batch (Gus's rate cons not in TruckMate yet — the full record is in the pending batch store).
+// → { rc (the rate con data, with docIds), from } | null
+async function rateConFor(it, db, site) {
+  if (it && it._ratecon) { const d = it._ratecon.data || it._ratecon; return { rc: { ...d, docIds: it._ratecon.docIds || d.docIds || [] }, from: 'this load\'s rate con' }; }
+  const n = ((it && it._nextLoad) || [])[0];
+  if (!n || !db || !db.enabled) return null;
+  let rec = null;
+  if (n.pendingId) rec = (((await db.get(`taRateConPending:${site}`, [])) || []).find((p) => p.id === n.pendingId) || {}).record || null;
+  if (!rec && n.trip) rec = ((await db.get(`taTruckMateRateCon:${site}`, {})) || {})[n.trip] || null;
+  if (!rec && n.rc) rec = { broker: n.rc.broker, loadNumber: n.rc.loadNumber, fbfBillNumber: n.rc.bill, tempSetting: n.rc.tempSetting, docIds: n.rc.docIds || [] };
+  if (!rec) return null;
+  const data = rec.data || rec;
+  return { rc: { ...data, docIds: rec.docIds || data.docIds || (n.rc && n.rc.docIds) || [] }, from: `the next load's rate con — ${[data.broker, data.loadNumber].filter(Boolean).join(' ') || 'batch'}${n.verified ? '' : ' (not in TruckMate yet)'}` };
+}
+
 export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendMail, log = null, trainingActive = async () => null, hubOf = async () => null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
@@ -147,7 +163,9 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
     const sent = enabled ? (((await db.get(SENT(SITE), {})) || {})[String(req.params.trip)] || []) : [];
     const tr = await trainingActive().catch(() => null);
     const hub = await Promise.resolve(hubOf(it)).catch(() => null);   // where the trailer is parked now, as a suggestion
-    res.json({ form: { ...releaseDraft(it, { by: who(req), now: now() }), hub: hub && HUB_NAMES[hub] ? hub : '' }, hubs: HUBS, always: ALWAYS_TO, to: enabled ? ((await db.get(LAST_TO, [])) || []).filter((x) => !ALWAYS_TO.includes(x)) : [], hasRateCon: !!(it._ratecon && (it._ratecon.docIds || []).length), sent: sent.map(({ fields, ...x }) => x), training: tr ? { on: true, to: tr.to || [] } : null });
+    const rcf = await rateConFor(it, db, SITE).catch(() => null);
+    const draft = releaseDraft(rcf ? { ...it, _ratecon: { data: rcf.rc, docIds: rcf.rc.docIds } } : it, { by: who(req), now: now() });
+    res.json({ form: { ...draft, hub: hub && HUB_NAMES[hub] ? hub : '' }, filledFrom: rcf ? rcf.from : null, hubs: HUBS, always: ALWAYS_TO, to: enabled ? ((await db.get(LAST_TO, [])) || []).filter((x) => !ALWAYS_TO.includes(x)) : [], hasRateCon: !!(rcf && (rcf.rc.docIds || []).length), sent: sent.map(({ fields, ...x }) => x), training: tr ? { on: true, to: tr.to || [] } : null });
   });
   // the PDF only (the console's "Preview PDF")
   app.post('/truckmate/release/:trip/pdf', requireAuth, async (req, res) => {
@@ -166,7 +184,8 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
     if (!f.truck || !f.trailer) return res.status(400).json({ error: 'Truck and trailer are needed on the release.' });
     if (!f.hub) return res.status(400).json({ error: 'Pick the hub the trailer is released at.' });
     const pdf = Buffer.from(await releasePdf(f));
-    const ids = ((it && it._ratecon && it._ratecon.docIds) || []).slice(0, 3);
+    const rcf = await rateConFor(it, db, SITE).catch(() => null);   // the same rate con the form was filled from goes along
+    const ids = ((rcf && rcf.rc.docIds) || []).slice(0, 3);
     const rc = docs && docs.readDocs && ids.length ? await docs.readDocs({ site: SITE, ids }).catch(() => []) : [];
     const m = releaseEmail(f);
     try {
