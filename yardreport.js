@@ -7,10 +7,13 @@
 import { MIAMI_YARDS, haversineMi, brokerLoad } from './watchtower.js';
 import { KNOWN_YARDS } from './loadsheet.js';
 import { geocodePlace } from './meetwatch.js';
-import { getLiveIndex, samsaraTokenFrom } from './samsara.js';
+import { getLiveIndex, samsaraTokenFrom, trailerLocations } from './samsara.js';
+import { nextParked } from './thermoking.js';
 
 const SITE = 'florida-beauty';
 const POINTS = 'taHubPoints';      // hub → [{ lat, lng }] (the yard addresses, looked up once)
+const SAM = 'taSamsaraTrailers';   // { units: { trailer: reading + parkedSince }, firstReadAt } — trailers with a Samsara gateway
+export const SAM_POLL_MS = 20 * 60000;
 export const HUB_MILES = 1;
 // Yards pinned where our trucks actually park (the street-address lookup for Bartow landed over a mile away, so the Central Florida
 // yard showed 0 while Darwin's inventory had trucks and trailers there — Nov 16: truck 2405 parked at 27.9181, -81.7260)
@@ -47,6 +50,24 @@ export function hubAt(p, points = {}) {
   return null;
 }
 
+// Trailer numbers as both sources write them: "07141" / "7141 " / "tl 7141" → "7141". Pure.
+export const trailerKey = (x) => String(x || '').trim().toUpperCase().replace(/^(TL|TRL|TRAILER)\s*/, '').replace(/\s+/g, '').replace(/^0+(?=\d)/, '');
+// One trailer list from Thermo King and Samsara (Nov 17: carriers' and other trailers without Thermo King show on Samsara).
+// Same trailer in both: the newer position wins (with its parked time); Thermo King's temperatures are always kept. Pure.
+export function mergeTrailers(tk = {}, sam = {}) {
+  const out = {};
+  for (const u of Object.values(tk)) { const k = trailerKey(u.trailer); if (k) out[k] = { ...u, trailer: k, source: 'Thermo King' }; }
+  for (const u of Object.values(sam)) {
+    const k = trailerKey(u.trailer); if (!k) continue;
+    const cur = out[k];
+    if (!cur) { out[k] = { ...u, trailer: k, source: 'Samsara' }; continue; }
+    if (u.lat != null && String(u.at || '') > String(cur.at || '')) {
+      out[k] = { ...cur, lat: u.lat, lng: u.lng, location: u.location || cur.location, at: u.at, mph: u.mph, parkedSince: u.parkedSince, atLeast: u.atLeast, watchStart: u.watchStart, source: 'Samsara + Thermo King' };
+    } else out[k] = { ...cur, source: 'Thermo King + Samsara' };
+  }
+  return out;
+}
+
 // The report from Thermo King units, the board and its ETAs. units: { trailer: reading }, etas: { trip: { stops } }. Pure.
 export const ROLLING_IN = /^(DEPSHIP|INTRAN|ENROUTE|WAY|ARRCONS|DEPCONS)/i;
 export function inboundToFlorida(it) {
@@ -70,11 +91,12 @@ export function yardReport({ units = {}, items = [], etas = {}, points = {}, now
     if (!h) {
       elsewhere += 1;
       const ps = Date.parse(u.parkedSince || '');
-      const sinceTracking = !!(u.atLeast && watchStart && ps <= watchStart + 60 * 60000 && now - ps >= 12 * 3600000 && now - ps < PARKED_MS);
-      if (Number.isFinite(ps) && (now - ps >= PARKED_MS || sinceTracking)) parked.push({ sinceTracking, hours: Math.floor((now - ps) / 3600000), trailer: u.trailer, location: u.location || null, lat: u.lat, lng: u.lng, parkedSince: u.parkedSince, atLeast: !!u.atLeast, days: Math.floor((now - ps) / 86400000), seenAt: u.at, ageMin: Math.round((now - Date.parse(u.at)) / 60000), unitOn: u.powerOn, returnF: u.returnF, setF: u.setF, supplyF: u.supplyF ?? null, onLoad: onLoad.get(u.trailer) || null });
+      const ws = u.watchStart ? Date.parse(u.watchStart) : watchStart;   // a Samsara trailer: since Jarvis began reading Samsara trailers
+      const sinceTracking = !!(u.atLeast && ws && ps <= ws + 60 * 60000 && now - ps >= 12 * 3600000 && now - ps < PARKED_MS);
+      if (Number.isFinite(ps) && (now - ps >= PARKED_MS || sinceTracking)) parked.push({ sinceTracking, hours: Math.floor((now - ps) / 3600000), source: u.source || null, trailer: u.trailer, location: u.location || null, lat: u.lat, lng: u.lng, parkedSince: u.parkedSince, atLeast: !!u.atLeast, days: Math.floor((now - ps) / 86400000), seenAt: u.at, ageMin: Math.round((now - Date.parse(u.at)) / 60000), unitOn: u.powerOn, returnF: u.returnF, setF: u.setF, supplyF: u.supplyF ?? null, onLoad: onLoad.get(u.trailer) || null });
       continue;
     }
-    hubs[h].push({ hub: HUB_NAMES[h], trailer: u.trailer, seenAt: u.at, ageMin: Math.round((now - Date.parse(u.at)) / 60000), unitOn: u.powerOn, returnF: u.returnF, setF: u.setF, supplyF: u.supplyF ?? null, onLoad: onLoad.get(u.trailer) || null });
+    hubs[h].push({ hub: HUB_NAMES[h], source: u.source || null, trailer: u.trailer, seenAt: u.at, ageMin: Math.round((now - Date.parse(u.at)) / 60000), unitOn: u.powerOn, returnF: u.returnF, setF: u.setF, supplyF: u.supplyF ?? null, onLoad: onLoad.get(u.trailer) || null });
   }
   for (const h of Object.keys(hubs)) hubs[h].sort((a, b) => String(a.trailer).localeCompare(String(b.trailer), 'en', { numeric: true }));
   // coming down to Florida: only trailers out in the country on an ACTIVE broker load into FL — picked up outside Florida
@@ -146,7 +168,7 @@ export function truckReport({ idx = {}, items = [], etas = {}, points = {}, now 
   };
 }
 
-export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => geocodePlace(q, null), now = () => Date.now() }) {
+export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => geocodePlace(q, null), now = () => Date.now(), onTrailers = null }) {
   // the yards' points: Miami's three lots are known; the others are looked up once from their addresses and kept
   async function points() {
     const saved = (await db.get(POINTS, {})) || {};
@@ -161,12 +183,48 @@ export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => ge
     for (const [h, list] of Object.entries(EXTRA_POINTS)) out[h] = [...(out[h] || []), ...list];
     return out;
   }
+  // Samsara trailer GPS (one light request, cached 2 min by samsara.js) every 20 min: each trailer's position and, like
+  // Thermo King, since when it has sat within half a mile without moving
+  async function readSamsara() {
+    const token = samsaraTokenFrom(process.env);
+    if (!token || !db || !db.enabled) return { skipped: 'no Samsara' };
+    const [loc, idx] = await Promise.all([trailerLocations(token), getLiveIndex(token).catch(() => ({}))]);
+    const names = (idx && idx.trailerAssets) || {};
+    const st = (await db.get(SAM, {})) || {};
+    const units = { ...(st.units || {}) }; const at = new Date(now()).toISOString();
+    const firstReadAt = st.firstReadAt || at;
+    for (const [id, fix] of Object.entries((loc && loc.byId) || {})) {
+      const name = trailerKey(names[id]); if (!name || fix.lat == null) continue;
+      const x = { trailer: name, lat: fix.lat, lng: fix.lng, at: fix.at || at, mph: fix.speedMph ?? null, location: fix.location || null, watchStart: firstReadAt };
+      if (!units[name] || String(x.at) >= String(units[name].at || '')) units[name] = { ...x, ...nextParked(units[name], x) };
+    }
+    // a silent trailer stays (its last position is where it sits) until it reports again
+    await db.set(SAM, { units, firstReadAt, lastRead: at, source: (loc && loc.source) || null, error: (loc && loc.error) || null });
+    return { units: Object.keys(units).length };
+  }
+  let samTimer = null;
+  if (app && db && db.enabled && process.env.NODE_ENV !== 'test') {
+    // every 20 min: read Samsara trailers, then the trailer watch (30+ days parked, moving without a load) on the merged list
+    const tick = async () => {
+      await readSamsara().catch((e) => console.warn('[yard-samsara]', e.message));
+      if (!onTrailers) return;
+      const units = mergeTrailers(((await db.get('taThermoKing', {})) || {}).units || {}, ((await db.get(SAM, {})) || {}).units || {});
+      const board = await getBoard(SITE).catch(() => null);
+      await onTrailers(units, (board && board.trips) || [], await points()).catch((e) => console.warn('[trailer-watch]', e.message));
+    };
+    samTimer = setInterval(() => { tick(); }, SAM_POLL_MS);
+    if (samTimer.unref) samTimer.unref();
+    setTimeout(() => { tick(); }, 30000);
+  }
   async function report() {
     const tkSt = (await db.get('taThermoKing', {})) || {};
-    const units = tkSt.units || {};
+    const samSt = (await db.get(SAM, {})) || {};
+    const units = mergeTrailers(tkSt.units || {}, samSt.units || {});
     const board = await getBoard(SITE);
     const etas = ((await db.get(`taWatch:${SITE}`, {})) || {}).etas || {};
-    return { ...yardReport({ units, items: (board && board.trips) || [], etas, points: await points(), now: now(), trackingSince: tkSt.firstReadAt || null }), trackingSince: tkSt.firstReadAt || null };
+    const all = Object.values(units);
+    const sources = { thermoKing: all.filter((u) => /Thermo King/.test(u.source || '')).length, samsara: all.filter((u) => /Samsara/.test(u.source || '')).length, samsaraOnly: all.filter((u) => u.source === 'Samsara').length };
+    return { ...yardReport({ units, items: (board && board.trips) || [], etas, points: await points(), now: now(), trackingSince: tkSt.firstReadAt || null }), trackingSince: tkSt.firstReadAt || null, samsaraSince: samSt.firstReadAt || null, sources };
   }
   async function trucks() {
     const token = samsaraTokenFrom(process.env);
@@ -179,5 +237,5 @@ export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => ge
   if (app && requireAuth) app.get('/truckmate/yard-report', requireAuth, async (req, res) => { try { res.json(await report()); } catch (e) { res.status(502).json({ error: e.message }); } });
   // the hub a release is for: where the load is headed (releases are given during the run, not at a yard)
   const hubOf = async (item) => hubForDest(item);
-  return { report, trucks, hubOf };
+  return { report, trucks, hubOf, readSamsara };
 }

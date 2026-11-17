@@ -20,7 +20,6 @@ const LOOKBACK_GAP_MS = 5000;     // a look-back (if one ever runs again) spaces
 export const MAX_LOGINS_A_DAY = 3;
 export const MAX_MANUAL_A_DAY = 5;
 export const BACKFILL_DAYS = 7;   // the parked-time look-back
-export const KEEP_DAYS = 14;
 const LOOKBACK_STEP = 12 * 60 * 60000;      // a silent trailer (unit off) stays this long   // a dispatcher's "retry now" (far under Thermo King's 35-a-day lock)
 
 export const cToF = (c) => (c == null || c === '' || !Number.isFinite(Number(c)) ? null : Math.round((Number(c) * 9 / 5 + 32) * 10) / 10);
@@ -189,8 +188,7 @@ export function initThermoKing({ app = null, requireAuth = null, requireAdmin = 
       if (!units[t] || x.at >= units[t].at) units[t] = { ...x, ...nextParked(units[t], x) };
       history[t] = [...(history[t] || []).filter((h) => h.at !== x.at), { at: x.at, returnF: x.returnF, setF: x.setF }].slice(-48);
     }
-    // a trailer whose unit is off stops reporting while it sits — kept 14 days so a long stay at a customer still shows
-    for (const [t, x] of Object.entries(units)) if (end - Date.parse(x.at) > KEEP_DAYS * DAY) { delete units[t]; delete history[t]; }
+    // a trailer whose unit is off stops reporting while it sits — it stays (at its last position) until it reports again
     await db.set(KEY, { units, history, lastEnd: end, lastPoll: new Date(end).toISOString(), error: null, lastCount: Object.keys(fresh).length, backfilledAt: st.backfilledAt || null, firstReadAt: st.firstReadAt, lookBack: st.lookBack || null });
     return { units: Object.keys(fresh).length };
   }

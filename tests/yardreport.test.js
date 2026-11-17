@@ -70,3 +70,20 @@ test('Memphis: trailer 7135 "0.70 km South West of MEMPHIS YARD" counts at the M
   assert.equal(hubAt({ lat: 35.066755, lng: -90.01618 }, { MEMPHIS: [{ lat: 35.15, lng: -89.9 }, ...EXTRA_POINTS.MEMPHIS] }), 'MEMPHIS');
   assert.equal(hubAt({ lat: 35.2, lng: -90.2 }, { MEMPHIS: EXTRA_POINTS.MEMPHIS }), null, 'miles away: not at the yard');
 });
+
+test('Samsara trailers join the yard report: one list by trailer number, the newer position wins, Thermo King temps kept', async () => {
+  const { mergeTrailers, trailerKey, yardReport } = await import('../yardreport.js');
+  assert.equal(trailerKey(' tl 07141 '), '7141');
+  const tk = { 7141: { trailer: '7141', lat: 25.79, lng: -80.31, at: '2026-11-17T10:00:00Z', returnF: 35, setF: 35, parkedSince: '2026-11-17T09:00:00Z', atLeast: false } };
+  const sam = {
+    7141: { trailer: '07141', lat: 35.2, lng: -80.8, at: '2026-11-17T20:00:00Z', parkedSince: '2026-11-17T14:00:00Z', atLeast: false, location: 'Charlotte, NC' },
+    9001: { trailer: '9001', lat: 35.7, lng: -79.4, at: '2026-11-17T20:00:00Z', parkedSince: '2026-11-17T00:00:00Z', atLeast: true, watchStart: '2026-11-17T00:00:00Z', location: 'Siler City, NC' },   // carrier trailer, Samsara only
+  };
+  const m = mergeTrailers(tk, sam);
+  assert.equal(m['7141'].source, 'Samsara + Thermo King'); assert.equal(m['7141'].location, 'Charlotte, NC'); assert.equal(m['7141'].returnF, 35);
+  assert.equal(m['9001'].source, 'Samsara');
+  const r = yardReport({ units: m, items: [], points: {}, now: Date.parse('2026-11-17T20:30:00Z'), trackingSince: '2026-11-16T23:25:00Z' });
+  assert.equal(r.trailers, 2);
+  const p = r.parked.find((x) => x.trailer === '9001');
+  assert.ok(p && p.sinceTracking && p.source === 'Samsara', 'a Samsara trailer not moved since Jarvis began reading Samsara: listed after 12 h');
+});

@@ -82,6 +82,7 @@ import { initLtlTempAlert } from './tempalert.js';
 import { initDvr } from './dvr.js';
 import { initThermoKing } from './thermoking.js';
 import { initYardReport } from './yardreport.js';
+import { initTrailerWatch } from './trailerwatch.js';
 import { initRelease } from './release.js';
 import { initPickupAsk } from './pickupask.js';
 import { initStaffMail } from './staffmail.js';
@@ -1480,7 +1481,9 @@ initDvr(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, 
 // Thermo King TracKing (read only, every 15 min): live reefer readings for the cards and temp alerts — THERMOKING_* in Render
 thermoKing = initThermoKing({ app, requireAuth: requireDispatch, requireAdmin, db, env: process.env });
 // yard report: trailers at each hub yard (Thermo King GPS) + what's coming down to Florida
-const yardReport = initYardReport(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site) });
+// trailer watch: emails Nadim a trailer parked 30+ days, or one moving without being on a load
+const trailerWatch = initTrailerWatch({ db, sendMail: (m) => sendMail(m, { env: process.env }), to: async () => ['ntellez@floridabeauty.us'] });
+const yardReport = initYardReport(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), onTrailers: (u, i, p) => trailerWatch.check(u, i, p) });
 // Driver Release Form: the Release button on a load card → the form filled from the load → emailed as a PDF + the rate con
 releaseApi = initRelease(app, { requireAuth: requireDispatch, db, docs, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), log: (...a) => comms.log(...a), trainingActive: () => training.active(), hubOf: (it) => yardReport.hubOf(it) });
 // LTL run done in the app + truck rolling again → "Rolling to your next pickup?" in the driver app; the answer emails dispatch
