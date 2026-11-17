@@ -136,20 +136,35 @@ export function releaseMark(list = []) {
   return { at: r.at, by: r.by || null, hub, hubName: hub ? HUB_NAMES[hub] || hub : null, count: list.length };
 }
 
-// The rate con the release is filled from (Nov 17): the load's own (manual upload, email, a batch filed to this trip), else
-// the truck's next load from a batch (Gus's rate cons not in TruckMate yet — the full record is in the pending batch store).
-// → { rc (the rate con data, with docIds), from } | null
+// The rate con the release is filled from — always THIS load's (Nov 17: a truck can have its next load assigned before the
+// release or the drop, and that must never fill this one):
+//   1. the load's own rate con (manual upload, email, a batch filed to this trip);
+//   2. a batch rate con whose FB # is one of this trip's bills (filed somewhere else / still pending);
+//   3. the next load's — only once this load is done (its flowers delivered: the card shows the next load), and then the
+//      trip / FB # on the form are the next load's too.
+// → { rc (data + docIds), from, next?: { trip, fb } } | null
+const billKey = (x) => String(x || '').trim().toUpperCase();
 async function rateConFor(it, db, site) {
   if (it && it._ratecon) { const d = it._ratecon.data || it._ratecon; return { rc: { ...d, docIds: it._ratecon.docIds || d.docIds || [] }, from: 'this load\'s rate con' }; }
+  if (!db || !db.enabled) return null;
+  const pending = (await db.get(`taRateConPending:${site}`, [])) || [];
+  const bills = new Set(((it && (it.freightBills || it.orders)) || []).map((b) => billKey(b && b.billNumber)).filter(Boolean));
+  const mine = pending.find((p) => p && p.record && bills.has(billKey((p.record.data || p.record).fbfBillNumber)));
+  if (mine) { const d = mine.record.data || mine.record; return { rc: { ...d, docIds: mine.record.docIds || d.docIds || [] }, from: `this load's rate con (FB ${billKey(d.fbfBillNumber)}, from a batch)` }; }
+  const done = it && it._flowerPhase && /^(delivered|next-load)$/.test(it._flowerPhase.phase || '');
   const n = ((it && it._nextLoad) || [])[0];
-  if (!n || !db || !db.enabled) return null;
+  if (!done || !n) return null;
   let rec = null;
-  if (n.pendingId) rec = (((await db.get(`taRateConPending:${site}`, [])) || []).find((p) => p.id === n.pendingId) || {}).record || null;
+  if (n.pendingId) rec = (pending.find((p) => p.id === n.pendingId) || {}).record || null;
   if (!rec && n.trip) rec = ((await db.get(`taTruckMateRateCon:${site}`, {})) || {})[n.trip] || null;
   if (!rec && n.rc) rec = { broker: n.rc.broker, loadNumber: n.rc.loadNumber, fbfBillNumber: n.rc.bill, tempSetting: n.rc.tempSetting, docIds: n.rc.docIds || [] };
   if (!rec) return null;
   const data = rec.data || rec;
-  return { rc: { ...data, docIds: rec.docIds || data.docIds || (n.rc && n.rc.docIds) || [] }, from: `the next load's rate con — ${[data.broker, data.loadNumber].filter(Boolean).join(' ') || 'batch'}${n.verified ? '' : ' (not in TruckMate yet)'}` };
+  return {
+    rc: { ...data, docIds: rec.docIds || data.docIds || (n.rc && n.rc.docIds) || [] },
+    from: `the next load's rate con — ${[data.broker, data.loadNumber].filter(Boolean).join(' ') || 'batch'}${n.verified ? '' : ' (not in TruckMate yet)'} — this load's flowers are delivered`,
+    next: { trip: (n.verified && n.verified.trip) || n.trip || '', fb: billKey(data.fbfBillNumber) },
+  };
 }
 
 export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendMail, log = null, trainingActive = async () => null, hubOf = async () => null, now = () => Date.now() }) {
@@ -164,8 +179,10 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
     const tr = await trainingActive().catch(() => null);
     const hub = await Promise.resolve(hubOf(it)).catch(() => null);   // where the trailer is parked now, as a suggestion
     const rcf = await rateConFor(it, db, SITE).catch(() => null);
-    const draft = releaseDraft(rcf ? { ...it, _ratecon: { data: rcf.rc, docIds: rcf.rc.docIds } } : it, { by: who(req), now: now() });
-    res.json({ form: { ...draft, hub: hub && HUB_NAMES[hub] ? hub : '' }, filledFrom: rcf ? rcf.from : null, hubs: HUBS, always: ALWAYS_TO, to: enabled ? ((await db.get(LAST_TO, [])) || []).filter((x) => !ALWAYS_TO.includes(x)) : [], hasRateCon: !!(rcf && (rcf.rc.docIds || []).length), sent: sent.map(({ fields, ...x }) => x), training: tr ? { on: true, to: tr.to || [] } : null });
+    const draft0 = releaseDraft(rcf ? { ...it, _ratecon: { data: rcf.rc, docIds: rcf.rc.docIds } } : it, { by: who(req), now: now() });
+    // filled from the next load: its trip / FB #, not the finished one's
+    const draft = rcf && rcf.next ? { ...draft0, trip: rcf.next.trip || '', fb: rcf.next.fb || '' } : draft0;
+    res.json({ form: { ...draft, hub: hub && HUB_NAMES[hub] ? hub : '' }, filledFrom: rcf ? rcf.from : 'TruckMate only — no rate con on file for this load', hubs: HUBS, always: ALWAYS_TO, to: enabled ? ((await db.get(LAST_TO, [])) || []).filter((x) => !ALWAYS_TO.includes(x)) : [], hasRateCon: !!(rcf && (rcf.rc.docIds || []).length), sent: sent.map(({ fields, ...x }) => x), training: tr ? { on: true, to: tr.to || [] } : null });
   });
   // the PDF only (the console's "Preview PDF")
   app.post('/truckmate/release/:trip/pdf', requireAuth, async (req, res) => {

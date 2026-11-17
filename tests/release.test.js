@@ -69,18 +69,28 @@ test('the release hub comes from where the load is headed: South Florida → Mia
   assert.equal(hubForDest({ trip: { destZoneDesc: 'ORLANDO, FL' }, freightBills: [{ endZoneDescription: 'BOCA RATON, FL, 33431' }] }), 'MIAMI', 'the last delivery wins');
 });
 
-test('no rate con on the load: the release fills from the truck\'s next-load batch rate con (and attaches it), and says so', async () => {
+test('the release is filled for THIS load: a next load already assigned never fills it — only once this load is done', async () => {
   const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
-  m.set('taRateConPending:florida-beauty', [{ id: 'p1', record: { broker: 'DM Trans, LLC dba Arrive Logistics', loadNumber: '9981663', tempSetting: '-10°F', commodity: 'Frozen food', pickups: [{ name: 'NOVOLEX' }], deliveries: [{ name: 'LINEAGE', address: '1 Cold St', city: 'FONTANA', state: 'CA', zip: '92335', date: '11/22/2026', time: '08:00' }], docIds: ['rc9'] } }]);
-  const item = { trip: { tripNumber: '627178', powerUnit: '733', trailer: '262045', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M5063124' }], _nextLoad: [{ pendingId: 'p1', rc: { broker: 'DM Trans, LLC dba Arrive Logistics', loadNumber: '9981663', docIds: ['rc9'] }, verified: null }] };
+  m.set('taRateConPending:florida-beauty', [
+    { id: 'p1', record: { broker: 'DM Trans, LLC dba Arrive Logistics', loadNumber: '9981663', fbfBillNumber: 'B181050', tempSetting: '-10°F', pickups: [{ name: 'NOVOLEX' }], deliveries: [{ name: 'LINEAGE', city: 'FONTANA', state: 'CA', zip: '92335' }], docIds: ['rc9'] } },
+    { id: 'p2', record: { broker: 'KLLM', loadNumber: '0382143', fbfBillNumber: 'B181004', tempSetting: '-10°F', pickups: [{ name: 'DEERFIELD COLD' }], deliveries: [{ name: 'ROCK HILL DC', city: 'ROCK HILL', state: 'SC', zip: '29730' }], docIds: ['rc4'] } },
+  ]);
+  const next = [{ pendingId: 'p1', rc: { broker: 'DM Trans, LLC dba Arrive Logistics', loadNumber: '9981663', docIds: ['rc9'] }, verified: { trip: '627311' } }];
+  const items = {
+    running: { trip: { tripNumber: '627178', powerUnit: '733', trailer: '262045', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M5063124' }], _nextLoad: next },
+    done: { trip: { tripNumber: '627179', powerUnit: '734', trailer: '262046', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'M5063125' }], _nextLoad: next, _flowerPhase: { phase: 'delivered' } },
+    broker: { trip: { tripNumber: '627246', powerUnit: '2018', trailer: '7282', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'B181004' }], _nextLoad: next },
+  };
   const routes = {}; const app = { get: (p, g, h) => { routes[`GET ${p}`] = h; }, post: (p, g, h) => { routes[`POST ${p}`] = h; } };
-  const sent = []; const read = [];
-  initRelease(app, { requireAuth: () => {}, db, docs: { readDocs: async ({ ids }) => { read.push(ids); return [{ mediaType: 'application/pdf', data: Buffer.from('%PDF') }]; } }, getBoard: async () => ({ trips: [item] }), sendMail: async (x) => sent.push(x) });
-  let out; await routes['GET /truckmate/release/:trip']({ user: { name: 'Nadim' }, params: { trip: '627178' } }, { status: () => ({ json: () => {} }), json: (j) => { out = j; } });
-  assert.match(out.filledFrom, /next load's rate con — DM Trans, LLC dba Arrive Logistics 9981663 \(not in TruckMate yet\)/);
-  assert.equal(out.form.broker, 'DM Trans, LLC dba Arrive Logistics'); assert.equal(out.form.shipper, 'NOVOLEX'); assert.equal(out.form.temp, '-10°F');
-  assert.deepEqual([out.form.stops[0].consignee, out.form.stops[0].city, out.form.stops[0].zip], ['LINEAGE', 'FONTANA', '92335']);
-  assert.equal(out.hasRateCon, true);
-  let r; await routes['POST /truckmate/release/:trip']({ user: { name: 'Nadim' }, params: { trip: '627178' }, body: { form: { ...out.form, hub: 'MIAMI' }, to: 'yard_dispatch@floridabeauty.us' } }, { status: () => ({ json: () => {} }), json: (j) => { r = j; } });
-  assert.equal(r.rateCon, true); assert.deepEqual(read[0], ['rc9']);
+  initRelease(app, { requireAuth: () => {}, db, docs: { readDocs: async () => [] }, getBoard: async () => ({ trips: Object.values(items) }), sendMail: async () => {} });
+  const get = async (trip) => { let out; await routes['GET /truckmate/release/:trip']({ user: { name: 'Nadim' }, params: { trip } }, { status: () => ({ json: () => {} }), json: (j) => { out = j; } }); return out; };
+  const a = await get('627178');   // still delivering its flowers, next load already assigned
+  assert.match(a.filledFrom, /TruckMate only — no rate con on file for this load/);
+  assert.equal(a.form.broker, ''); assert.equal(a.form.trip, '627178');
+  const b = await get('627246');   // a broker load whose batch rate con was never filed to it: matched by its FB #
+  assert.match(b.filledFrom, /this load's rate con \(FB B181004, from a batch\)/);
+  assert.equal(b.form.broker, 'KLLM'); assert.equal(b.form.stops[0].consignee, 'ROCK HILL DC');
+  const c = await get('627179');   // flowers delivered: the release is for the next load
+  assert.match(c.filledFrom, /next load's rate con — DM Trans, LLC dba Arrive Logistics 9981663 — this load's flowers are delivered/);
+  assert.equal(c.form.trip, '627311'); assert.equal(c.form.fb, 'B181050'); assert.equal(c.form.stops[0].consignee, 'LINEAGE');
 });
