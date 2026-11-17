@@ -3,7 +3,7 @@
 // from what Jarvis knows (TruckMate: FB#, truck, trailer, drivers + IDs, trip; the rate con: broker, shipper, temperature,
 // commodity, up to 4 deliveries with consignee, address, date, time, lumper), the dispatcher checks it and submits, and it is
 // emailed as a PDF laid out like the form (FBF logo + truck banner) with the rate con attached. Who it goes to is typed on the
-// form on top of the two dispatch inboxes it always goes to (the last extra list used is remembered). A record of every release stays on the load.
+// form: the two dispatch inboxes are on it every time it opens (one can be taken off for a release), plus any added (the last extra list used is remembered). A record of every release stays on the load.
 // ---------------------------------------------------------------
 import { readFileSync } from 'node:fs';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
@@ -11,7 +11,7 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 const SITE = 'florida-beauty';
 const SENT = (site) => `taReleases:${site}`;     // trip → [{ at, by, to, fields }]
 const LAST_TO = 'taReleaseTo';                   // the extra recipients used last time
-export const ALWAYS_TO = ['yard_dispatch@floridabeauty.us', 'inbound-dispatch@floridabeauty.us'];   // every release goes to both
+export const ALWAYS_TO = ['yard_dispatch@floridabeauty.us', 'inbound-dispatch@floridabeauty.us'];   // on every release form when it opens
 const ASSET = (f) => { try { return readFileSync(new URL(`./assets/release/${f}`, import.meta.url)); } catch { return null; } };
 const LOGO = ASSET('fbf-logo.png');
 const BANNER = ASSET('driver-release-banner.png');
@@ -143,12 +143,12 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
     res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="Driver-Release-${f.trip}.pdf"` });
     res.end(Buffer.from(await releasePdf(f)));
   });
-  // submit: email the form (PDF) + the rate con to the two dispatch inboxes and anyone added on it
+  // submit: email the form (PDF) + the rate con to the recipients on it
   app.post('/truckmate/release/:trip', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
     const b = req.body || {}; const trip = String(req.params.trip);
-    const extra = [...new Set((Array.isArray(b.to) ? b.to : String(b.to || '').split(/[,;\s]+/)).map((x) => String(x).trim().toLowerCase()).filter((x) => EMAIL.test(x) && !ALWAYS_TO.includes(x)))].slice(0, 10);
-    const to = [...ALWAYS_TO, ...extra];
+    const to = [...new Set((Array.isArray(b.to) ? b.to : String(b.to || '').split(/[,;\s]+/)).map((x) => String(x).trim().toLowerCase()).filter((x) => EMAIL.test(x)))].slice(0, 12);
+    if (!to.length) return res.status(400).json({ error: 'Add who gets the release (an email).' });
     const it = await itemOf(trip);
     const f = cleanForm({ ...(b.form || {}), trip });
     if (!f.truck || !f.trailer) return res.status(400).json({ error: 'Truck and trailer are needed on the release.' });
@@ -161,7 +161,7 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
         ...rc.map((x, i) => ({ name: `Rate-Con-${trip}${rc.length > 1 ? `-${i + 1}` : ''}.${/pdf/.test(x.mediaType) ? 'pdf' : 'jpg'}`, contentType: x.mediaType, bytes: x.data }))] });
     } catch (e) { return res.status(502).json({ error: e.message }); }
     const at = new Date(now()).toISOString();
-    await db.set(LAST_TO, extra);
+    await db.set(LAST_TO, to.filter((x) => !ALWAYS_TO.includes(x)));
     await db.update(SENT(SITE), (cur) => ({ ...(cur || {}), [trip]: [...((cur || {})[trip] || []), { at, by: who(req), to, fields: f }].slice(-10) }), {});
     if (log) await log(SITE, trip, { type: 'note', kind: 'release', text: `Driver release sent to ${to.join(', ')} (truck ${f.truck}, trailer ${f.trailer})`, by: who(req), noThread: true }).catch(() => {});
     res.json({ ok: true, at, to, rateCon: rc.length > 0 });

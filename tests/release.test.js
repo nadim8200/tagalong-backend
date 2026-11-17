@@ -19,7 +19,7 @@ test('the Driver Release Form filled from the load: FB#, truck, trailer, driver 
   assert.match(m.html, /Sign bills S\.L\.C/);
 });
 
-test('submit: emails the PDF + the rate con always to Yard + Inbound Dispatch plus anyone added, remembers the extras, keeps a record; needs truck and trailer', async () => {
+test('submit: emails the PDF + the rate con to the recipients on the form (the two dispatch inboxes are offered every time), remembers the extras, keeps a record; needs truck, trailer and an email', async () => {
   const pdf = await releasePdf(cleanForm(releaseDraft(item)));
   assert.equal(Buffer.from(pdf).subarray(0, 4).toString(), '%PDF');
   const routes = {}; const app = { get: (p, g, h) => { routes[`GET ${p}`] = h; }, post: (p, g, h) => { routes[`POST ${p}`] = h; } };
@@ -31,7 +31,7 @@ test('submit: emails the PDF + the rate con always to Yard + Inbound Dispatch pl
   assert.equal(g.out.form.fb, 'B180942'); assert.equal(g.out.hasRateCon, true);
   assert.deepEqual(g.out.always, ['yard_dispatch@floridabeauty.us', 'inbound-dispatch@floridabeauty.us']);
   assert.equal((await call('POST /truckmate/release/:trip', { body: { form: { ...g.out.form, trailer: '' }, to: 'yard@example.com' } })).code, 400);
-  const r = await call('POST /truckmate/release/:trip', { body: { form: { ...g.out.form, comments: 'Drop at Bartow' }, to: 'Yard@Example.com, dispatch@floridabeauty.us, Yard_Dispatch@floridabeauty.us' } });
+  const r = await call('POST /truckmate/release/:trip', { body: { form: { ...g.out.form, comments: 'Drop at Bartow' }, to: 'Yard_Dispatch@floridabeauty.us, Inbound-Dispatch@floridabeauty.us, Yard@Example.com, dispatch@floridabeauty.us, yard_dispatch@floridabeauty.us' } });
   assert.equal(r.out.ok, true); assert.equal(r.out.rateCon, true);
   assert.deepEqual(sent[0].to, ['yard_dispatch@floridabeauty.us', 'inbound-dispatch@floridabeauty.us', 'yard@example.com', 'dispatch@floridabeauty.us'], 'the two inboxes first, never twice');
   assert.deepEqual(sent[0].attachments.map((a) => a.name), ['Driver-Release-627031.pdf', 'Rate-Con-627031.pdf']);
@@ -39,9 +39,12 @@ test('submit: emails the PDF + the rate con always to Yard + Inbound Dispatch pl
   assert.equal(m.get('taReleases:florida-beauty')['627031'][0].fields.comments, 'Drop at Bartow');
   assert.match(logs[0].text, /Driver release sent to yard_dispatch@floridabeauty\.us, inbound-dispatch@floridabeauty\.us, yard@example\.com/);
   assert.deepEqual((await call('GET /truckmate/release/:trip', {})).out.to, ['yard@example.com', 'dispatch@floridabeauty.us'], 'remembered for next time');
-  const only = await call('POST /truckmate/release/:trip', { body: { form: g.out.form, to: '' } });
-  assert.equal(only.out.ok, true, 'nothing added: it still goes to the two dispatch inboxes');
-  assert.deepEqual(sent[1].to, ['yard_dispatch@floridabeauty.us', 'inbound-dispatch@floridabeauty.us']);
+  assert.equal((await call('POST /truckmate/release/:trip', { body: { form: g.out.form, to: '' } })).code, 400, 'no one on it');
+  await call('POST /truckmate/release/:trip', { body: { form: g.out.form, to: 'yard_dispatch@floridabeauty.us' } });
+  assert.deepEqual(sent[1].to, ['yard_dispatch@floridabeauty.us'], 'Inbound Dispatch taken off for this release');
+  const again = (await call('GET /truckmate/release/:trip', {})).out;
+  assert.deepEqual(again.always, ['yard_dispatch@floridabeauty.us', 'inbound-dispatch@floridabeauty.us'], 'both back the next time the form opens');
+  assert.deepEqual(again.to, [], 'no extras that time');
 });
 
 test('city, state and ZIP edit separately and round-trip to the PDF line; an older one-line value still works', () => {
