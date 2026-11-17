@@ -55,12 +55,14 @@ export function setPointMismatch(it) {
 // Is the flower load on the trailer right now? → { phase: 'next-load' | 'delivered' | 'empty' | 'loading' | 'on', by }.
 // next-load: the same trailer is on a newer trip that has started (at the shipper or later). delivered: every bill has a
 // TruckMate delivery time, or every delivery stop on the trip sheet has a completed GPS visit (stops without a geofence
-// never count as visited, so it stays on). Pure.
+// never count as visited, so it stays on), or — Jarvis's own stop records (milestones: parked at the stop, then left) show
+// every delivery stop left AND the reefer is now set far from flower temperature (33°F or colder, or 50°F+): the driver
+// set it for the next load (627178, Nov 17: delivered in Boston, set −10°F, TruckMate not updated). Pure.
 const STARTED = /^(LOADINGMAN|LOADEDTOGO|DISP|ARRSHIP|DEPSHIP|INTRAN|ENROUTE|WAY|ARRCONS|DEPCONS)/i;
 const LOADING = /^(LOADINGMAN|LOADEDTOGO|DISP|ARRSHIP)/i;
 const stOf = (it) => String(tripOf(it).status || '').trim();
 const tlOf = (it) => String(tripOf(it).trailer || '').trim().toUpperCase();
-export function loadPhase(it, { trips = [], visits = {} } = {}) {
+export function loadPhase(it, { trips = [], visits = {}, milestones = {} } = {}) {
   const n = tripNo(it); const tl = tlOf(it);
   if (tl) {
     const newer = trips.find((o) => o !== it && tlOf(o) === tl && Number(tripNo(o)) > Number(n) && STARTED.test(stOf(o)));
@@ -71,6 +73,12 @@ export function loadPhase(it, { trips = [], visits = {} } = {}) {
   const stops = ((it && it._manifest && it._manifest.stops) || []).filter((x) => x && x.key && !/^LOAD$/i.test(x.action || ''));
   const v = visits[n] || {};
   if (stops.length && stops.every((x) => v[x.key] && v[x.key].state === 'completed')) return { phase: 'delivered', by: 'GPS' };
+  const places = [...new Set(bills.map((b) => b && (b.endZoneDescription || b.endZone)).filter(Boolean))];
+  const ms = milestones[n];
+  const left = (pl) => !!(ms && ((ms.ms && (ms.ms[`left:${pl}`] || ms.ms[`delivered:${pl}`])) || (ms.waits && ms.waits[pl] && ms.waits[pl].leftAt)));
+  const sp = it && it._loadTemp && it._loadTemp.current && it._loadTemp.current.setF;
+  const notFlowerSet = sp != null && Number.isFinite(Number(sp)) && (Number(sp) <= FREEZE_F || Number(sp) >= 50);
+  if (places.length && places.every(left) && notFlowerSet) return { phase: 'delivered', by: 'stops left + set for the next load' };
   const st = stOf(it);
   if (!st || !STARTED.test(st)) return { phase: 'empty' };
   return { phase: LOADING.test(st) ? 'loading' : 'on' };
@@ -235,12 +243,13 @@ export function initLtlTempAlert({ db, sendMail = null, emails = async () => [],
     const trips = (board && board.trips) || [];
     // is the flower load on the trailer? (loading for more than 3 hours counts as on: the warm allowance is over)
     const visits = (await db.get(`taStopVisits:${site}`, {})) || {};
+    const milestones = (await db.get(`taMilestones:${site}`, {})) || {};
     const prevPh = (await db.get(PHASE(site), {})) || {};
     const ph = {}; const phases = {};
     for (const it of trips) {
       if (!isLtl(it)) continue;
       const n = tripNo(it); if (!n) continue;
-      const p = loadPhase(it, { trips, visits });
+      const p = loadPhase(it, { trips, visits, milestones });
       const since = prevPh[n] && prevPh[n].phase === p.phase ? prevPh[n].since : now();
       ph[n] = { phase: p.phase, since, ...(p.by ? { by: p.by } : {}) };
       phases[n] = p.phase === 'loading' && now() - since > LOADING_MAX_MIN * MIN ? 'on' : p.phase;
@@ -267,7 +276,7 @@ export function initLtlTempAlert({ db, sendMail = null, emails = async () => [],
     const offKeys = new Set(off.map(alertKey));
     for (const x of off) {
       const k = alertKey(x); const prev = st[k];
-      const held = x.kind !== 'setpoint' && !prev && holding(x, nextHist[x.trip], { holdMin: cfg.holdMin });
+      const held = x.kind !== 'setpoint' && (!prev || (x.kind === 'freeze' && prev.kind !== 'freeze')) && holding(x, nextHist[x.trip], { holdMin: cfg.holdMin });
       const rec = { kind: x.kind, offF: x.offF, setF: x.setF, readingF: x.readingF ?? null, readAt: x.at || null, at: new Date(now()).toISOString() };
       if (!held && shouldAlert(prev, x)) { due.push({ x, worse: !!prev && x.kind !== 'setpoint' && (prev.kind || 'reading') === x.kind }); next[k] = rec; } else if (prev) next[k] = prev;
     }

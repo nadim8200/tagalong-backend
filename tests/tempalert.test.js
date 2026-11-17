@@ -165,3 +165,25 @@ test('yesterday\'s texts that should not have gone out — and the ones that mus
   for (let i = 13; i <= 16; i += 1) await run(i * 15, [load('8', 47, 35, i * 15, 'LOADEDTOGO')]);
   assert.equal(texts.length, 1, 'still warm after 3 hours loading → counts (10°F+ → 30 min)');
 });
+
+test('627178 (Nov 17): delivered in Boston (stop left), set to -10°F for the next load, TruckMate not updated → no FREEZE text; a freeze after an older alert still needs 2 readings', async () => {
+  const { loadPhase } = await import('../tempalert.js');
+  const it = { trip: { tripNumber: '627178', status: 'DEPSHIP', trailer: '262045' }, freightBills: [{ billNumber: 'M5063124', endZoneDescription: 'HYDE PARK, MA, 02136' }],
+    _loadTemp: { current: { readingF: -8.8, setF: -10 }, target: { minF: 35, maxF: 35 } } };
+  const ms = { 627178: { waits: { 'HYDE PARK, MA, 02136': { arrivedAt: '2026-11-16T07:09:55Z', leftAt: '2026-11-16T13:54:55Z' } } } };
+  assert.deepEqual(loadPhase(it, { milestones: ms }), { phase: 'delivered', by: 'stops left + set for the next load' });
+  assert.equal(loadPhase({ ...it, _loadTemp: { current: { readingF: 36, setF: 35 }, target: { minF: 35, maxF: 35 } } }, { milestones: ms }).phase, 'on', 'stop left but still set for flowers → keep watching');
+  assert.equal(loadPhase(it, { milestones: { 627178: { waits: {} } } }).phase, 'on', 'never left the stop → keep watching (and the set point alerts)');
+  const two = { ...it, freightBills: [...it.freightBills, { billNumber: 'M2', endZoneDescription: 'BOSTON, MA, 02118' }] };
+  assert.equal(loadPhase(two, { milestones: ms }).phase, 'on', 'one delivery stop not left yet → keep watching');
+  // an earlier warm alert on the trip doesn't skip the 2-reading freeze check
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v) };
+  const texts = []; let clock = at(0);
+  const a = initLtlTempAlert({ db, emails: async () => [], phones: async () => ['+1'], sendSms: async (to, t) => texts.push(t), now: () => clock });
+  const load = (f, min) => { const x = ltlAt('9', f, 35, min); x._loadTemp.target = { minF: 35, maxF: 35, text: '35°F' }; return x; };
+  m.set('taLtlTempAlert:s', { 9: { kind: 'reading', offF: 6, setF: 35, readingF: 41 } });
+  clock = at(0) + 60000; await a.process('s', { trips: [load(32, 0)] });
+  assert.equal(texts.length, 0, 'one freezing reading: wait for the next');
+  clock = at(15) + 60000; await a.process('s', { trips: [load(31.5, 15)] });
+  assert.equal(texts.length, 1); assert.match(texts[0], /^FREEZE RISK - FLOWERS[\s\S]*2 readings in a row/);
+});
