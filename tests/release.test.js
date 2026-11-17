@@ -85,10 +85,12 @@ test('the release is filled for THIS load: a next load already assigned never fi
   initRelease(app, { requireAuth: () => {}, db, docs: { readDocs: async () => [] }, getBoard: async () => ({ trips: Object.values(items) }), sendMail: async () => {} });
   const get = async (trip) => { let out; await routes['GET /truckmate/release/:trip']({ user: { name: 'Nadim' }, params: { trip } }, { status: () => ({ json: () => {} }), json: (j) => { out = j; } }); return out; };
   const a = await get('627178');   // still delivering its flowers, next load already assigned
-  assert.match(a.filledFrom, /TruckMate only — no rate con on file for this load/);
+  assert.equal(a.filledFrom, null, 'an LTL (M bills) never has a rate con: no note');
   assert.equal(a.form.broker, ''); assert.equal(a.form.trip, '627178');
   const b = await get('627246');   // a broker load whose batch rate con was never filed to it: matched by its FB #
   assert.match(b.filledFrom, /this load's rate con \(FB B181004, from a batch\)/);
+  m.set('taRateConPending:florida-beauty', m.get('taRateConPending:florida-beauty').filter((p) => p.id !== 'p2'));
+  assert.match((await get('627246')).filledFrom, /TruckMate only — no rate con on file for this broker load yet/, 'a broker load without its rate con: said');
   assert.equal(b.form.broker, 'KLLM'); assert.equal(b.form.stops[0].consignee, 'ROCK HILL DC');
   const c = await get('627179');   // flowers delivered: the release is for the next load
   assert.match(c.filledFrom, /next load's rate con — DM Trans, LLC dba Arrive Logistics 9981663 — this load's flowers are delivered/);

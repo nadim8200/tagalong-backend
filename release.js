@@ -8,6 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { HUB_NAMES } from './yardreport.js';
+import { brokerLoad } from './watchtower.js';
 
 const SITE = 'florida-beauty';
 const SENT = (site) => `taReleases:${site}`;     // trip → [{ at, by, to, fields }]
@@ -178,11 +179,12 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
     const sent = enabled ? (((await db.get(SENT(SITE), {})) || {})[String(req.params.trip)] || []) : [];
     const tr = await trainingActive().catch(() => null);
     const hub = await Promise.resolve(hubOf(it)).catch(() => null);   // where the trailer is parked now, as a suggestion
+    // the note on the form: where it was filled from — none for an LTL (it never has a rate con)
     const rcf = await rateConFor(it, db, SITE).catch(() => null);
     const draft0 = releaseDraft(rcf ? { ...it, _ratecon: { data: rcf.rc, docIds: rcf.rc.docIds } } : it, { by: who(req), now: now() });
     // filled from the next load: its trip / FB #, not the finished one's
     const draft = rcf && rcf.next ? { ...draft0, trip: rcf.next.trip || '', fb: rcf.next.fb || '' } : draft0;
-    res.json({ form: { ...draft, hub: hub && HUB_NAMES[hub] ? hub : '' }, filledFrom: rcf ? rcf.from : 'TruckMate only — no rate con on file for this load', hubs: HUBS, always: ALWAYS_TO, to: enabled ? ((await db.get(LAST_TO, [])) || []).filter((x) => !ALWAYS_TO.includes(x)) : [], hasRateCon: !!(rcf && (rcf.rc.docIds || []).length), sent: sent.map(({ fields, ...x }) => x), training: tr ? { on: true, to: tr.to || [] } : null });
+    res.json({ form: { ...draft, hub: hub && HUB_NAMES[hub] ? hub : '' }, filledFrom: rcf ? rcf.from : (brokerLoad(it) ? 'TruckMate only — no rate con on file for this broker load yet' : null), hubs: HUBS, always: ALWAYS_TO, to: enabled ? ((await db.get(LAST_TO, [])) || []).filter((x) => !ALWAYS_TO.includes(x)) : [], hasRateCon: !!(rcf && (rcf.rc.docIds || []).length), sent: sent.map(({ fields, ...x }) => x), training: tr ? { on: true, to: tr.to || [] } : null });
   });
   // the PDF only (the console's "Preview PDF")
   app.post('/truckmate/release/:trip/pdf', requireAuth, async (req, res) => {
