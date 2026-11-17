@@ -187,3 +187,18 @@ test('627178 (Nov 17): delivered in Boston (stop left), set to -10°F for the ne
   clock = at(15) + 60000; await a.process('s', { trips: [load(31.5, 15)] });
   assert.equal(texts.length, 1); assert.match(texts[0], /^FREEZE RISK - FLOWERS[\s\S]*2 readings in a row/);
 });
+
+test('a set point alert is said once per trailer, trip and value — even if the trip flips to delivered and back, or the state is lost', async () => {
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v) };
+  const texts = []; let clock = at(0);
+  const a = initLtlTempAlert({ db, emails: async () => [], phones: async () => ['+1'], sendSms: async (to, t) => texts.push(t), now: () => clock });
+  const load = (extra = {}) => { const x = ltlAt('627190', 36, -10, 0, { trip: { tripNumber: '627190', trailer: '7351', status: 'DEPCONS' }, ...extra }); x._loadTemp.target = { minF: 35, maxF: 35, text: '35°F' }; return x; };
+  clock = at(1); await a.process('s', { trips: [load()] });
+  assert.equal(texts.length, 1);
+  clock = at(2); await a.process('s', { trips: [load({ freightBills: [{ billNumber: 'P1', actualDelivery: '2026-11-17' }] })] });   // delivered
+  clock = at(3); await a.process('s', { trips: [load()] });                                                                      // flips back
+  assert.equal(texts.length, 1, 'remembered while on the board');
+  m.delete('taLtlTempAlert:s');                                                                                                  // state lost (an overlapping deploy)
+  clock = at(4); await a.process('s', { trips: [load()] });
+  assert.equal(texts.length, 1, 'the sent log still stops it');
+});

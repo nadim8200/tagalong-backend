@@ -284,8 +284,13 @@ export function initLtlTempAlert({ db, sendMail = null, emails = async () => [],
     // delivered / next load → forgotten quietly. Set point alerts are just forgotten.
     const back = [];
     for (const [k, prev] of Object.entries(st)) {
-      if (offKeys.has(k) || k.endsWith('|set')) continue;
-      const it = trips.find((x) => tripNo(x) === k);
+      if (offKeys.has(k)) continue;
+      const tk = k.replace(/\|set$/, '');
+      const it = trips.find((x) => tripNo(x) === tk);
+      // flowers off the trailer (or still loading in a way that hides it): remember what was already said while the trip
+      // is on the board, so a phase that flips back — or an overlapping deploy — never repeats it
+      if (it && !ONBOARD.has(phases[tk])) { next[k] = prev; continue; }
+      if (k.endsWith('|set')) continue;                                             // set point fixed → forgotten
       const c = it && it._loadTemp && it._loadTemp.current;
       const at = c ? Date.parse(c.at || '') : null;
       if (!it || !ONBOARD.has(phases[k]) || !c || c.readingF == null || !at || (prev.readAt && at <= prev.readAt) || now() - at > 240 * MIN) { if (it && ONBOARD.has(phases[k])) next[k] = prev; continue; }
@@ -298,6 +303,7 @@ export function initLtlTempAlert({ db, sendMail = null, emails = async () => [],
     const once = async (id) => { if (sent[id]) return false; sent[id] = new Date(now()).toISOString(); await db.set(SENT(site), Object.fromEntries(Object.entries(sent).slice(-500))); return true; };
     for (const { x, worse } of due) {
       const m = tempMessage(x, { worse });
+      if (x.kind === 'setpoint' && !(await once([x.trailer || '-', x.trip, 'set', x.setF].join('|')))) continue; // eslint-disable-line no-await-in-loop
       if (x.kind !== 'setpoint') {
         // once per trailer, trip, stretch and reading — a repeat cycle or a retry never texts the same thing twice
         const t = nextHist[x.trip];
