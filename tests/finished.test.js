@@ -87,3 +87,25 @@ test('Jarvis by truck number: the real load, not the truck\'s empty yard move', 
   const ox = { trip: { tripNumber: '626845', status: 'DEPCONS', powerUnit: '2611', trailer: '7136', destZoneDesc: 'OXNARD, CA' }, freightBills: [{ billNumber: 'M1', endZoneDescription: 'OXNARD, CA, 93030' }] };
   assert.equal(findLoad([yard, ox], { truck: '2611' }).item.trip.tripNumber, '626845');
 });
+
+test('an LTL with its flowers delivered: truck moved on, or trailer on a newer started trip → Delivered (not Not closed); delivered alone stays', async () => {
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const recorded = [];
+  const f = initFinished({ post: () => {}, get: () => {}, put: () => {} }, { requireAuth: () => {}, db, recordFinished: async (site, it, reason) => recorded.push([it.trip.tripNumber, reason]) });
+  const ltl = T('627178', 'DEPSHIP', { unit: '733', more: { _flowerPhase: { phase: 'delivered' } } });
+  const next = T('627311', 'ARRSHIP', { unit: '733' });
+  const items = [ltl, next];
+  const r = await f.sweep('fb', items);
+  assert.deepEqual(items.map((i) => i.trip.tripNumber), ['627311']);
+  assert.deepEqual(recorded, [['627178', 'flowers delivered — truck 733 now on trip 627311']]);
+  assert.equal(r.unclosed.length, 0, 'not "Not closed"');
+  const trl = T('627080', 'DEPCONS', { unit: '4551', more: { _flowerPhase: { phase: 'next-load', by: '627246' } } });
+  const items2 = [trl];
+  await f.sweep('fb', items2);
+  assert.equal(items2.length, 0); assert.deepEqual(recorded[1], ['627080', 'flowers delivered — trailer now on trip 627246']);
+  const waiting = T('627200', 'DEPSHIP', { unit: '800', more: { _flowerPhase: { phase: 'delivered' } } });
+  const items3 = [waiting];
+  await f.sweep('fb', items3);
+  assert.equal(items3.length, 1, 'delivered, next load not picked up yet: stays (the card shows the next load)');
+});

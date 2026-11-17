@@ -4,6 +4,7 @@
 //   2. Geofence: every trip-sheet stop visited, or the LAST stop visited / delivered
 //   3. (suggestion only) the same company truck has since left a shipper on a newer trip
 //   4. A dispatcher clicked "Mark finished" (and can reopen it)
+//   5. An LTL whose flowers are delivered and whose truck / trailer is on a newer load (Nov 17)
 // NOT CLOSED: the load's truck or trailer has picked up a newer load, but TruckMate
 // still has this one open. It leaves the active board and the alerts, waits in the
 // "Not closed" tab, and dispatch gets an email (once, then a daily reminder) to
@@ -111,6 +112,11 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
       const reason = finishReason(it, items);
       if (reason && isSure(reason)) { newly.push({ n, it, reason }); continue; }
       const mv = movedOn(it, items);
+      // an LTL whose flowers are delivered (tempalert.js: stops left + set for the next load) and whose truck has picked up a
+      // newer load, or whose trailer is on a newer trip that has started → finished (Delivered), not "Not closed" (Nov 17)
+      const fp = it._flowerPhase && it._flowerPhase.phase;
+      if (fp === 'next-load') { newly.push({ n, it, reason: `flowers delivered — trailer now on trip ${it._flowerPhase.by}` }); continue; }
+      if (fp === 'delivered' && mv) { newly.push({ n, it, reason: `flowers delivered — ${mv.by} ${mv.unit} now on trip ${mv.newTrip}` }); continue; }
       if (mv) { open.push({ n, it, mv }); continue; }
       if (reason) it._finishHint = `Probably finished — ${reason}`;
     }
