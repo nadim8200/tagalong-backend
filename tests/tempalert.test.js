@@ -47,9 +47,13 @@ test('first text waits until it has been off for 2 hours (by the readings); one 
   await run(44.6, 165);                                                     // 3°F worse → TEMP UPDATE
   assert.equal(texts.length, 2); assert.match(texts[1][1], /^TEMP UPDATE\n/); assert.match(texts[1][1], /Above set point for: 2 hr 30 min/);
   assert.equal(mails.length, 2);
-  await run(34.5, 180);                                                     // back at the set point → forgotten
+  await run(34.5, 180);                                                     // back at the set point → one BACK IN RANGE text, forgotten
+  assert.equal(texts.length, 3);
+  assert.equal(texts[2][1], ['TEMP BACK IN RANGE', 'Trailer 7136 | Trip 2', 'Reading: 34.5°F', 'Set point: 35.0°F', 'Was: 44.6°F at Nov 13, 10:45 AM ET', 'Reading taken: Nov 13, 11:00 AM ET', 'Jarvis · Florida Beauty Dispatch'].join('\n'));
+  await run(34.5, 180);
+  assert.equal(texts.length, 3, 'said once');
   await run(41.2, 195);
-  assert.equal(texts.length, 2, 'off again: waits 2 hours again');
+  assert.equal(texts.length, 3, 'off again: waits 2 hours again');
 });
 
 test('duration: swings above the set point keep the clock; at/below it resets; gaps and set-point changes are not assumed continuous', async () => {
@@ -97,4 +101,67 @@ test('the reading is checked against the required temp too; ARTIS set point not 
   // at a receiver the set point still counts, the reading doesn't
   const at = { ...it, trip: { ...it.trip, status: 'ARRCONS' } };
   assert.deepEqual(tempOff([at], { now }).map((x) => x.kind), ['setpoint']);
+});
+
+test('is the flower load on the trailer? next load on the same trailer, delivered (TruckMate or GPS), not loaded yet, loading, rolling', async () => {
+  const { loadPhase, isFlowerTemp } = await import('../tempalert.js');
+  const it = (n, status, trailer = '262042', extra = {}) => ({ trip: { tripNumber: n, status, trailer }, freightBills: [{ billNumber: 'M1' }], ...extra });
+  const old = it('627079', 'DEPCONS'); const nxt = it('627315', 'LOADINGMAN');
+  assert.deepEqual(loadPhase(old, { trips: [old, nxt] }), { phase: 'next-load', by: '627315' }, '262042 loading for 627315 → 627079 is done');
+  assert.equal(loadPhase(old, { trips: [old, it('627315', 'ASSGN')] }).phase, 'on', 'a newer trip only assigned doesn\'t count');
+  assert.equal(loadPhase(old, { trips: [old, it('627001', 'DEPSHIP')] }).phase, 'on', 'an older trip doesn\'t count');
+  assert.equal(loadPhase(it('1', 'DEPSHIP', 'X', { freightBills: [{ actualDelivery: '2026-11-16T10:00:00' }, { actualDelivery: '2026-11-16T12:00:00' }] })).phase, 'delivered');
+  assert.equal(loadPhase(it('1', 'DEPSHIP', 'X', { freightBills: [{ actualDelivery: '2026-11-16T10:00:00' }, {}] })).phase, 'on', 'one bill still to deliver');
+  const sheet = { _manifest: { stops: [{ key: 'L', action: 'LOAD' }, { key: 'a', action: 'DELIVER' }, { key: 'b', action: 'DELIVER' }] } };
+  assert.deepEqual(loadPhase(it('627178', 'DEPSHIP', 'X', sheet), { visits: { 627178: { a: { state: 'completed' }, b: { state: 'completed' } } } }), { phase: 'delivered', by: 'GPS' });
+  assert.equal(loadPhase(it('627178', 'DEPSHIP', 'X', sheet), { visits: { 627178: { a: { state: 'completed' } } } }).phase, 'on', 'a stop not visited (or no geofence) keeps it on');
+  assert.equal(loadPhase(it('1', 'ASSGN')).phase, 'empty');
+  assert.equal(loadPhase(it('1', 'LOADEDTOGO')).phase, 'loading');
+  assert.equal(loadPhase(it('1', 'INTRAN')).phase, 'on');
+  assert.equal(isFlowerTemp({ target: { minF: 35, maxF: 35 } }), true);
+  assert.equal(isFlowerTemp({ target: { minF: 33, maxF: 36 } }), true);
+  assert.equal(isFlowerTemp({ target: { minF: 25, maxF: 25 } }), false, 'a 25°F load isn\'t flowers');
+  assert.equal(isFlowerTemp({ current: { setF: 35 } }), true);
+});
+
+test('yesterday\'s texts that should not have gone out — and the ones that must: freeze, 10°F warm, a jump while loaded', async () => {
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v) };
+  const texts = []; let clock = at(0);
+  const a = initLtlTempAlert({ db, emails: async () => [], phones: async () => ['+13055040711'], sendSms: async (to, t) => texts.push(t), now: () => clock });
+  const load = (n, f, setF, min, status = 'DEPSHIP', trailer = '7136', extra = {}) => { const it = ltlAt(n, f, setF, min, { trip: { tripNumber: n, powerUnit: '2611', trailer, status, origZoneDesc: 'MIAMI TERMINAL' }, ...extra }); it._loadTemp.target = { minF: 35, maxF: 35, text: '35°F', from: 'trip sheet' }; return it; };
+  const run = async (min, trips) => { clock = at(min) + 60000; await a.process('s', { trips }); };
+  // 627079 finished, its trailer 262042 loading for 627315 at 41–45°F: nothing for either
+  for (let i = 0; i <= 12; i += 1) await run(i * 15, [load('627079', 41 + i / 4, 35, i * 15, 'DEPCONS', '262042'), load('627315', 41 + i / 4, 35, i * 15, 'LOADINGMAN', '262042')]);
+  assert.equal(texts.length, 0, 'finished load and a load being loaded: no texts');
+  // 627080: next load on 7282 is a broker load at -11°F → the LTL trip stops (no set point / reading texts)
+  m.clear();
+  const kllm = { trip: { tripNumber: '627246', trailer: '7282', status: 'DEPSHIP' }, _ratecon: { broker: 'KLLM' }, freightBills: [{ billNumber: 'B181004' }] };
+  for (let i = 0; i <= 12; i += 1) await run(i * 15, [load('627080', 13.7 + i, -11, i * 15, 'DEPCONS', '7282'), kllm]);
+  assert.equal(texts.length, 0, 'trailer on a newer trip: the old flower trip is over');
+  // freeze: flowers at 33°F → FREEZE RISK after two readings in a row (no 2-hour wait), even at a receiver
+  m.clear(); texts.length = 0;
+  await run(0, [load('5', 35, 35, 0)]);
+  await run(15, [load('5', 33, 35, 15)]);
+  assert.equal(texts.length, 0, 'one reading: could be a blip');
+  await run(30, [load('5', 32.6, 35, 30, 'ARRCONS')]);
+  assert.equal(texts.length, 1);
+  assert.match(texts[0], /^FREEZE RISK - FLOWERS\nTrailer 7136 \| Trip 5\nReading: 32\.6°F\nSet point: 35\.0°F/);
+  assert.match(texts[0], /At or below 33°F: 2 readings in a row since Nov 13, 8:15 AM ET/);
+  await run(45, [load('5', 35, 35, 45)]);
+  assert.match(texts[1], /^TEMP BACK IN RANGE\n/);
+  // set to 30°F with flowers on board → FREEZE RISK set point text right away
+  m.clear(); texts.length = 0;
+  await run(0, [load('6', 35, 30, 0)]);
+  assert.match(texts[0], /^FREEZE RISK — flowers\. LTL set point alert: trip 6/);
+  // 10°F+ warm while rolling → after 30 minutes, not 2 hours; while loading the doors-open allowance applies
+  m.clear(); texts.length = 0;
+  await run(0, [load('7', 36, 35, 0)]); await run(15, [load('7', 46, 35, 15)]); await run(30, [load('7', 46.5, 35, 30)]);
+  assert.equal(texts.length, 0, '15 minutes');
+  await run(45, [load('7', 47, 35, 45)]);
+  assert.equal(texts.length, 1); assert.match(texts[0], /^REEFER TEMP ALERT\n[\s\S]*Above set point: \+12\.0°F/);
+  m.clear(); texts.length = 0;
+  for (let i = 0; i <= 12; i += 1) await run(i * 15, [load('8', 47, 35, i * 15, 'LOADEDTOGO')]);
+  assert.equal(texts.length, 0, 'loading 3 hours: doors open');
+  for (let i = 13; i <= 16; i += 1) await run(i * 15, [load('8', 47, 35, i * 15, 'LOADEDTOGO')]);
+  assert.equal(texts.length, 1, 'still warm after 3 hours loading → counts (10°F+ → 30 min)');
 });
