@@ -62,3 +62,26 @@ test('parked since: from the readings — stays within half a mile and still →
   assert.equal(nextParked(prev, r('2026-11-16T12:00:00Z', 33.5, -84.2)).parkedSince, '2026-11-13T12:00:00Z');
   assert.equal(nextParked(prev, r('2026-11-16T12:00:00Z', 34.0, -84.2)).parkedSince, '2026-11-16T12:00:00Z');
 });
+
+test('token expired and the new login is refused: the status says the login was refused (Thermo King\'s words), no login spent twice an hour', async () => {
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v) };
+  const env = { THERMOKING_USER: 'u', THERMOKING_PASSWORD: 'p', THERMOKING_CUSTOMER_ID: 'c' };
+  let clock = Date.parse('2026-11-17T14:00:00Z'); const calls = [];
+  m.set('taThermoKingToken', { accessToken: 'old', obtainedAt: clock - 2 * 86400000 + 3600000, attempts: {} });   // logged in ~2 days ago
+  const fetchFn = async (url, o = {}) => {
+    calls.push(url.includes('obtainToken') ? 'login' : 'read');
+    if (url.includes('obtainToken')) return { status: 403, ok: false, json: async () => ({ message: 'User account is disabled' }) };
+    return { status: 403, ok: false, json: async () => ({}) };
+  };
+  const routes = {}; const app = { get: (p, a, h) => { routes[p] = h; } };
+  const tk = initThermoKing({ app, requireAuth: () => {}, db, env, fetchFn, now: () => clock });
+  const r1 = await tk.poll();
+  assert.match(r1.error, /login refused \(HTTP 403\): User account is disabled/);
+  assert.equal(JSON.stringify(m.get('taThermoKingToken')).includes('"p"'), false, 'the password is never stored');
+  let out; await routes['/truckmate/thermoking/status']({}, { json: (j) => { out = j; } });
+  assert.match(out.loginError, /User account is disabled/);
+  assert.equal(out.loginsToday, 2, 'the daily-age login + the refused-read retry');
+  clock += 15 * 60000; calls.length = 0;
+  await tk.poll();
+  assert.ok(calls.filter((c) => c === 'login').length <= 1, 'at most one more login, then the daily cap holds');
+});

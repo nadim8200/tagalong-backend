@@ -105,7 +105,12 @@ export function initThermoKing({ app = null, requireAuth = null, db, env = proce
     const r = await fetchFn(`${c.base}/obtainToken/`, { method: 'POST', headers: { 'X-External-ID': c.customer, 'Content-Type': 'application/json' }, body: JSON.stringify({ userName: c.user, password: c.password }) });
     const j = await r.json().catch(() => ({}));
     if (r.status === 423) { await db.set(TOKEN, { ...tok, attempts, blockedUntil: now() + DAY, error: 'Thermo King blocked the login (423) — waiting 24 h; tracking@thermoking.com can unblock it' }); throw new Error('Thermo King blocked the login (423)'); }
-    if (!r.ok || !j.accessToken) { await db.set(TOKEN, { ...tok, attempts, error: `login failed (HTTP ${r.status})` }); throw new Error(`Thermo King login failed (HTTP ${r.status})`); }
+    if (!r.ok || !j.accessToken) {
+      // keep Thermo King's own words (never the request: it carries the password)
+      const why = String(j.message || j.error || j.errorMessage || j.detail || '').replace(/\s+/g, ' ').slice(0, 200);
+      await db.set(TOKEN, { ...tok, attempts, error: `login refused (HTTP ${r.status})${why ? `: ${why}` : ''}`, errorAt: now() });
+      throw new Error(`Thermo King login refused (HTTP ${r.status})${why ? `: ${why}` : ''}`);
+    }
     await db.set(TOKEN, { accessToken: j.accessToken, obtainedAt: now(), refreshExpiresAt: j.expiresIn ? now() + Number(j.expiresIn) * 1000 : null, attempts, error: null });
     return j.accessToken;
   }
@@ -114,15 +119,22 @@ export function initThermoKing({ app = null, requireAuth = null, db, env = proce
     if (!ready()) return { skipped: 'not configured' };
     const c = cfg();
     const st = (await db.get(KEY, {})) || {};
-    let tk = await token();
-    if (!tk) return { skipped: 'no token (blocked or out of logins for today)' };
+    let loginErr = null;
+    // a refused login keeps the token we have (it may still work for a while) — and the reason is kept for the status
+    let tk = await token().catch(async (e) => { loginErr = e.message; return ((await db.get(TOKEN, {})) || {}).accessToken || null; });
+    if (!tk) { if (loginErr) await db.set(KEY, { ...st, lastPoll: new Date(now()).toISOString(), error: loginErr }); return loginErr ? { error: loginErr } : { skipped: 'no token (blocked or out of logins for today)' }; }
     // since the last read (5 min overlap), at most the last 2 hours — Thermo King refuses ranges over 24 h
     const end = now(); const start = Math.max(end - 2 * 60 * MIN, (st.lastEnd || 0) - 5 * MIN);
     const url = `${c.base}/getTemperatureDataForVehicles/${encodeURIComponent(tkStamp(start))}/${encodeURIComponent(tkStamp(end))}/`;
     const get = (t) => fetchFn(url, { headers: { 'X-External-ID': c.customer, 'X-OAuth2-Token': t, 'Content-Type': 'application/json' } });
     let r = await get(tk);
-    if (r.status === 401 || r.status === 403) { tk = await token({ force: true }).catch(() => null); if (tk) r = await get(tk); }
-    if (!r.ok) { await db.set(KEY, { ...st, lastPoll: new Date(end).toISOString(), error: `HTTP ${r.status}` }); return { error: `HTTP ${r.status}` }; }
+    if (r.status === 401 || r.status === 403) {
+      // a refused read means the token is no good — log in again, but not twice within an hour (a login that just worked
+      // and still gets refused isn't a token problem; logins are capped a day)
+      const t0 = (await db.get(TOKEN, {})) || {};
+      if (!t0.obtainedAt || now() - t0.obtainedAt > 60 * MIN) { tk = await token({ force: true }).catch((e) => { loginErr = e.message; return null; }); if (tk) r = await get(tk); }
+    }
+    if (!r.ok) { const error = loginErr || `data read refused (HTTP ${r.status})`; await db.set(KEY, { ...st, lastPoll: new Date(end).toISOString(), error }); return { error }; }
     const fresh = latestByTrailer(await r.json().catch(() => []));
     const units = { ...(st.units || {}) }; const history = { ...(st.history || {}) };
     // one time: the last 3 days (3 requests of 24 h — Thermo King's limit), to know how long each trailer has been parked
@@ -168,7 +180,8 @@ export function initThermoKing({ app = null, requireAuth = null, db, env = proce
     // what's connected (never the password or token)
     app.get('/truckmate/thermoking/status', requireAuth, async (req, res) => {
       const st = (await db.get(KEY, {})) || {}; const tok = (await db.get(TOKEN, {})) || {};
-      res.json({ configured: ready(), lastPoll: st.lastPoll || null, lastCount: st.lastCount ?? null, units: Object.keys(st.units || {}).length, error: st.error || tok.error || null, blockedUntil: tok.blockedUntil || null, loginsToday: (tok.attempts || {})[etDay()] || 0, sample: Object.values(st.units || {}).slice(0, 3).map(({ lat, lng, location, ...x }) => x) });
+      const newest = Object.values(st.units || {}).reduce((m, x) => (x.at > m ? x.at : m), '');
+      res.json({ configured: ready(), lastPoll: st.lastPoll || null, lastCount: st.lastCount ?? null, units: Object.keys(st.units || {}).length, error: st.error || tok.error || null, loginError: tok.error || null, loginErrorAt: tok.errorAt ? new Date(tok.errorAt).toISOString() : null, lastLoginOk: tok.obtainedAt ? new Date(tok.obtainedAt).toISOString() : null, newestReading: newest || null, blockedUntil: tok.blockedUntil || null, loginsToday: (tok.attempts || {})[etDay()] || 0, loginsPerDay: MAX_LOGINS_A_DAY, sample: Object.values(st.units || {}).slice(0, 3).map(({ lat, lng, location, ...x }) => x) });
     });
   }
   return { poll, overlay, token, ready };
