@@ -22,6 +22,21 @@ export const HUB_NAMES = { MIAMI: 'Miami', VENTURA: 'Ventura', MEMPHIS: 'Memphis
 // South Florida: the cities trucks deliver around the Miami yard (Miami-Dade, Broward, Palm Beach). Pure.
 const SOUTH_FL = /\b(MIAMI|MEDLEY|DORAL|HIALEAH|OPA[- ]?LOCKA|HOMESTEAD|FLORIDA CITY|SWEETWATER|MIAMI GARDENS|MIAMI LAKES|NORTH MIAMI|AVENTURA|FORT LAUDERDALE|FT LAUDERDALE|HOLLYWOOD|PEMBROKE|MIRAMAR|DAVIE|PLANTATION|SUNRISE|WESTON|POMPANO|DEERFIELD|CORAL SPRINGS|MARGATE|TAMARAC|LAUDERHILL|LAUDERDALE|BOCA RATON|DELRAY|BOYNTON|LAKE WORTH|WEST PALM|PALM BEACH|JUPITER|WELLINGTON|ROYAL PALM|LOXAHATCHEE|RIVIERA BEACH)\b/i;
 
+// The hub a load is headed to, from its destination (the last delivery's place, else TruckMate's destination):
+// South Florida → Miami, the rest of Florida → Central Florida (Bartow), Memphis area (TN / MS / AR) → Memphis,
+// California → Ventura; anywhere else → null (the dispatcher picks). Pure.
+export function hubForDest(item) {
+  const t = (item && item.trip) || item || {};
+  const bills = (item && (item.freightBills || item.orders)) || [];
+  const last = bills.map((b) => b && (b.endZoneDescription || b.endZone)).filter(Boolean).pop();
+  const d = String(last || t.destZoneDesc || t.descZoneDesc || '').toUpperCase();
+  const st = (d.match(/,\s*([A-Z]{2})\b/) || [])[1] || null;
+  if (st === 'FL') return SOUTH_FL.test(d) ? 'MIAMI' : 'BARTOW';
+  if (st === 'TN' || st === 'MS' || st === 'AR') return 'MEMPHIS';
+  if (st === 'CA') return 'VENTURA';
+  return null;
+}
+
 // Which hub yard a point is at (within HUB_MILES), else null. Pure.
 export function hubAt(p, points = {}) {
   if (!p || p.lat == null || p.lng == null) return null;
@@ -154,5 +169,7 @@ export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => ge
   }
   if (app && requireAuth) app.get('/truckmate/yard-report/trucks', requireAuth, async (req, res) => { try { res.json(await trucks()); } catch (e) { res.status(502).json({ error: e.message }); } });
   if (app && requireAuth) app.get('/truckmate/yard-report', requireAuth, async (req, res) => { try { res.json(await report()); } catch (e) { res.status(502).json({ error: e.message }); } });
-  return { report, trucks };
+  // the hub a release is for: where the load is headed (releases are given during the run, not at a yard)
+  const hubOf = async (item) => hubForDest(item);
+  return { report, trucks, hubOf };
 }

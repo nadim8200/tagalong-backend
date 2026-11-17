@@ -25,10 +25,13 @@ test('submit: emails the PDF + the rate con to the recipients on the form (the t
   const routes = {}; const app = { get: (p, g, h) => { routes[`GET ${p}`] = h; }, post: (p, g, h) => { routes[`POST ${p}`] = h; } };
   const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
   const sent = []; const logs = [];
-  initRelease(app, { requireAuth: () => {}, db, docs: { readDocs: async () => [{ id: 'rc1', mediaType: 'application/pdf', data: Buffer.from('%PDF rc') }] }, getBoard: async () => ({ trips: [item] }), sendMail: async (x) => sent.push(x), log: async (s, t, e) => logs.push(e) });
+  const api = initRelease(app, { requireAuth: () => {}, db, hubOf: async () => 'MIAMI', docs: { readDocs: async () => [{ id: 'rc1', mediaType: 'application/pdf', data: Buffer.from('%PDF rc') }] }, getBoard: async () => ({ trips: [item] }), sendMail: async (x) => sent.push(x), log: async (s, t, e) => logs.push(e) });
   const call = async (k, req) => { let out; let code = 200; await routes[k]({ user: { name: 'Nadim' }, params: { trip: '627031' }, body: {}, ...req }, { status: (c) => { code = c; return { json: (j) => { out = j; } }; }, json: (j) => { out = j; }, set: () => {}, end: () => {} }); return { code, out }; };
   const g = await call('GET /truckmate/release/:trip', {});
   assert.equal(g.out.form.fb, 'B180942'); assert.equal(g.out.hasRateCon, true);
+  assert.equal(g.out.form.hub, 'MIAMI', 'suggested from where the load is headed');
+  assert.deepEqual(g.out.hubs.map((h) => h.key), ['MIAMI', 'VENTURA', 'MEMPHIS', 'BARTOW']);
+  assert.equal((await call('POST /truckmate/release/:trip', { body: { form: { ...g.out.form, hub: '' }, to: 'yard@example.com' } })).code, 400, 'the hub is required');
   assert.deepEqual(g.out.always, ['yard_dispatch@floridabeauty.us', 'inbound-dispatch@floridabeauty.us']);
   assert.equal((await call('POST /truckmate/release/:trip', { body: { form: { ...g.out.form, trailer: '' }, to: 'yard@example.com' } })).code, 400);
   const r = await call('POST /truckmate/release/:trip', { body: { form: { ...g.out.form, comments: 'Drop at Bartow' }, to: 'Yard_Dispatch@floridabeauty.us, Inbound-Dispatch@floridabeauty.us, Yard@Example.com, dispatch@floridabeauty.us, yard_dispatch@floridabeauty.us' } });
@@ -37,7 +40,11 @@ test('submit: emails the PDF + the rate con to the recipients on the form (the t
   assert.deepEqual(sent[0].attachments.map((a) => a.name), ['Driver-Release-627031.pdf', 'Rate-Con-627031.pdf']);
   assert.deepEqual(m.get('taReleaseTo'), ['yard@example.com', 'dispatch@floridabeauty.us']);
   assert.equal(m.get('taReleases:florida-beauty')['627031'][0].fields.comments, 'Drop at Bartow');
-  assert.match(logs[0].text, /Driver release sent to yard_dispatch@floridabeauty\.us, inbound-dispatch@floridabeauty\.us, yard@example\.com/);
+  assert.match(sent[0].html, /Release at<\/b><\/td><td[^>]*>Miami hub/);
+  const board = [{ trip: { tripNumber: '627031' } }, { trip: { tripNumber: '1' } }]; await api.overlay('florida-beauty', board);
+  assert.deepEqual({ ...board[0]._release, at: undefined }, { at: undefined, by: 'Nadim', hub: 'MIAMI', hubName: 'Miami', count: 1 });
+  assert.equal(board[1]._release, undefined);
+  assert.match(logs[0].text, /Driver release at Miami sent to yard_dispatch@floridabeauty\.us, inbound-dispatch@floridabeauty\.us, yard@example\.com/);
   assert.deepEqual((await call('GET /truckmate/release/:trip', {})).out.to, ['yard@example.com', 'dispatch@floridabeauty.us'], 'remembered for next time');
   assert.equal((await call('POST /truckmate/release/:trip', { body: { form: g.out.form, to: '' } })).code, 400, 'no one on it');
   await call('POST /truckmate/release/:trip', { body: { form: g.out.form, to: 'yard_dispatch@floridabeauty.us' } });
@@ -52,4 +59,12 @@ test('city, state and ZIP edit separately and round-trip to the PDF line; an old
   assert.deepEqual([d.stops[0].city, d.stops[0].state, d.stops[0].zip], ['MIAMI', 'FL', '33122']);
   assert.equal(cleanForm({ stops: [{ city: 'Doral', state: 'fl', zip: '33178' }] }).stops[0].cityStateZip, 'Doral, FL 33178');
   assert.equal(cleanForm({ stops: [{ cityStateZip: 'MIAMI, FL 33122' }] }).stops[0].cityStateZip, 'MIAMI, FL 33122');
+});
+
+test('the release hub comes from where the load is headed: South Florida → Miami, the rest of Florida → Bartow, TN/MS/AR → Memphis, CA → Ventura', async () => {
+  const { hubForDest } = await import('../yardreport.js');
+  const at = (d) => hubForDest({ trip: { destZoneDesc: d } });
+  assert.equal(at('MIAMI, FL, 33122'), 'MIAMI'); assert.equal(at('ORLANDO, FL, 32824'), 'BARTOW'); assert.equal(at('MEMPHIS, TN, 38141'), 'MEMPHIS');
+  assert.equal(at('OXNARD, CA, 93030'), 'VENTURA'); assert.equal(at('ROCK HILL, SC, 29730'), null);
+  assert.equal(hubForDest({ trip: { destZoneDesc: 'ORLANDO, FL' }, freightBills: [{ endZoneDescription: 'BOCA RATON, FL, 33431' }] }), 'MIAMI', 'the last delivery wins');
 });

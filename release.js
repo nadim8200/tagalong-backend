@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------
 import { readFileSync } from 'node:fs';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { HUB_NAMES } from './yardreport.js';
 
 const SITE = 'florida-beauty';
 const SENT = (site) => `taReleases:${site}`;     // trip → [{ at, by, to, fields }]
@@ -51,7 +52,9 @@ export function releaseDraft(item, { by = '', now = Date.now() } = {}) {
 // What the dispatcher sent, made safe: plain text, capped, at most 4 deliveries. Pure.
 export function cleanForm(f = {}) {
   const k = (n, m) => clean(f[n], m);
+  const hub = String(f.hub || '').trim().toUpperCase();
   return {
+    hub: HUB_NAMES[hub] ? hub : '',   // the hub the trailer is released at (Miami, Ventura, Memphis, Central Florida)
     approvedBy: k('approvedBy', 60), signature: k('signature', 60), date: k('date', 20), time: k('time', 20), fb: k('fb', 20), truck: k('truck', 12), trailer: k('trailer', 16), trip: k('trip', 12),
     driver1: k('driver1', 50), driver1Id: k('driver1Id', 12), driver2: k('driver2', 50), driver2Id: k('driver2Id', 12), broker: k('broker', 60), shipper: k('shipper', 60),
     temp: k('temp', 30), commodity: k('commodity', 80), comments: clean(f.comments, 400),
@@ -115,7 +118,7 @@ export async function releasePdf(f) {
 export function releaseEmail(f) {
   const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const subject = `DRIVER RELEASE — FB ${f.fb || '—'} · Trip ${f.trip} · Truck ${f.truck || '—'} · Trailer ${f.trailer || '—'}`;
-  const rows = [['FB#', f.fb], ['Trip#', f.trip], ['Truck#', f.truck], ['Trailer#', f.trailer], ['Driver', [f.driver1, f.driver1Id && `ID ${f.driver1Id}`].filter(Boolean).join(' · ')], ...(f.driver2 ? [['Driver 2', [f.driver2, f.driver2Id && `ID ${f.driver2Id}`].filter(Boolean).join(' · ')]] : []), ['Broker', f.broker], ['Shipper', f.shipper], ['Temp', f.temp], ['Commodity', f.commodity], ...(f.comments ? [['Comments', f.comments]] : [])];
+  const rows = [...(f.hub && HUB_NAMES[f.hub] ? [['Release at', `${HUB_NAMES[f.hub]} hub`]] : []), ['FB#', f.fb], ['Trip#', f.trip], ['Truck#', f.truck], ['Trailer#', f.trailer], ['Driver', [f.driver1, f.driver1Id && `ID ${f.driver1Id}`].filter(Boolean).join(' · ')], ...(f.driver2 ? [['Driver 2', [f.driver2, f.driver2Id && `ID ${f.driver2Id}`].filter(Boolean).join(' · ')]] : []), ['Broker', f.broker], ['Shipper', f.shipper], ['Temp', f.temp], ['Commodity', f.commodity], ...(f.comments ? [['Comments', f.comments]] : [])];
   const stops = f.stops.filter((s) => s.consignee || s.address).map((s, i) => `<li><b>${esc(s.consignee || `Delivery ${i + 1}`)}</b> — ${esc([s.address, s.cityStateZip].filter(Boolean).join(', '))}${s.date || s.time ? ` · ${esc([s.date, s.time].filter(Boolean).join(' '))}` : ''}${s.lumper ? ` · Lumper: ${esc(s.lumper)}` : ''}${s.signSlc ? ' · <b>Sign bills S.L.C</b>' : ''}</li>`).join('');
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#14213d"><p>Good day,</p><p>Driver release for trip <b>${esc(f.trip)}</b>. The release form is attached (PDF), with the rate confirmation.</p>
 <table style="border-collapse:collapse;font-size:14px">${rows.map(([k, v]) => `<tr><td style="padding:3px 14px 3px 0;color:#5b6778"><b>${esc(k)}</b></td><td style="padding:3px 0">${esc(v || '—')}</td></tr>`).join('')}</table>
@@ -125,7 +128,15 @@ ${stops ? `<p style="margin-bottom:4px"><b>Deliveries</b></p><ol style="margin-t
   return { subject, html, text };
 }
 
-export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendMail, log = null, trainingActive = async () => null, now = () => Date.now() }) {
+export const HUBS = Object.entries(HUB_NAMES).map(([key, name]) => ({ key, name }));
+// the load card's release marker from the releases sent: the latest one (when, by whom, at which hub). Pure.
+export function releaseMark(list = []) {
+  const r = list[list.length - 1]; if (!r) return null;
+  const hub = (r.fields && r.fields.hub) || r.hub || null;
+  return { at: r.at, by: r.by || null, hub, hubName: hub ? HUB_NAMES[hub] || hub : null, count: list.length };
+}
+
+export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendMail, log = null, trainingActive = async () => null, hubOf = async () => null, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const itemOf = async (trip) => ((((await getBoard(SITE)) || {}).trips) || []).find((x) => tripNo(x) === String(trip)) || null;
@@ -135,7 +146,8 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
     if (!it) return res.status(404).json({ error: 'That load is not on the board.' });
     const sent = enabled ? (((await db.get(SENT(SITE), {})) || {})[String(req.params.trip)] || []) : [];
     const tr = await trainingActive().catch(() => null);
-    res.json({ form: releaseDraft(it, { by: who(req), now: now() }), always: ALWAYS_TO, to: enabled ? ((await db.get(LAST_TO, [])) || []).filter((x) => !ALWAYS_TO.includes(x)) : [], hasRateCon: !!(it._ratecon && (it._ratecon.docIds || []).length), sent: sent.map(({ fields, ...x }) => x), training: tr ? { on: true, to: tr.to || [] } : null });
+    const hub = await Promise.resolve(hubOf(it)).catch(() => null);   // where the trailer is parked now, as a suggestion
+    res.json({ form: { ...releaseDraft(it, { by: who(req), now: now() }), hub: hub && HUB_NAMES[hub] ? hub : '' }, hubs: HUBS, always: ALWAYS_TO, to: enabled ? ((await db.get(LAST_TO, [])) || []).filter((x) => !ALWAYS_TO.includes(x)) : [], hasRateCon: !!(it._ratecon && (it._ratecon.docIds || []).length), sent: sent.map(({ fields, ...x }) => x), training: tr ? { on: true, to: tr.to || [] } : null });
   });
   // the PDF only (the console's "Preview PDF")
   app.post('/truckmate/release/:trip/pdf', requireAuth, async (req, res) => {
@@ -152,6 +164,7 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
     const it = await itemOf(trip);
     const f = cleanForm({ ...(b.form || {}), trip });
     if (!f.truck || !f.trailer) return res.status(400).json({ error: 'Truck and trailer are needed on the release.' });
+    if (!f.hub) return res.status(400).json({ error: 'Pick the hub the trailer is released at.' });
     const pdf = Buffer.from(await releasePdf(f));
     const ids = ((it && it._ratecon && it._ratecon.docIds) || []).slice(0, 3);
     const rc = docs && docs.readDocs && ids.length ? await docs.readDocs({ site: SITE, ids }).catch(() => []) : [];
@@ -163,8 +176,14 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
     const at = new Date(now()).toISOString();
     await db.set(LAST_TO, to.filter((x) => !ALWAYS_TO.includes(x)));
     await db.update(SENT(SITE), (cur) => ({ ...(cur || {}), [trip]: [...((cur || {})[trip] || []), { at, by: who(req), to, fields: f }].slice(-10) }), {});
-    if (log) await log(SITE, trip, { type: 'note', kind: 'release', text: `Driver release sent to ${to.join(', ')} (truck ${f.truck}, trailer ${f.trailer})`, by: who(req), noThread: true }).catch(() => {});
-    res.json({ ok: true, at, to, rateCon: rc.length > 0 });
+    if (log) await log(SITE, trip, { type: 'note', kind: 'release', text: `Driver release at ${HUB_NAMES[f.hub]} sent to ${to.join(', ')} (truck ${f.truck}, trailer ${f.trailer})`, by: who(req), noThread: true }).catch(() => {});
+    res.json({ ok: true, at, to, rateCon: rc.length > 0, hub: f.hub, hubName: HUB_NAMES[f.hub] });
   });
-  return {};
+  // the board: each load's release marker (the latest release sent)
+  async function overlay(site, trips) {
+    if (!enabled) return;
+    const all = (await db.get(SENT(site), {})) || {};
+    for (const it of trips || []) { const m = releaseMark(all[tripNo(it)] || []); if (m) it._release = m; }
+  }
+  return { overlay };
 }
