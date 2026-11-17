@@ -338,6 +338,8 @@ function tripFacts(item, now) {
     tasks: (item && item._tasks) || [],
     instrTotal: instr.length,
     hold: (item && item._hold) || null,
+    tmNext: (item && item._tmNext) || [],          // TruckMate's next trip(s) for this truck (nextloads.js)
+    nextLoads: (item && item._nextLoad) || [],     // broker loads Gus sent for this truck, not in TruckMate yet
   };
 }
 
@@ -621,6 +623,43 @@ const RULES = [
       detail: 'The receiver needs an appointment but the time was never entered, so lateness can\'t be checked. Enter the appointment in TruckMate.',
     };
   },
+  // Out of hours before the load is done (Nov 17, truck 2403: 1 min of drive left, Milwaukee still to deliver, then Gustavo's
+  // pickup). Raised as soon as the clock can't cover the stops left — while there's time to plan a relay, swap the order or warn
+  // the customer — with the earliest restart, the new ETA for the last delivery and the next load it pushes back. Unlike hos-low
+  // it stays open while the truck sits on its break, until it's rolling again with the hours to finish. Only when the shortfall
+  // is under 5 h: a long haul with resets ahead is normal, not news. Teams count both drivers' drive time.
+  function hoursShort(f, ctx) {
+    if (f.oc) return null;
+    const l = f.live; const h = l && l.hos;
+    if (!h || h.driveLeftMin == null) return null;
+    const route = routeEtas(f, ctx);
+    if (!route || !route.length) return null;
+    const last = route[route.length - 1];
+    const needMin = Math.round((last.miles / CRUISE_MPH) * 60);
+    if (needMin < 5) return null;                                  // at the last stop already
+    const left = Math.max(0, h.driveLeftMin) + (f.team && l.hos2 && l.hos2.driveLeftMin != null ? Math.max(0, l.hos2.driveLeftMin) : 0);
+    const dwell = route.reduce((n, r, i) => n + (i < route.length - 1 ? 30 : 0), 0);
+    const shift = !f.team && h.shiftLeftMin != null ? Math.max(0, h.shiftLeftMin) : null;
+    const shortDrive = needMin - left;
+    const shortShift = shift != null ? needMin + dwell - shift : -1;
+    const short = Math.max(shortDrive, shortShift);
+    if (short <= 0 || short > 300) return null;
+    const lost = route.filter((r) => (r.miles / CRUISE_MPH) * 60 > Math.min(left, shift != null ? shift : left));
+    const name = (r) => ((r.stop.customers && r.stop.customers[0]) ? `${r.stop.customers[0]} (${r.stop.label.replace(/, \d{5}$/, '')})` : r.stop.label.replace(/, \d{5}$/, ''));
+    // earliest back on the road: 10 h after the break started (resting now), else after the hours that are left
+    const resting = /^(offduty|sleeper)/i.test(String(h.status || '')) || (l.speedMph != null && l.speedMph <= 2 && f.stoppedMin >= 30);
+    const restSince = h.restSinceMs || (resting && f.stoppedMin ? ctx.now - f.stoppedMin * MIN : null);
+    const restartMs = f.team ? null : resting && restSince ? restSince + 10 * 60 * MIN : ctx.now + Math.max(0, Math.min(left, shift != null ? shift : left)) * MIN + 10 * 60 * MIN;
+    const flowers = !f.broker && f.reqTemp != null && f.reqTemp >= 33;
+    const nx = (f.tmNext || [])[0]; const nb = (f.nextLoads || [])[0];
+    const nextTxt = nx ? `Next load: TruckMate trip ${nx.trip}${nx.from ? ` (${nx.from}${nx.to ? ` → ${nx.to}` : ''})` : ''} — its pickup can't start before ~${fmtLocalShort(last.etaMs + 30 * MIN, nx.from || last.stop.label)}.`
+      : nb && nb.rc ? `Next load: ${[nb.rc.broker, nb.rc.loadNumber].filter(Boolean).join(' ') || 'broker load'}${nb.rc.pickup && nb.rc.pickup.city ? ` pickup ${nb.rc.pickup.city}${nb.rc.pickup.date ? ` ${nb.rc.pickup.date}` : ''}${nb.rc.pickup.time ? ` ${nb.rc.pickup.time}` : ''}` : ''} (not in TruckMate yet) — it can't start before ~${fmtLocalShort(last.etaMs + 30 * MIN, last.stop.label)}.` : '';
+    return {
+      code: 'hours-short', severity: flowers || (nx || nb) ? 'critical' : 'warning', key: last.stop.key,
+      title: `Out of hours before the load is done — ${lost.length} stop${lost.length === 1 ? '' : 's'} left${flowers ? ' (flowers)' : ''}`,
+      detail: `${f.driver || 'Driver'}${f.team ? ' (team)' : ''} has ${fmtMin(left)} of drive time${shift != null ? `, ${fmtMin(shift)} of shift` : ''}; the stops left need ~${fmtMin(needMin)} of driving (${Math.round(last.miles)} mi). Won't make it on this clock: ${lost.map(name).join(', ')}.${restartMs ? ` Earliest back on the road: ~${fmtLocalShort(restartMs, last.stop.label)} (after the 10-hour break).` : ''} New ETA for the last delivery: ${fmtLocalShort(last.etaMs, last.stop.label)}. ${nextTxt} Plan a relay, change the stop order, or warn the customer${nx || nb ? ' and the next shipper' : ''}.`.replace(/\s+/g, ' ').trim(),
+    };
+  },
   function hosLow(f) {
     if (f.oc) return null;                              // outside carrier: not our ELD / engine
     const l = f.live;
@@ -816,7 +855,7 @@ export function atCustomerEvidence(item, steps = {}, now = Date.now()) {
   return null;
 }
 
-const TRUCK_CODES = new Set(['hos-low', 'stopped', 'unscheduled-stop', 'check-engine', 'tracking-lost', 'reefer-off', 'reefer-temp', 'reefer-setpoint']);
+const TRUCK_CODES = new Set(['hos-low', 'hours-short', 'stopped', 'unscheduled-stop', 'check-engine', 'tracking-lost', 'reefer-off', 'reefer-temp', 'reefer-setpoint']);
 export function evaluateBoard(board, ctxIn) {
   const ctx = { origin: MIAMI_TERMINAL, unitState: () => null, ...ctxIn };
   const out = [];
