@@ -4,7 +4,7 @@
 // coming down to Florida (loads delivering in FL, with truck, trailer, where they are and the ETA), so the yard manager
 // can plan; and trailers parked away from the hubs for 2+ days (Thermo King positions). Read only; no ARTIS.
 // ---------------------------------------------------------------
-import { MIAMI_YARDS, haversineMi } from './watchtower.js';
+import { MIAMI_YARDS, haversineMi, brokerLoad } from './watchtower.js';
 import { KNOWN_YARDS } from './loadsheet.js';
 import { geocodePlace } from './meetwatch.js';
 import { getLiveIndex, samsaraTokenFrom } from './samsara.js';
@@ -30,6 +30,15 @@ export function hubAt(p, points = {}) {
 }
 
 // The report from Thermo King units, the board and its ETAs. units: { trailer: reading }, etas: { trip: { stops } }. Pure.
+export const ROLLING_IN = /^(DEPSHIP|INTRAN|ENROUTE|WAY|ARRCONS|DEPCONS)/i;
+export function inboundToFlorida(it) {
+  const t = tripOf(it);
+  if (!/,\s*FL\b/i.test(String(t.destZoneDesc || ''))) return false;
+  if (/,\s*FL\b|MIAMI TERM|\bFL\s*\d{0,5}$/i.test(String(t.origZoneDesc || ''))) return false;   // started in Florida
+  if (!brokerLoad(it)) return false;
+  return ROLLING_IN.test(String(t.status || '').trim());
+}
+
 export function yardReport({ units = {}, items = [], etas = {}, points = {}, now = Date.now() }) {
   const list = Object.values(units);
   const onLoad = new Map(items.map((it) => [String(tripOf(it).trailer || '').trim().toUpperCase().replace(/^0+(?=\d)/, ''), tripNo(it)]));
@@ -47,8 +56,10 @@ export function yardReport({ units = {}, items = [], etas = {}, points = {}, now
     hubs[h].push({ hub: HUB_NAMES[h], trailer: u.trailer, seenAt: u.at, ageMin: Math.round((now - Date.parse(u.at)) / 60000), unitOn: u.powerOn, returnF: u.returnF, setF: u.setF, supplyF: u.supplyF ?? null, onLoad: onLoad.get(u.trailer) || null });
   }
   for (const h of Object.keys(hubs)) hubs[h].sort((a, b) => String(a.trailer).localeCompare(String(b.trailer), 'en', { numeric: true }));
-  // coming down to Florida: loads delivering in FL that didn't start at the Miami terminal
-  const inbound = items.filter((it) => /,\s*FL\b/i.test(String(tripOf(it).destZoneDesc || '')) && !/MIAMI TERM/i.test(String(tripOf(it).origZoneDesc || '')) && !/^(DELV|CMPLT|CANC|VOID)/i.test(String(tripOf(it).status || '')))
+  // coming down to Florida: only trailers out in the country on an ACTIVE broker load into FL — picked up outside Florida
+  // and rolling (departed the shipper, between stops or at a Florida stop). Never Miami outbounds, never loads only booked
+  // (assigned / dispatched / spotted / at the shipper still loading).
+  const inbound = items.filter(inboundToFlorida)
     .map((it) => {
       const t = tripOf(it); const s = it._samsara || {}; const e = (etas[tripNo(it)] || {}).stops || []; const last = e[e.length - 1] || null;
       const tk = it._tkApi || null;

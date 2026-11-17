@@ -11,7 +11,9 @@ test('trailers counted per hub yard by their Thermo King GPS; the rest are on th
   assert.equal(hubAt({ lat: 25.90, lng: -80.30 }, points), null, '7 miles away');
   const units = { 7200: u('7200', 25.7948, -80.31), 7136: u('7136', 34.2701, -119.2401), 2024: u('2024', 27.8702, -81.8199), 7387: u('7387', 30.8, -83.2, { powerOn: true, returnF: 54.5, setF: 55 }) };
   const items = [
-    { trip: { tripNumber: '627033', status: 'DISP', powerUnit: '934', trailer: '7342', origZoneDesc: 'HYDE PARK, MA', destZoneDesc: 'DEERFIELD BEACH, FL, 33442' }, freightBills: [{ billNumber: 'B180949' }], _samsara: { location: 'Opa-locka, FL', driver1: 'Ana R' } },
+    { trip: { tripNumber: '627033', status: 'DEPSHIP', powerUnit: '934', trailer: '7342', origZoneDesc: 'HYDE PARK, MA', destZoneDesc: 'DEERFIELD BEACH, FL, 33442' }, freightBills: [{ billNumber: 'B180949' }], _samsara: { location: 'Opa-locka, FL', driver1: 'Ana R' } },
+    { trip: { tripNumber: '627345', status: 'ASSGN', trailer: '7392', origZoneDesc: 'NEWARK, NJ', destZoneDesc: 'JACKSONVILLE, FL' }, freightBills: [{ billNumber: 'B181000' }] },
+    { trip: { tripNumber: '627251', status: 'DEPSHIP', powerUnit: '2001', trailer: '7300', origZoneDesc: 'BARTOW, FL', destZoneDesc: 'MIAMI, FL' }, freightBills: [{ billNumber: 'B181001' }] },
     { trip: { tripNumber: '627093', status: 'DEPSHIP', powerUnit: '1082', trailer: '7387', origZoneDesc: 'MEMPHIS, TN', destZoneDesc: 'LAKELAND, FL, 33801' }, freightBills: [{ billNumber: 'H1' }], _tkApi: units[7387] },
     { trip: { tripNumber: '627130', status: 'DEPSHIP', powerUnit: '2604', trailer: '7200', origZoneDesc: 'MIAMI TERMINAL', destZoneDesc: 'WEST SACRAMENTO, CA' }, freightBills: [] },
   ];
@@ -20,8 +22,8 @@ test('trailers counted per hub yard by their Thermo King GPS; the rest are on th
   assert.equal(r.trailers, 4); assert.equal(r.elsewhere, 1);
   assert.deepEqual(r.hubs.map((h) => [h.hub, h.count]), [['Miami', 1], ['Ventura', 1], ['Memphis', 0], ['Central Florida (Bartow)', 1]]);
   assert.equal(r.hubs[0].trailers[0].onLoad, '627130');
-  assert.deepEqual(r.inbound.map((x) => [x.trip, x.southFlorida, x.milesLeft]), [['627033', true, 30], ['627093', false, 260]], 'by ETA; the Miami outbound is not inbound');
-  assert.equal(r.inbound[1].reeferF, 54.5); assert.equal(r.southFlorida, 1);
+  assert.deepEqual(r.inbound.map((x) => [x.trip, x.southFlorida, x.milesLeft]), [['627033', true, 30]], 'only active broker loads picked up outside FL: not the Miami outbound, not a booked (ASSGN) load, not one from Bartow, not an LTL (H) bill');
+  assert.equal(r.southFlorida, 1);
 });
 
 test('parked away from the hubs 2+ days: listed longest first; at a hub or under 2 days never', () => {
