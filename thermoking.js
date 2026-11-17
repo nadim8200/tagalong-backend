@@ -18,7 +18,8 @@ export const POLL_MS = 15 * MIN;
 export const MAX_LOGINS_A_DAY = 3;
 export const MAX_MANUAL_A_DAY = 5;
 export const BACKFILL_DAYS = 7;   // the parked-time look-back
-export const KEEP_DAYS = 14;      // a silent trailer (unit off) stays this long   // a dispatcher's "retry now" (far under Thermo King's 35-a-day lock)
+export const KEEP_DAYS = 14;
+const LOOKBACK_STEP = 12 * 60 * 60000;      // a silent trailer (unit off) stays this long   // a dispatcher's "retry now" (far under Thermo King's 35-a-day lock)
 
 export const cToF = (c) => (c == null || c === '' || !Number.isFinite(Number(c)) ? null : Math.round((Number(c) * 9 / 5 + 32) * 10) / 10);
 // the trailer number a unit is named by in TracKing (external ID, else vehicle name) — "07200" and "7200" are the same. Pure.
@@ -147,16 +148,18 @@ export function initThermoKing({ app = null, requireAuth = null, requireAdmin = 
     // look back up to 7 days (24 h a request — Thermo King's limit) to know how long each trailer has been parked. Retried
     // every 6 h until a day comes back with readings; what each day returned is kept (status endpoint: lookBack).
     const lb = st.lookBack || null;
-    if (!lb || (!lb.ok && end - Date.parse(lb.at) > 6 * 60 * MIN)) {
+    // (a look-back made with 24-hour windows — all refused — is retried right away with the 12-hour ones)
+    if (!lb || (!lb.ok && (end - Date.parse(lb.at) > 6 * 60 * MIN || (lb.log || []).some((x) => x.daysBack)))) {
       const all = {}; const log = [];
-      for (let d = BACKFILL_DAYS; d >= 1; d -= 1) {
-        const a = end - d * DAY; const b = end - (d - 1) * DAY;
+      // 12-hour windows: Thermo King answered 400 to every 24-hour one (Nov 17) though 2-hour reads work
+      for (let d = BACKFILL_DAYS * 2; d >= 1; d -= 1) {
+        const a = end - d * LOOKBACK_STEP; const b = end - (d - 1) * LOOKBACK_STEP;
         try {
           const rr = await fetchFn(`${c.base}/getTemperatureDataForVehicles/${encodeURIComponent(tkStamp(a))}/${encodeURIComponent(tkStamp(b))}/`, { headers: { 'X-External-ID': c.customer, 'X-OAuth2-Token': tk, 'Content-Type': 'application/json' } }); // eslint-disable-line no-await-in-loop
           let n = 0;
           if (rr.ok) for (const [t, l] of Object.entries(readingsByTrailer(await rr.json().catch(() => [])))) { (all[t] = all[t] || []).push(...l); n += l.length; } // eslint-disable-line no-await-in-loop
-          log.push({ daysBack: d, status: rr.status, readings: n });
-        } catch (e) { log.push({ daysBack: d, error: e.message }); }
+          log.push({ hoursBack: d * 12, status: rr.status, readings: n });
+        } catch (e) { log.push({ hoursBack: d * 12, error: e.message }); }
       }
       let earliest = null;
       for (const [t, l] of Object.entries(all)) {

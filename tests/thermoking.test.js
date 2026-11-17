@@ -39,9 +39,9 @@ test('poll: one login, then readings with the token; a 423 stops logins for 24 h
   await tk.poll(); clock += 15 * 60000; await tk.poll();
   assert.equal(calls.filter((c) => /obtainToken/.test(c.url)).length, 1, 'one login');
   const reads = calls.filter((c) => /getTemperatureDataForVehicles/.test(c.url));
-  assert.equal(reads.length, 9, '7 one-time days back (they came back with readings: not again) + 2 regular reads'); assert.equal(reads[8].h['X-OAuth2-Token'], 'TOK'); assert.equal(reads[8].h['X-External-ID'], 'C-1');
+  assert.equal(reads.length, 16, '7 days back in 12-hour windows (came back with readings: not again) + 2 regular reads'); assert.equal(reads[15].h['X-OAuth2-Token'], 'TOK'); assert.equal(reads[15].h['X-External-ID'], 'C-1');
   assert.match(reads[0].url, /getTemperatureDataForVehicles\/2026-11-16%2016%3A00%3A00\/2026-11-16%2018%3A00%3A00\/$/);
-  assert.match(reads[1].url, /getTemperatureDataForVehicles\/2026-11-09%2018%3A00%3A00\/2026-11-10%2018%3A00%3A00\/$/, 'look-back: 24 h windows, 7 days');
+  assert.match(reads[1].url, /getTemperatureDataForVehicles\/2026-11-09%2018%3A00%3A00\/2026-11-10%2006%3A00%3A00\/$/, 'look-back: 12 h windows, 7 days');
   assert.ok(!calls.some((c) => /command/i.test(c.url)), 'never the Command API');
   const trips = [{ trip: { tripNumber: '627130', trailer: '7200' } }, { trip: { tripNumber: '1', trailer: '9999' } }];
   await tk.overlay('s', trips);
