@@ -323,5 +323,12 @@ export function initLtlTempAlert({ db, sendMail = null, emails = async () => [],
     }
     return due.map((d) => d.x);
   }
-  return { process };
+  // the board: whether each LTL load's flowers are still on the trailer (the card's reefer panel uses it — no red "flowers
+  // freeze" on a trailer already delivered / on its next load)
+  async function overlay(site, trips) {
+    if (!enabled) return;
+    const ph = (await db.get(PHASE(site), {})) || {};
+    for (const it of trips || []) { const p = ph[tripNo(it)]; if (p) it._flowerPhase = { phase: p.phase, by: p.by || null, since: p.since || null }; }
+  }
+  return { process, overlay };
 }

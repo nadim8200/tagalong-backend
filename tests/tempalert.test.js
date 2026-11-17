@@ -202,3 +202,13 @@ test('a set point alert is said once per trailer, trip and value — even if the
   clock = at(4); await a.process('s', { trips: [load()] });
   assert.equal(texts.length, 1, 'the sent log still stops it');
 });
+
+test('the board gets each LTL load\'s flowers-on-board phase (the card stops warning once they are delivered)', async () => {
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v) };
+  const a = initLtlTempAlert({ db, now: () => at(0) });
+  m.set('taLtlTempPhase:s', { 627178: { phase: 'delivered', by: 'stops left + set for the next load', since: 1 } });
+  const trips = [{ trip: { tripNumber: '627178' } }, { trip: { tripNumber: '1' } }];
+  await a.overlay('s', trips);
+  assert.deepEqual(trips[0]._flowerPhase, { phase: 'delivered', by: 'stops left + set for the next load', since: 1 });
+  assert.equal(trips[1]._flowerPhase, undefined);
+});
