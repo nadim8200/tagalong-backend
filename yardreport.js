@@ -54,7 +54,9 @@ export function inboundToFlorida(it) {
   return ROLLING_IN.test(String(t.status || '').trim());
 }
 
-export function yardReport({ units = {}, items = [], etas = {}, points = {}, now = Date.now() }) {
+export function yardReport({ units = {}, items = [], etas = {}, points = {}, now = Date.now(), trackingSince = null }) {
+  // a trailer never seen moving since Jarvis began watching: parked at least that long — listed after 12 h, marked so
+  const watchStart = trackingSince ? Date.parse(trackingSince) : null;
   const list = Object.values(units);
   const onLoad = new Map(items.map((it) => [String(tripOf(it).trailer || '').trim().toUpperCase().replace(/^0+(?=\d)/, ''), tripNo(it)]));
   const hubs = Object.fromEntries(Object.keys(HUB_NAMES).map((h) => [h, []]));
@@ -65,7 +67,8 @@ export function yardReport({ units = {}, items = [], etas = {}, points = {}, now
     if (!h) {
       elsewhere += 1;
       const ps = Date.parse(u.parkedSince || '');
-      if (Number.isFinite(ps) && now - ps >= PARKED_MS) parked.push({ trailer: u.trailer, location: u.location || null, lat: u.lat, lng: u.lng, parkedSince: u.parkedSince, atLeast: !!u.atLeast, days: Math.floor((now - ps) / 86400000), seenAt: u.at, ageMin: Math.round((now - Date.parse(u.at)) / 60000), unitOn: u.powerOn, returnF: u.returnF, setF: u.setF, supplyF: u.supplyF ?? null, onLoad: onLoad.get(u.trailer) || null });
+      const sinceTracking = !!(u.atLeast && watchStart && ps <= watchStart + 60 * 60000 && now - ps >= 12 * 3600000 && now - ps < PARKED_MS);
+      if (Number.isFinite(ps) && (now - ps >= PARKED_MS || sinceTracking)) parked.push({ sinceTracking, hours: Math.floor((now - ps) / 3600000), trailer: u.trailer, location: u.location || null, lat: u.lat, lng: u.lng, parkedSince: u.parkedSince, atLeast: !!u.atLeast, days: Math.floor((now - ps) / 86400000), seenAt: u.at, ageMin: Math.round((now - Date.parse(u.at)) / 60000), unitOn: u.powerOn, returnF: u.returnF, setF: u.setF, supplyF: u.supplyF ?? null, onLoad: onLoad.get(u.trailer) || null });
       continue;
     }
     hubs[h].push({ hub: HUB_NAMES[h], trailer: u.trailer, seenAt: u.at, ageMin: Math.round((now - Date.parse(u.at)) / 60000), unitOn: u.powerOn, returnF: u.returnF, setF: u.setF, supplyF: u.supplyF ?? null, onLoad: onLoad.get(u.trailer) || null });
@@ -155,10 +158,11 @@ export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => ge
     return out;
   }
   async function report() {
-    const units = ((await db.get('taThermoKing', {})) || {}).units || {};
+    const tkSt = (await db.get('taThermoKing', {})) || {};
+    const units = tkSt.units || {};
     const board = await getBoard(SITE);
     const etas = ((await db.get(`taWatch:${SITE}`, {})) || {}).etas || {};
-    return yardReport({ units, items: (board && board.trips) || [], etas, points: await points(), now: now() });
+    return { ...yardReport({ units, items: (board && board.trips) || [], etas, points: await points(), now: now(), trackingSince: tkSt.firstReadAt || null }), trackingSince: tkSt.firstReadAt || null };
   }
   async function trucks() {
     const token = samsaraTokenFrom(process.env);

@@ -16,7 +16,9 @@ const TOKEN = 'taThermoKingToken';         // { accessToken, obtainedAt, refresh
 export const TK_BASE = 'https://rest.tracking.thermoking.com/connected-solutions';
 export const POLL_MS = 15 * MIN;
 export const MAX_LOGINS_A_DAY = 3;
-export const MAX_MANUAL_A_DAY = 5;   // a dispatcher's "retry now" (far under Thermo King's 35-a-day lock)
+export const MAX_MANUAL_A_DAY = 5;
+export const BACKFILL_DAYS = 7;   // the parked-time look-back
+export const KEEP_DAYS = 14;      // a silent trailer (unit off) stays this long   // a dispatcher's "retry now" (far under Thermo King's 35-a-day lock)
 
 export const cToF = (c) => (c == null || c === '' || !Number.isFinite(Number(c)) ? null : Math.round((Number(c) * 9 / 5 + 32) * 10) / 10);
 // the trailer number a unit is named by in TracKing (external ID, else vehicle name) — "07200" and "7200" are the same. Pure.
@@ -140,25 +142,43 @@ export function initThermoKing({ app = null, requireAuth = null, requireAdmin = 
     if (!r.ok) { const error = loginErr || `data read refused (HTTP ${r.status})`; await db.set(KEY, { ...st, lastPoll: new Date(end).toISOString(), error }); return { error }; }
     const fresh = latestByTrailer(await r.json().catch(() => []));
     const units = { ...(st.units || {}) }; const history = { ...(st.history || {}) };
-    // one time: the last 3 days (3 requests of 24 h — Thermo King's limit), to know how long each trailer has been parked
-    if (!st.backfilledAt) {
-      const all = {};
-      for (let d = 3; d >= 1; d -= 1) {
+    // when Jarvis started watching (parked times can't be older than this, unless the look-back below finds history)
+    if (!st.firstReadAt) st.firstReadAt = st.backfilledAt || new Date(end).toISOString();
+    // look back up to 7 days (24 h a request — Thermo King's limit) to know how long each trailer has been parked. Retried
+    // every 6 h until a day comes back with readings; what each day returned is kept (status endpoint: lookBack).
+    const lb = st.lookBack || null;
+    if (!lb || (!lb.ok && end - Date.parse(lb.at) > 6 * 60 * MIN)) {
+      const all = {}; const log = [];
+      for (let d = BACKFILL_DAYS; d >= 1; d -= 1) {
         const a = end - d * DAY; const b = end - (d - 1) * DAY;
         try {
           const rr = await fetchFn(`${c.base}/getTemperatureDataForVehicles/${encodeURIComponent(tkStamp(a))}/${encodeURIComponent(tkStamp(b))}/`, { headers: { 'X-External-ID': c.customer, 'X-OAuth2-Token': tk, 'Content-Type': 'application/json' } }); // eslint-disable-line no-await-in-loop
-          if (rr.ok) for (const [t, l] of Object.entries(readingsByTrailer(await rr.json().catch(() => [])))) (all[t] = all[t] || []).push(...l); // eslint-disable-line no-await-in-loop
-        } catch { /* that day stays unknown */ }
+          let n = 0;
+          if (rr.ok) for (const [t, l] of Object.entries(readingsByTrailer(await rr.json().catch(() => [])))) { (all[t] = all[t] || []).push(...l); n += l.length; } // eslint-disable-line no-await-in-loop
+          log.push({ daysBack: d, status: rr.status, readings: n });
+        } catch (e) { log.push({ daysBack: d, error: e.message }); }
       }
-      for (const [t, l] of Object.entries(all)) { l.sort((p, q) => p.at.localeCompare(q.at)); const ps = parkedSinceOf(l); const last = l[l.length - 1]; if (ps) units[t] = { ...(units[t] || {}), ...last, ...ps }; }
-      st.backfilledAt = new Date(end).toISOString();
+      let earliest = null;
+      for (const [t, l] of Object.entries(all)) {
+        l.sort((p, q) => p.at.localeCompare(q.at));
+        if (!earliest || l[0].at < earliest) earliest = l[0].at;
+        const ps = parkedSinceOf(l); const last = l[l.length - 1]; const cur = units[t];
+        if (!ps) continue;
+        // still where the look-back last saw it, and never seen moving since → parked since the look-back's time
+        if (!cur) units[t] = { ...last, ...ps };
+        else if (cur.atLeast !== false && cur.lat != null && last.lat != null && miles(cur, last) <= MOVE_MI && (!cur.parkedSince || ps.parkedSince < cur.parkedSince)) units[t] = { ...cur, ...ps };
+      }
+      st.lookBack = { at: new Date(end).toISOString(), ok: log.some((x) => x.readings > 0), log };
+      if (earliest && earliest < st.firstReadAt) st.firstReadAt = earliest;
+      st.backfilledAt = st.backfilledAt || new Date(end).toISOString();
     }
     for (const [t, x] of Object.entries(fresh)) {
       if (!units[t] || x.at >= units[t].at) units[t] = { ...x, ...nextParked(units[t], x) };
       history[t] = [...(history[t] || []).filter((h) => h.at !== x.at), { at: x.at, returnF: x.returnF, setF: x.setF }].slice(-48);
     }
-    for (const [t, x] of Object.entries(units)) if (end - Date.parse(x.at) > 3 * DAY) { delete units[t]; delete history[t]; }
-    await db.set(KEY, { units, history, lastEnd: end, lastPoll: new Date(end).toISOString(), error: null, lastCount: Object.keys(fresh).length, backfilledAt: st.backfilledAt || null });
+    // a trailer whose unit is off stops reporting while it sits — kept 14 days so a long stay at a customer still shows
+    for (const [t, x] of Object.entries(units)) if (end - Date.parse(x.at) > KEEP_DAYS * DAY) { delete units[t]; delete history[t]; }
+    await db.set(KEY, { units, history, lastEnd: end, lastPoll: new Date(end).toISOString(), error: null, lastCount: Object.keys(fresh).length, backfilledAt: st.backfilledAt || null, firstReadAt: st.firstReadAt, lookBack: st.lookBack || null });
     return { units: Object.keys(fresh).length };
   }
 
@@ -191,7 +211,7 @@ export function initThermoKing({ app = null, requireAuth = null, requireAdmin = 
     app.get('/truckmate/thermoking/status', requireAuth, async (req, res) => {
       const st = (await db.get(KEY, {})) || {}; const tok = (await db.get(TOKEN, {})) || {};
       const newest = Object.values(st.units || {}).reduce((m, x) => (x.at > m ? x.at : m), '');
-      res.json({ configured: ready(), lastPoll: st.lastPoll || null, lastCount: st.lastCount ?? null, units: Object.keys(st.units || {}).length, error: st.error || tok.error || null, loginError: tok.error || null, loginErrorAt: tok.errorAt ? new Date(tok.errorAt).toISOString() : null, lastLoginOk: tok.obtainedAt ? new Date(tok.obtainedAt).toISOString() : null, newestReading: newest || null, blockedUntil: tok.blockedUntil || null, loginsToday: (tok.attempts || {})[etDay()] || 0, loginsPerDay: MAX_LOGINS_A_DAY, sample: Object.values(st.units || {}).slice(0, 3).map(({ lat, lng, location, ...x }) => x) });
+      res.json({ configured: ready(), lastPoll: st.lastPoll || null, lastCount: st.lastCount ?? null, units: Object.keys(st.units || {}).length, error: st.error || tok.error || null, loginError: tok.error || null, loginErrorAt: tok.errorAt ? new Date(tok.errorAt).toISOString() : null, lastLoginOk: tok.obtainedAt ? new Date(tok.obtainedAt).toISOString() : null, newestReading: newest || null, trackingSince: st.firstReadAt || null, lookBack: st.lookBack || null, blockedUntil: tok.blockedUntil || null, loginsToday: (tok.attempts || {})[etDay()] || 0, loginsPerDay: MAX_LOGINS_A_DAY, sample: Object.values(st.units || {}).slice(0, 3).map(({ lat, lng, location, ...x }) => x) });
     });
   }
   return { poll, overlay, token, ready };

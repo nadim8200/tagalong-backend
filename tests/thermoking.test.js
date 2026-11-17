@@ -39,9 +39,9 @@ test('poll: one login, then readings with the token; a 423 stops logins for 24 h
   await tk.poll(); clock += 15 * 60000; await tk.poll();
   assert.equal(calls.filter((c) => /obtainToken/.test(c.url)).length, 1, 'one login');
   const reads = calls.filter((c) => /getTemperatureDataForVehicles/.test(c.url));
-  assert.equal(reads.length, 5, '3 one-time days back + 2 regular reads'); assert.equal(reads[4].h['X-OAuth2-Token'], 'TOK'); assert.equal(reads[4].h['X-External-ID'], 'C-1');
+  assert.equal(reads.length, 9, '7 one-time days back (they came back with readings: not again) + 2 regular reads'); assert.equal(reads[8].h['X-OAuth2-Token'], 'TOK'); assert.equal(reads[8].h['X-External-ID'], 'C-1');
   assert.match(reads[0].url, /getTemperatureDataForVehicles\/2026-11-16%2016%3A00%3A00\/2026-11-16%2018%3A00%3A00\/$/);
-  assert.match(reads[1].url, /getTemperatureDataForVehicles\/2026-11-13%2018%3A00%3A00\/2026-11-14%2018%3A00%3A00\/$/, 'backfill: 24 h windows');
+  assert.match(reads[1].url, /getTemperatureDataForVehicles\/2026-11-09%2018%3A00%3A00\/2026-11-10%2018%3A00%3A00\/$/, 'look-back: 24 h windows, 7 days');
   assert.ok(!calls.some((c) => /command/i.test(c.url)), 'never the Command API');
   const trips = [{ trip: { tripNumber: '627130', trailer: '7200' } }, { trip: { tripNumber: '1', trailer: '9999' } }];
   await tk.overlay('s', trips);
@@ -107,4 +107,19 @@ test('retry now: a dispatcher can try the login past the 3-a-day cap (5 a day), 
   for (let i = 0; i < 3; i += 1) await call();
   const f = await call();
   assert.match(f.error, /Already retried 5 times today/);
+});
+
+test('parked: a trailer that sat at a customer before Jarvis was watching gets its time from the look-back; never seen moving since tracking began → listed after 12 h, marked', async () => {
+  const { yardReport } = await import('../yardreport.js');
+  const NOW2 = Date.parse('2026-11-17T20:42:00Z');
+  const units = {
+    7300: { trailer: '7300', lat: 35.2, lng: -80.8, at: '2026-11-17T20:30:00Z', parkedSince: '2026-11-16T23:25:00Z', atLeast: true, location: 'Charlotte, NC' },   // never moved since tracking began
+    7301: { trailer: '7301', lat: 27.95, lng: -82.46, at: '2026-11-17T20:30:00Z', parkedSince: '2026-11-17T15:00:00Z', atLeast: false, location: 'Tampa, FL' },   // moved today
+    7302: { trailer: '7302', lat: 35.2, lng: -80.8, at: '2026-11-17T20:30:00Z', parkedSince: '2026-11-13T10:00:00Z', atLeast: true, location: 'Charlotte, NC' },   // 4 days (look-back)
+  };
+  const r = yardReport({ units, items: [], points: {}, now: NOW2, trackingSince: '2026-11-16T23:25:00Z' });
+  const byT = Object.fromEntries(r.parked.map((p) => [p.trailer, p]));
+  assert.equal(byT['7300'].sinceTracking, true); assert.equal(byT['7300'].hours, 21);
+  assert.equal(byT['7302'].sinceTracking, false); assert.equal(byT['7302'].days, 4);
+  assert.equal(byT['7301'], undefined, 'moved today: not parked');
 });
