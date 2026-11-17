@@ -16,6 +16,7 @@ const TOKEN = 'taThermoKingToken';         // { accessToken, obtainedAt, refresh
 export const TK_BASE = 'https://rest.tracking.thermoking.com/connected-solutions';
 export const POLL_MS = 15 * MIN;
 export const MAX_LOGINS_A_DAY = 3;
+export const MAX_MANUAL_A_DAY = 5;   // a dispatcher's "retry now" (far under Thermo King's 35-a-day lock)
 
 export const cToF = (c) => (c == null || c === '' || !Number.isFinite(Number(c)) ? null : Math.round((Number(c) * 9 / 5 + 32) * 10) / 10);
 // the trailer number a unit is named by in TracKing (external ID, else vehicle name) — "07200" and "7200" are the same. Pure.
@@ -93,25 +94,27 @@ export function initThermoKing({ app = null, requireAuth = null, db, env = proce
   const ready = () => { const c = cfg(); return !!(db && db.enabled && c.user && c.password && c.customer); };
   const etDay = () => new Date(now()).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
-  async function token({ force = false } = {}) {
+  async function token({ force = false, manual = false } = {}) {
     const c = cfg();
     const tok = (await db.get(TOKEN, {})) || {};
     if (!force && !needLogin(tok, now(), etDay())) return tok.accessToken || null;
     if (tok.blockedUntil && now() < tok.blockedUntil) return null;
     const day = etDay();
-    if (((tok.attempts || {})[day] || 0) >= MAX_LOGINS_A_DAY) return tok.accessToken || null;
+    if (!manual && ((tok.attempts || {})[day] || 0) >= MAX_LOGINS_A_DAY) return tok.accessToken || null;
+    if (manual && ((tok.manual || {})[day] || 0) >= MAX_MANUAL_A_DAY) throw new Error(`Already retried ${MAX_MANUAL_A_DAY} times today — Thermo King locks the account after 35 logins a day`);
     const attempts = { [day]: ((tok.attempts || {})[day] || 0) + 1 };
-    await db.set(TOKEN, { ...tok, attempts });   // counted before the call: a crash can't loop logins
+    const manualN = manual ? { manual: { [day]: ((tok.manual || {})[day] || 0) + 1 } } : {};
+    await db.set(TOKEN, { ...tok, attempts, ...manualN });   // counted before the call: a crash can't loop logins
     const r = await fetchFn(`${c.base}/obtainToken/`, { method: 'POST', headers: { 'X-External-ID': c.customer, 'Content-Type': 'application/json' }, body: JSON.stringify({ userName: c.user, password: c.password }) });
     const j = await r.json().catch(() => ({}));
-    if (r.status === 423) { await db.set(TOKEN, { ...tok, attempts, blockedUntil: now() + DAY, error: 'Thermo King blocked the login (423) — waiting 24 h; tracking@thermoking.com can unblock it' }); throw new Error('Thermo King blocked the login (423)'); }
+    if (r.status === 423) { await db.set(TOKEN, { ...tok, attempts, ...manualN, blockedUntil: now() + DAY, error: 'Thermo King blocked the login (423) — waiting 24 h; tracking@thermoking.com can unblock it' }); throw new Error('Thermo King blocked the login (423)'); }
     if (!r.ok || !j.accessToken) {
       // keep Thermo King's own words (never the request: it carries the password)
       const why = String(j.message || j.error || j.errorMessage || j.detail || '').replace(/\s+/g, ' ').slice(0, 200);
-      await db.set(TOKEN, { ...tok, attempts, error: `login refused (HTTP ${r.status})${why ? `: ${why}` : ''}`, errorAt: now() });
+      await db.set(TOKEN, { ...tok, attempts, ...manualN, error: `login refused (HTTP ${r.status})${why ? `: ${why}` : ''}`, errorAt: now() });
       throw new Error(`Thermo King login refused (HTTP ${r.status})${why ? `: ${why}` : ''}`);
     }
-    await db.set(TOKEN, { accessToken: j.accessToken, obtainedAt: now(), refreshExpiresAt: j.expiresIn ? now() + Number(j.expiresIn) * 1000 : null, attempts, error: null });
+    await db.set(TOKEN, { accessToken: j.accessToken, obtainedAt: now(), refreshExpiresAt: j.expiresIn ? now() + Number(j.expiresIn) * 1000 : null, attempts, ...manualN, error: null });
     return j.accessToken;
   }
 
@@ -177,6 +180,13 @@ export function initThermoKing({ app = null, requireAuth = null, db, env = proce
     if (t.unref) t.unref();
   }
   if (app && requireAuth) {
+    // a dispatcher's "retry the login now" (past the 3-a-day cap, at most 5 a day), then one read — the answer says what happened
+    app.post('/truckmate/thermoking/retry', requireAuth, async (req, res) => {
+      if (!ready()) return res.status(400).json({ error: 'Thermo King is not configured.' });
+      try { await token({ force: true, manual: true }); } catch (e) { return res.json({ ok: false, login: 'refused', error: e.message }); }
+      const r = await poll().catch((e) => ({ error: e.message }));
+      res.json({ ok: !r.error, login: 'ok', read: r });
+    });
     // what's connected (never the password or token)
     app.get('/truckmate/thermoking/status', requireAuth, async (req, res) => {
       const st = (await db.get(KEY, {})) || {}; const tok = (await db.get(TOKEN, {})) || {};

@@ -73,7 +73,7 @@ test('token expired and the new login is refused: the status says the login was 
     if (url.includes('obtainToken')) return { status: 403, ok: false, json: async () => ({ message: 'User account is disabled' }) };
     return { status: 403, ok: false, json: async () => ({}) };
   };
-  const routes = {}; const app = { get: (p, a, h) => { routes[p] = h; } };
+  const routes = {}; const app = { get: (p, a, h) => { routes[p] = h; }, post: () => {} };
   const tk = initThermoKing({ app, requireAuth: () => {}, db, env, fetchFn, now: () => clock });
   const r1 = await tk.poll();
   assert.match(r1.error, /login refused \(HTTP 403\): User account is disabled/);
@@ -84,4 +84,27 @@ test('token expired and the new login is refused: the status says the login was 
   clock += 15 * 60000; calls.length = 0;
   await tk.poll();
   assert.ok(calls.filter((c) => c === 'login').length <= 1, 'at most one more login, then the daily cap holds');
+});
+
+test('retry now: a dispatcher can try the login past the 3-a-day cap (5 a day), and hears the result', async () => {
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v) };
+  const env = { THERMOKING_USER: 'u', THERMOKING_PASSWORD: 'p', THERMOKING_CUSTOMER_ID: 'c' };
+  const clock = Date.parse('2026-11-17T17:00:00Z'); const day = new Date(clock).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  m.set('taThermoKingToken', { accessToken: 'old', obtainedAt: clock - 2 * 86400000, attempts: { [day]: 3 } });   // today's 3 used
+  let ok = false;
+  const fetchFn = async (url) => (url.includes('obtainToken')
+    ? (ok ? { status: 200, ok: true, json: async () => ({ accessToken: 'NEW', expiresIn: 172800 }) } : { status: 403, ok: false, json: async () => ({ message: 'Invalid username or password' }) })
+    : { status: 200, ok: true, json: async () => [] });
+  const routes = {}; const app = { get: () => {}, post: (p, a, h) => { routes[p] = h; } };
+  initThermoKing({ app, requireAuth: () => {}, db, env, fetchFn, now: () => clock });
+  const call = async () => { let out; await routes['/truckmate/thermoking/retry']({}, { json: (j) => { out = j; }, status: () => ({ json: (j) => { out = j; } }) }); return out; };
+  const a = await call();
+  assert.equal(a.login, 'refused'); assert.match(a.error, /Invalid username or password/);
+  ok = true;
+  const b = await call();
+  assert.equal(b.login, 'ok'); assert.equal(b.ok, true);
+  assert.equal(m.get('taThermoKingToken').accessToken, 'NEW');
+  for (let i = 0; i < 3; i += 1) await call();
+  const f = await call();
+  assert.match(f.error, /Already retried 5 times today/);
 });
