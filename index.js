@@ -1483,7 +1483,7 @@ thermoKing = initThermoKing({ app, requireAuth: requireDispatch, requireAdmin, d
 // yard report: trailers at each hub yard (Thermo King GPS) + what's coming down to Florida
 // trailer watch: emails Nadim a trailer parked 30+ days, or one moving without being on a load
 const trailerWatch = initTrailerWatch({ db, sendMail: (m) => sendMail(m, { env: process.env }), to: async () => ['ntellez@floridabeauty.us'] });
-const yardReport = initYardReport(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), onTrailers: (u, i, p) => trailerWatch.check(u, i, p) });
+const yardReport = initYardReport(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), getFleet: () => truckmate.refreshFleet('florida-beauty'), onTrailers: (u, i, p) => trailerWatch.check(u, i, p) });
 // Driver Release Form: the Release button on a load card → the form filled from the load → emailed as a PDF + the rate con
 releaseApi = initRelease(app, { requireAuth: requireDispatch, db, docs, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), log: (...a) => comms.log(...a), trainingActive: () => training.active(), hubOf: (it) => yardReport.hubOf(it) });
 // LTL run done in the app + truck rolling again → "Rolling to your next pickup?" in the driver app; the answer emails dispatch

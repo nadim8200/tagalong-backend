@@ -87,3 +87,19 @@ test('Samsara trailers join the yard report: one list by trailer number, the new
   const p = r.parked.find((x) => x.trailer === '9001');
   assert.ok(p && p.sinceTracking && p.source === 'Samsara', 'a Samsara trailer not moved since Jarvis began reading Samsara: listed after 12 h');
 });
+
+test('Samsara trailers come from the fleet map list (hitched → the truck\'s GPS; dropped → where it was left)', async () => {
+  const { initYardReport } = await import('../yardreport.js');
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
+  const fleet = { trailers: [
+    { trailer: '2022', lat: 25.8025, lng: -80.3, gpsAt: '2026-11-17T21:40:43Z', speedMph: 0, source: 'With truck 2606', location: 'Miami, FL' },
+    { trailer: '2023', lat: 38.2587, lng: -85.7, gpsAt: '2026-10-23T16:14:47Z', source: 'Last known — dropped by truck 2018' },
+    { trailer: '9999', lat: null, lng: null, gpsAt: null },
+  ] };
+  const y = initYardReport(null, { db, getBoard: async () => ({ trips: [] }), getFleet: async () => fleet, now: () => Date.parse('2026-11-17T21:45:00Z') });
+  const r = await y.readSamsara();
+  assert.equal(r.units, 2);
+  const u = m.get('taSamsaraTrailers').units;
+  assert.equal(u['2023'].via, 'Last known — dropped by truck 2018'); assert.equal(u['2023'].parkedSince, '2026-10-23T16:14:47Z');
+  assert.equal(u['2022'].via, 'With truck 2606');
+});
