@@ -14,7 +14,9 @@ const DAY = 24 * 60 * MIN;
 const KEY = 'taThermoKing';                // { units: { trailer: reading }, history: { trailer: [{ at, returnF, setF }] }, lastEnd, lastPoll, error }
 const TOKEN = 'taThermoKingToken';         // { accessToken, obtainedAt, refreshExpiresAt, attempts: { [ET day]: n }, blockedUntil }
 export const TK_BASE = 'https://rest.tracking.thermoking.com/connected-solutions';
-export const POLL_MS = 15 * MIN;
+export const POLL_MS = 20 * MIN;   // light on Thermo King (Nov 17): 72 small reads a day
+export const BACKOFF_MS = 60 * MIN; // after a 423 / 429 / 5xx: no reads for an hour
+const LOOKBACK_GAP_MS = 5000;     // a look-back (if one ever runs again) spaces its requests
 export const MAX_LOGINS_A_DAY = 3;
 export const MAX_MANUAL_A_DAY = 5;
 export const BACKFILL_DAYS = 7;   // the parked-time look-back
@@ -92,7 +94,7 @@ export function needLogin(tok = {}, now = Date.now(), day = '') {
   return !!(tok.refreshExpiresAt && tok.refreshExpiresAt - now < 6 * 60 * MIN);
 }
 
-export function initThermoKing({ app = null, requireAuth = null, requireAdmin = null, db, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initThermoKing({ app = null, requireAuth = null, requireAdmin = null, db, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now(), sleepMs = LOOKBACK_GAP_MS }) {
   const cfg = () => ({ user: env.THERMOKING_USER || '', password: env.THERMOKING_PASSWORD || '', customer: env.THERMOKING_CUSTOMER_ID || '', base: String(env.THERMOKING_URL || TK_BASE).replace(/\/+$/, '') });
   const ready = () => { const c = cfg(); return !!(db && db.enabled && c.user && c.password && c.customer); };
   const etDay = () => new Date(now()).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -125,6 +127,7 @@ export function initThermoKing({ app = null, requireAuth = null, requireAdmin = 
     if (!ready()) return { skipped: 'not configured' };
     const c = cfg();
     const st = (await db.get(KEY, {})) || {};
+    if (st.pausedUntil && now() < Date.parse(st.pausedUntil)) return { skipped: `paused until ${st.pausedUntil} (Thermo King asked us to slow down)` };
     let loginErr = null;
     // a refused login keeps the token we have (it may still work for a while) — and the reason is kept for the status
     let tk = await token().catch(async (e) => { loginErr = e.message; return ((await db.get(TOKEN, {})) || {}).accessToken || null; });
@@ -140,7 +143,12 @@ export function initThermoKing({ app = null, requireAuth = null, requireAdmin = 
       const t0 = (await db.get(TOKEN, {})) || {};
       if (!t0.obtainedAt || now() - t0.obtainedAt > 60 * MIN) { tk = await token({ force: true }).catch((e) => { loginErr = e.message; return null; }); if (tk) r = await get(tk); }
     }
-    if (!r.ok) { const error = loginErr || `data read refused (HTTP ${r.status})`; await db.set(KEY, { ...st, lastPoll: new Date(end).toISOString(), error }); return { error }; }
+    if (!r.ok) {
+      const slow = r.status === 423 || r.status === 429 || r.status >= 500;   // too many requests / their server struggling
+      const error = loginErr || `data read refused (HTTP ${r.status})${slow ? ' — paused for an hour' : ''}`;
+      await db.set(KEY, { ...st, lastPoll: new Date(end).toISOString(), error, ...(slow ? { pausedUntil: new Date(end + BACKOFF_MS).toISOString() } : {}) });
+      return { error };
+    }
     const fresh = latestByTrailer(await r.json().catch(() => []));
     const units = { ...(st.units || {}) }; const history = { ...(st.history || {}) };
     // when Jarvis started watching (parked times can't be older than this, unless the look-back below finds history)
@@ -159,6 +167,8 @@ export function initThermoKing({ app = null, requireAuth = null, requireAdmin = 
           let n = 0;
           if (rr.ok) for (const [t, l] of Object.entries(readingsByTrailer(await rr.json().catch(() => [])))) { (all[t] = all[t] || []).push(...l); n += l.length; } // eslint-disable-line no-await-in-loop
           log.push({ hoursBack: d * 12, status: rr.status, readings: n });
+          if (rr.status === 423 || rr.status === 429) break;                                   // asked to slow down: stop here
+          if (d > 1) await new Promise((res) => { setTimeout(res, sleepMs); });               // eslint-disable-line no-await-in-loop
         } catch (e) { log.push({ hoursBack: d * 12, error: e.message }); }
       }
       let earliest = null;
@@ -214,7 +224,7 @@ export function initThermoKing({ app = null, requireAuth = null, requireAdmin = 
     app.get('/truckmate/thermoking/status', requireAuth, async (req, res) => {
       const st = (await db.get(KEY, {})) || {}; const tok = (await db.get(TOKEN, {})) || {};
       const newest = Object.values(st.units || {}).reduce((m, x) => (x.at > m ? x.at : m), '');
-      res.json({ configured: ready(), lastPoll: st.lastPoll || null, lastCount: st.lastCount ?? null, units: Object.keys(st.units || {}).length, error: st.error || tok.error || null, loginError: tok.error || null, loginErrorAt: tok.errorAt ? new Date(tok.errorAt).toISOString() : null, lastLoginOk: tok.obtainedAt ? new Date(tok.obtainedAt).toISOString() : null, newestReading: newest || null, trackingSince: st.firstReadAt || null, lookBack: st.lookBack || null, blockedUntil: tok.blockedUntil || null, loginsToday: (tok.attempts || {})[etDay()] || 0, loginsPerDay: MAX_LOGINS_A_DAY, sample: Object.values(st.units || {}).slice(0, 3).map(({ lat, lng, location, ...x }) => x) });
+      res.json({ configured: ready(), lastPoll: st.lastPoll || null, lastCount: st.lastCount ?? null, units: Object.keys(st.units || {}).length, error: st.error || tok.error || null, loginError: tok.error || null, loginErrorAt: tok.errorAt ? new Date(tok.errorAt).toISOString() : null, lastLoginOk: tok.obtainedAt ? new Date(tok.obtainedAt).toISOString() : null, newestReading: newest || null, pausedUntil: st.pausedUntil && Date.parse(st.pausedUntil) > now() ? st.pausedUntil : null, trackingSince: st.firstReadAt || null, lookBack: st.lookBack || null, blockedUntil: tok.blockedUntil || null, loginsToday: (tok.attempts || {})[etDay()] || 0, loginsPerDay: MAX_LOGINS_A_DAY, sample: Object.values(st.units || {}).slice(0, 3).map(({ lat, lng, location, ...x }) => x) });
     });
   }
   return { poll, overlay, token, ready };

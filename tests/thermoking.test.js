@@ -35,7 +35,7 @@ test('poll: one login, then readings with the token; a 423 stops logins for 24 h
   };
   const env = { NODE_ENV: 'test', THERMOKING_USER: 'u', THERMOKING_PASSWORD: 'p', THERMOKING_CUSTOMER_ID: 'C-1' };
   let clock = NOW;
-  const tk = initThermoKing({ db, env, fetchFn, now: () => clock });
+  const tk = initThermoKing({ db, env, fetchFn, now: () => clock, sleepMs: 0 });
   await tk.poll(); clock += 15 * 60000; await tk.poll();
   assert.equal(calls.filter((c) => /obtainToken/.test(c.url)).length, 1, 'one login');
   const reads = calls.filter((c) => /getTemperatureDataForVehicles/.test(c.url));
@@ -74,7 +74,7 @@ test('token expired and the new login is refused: the status says the login was 
     return { status: 403, ok: false, json: async () => ({}) };
   };
   const routes = {}; const app = { get: (p, a, h) => { routes[p] = h; }, post: () => {} };
-  const tk = initThermoKing({ app, requireAuth: () => {}, db, env, fetchFn, now: () => clock });
+  const tk = initThermoKing({ app, requireAuth: () => {}, db, env, fetchFn, now: () => clock, sleepMs: 0 });
   const r1 = await tk.poll();
   assert.match(r1.error, /login refused \(HTTP 403\): User account is disabled/);
   assert.equal(JSON.stringify(m.get('taThermoKingToken')).includes('"p"'), false, 'the password is never stored');
@@ -96,7 +96,7 @@ test('retry now: a dispatcher can try the login past the 3-a-day cap (5 a day), 
     ? (ok ? { status: 200, ok: true, json: async () => ({ accessToken: 'NEW', expiresIn: 172800 }) } : { status: 403, ok: false, json: async () => ({ message: 'Invalid username or password' }) })
     : { status: 200, ok: true, json: async () => [] });
   const routes = {}; const app = { get: () => {}, post: (p, a, h) => { routes[p] = h; } };
-  initThermoKing({ app, requireAuth: () => {}, db, env, fetchFn, now: () => clock });
+  initThermoKing({ app, requireAuth: () => {}, db, env, fetchFn, now: () => clock, sleepMs: 0 });
   const call = async () => { let out; await routes['/truckmate/thermoking/retry']({}, { json: (j) => { out = j; }, status: () => ({ json: (j) => { out = j; } }) }); return out; };
   const a = await call();
   assert.equal(a.login, 'refused'); assert.match(a.error, /Invalid username or password/);
@@ -122,4 +122,26 @@ test('parked: a trailer that sat at a customer before Jarvis was watching gets i
   assert.equal(byT['7300'].sinceTracking, true); assert.equal(byT['7300'].hours, 21);
   assert.equal(byT['7302'].sinceTracking, false); assert.equal(byT['7302'].days, 4);
   assert.equal(byT['7301'], undefined, 'moved today: not parked');
+});
+
+test('Thermo King says slow down (423 / 429 / 5xx): no reads for an hour; a look-back stops at the first 423', async () => {
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v) };
+  const env = { THERMOKING_USER: 'u', THERMOKING_PASSWORD: 'p', THERMOKING_CUSTOMER_ID: 'c' };
+  let clock = Date.parse('2026-11-17T21:00:00Z'); const reads = []; let status = 423;
+  m.set('taThermoKingToken', { accessToken: 'T', obtainedAt: clock - 3600000, attempts: {} });
+  m.set('taThermoKing', { units: {}, lookBack: { at: '2026-11-17T20:00:00Z', ok: true, log: [] }, firstReadAt: '2026-11-16T00:00:00Z' });
+  const fetchFn = async (url) => { reads.push(url); return { status, ok: status === 200, json: async () => [] }; };
+  const tk = initThermoKing({ db, env, fetchFn, now: () => clock, sleepMs: 0 });
+  const r1 = await tk.poll();
+  assert.match(r1.error, /HTTP 423\) — paused for an hour/);
+  clock += 20 * 60000; const r2 = await tk.poll();
+  assert.match(r2.skipped, /paused until/); assert.equal(reads.length, 1, 'no read while paused');
+  clock += 45 * 60000; status = 200; await tk.poll();
+  assert.equal(reads.length, 2, 'reads again after the hour');
+  // a look-back hitting 423 stops at once (no burst of refused requests)
+  m.set('taThermoKing', { units: {}, firstReadAt: '2026-11-16T00:00:00Z' }); reads.length = 0;
+  let n = 0;
+  const tk2 = initThermoKing({ db, env, fetchFn: async (url) => { reads.push(url); n += 1; return n === 1 ? { status: 200, ok: true, json: async () => [] } : { status: 423, ok: false, json: async () => [] }; }, now: () => clock, sleepMs: 0 });
+  await tk2.poll();
+  assert.equal(reads.length, 2, 'the regular read + one look-back request that got 423');
 });
