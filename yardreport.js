@@ -12,6 +12,9 @@ import { getLiveIndex, samsaraTokenFrom } from './samsara.js';
 const SITE = 'florida-beauty';
 const POINTS = 'taHubPoints';      // hub → [{ lat, lng }] (the yard addresses, looked up once)
 export const HUB_MILES = 1;
+// Yards pinned where our trucks actually park (the street-address lookup for Bartow landed over a mile away, so the Central Florida
+// yard showed 0 while Darwin's inventory had trucks and trailers there — Nov 16: truck 2405 parked at 27.9181, -81.7260)
+export const PINNED = { BARTOW: [{ lat: 27.9181, lng: -81.7260, miles: 1 }] };
 export const PARKED_MS = 2 * 86400000;   // parked away from the hubs this long shows on the Parked tab
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
@@ -115,8 +118,9 @@ export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => ge
   // the yards' points: Miami's three lots are known; the others are looked up once from their addresses and kept
   async function points() {
     const saved = (await db.get(POINTS, {})) || {};
-    const out = { MIAMI: MIAMI_YARDS.map((y) => ({ lat: y.lat, lng: y.lng, miles: 0.5 })) };
+    const out = { MIAMI: MIAMI_YARDS.map((y) => ({ lat: y.lat, lng: y.lng, miles: 0.5 })), ...PINNED };
     for (const h of ['VENTURA', 'MEMPHIS', 'BARTOW']) {
+      if (out[h]) continue;
       if (saved[h]) { out[h] = saved[h]; continue; }
       const y = KNOWN_YARDS[h];
       const g = y ? await geo(y.address).catch(() => null) : null; // eslint-disable-line no-await-in-loop

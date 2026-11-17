@@ -54,3 +54,11 @@ test('trucks: at a hub yard or on the road; drivers from the load (team / solo +
   assert.equal(t.trip, '627130'); assert.equal(t.milesLeft, 470); assert.equal(t.southFlorida, true); assert.equal(t.where, 'I-75, Valdosta, GA');
   assert.equal(r.toFlorida, 1);
 });
+
+test('Bartow yard is pinned where the trucks park (Rifle Range Road): truck 2405 counts as Central Florida', async () => {
+  const { truckReport, PINNED, hubAt } = await import('../yardreport.js');
+  assert.equal(hubAt({ lat: 27.918074, lng: -81.726045 }, { ...points, ...PINNED }), 'BARTOW');
+  const idx = { statsByUnit: { 2405: { name: '2405', gps: { latitude: 27.918074, longitude: -81.726045, time: '2026-11-16T19:50:00Z', reverseGeo: { formattedLocation: 'Rifle Range Road, Polk County, FL, 33830' } } } } };
+  const r = truckReport({ idx, points: { ...points, ...PINNED }, now: NOW });
+  assert.equal(r.hubs.find((h) => h.key === 'BARTOW').count, 1);
+});
