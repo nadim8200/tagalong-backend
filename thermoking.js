@@ -89,7 +89,7 @@ export function needLogin(tok = {}, now = Date.now(), day = '') {
   return !!(tok.refreshExpiresAt && tok.refreshExpiresAt - now < 6 * 60 * MIN);
 }
 
-export function initThermoKing({ app = null, requireAuth = null, db, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initThermoKing({ app = null, requireAuth = null, requireAdmin = null, db, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const cfg = () => ({ user: env.THERMOKING_USER || '', password: env.THERMOKING_PASSWORD || '', customer: env.THERMOKING_CUSTOMER_ID || '', base: String(env.THERMOKING_URL || TK_BASE).replace(/\/+$/, '') });
   const ready = () => { const c = cfg(); return !!(db && db.enabled && c.user && c.password && c.customer); };
   const etDay = () => new Date(now()).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -181,7 +181,7 @@ export function initThermoKing({ app = null, requireAuth = null, db, env = proce
   }
   if (app && requireAuth) {
     // a dispatcher's "retry the login now" (past the 3-a-day cap, at most 5 a day), then one read — the answer says what happened
-    app.post('/truckmate/thermoking/retry', requireAuth, async (req, res) => {
+    app.post('/truckmate/thermoking/retry', requireAdmin || requireAuth, async (req, res) => {   // the master admin (console button)
       if (!ready()) return res.status(400).json({ error: 'Thermo King is not configured.' });
       try { await token({ force: true, manual: true }); } catch (e) { return res.json({ ok: false, login: 'refused', error: e.message }); }
       const r = await poll().catch((e) => ({ error: e.message }));

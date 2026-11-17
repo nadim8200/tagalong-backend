@@ -1478,7 +1478,7 @@ driverNotify = (...a) => driverAuth.notify(...a);
 // the driver vehicle inspection report (DVIR) from the driver app: email to Maintenance + Dispatch, photos / short videos kept in the database
 initDvr(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, requireAuth: requireDispatch, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('dvr'), log: (...a) => comms.log(...a) });
 // Thermo King TracKing (read only, every 15 min): live reefer readings for the cards and temp alerts — THERMOKING_* in Render
-thermoKing = initThermoKing({ app, requireAuth: requireDispatch, db, env: process.env });
+thermoKing = initThermoKing({ app, requireAuth: requireDispatch, requireAdmin, db, env: process.env });
 // yard report: trailers at each hub yard (Thermo King GPS) + what's coming down to Florida
 const yardReport = initYardReport(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site) });
 // Driver Release Form: the Release button on a load card → the form filled from the load → emailed as a PDF + the rate con
