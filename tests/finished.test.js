@@ -115,3 +115,26 @@ test('an LTL whose flowers look delivered (truck moved on, or trailer on a newer
   await f.sweep('fb', items3);
   assert.equal(items3.length, 0, 'finished by the driver → off the board');
 });
+
+test('GPS left every delivery place (a broker load with no trip sheet) → "Probably finished", the driver is asked; never closed by itself', async () => {
+  const { leftEveryDelivery } = await import('../finished.js');
+  const it = { trip: { tripNumber: '627243', status: 'ARRCONS' }, freightBills: [{ billNumber: 'B1', endZoneDescription: 'NORTH LITTLE ROCK, AR, 72117' }] };
+  assert.equal(leftEveryDelivery(it, { 627243: { ms: { 'left:NORTH LITTLE ROCK, AR, 72117': { at: 'x' } } } }), 'left the last delivery — NORTH LITTLE ROCK (GPS)');
+  assert.equal(leftEveryDelivery(it, { 627243: { ms: {} } }), null);
+  const m = new Map([['taMilestones:fb', { 627243: { ms: { 'left:NORTH LITTLE ROCK, AR, 72117': { at: 'x' } } } }]]);
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const f = initFinished({ post: () => {}, get: () => {}, put: () => {} }, { requireAuth: () => {}, db });
+  const items = [JSON.parse(JSON.stringify(it))];
+  await f.sweep('fb', items);
+  assert.equal(items.length, 1);
+  assert.equal(items[0]._finishGuess, 'left the last delivery — NORTH LITTLE ROCK (GPS)');
+});
+
+test('a broker load whose truck parked at the rate con\'s delivery address and left (geofence) → "Probably finished", driver asked', async () => {
+  const { leftEveryDelivery } = await import('../finished.js');
+  const it = { trip: { tripNumber: '627400', status: 'ARRCONS' }, freightBills: [{ billNumber: 'B1', endZoneDescription: 'VERNON, CA, 90058' }],
+    _ratecon: { data: { deliveries: [{ name: 'Smart Foodservice', address: '2600 E 50th St', city: 'Vernon', state: 'CA' }] } } };
+  assert.equal(leftEveryDelivery(it, { 627400: { ms: {}, fences: { 'pickup:0': { leftAt: 'x' }, 'delivery:s1': { inAt: 'a', leftAt: 'b' } } } }), 'left the rate con\'s delivery address — Smart Foodservice, Vernon, CA (GPS)');
+  assert.equal(leftEveryDelivery(it, { 627400: { ms: {}, fences: { 'delivery:s1': { inAt: 'a' } } } }), null, 'still at the receiver');
+  assert.equal(leftEveryDelivery(it, { 627400: { ms: {}, fences: { 'pickup:0': { leftAt: 'x' } } } }), null, 'only the pickup');
+});

@@ -224,20 +224,24 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
     const saved = (await db.get(`taTruckMateRateCon:${site}`, {})) || {};
     const trucks = new Set(items.map(unitOf).filter(Boolean));
     const plan = (await db.get(PLAN_KEY, {})) || {};
-    const out = [];
+    const out = []; const drop = [];
     for (const e of entries) {
       const rec = e.pendingId ? ((pending.find((p) => p.id === e.pendingId) || {}).record) : (e.trip ? saved[e.trip] : null);
       if (!rec) continue;
       const matched = e.trip ? items.find((it) => tripNo(it) === e.trip) : null;
       const found = truckFor(rec, { emailText, trucks, single: entries.length === 1 }) || (matched && unitOf(matched) ? { truck: unitOf(matched), how: `TruckMate trip ${e.trip}` } : null) || sheetTruck(brief(rec), plan.bills, plan.sheetNotes);
+      // Gus's sheet has it on the LEFT of a truck's row: the load that truck is on (or just finished) — not its next load
+      const bk = billKey((brief(rec) || {}).bill) || billKey((plan.loadBills || {})[String(rec.loadNumber || '').toUpperCase().replace(/[^A-Z0-9]/g, '')]);
+      const side = bk && plan.bills && plan.bills[bk] && typeof plan.bills[bk] === 'object' ? plan.bills[bk] : null;
+      if (side && side.side === 'current') { drop.push(e.pendingId || `t${e.trip}`); out.push({ trip: e.trip, skipped: `truck ${side.truck}'s current load on Gus's sheet` }); continue; }
       // already the truck's run in progress → not a "next" load
       if (matched && ROLLING.test(String(tripOf(matched).status || ''))) { out.push({ trip: e.trip, skipped: 'already running' }); continue; }
       const entry = { id: e.pendingId || `t${e.trip}`, truck: found ? found.truck : null, truckHow: found ? found.how : null, trip: e.trip || null, pendingId: e.pendingId || null, rc: brief(rec, rec.docIds || []), from: from || null, emailId, subject: String(subject || '').slice(0, 200), at: new Date(now()).toISOString() };
       out.push(entry);
     }
-    if (out.some((x) => x.id)) {
+    if (out.some((x) => x.id) || drop.length) {
       await db.update(key, (cur) => {
-        const list = ((cur && cur.list) || []).filter((x) => !out.some((n) => n.id === x.id));
+        const list = ((cur && cur.list) || []).filter((x) => !out.some((n) => n.id === x.id) && !drop.includes(x.id) && !(emailId && x.emailId === emailId && !x.doneAt) && !(x.rc && x.rc.loadNumber && !x.doneAt && out.some((n) => n.id && n.rc && n.rc.loadNumber === x.rc.loadNumber && n.rc.broker === x.rc.broker)));   // …and Gus + Rafael sending the same load: one next load   // the same email read again replaces what it gave before   // read again as a current load: no longer "next"
         return { list: [...out.filter((x) => x.id), ...list].filter((x) => now() - Date.parse(x.at) < 14 * DAY).slice(0, 300) };
       }, { list: [] });
     }
@@ -287,7 +291,7 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
       all = ((await db.update(key, (cur) => ({ list: ((cur && cur.list) || []).map((x) => (!x.truck && f.has(x.id) ? { ...x, truck: f.get(x.id).truck, truckHow: f.get(x.id).how } : x)) }), { list: [] })) || {}).list || all;
       mark(`trucks from Gus's sheet (${found.length})`);
     }
-    const list = all.filter((x) => x.truck && !x.doneAt);
+    const list = all.filter((x) => !x.doneAt);   // no truck yet: TruckMate may have it on one (below)
     mark(`waiting next loads (read, ${list.length})`);
     if (!list.length) return { timing };
     const sheets = Object.values((await db.get(`taTruckMateManifest:${site}`, {})) || {});
@@ -297,7 +301,12 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
     const sheetBlobs = new Map(); const sheetBlob = (sh) => { let b = sheetBlobs.get(sh); if (b == null) { b = billKey(JSON.stringify(sh)); sheetBlobs.set(sh, b); } return b; };
     const byTrip = new Map(trips.map((it) => [tripNo(it), it]));
     const finished = [];
-    for (const n of list) {
+    for (const n0 of list) {
+      // TruckMate is the most up to date: when a trip there carries this load (its bill / load number) on another truck,
+      // that truck wins over the rate con, the email or Gus's sheet (Nov 18)
+      const carrier = trips.find((it) => unitOf(it) && carries(it, n0, blobOf) && !DONE.test(String(tripOf(it).status || '')));
+      const n = carrier && unitOf(carrier) !== n0.truck ? { ...n0, truck: unitOf(carrier), truckHow: `TruckMate trip ${tripNo(carrier)}${n0.truck ? ` (was ${n0.truck}: ${n0.truckHow || 'rate con'})` : ''}` } : n0;
+      if (!n.truck) continue;
       // the next trip has started (or the load is done) → no longer "next"
       const own = n.trip ? byTrip.get(n.trip) : null;
       const v = verify(n, trips, sheets, { blobOf, sheetBlob });

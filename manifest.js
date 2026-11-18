@@ -676,7 +676,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     // the RC- sticker read off a next-load scan, not matched yet: kept apart (never sent on as the bill) and checked again —
     // with the route — once that bill is on a trip (Nov 18: the sticker is how most of Rafael's / Gus's rate cons find their load)
     const read = rc.fbfBillNumber || labels.find(Boolean) || null;
-    const record = { ...rc, fbfBillNumber: bill ? billKey(bill) : null, ...(!bill && read ? { stickerBill: billKey(read) } : {}), filename, pageCount, uploadedAt: new Date().toISOString(), uploadedBy: by, source, ...(exact ? { nextLoadBatch: true } : {}) };
+    const record = { ...rc, fbfBillNumber: bill ? billKey(bill) : null, ...(!bill && read && /^[BT]\d{6}$/.test(billKey(read)) ? { stickerBill: billKey(read) } : {}), filename, pageCount, uploadedAt: new Date().toISOString(), uploadedBy: by, source, ...(exact ? { nextLoadBatch: true } : {}) };
     if (m) {
       if (docs && docs.enabled && docs.retypeDocs && docIds.length) { try { record.version = await docs.retypeDocs({ site, ids: docIds, kind: 'ratecon', trip: m.trip }); record.docIds = docIds; } catch (e) { record.docError = e.message; } }
       record.matchedBy = m.matchedBy;

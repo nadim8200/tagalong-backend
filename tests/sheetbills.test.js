@@ -59,3 +59,28 @@ test('the left side ties broker load numbers to B numbers: "FIRST STAR 806370 B1
   const { loadBills } = sheetBills(LIST, TRUCKS);
   assert.deepEqual(loadBills, { '0458940': 'B180940', 806370: 'B181012', '0564054': 'B181024' });
 });
+
+test('a rate con for the load on the LEFT of a truck\'s row (its current load) never becomes that truck\'s next load', async () => {
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  m.set('taRateConPending:florida-beauty', [{ id: 'rc1', record: { broker: 'First Star Logistics, LLC', loadNumber: '806370', truckNumber: '4565', nextLoadBatch: true } }]);
+  m.set('taPlanSheet:florida-beauty', { ...sheetBills(LIST, TRUCKS), bills: sheetBills(LIST, TRUCKS).bills });
+  const nl = initNextLoads({ db, now: () => Date.parse('2026-11-18T21:00:00Z') });
+  const got = await nl.consider('florida-beauty', [{ trip: null, pendingId: 'rc1' }], { items: [{ trip: { tripNumber: '627300', powerUnit: '4565', status: 'DEPSHIP' } }] });
+  assert.deepEqual(got, [{ trip: null, skipped: 'truck 4565\'s current load on Gus\'s sheet' }]);
+});
+
+test('TruckMate is the most up to date: a load booked there on another truck moves to that truck\'s card, whatever the sheet said', async () => {
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  m.set('taNextLoads:florida-beauty', { list: [{ id: 'rc1', truck: '2403', truckHow: 'Gus\'s sheet (B181111 in truck 2403\'s comments)', rc: { broker: 'Arrive', loadNumber: '10041856', bill: 'B181111' }, at: '2026-11-18T20:00:00Z' }] });
+  const nl = initNextLoads({ db, now: () => Date.parse('2026-11-18T21:00:00Z') });
+  const trips = [
+    { trip: { tripNumber: '627400', powerUnit: '2403', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'B180001' }] },
+    { trip: { tripNumber: '627410', powerUnit: '2207', status: 'DEPSHIP' }, freightBills: [{ billNumber: 'B180002' }] },
+    { trip: { tripNumber: '627420', powerUnit: '2207', status: 'ASSGN' }, freightBills: [{ billNumber: 'B181111' }] },
+  ];
+  await nl.overlay('florida-beauty', trips);
+  assert.equal(trips[0]._nextLoad, undefined, 'not on 2403 any more');
+  assert.equal(trips[1]._nextLoad[0].truckHow, 'TruckMate trip 627420 (was 2403: Gus\'s sheet (B181111 in truck 2403\'s comments))');
+});

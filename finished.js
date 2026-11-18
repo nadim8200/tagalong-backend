@@ -90,6 +90,26 @@ export function finishReason(item, items = []) {
 }
 // Only facts finish a load by themselves; "truck moved on" and "last stop" are shown as suggestions (the driver is asked).
 export const isSure = (reason) => !!reason && !/moved on|last stop/.test(reason);
+// GPS (Jarvis's stop records, milestones.js): the truck has left every place the load's bills deliver to → the last delivery
+// looks done. A guess — the driver is asked (doneask.js). Covers broker loads with no trip sheet. Pure.
+export function leftEveryDelivery(item, milestones = {}) {
+  const bills = (item && (item.freightBills || item.orders)) || tripOf(item).freightBills || [];
+  const places = [...new Set(bills.map((b) => b && (b.endZoneDescription || b.endZone)).filter(Boolean))];
+  const ms = milestones[tripNo(item)];
+  if (!ms) return null;
+  // the delivery geofences (loadfences.js: the trip sheet's, the rate con's delivery address, or TruckMate's consignee) —
+  // parked 20 min at each, then left: a broker load's receiver from the rate con (Nov 18)
+  const dels = Object.entries(ms.fences || {}).filter(([k]) => /^delivery:/.test(k));
+  if (dels.length && dels.every(([, f]) => f && f.leftAt)) {
+    const rc = (item._ratecon && (item._ratecon.data || item._ratecon)) || {};
+    const last = (rc.deliveries || [])[(rc.deliveries || []).length - 1];
+    const who = last ? [last.name, [last.city, last.state].filter(Boolean).join(', ')].filter(Boolean).join(', ') : null;
+    return `left the ${last ? 'rate con\'s ' : ''}delivery address${who ? ` — ${who}` : ''} (GPS)`;
+  }
+  if (!places.length) return null;
+  const left = (pl) => !!((ms.ms && (ms.ms[`left:${pl}`] || ms.ms[`delivered:${pl}`])) || (ms.waits && ms.waits[pl] && ms.waits[pl].leftAt));
+  return places.every(left) ? `left the last delivery — ${cityOf(places[places.length - 1]) || places[places.length - 1]} (GPS)` : null;
+}
 const etHm = (iso) => new Date(iso).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
 // The driver's side of a "Probably finished" line (doneask.js state). Pure.
 export function askLine(a) {
@@ -116,6 +136,7 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
     if (!enabled || !items.length) return { finished: [], unclosed: [] };
     const fin = await db.get(key(site), {});
     const asks = ((await db.get(`taDoneAsk:${site}`, {})) || {}).asks || {};
+    const milestones = (await db.get(`taMilestones:${site}`, {})) || {};
     const newly = [];
     const open = [];
     for (const it of items) {
@@ -130,7 +151,8 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
       const fp = it._flowerPhase && it._flowerPhase.phase;
       const guess = fp === 'next-load' ? `flowers delivered, trailer now on trip ${it._flowerPhase.by}`
         : fp === 'delivered' && mv ? `flowers delivered, ${mv.by} ${mv.unit} now on trip ${mv.newTrip}`
-          : !mv && reason ? reason : null;
+          : !mv && reason ? reason
+            : !mv && !NOT_STARTED.test(String(tripOf(it).status || '')) ? leftEveryDelivery(it, milestones) : null;
       if (guess) { it._finishGuess = guess; it._finishHint = `Probably finished — ${guess}${askLine(asks[n])}`; continue; }
       if (mv) { open.push({ n, it, mv }); continue; }
     }

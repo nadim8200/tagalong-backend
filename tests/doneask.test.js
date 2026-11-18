@@ -42,10 +42,51 @@ test('the app: the push opens the question; Yes closes the load with the driver\
   assert.deepEqual(await d.openFor('2000', 'fb'), { trip: '627335', place: 'SANTA ANA, CA', why: 'flowers delivered, trailer now on trip 627349', askedAt: new Date(now).toISOString() });
   assert.equal((await d.answer('627335', '9999', { choice: 'yes' }, 'fb')).code, 404, 'only its crew');
   assert.equal((await d.answer('627335', '2000', { choice: 'maybe', text: '' }, 'fb')).code, 400);
-  assert.deepEqual(await d.answer('627334', '3100', { choice: null, text: 'Still at the receiver, unloading', by: 'Ana' }, 'fb'), { ok: true, finished: false });
+  assert.deepEqual(await d.answer('627334', '3100', { choice: null, text: 'Still at the receiver, unloading', by: 'Ana' }, 'fb'), { ok: true, finished: false, emailed: false });
   assert.equal(finished.length, 0, 'words alone never close it');
-  assert.deepEqual(await d.answer('627335', '2000', { choice: 'yes', by: 'Julio' }, 'fb'), { ok: true, finished: true });
+  assert.deepEqual(await d.answer('627335', '2000', { choice: 'yes', by: 'Julio' }, 'fb'), { ok: true, finished: true, emailed: false });
   assert.deepEqual(finished[0], ['fb', '627335', 'driver confirmed delivery in the app — Julio', 'Julio']);
   assert.equal(await d.openFor('2000', 'fb'), null, 'answered: no more pop-up');
   assert.deepEqual(await d.answer('627335', '2000', { choice: 'no' }, 'fb'), { ok: true, already: true });
+});
+
+test('driver says Yes → Inbound gets "driver reported empty" with what the truck is on now, and what to update in TruckMate', async () => {
+  const { emptyEmail, nowOn } = await import('../doneask.js');
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const item = { trip: { tripNumber: '627243', powerUnit: '3519', driver: '5682', origZoneDesc: 'MIAMI, FL, 33122', destZoneDesc: 'NORTH LITTLE ROCK, AR, 72117' }, _finishGuess: 'left the last delivery — NORTH LITTLE ROCK (GPS)',
+    _tmNext: [{ trip: '627388', status: 'ARRSHIP', from: 'NEW ALBANY, MS, 38652', to: 'LAKELAND, FL, 33801' }] };
+  const mails = []; const finished = [];
+  const d = initDoneAsk(null, { db, getBoard: async () => ({ trips: [item], unclosed: [] }), notify: async () => {}, finishTrip: async (...a) => finished.push(a), sendMail: async (x) => mails.push(x), recipients: async () => ['inbound-dispatch@floridabeauty.us'], env: { NODE_ENV: 'test' }, now: () => Date.parse('2026-11-18T22:00:00Z') });
+  await d.process('fb');
+  const r = await d.answer('627243', '5682', { choice: 'yes', by: 'Jose Rosa' }, 'fb');
+  assert.deepEqual(r, { ok: true, finished: true, emailed: true });
+  assert.deepEqual(mails[0].to, ['inbound-dispatch@floridabeauty.us']);
+  assert.equal(mails[0].subject, 'Driver reported empty — load 627243 done, truck 3519 on load 627388');
+  assert.match(mails[0].text, /Jose Rosa reported in the driver app that load 627243 \(MIAMI, FL → NORTH LITTLE ROCK, AR\) is fully delivered/);
+  assert.match(mails[0].text, /Truck 3519 is now on load 627388 \(NEW ALBANY, MS → LAKELAND, FL\)/);
+  assert.match(mails[0].text, /Please update the system: close load 627243 as delivered, and make sure load 627388 shows as started on truck 3519/);
+  // not started yet / only a rate con / nothing
+  assert.equal(nowOn({ _tmNext: [{ trip: '627400', status: 'ASSGN', from: 'A, FL', to: 'B, GA' }] }).text, 'on the way to pick up load 627400 (A, FL → B, GA)');
+  assert.equal(nowOn({ _nextLoad: [{ rc: { broker: 'Arrive', loadNumber: '10041856', pickup: { city: 'Bedford Park, IL' }, delivery: { city: 'Vernon, CA' } } }] }).text, 'on the way to pick up Arrive load 10041856 (Bedford Park, IL → Vernon, CA) — not in TruckMate yet');
+  assert.match(emptyEmail({ trip: { tripNumber: '1', powerUnit: '2001' } }, { by: 'Ana' }, '1').text, /empty — no next load on the board yet[\s\S]*close load 1 as delivered\./);
+  // No → no email
+  mails.length = 0;
+});
+
+test('the driver already tapped "Delivered" at every delivery stop: no second question — Delivered + the Inbound email', async () => {
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  m.set('taMilestones:fb', { 627400: { ms: {}, fences: { 'pickup:0': { leftAt: 'x' }, 'delivery:s1': { inAt: 'a', leftAt: 'b' } } }, 627401: { ms: {}, fences: { 'delivery:s1': { leftAt: 'b' }, 'delivery:s2': { leftAt: 'c' } } } });
+  m.set('taDriverCheckins:fb', { 627400: { steps: { 'delivered:s1': { at: '2026-11-18T21:30:00Z', by: 'Jose Rosa' } } }, 627401: { steps: { 'delivered:s1': { at: '2026-11-18T21:30:00Z', by: 'Ana' } } } });
+  const board = { trips: [T('627400', { _finishGuess: 'left the rate con\'s delivery address — Smart Foodservice, Vernon, CA (GPS)' }), T('627401', { _finishGuess: 'x' }, { driver: '3100' })], unclosed: [] };
+  const pushes = []; const finished = []; const mails = [];
+  const d = initDoneAsk(null, { db, getBoard: async () => board, notify: async (code, msg) => pushes.push([code, msg.data.trip]), finishTrip: async (...a) => finished.push(a), sendMail: async (x) => mails.push(x), recipients: async () => ['inbound-dispatch@floridabeauty.us'], env: { NODE_ENV: 'test' }, now: () => Date.parse('2026-11-18T22:00:00Z') });
+  await d.process('fb');
+  assert.deepEqual(finished.map((f) => f[1]), ['627400']);
+  assert.equal(finished[0][2], 'driver confirmed delivery in the app (Delivered check-in) — Jose Rosa');
+  assert.equal(mails.length, 1);
+  assert.deepEqual(pushes, [['3100', '627401']], 'one stop of two tapped: the driver is asked');
+  await d.process('fb');
+  assert.equal(finished.length, 1, 'once');
 });

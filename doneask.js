@@ -7,6 +7,8 @@
 // the card shows what the driver said. No answer in 2 hours → asked once more. After a No, asked again 12 hours later
 // if it still looks finished.
 // ---------------------------------------------------------------
+import { staffEmail } from './staffmail.js';
+
 const SITE = 'florida-beauty';
 const KEY = (site) => `taDoneAsk:${site}`;     // { asks: { trip: { codes, why, place, askedAt, count, answer } } }
 const MIN = 60000;
@@ -53,14 +55,66 @@ export function dueAsks(cands = [], asks = {}, now = Date.now()) {
   return { send, asks: next };
 }
 
-export function initDoneAsk(app, { db, requireDriver = null, getBoard, notify = null, finishTrip = null, env = process.env, now = () => Date.now() } = {}) {
+// What the truck does now, from the board (TruckMate first: its next trip on this truck; else the next-load rate con). Pure.
+const ROLLING_NEXT = /^(ARRSHIP|DEPSHIP|INTRAN|ENROUTE|ARRCONS|DEPCONS|LOADINGMAN|LOADEDTOGO)/i;
+export function nowOn(item) {
+  const tm = (item && item._tmNext) || [];
+  if (tm[0]) {
+    const x = tm[0]; const lane = [x.from, x.to].filter(Boolean).map((z) => city(z)).join(' → ');
+    return ROLLING_NEXT.test(String(x.status || '')) ? { text: `now on load ${x.trip}${lane ? ` (${lane})` : ''}`, trip: x.trip, rolling: true }
+      : { text: `on the way to pick up load ${x.trip}${lane ? ` (${lane})` : ''}`, trip: x.trip, rolling: false };
+  }
+  const nl = ((item && item._nextLoad) || [])[0];
+  if (nl && nl.rc) {
+    const lane = [nl.rc.pickup && nl.rc.pickup.city, nl.rc.delivery && nl.rc.delivery.city].filter(Boolean).join(' → ');
+    const name = [nl.rc.broker, nl.rc.loadNumber && `load ${nl.rc.loadNumber}`, nl.rc.bill].filter(Boolean).join(' ');
+    return { text: `on the way to pick up ${name || 'the next load'}${lane ? ` (${lane})` : ''} — not in TruckMate yet`, trip: null, rolling: false };
+  }
+  return { text: 'empty — no next load on the board yet', trip: null, rolling: false };
+}
+
+// The email to Inbound when the driver says Yes (the "A note from Jarvis" style). Pure.
+export function emptyEmail(item, ans, trip) {
+  const t = (item && item.trip) || item || {};
+  const truck = String(t.powerUnit || '').trim();
+  const driver = ans.by || 'The driver';
+  const lane = [t.origZoneDesc, t.destZoneDesc].filter(Boolean).map(city).join(' → ');
+  const on = nowOn(item);
+  const todo = [`close load ${trip} as delivered`, on.trip ? (on.rolling ? `make sure load ${on.trip} shows as started on truck ${truck}` : `dispatch load ${on.trip} on truck ${truck}`) : on.text.includes('not in TruckMate') ? `enter the next load and put it on truck ${truck}` : null].filter(Boolean);
+  return staffEmail({
+    subject: `Driver reported empty — load ${trip} done${truck ? `, truck ${truck}` : ''} ${on.trip ? `${on.rolling ? 'on' : 'going to'} load ${on.trip}` : ''}`.trim(),
+    category: 'Driver app', headline: `Truck ${truck || '—'}: load ${trip} done`, greeting: 'Hi team,',
+    body: `${driver} reported in the driver app that load ${trip}${lane ? ` (${lane})` : ''} is fully delivered${ans.text ? `: "${ans.text}"` : ''}. TruckMate still has it open.\n\n{{updates}}\n\nPlease update the system: ${todo.join(', and ')}.`,
+    updates: [{ icon: 'clock', title: `Truck ${truck || '—'} is ${on.text}`, text: `Driver: ${driver}${ans.at ? ` · told Jarvis ${new Date(ans.at).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} ET` : ''}` }],
+    closing: 'Jarvis',
+  });
+}
+
+export function initDoneAsk(app, { db, requireDriver = null, getBoard, notify = null, finishTrip = null, sendMail = null, recipients = async () => [], env = process.env, now = () => Date.now() } = {}) {
   const enabled = !!(db && db.enabled);
   async function process(site = SITE) {
     if (!enabled) return [];
     const board = (await getBoard(site)) || {};
     const st = (await db.get(KEY(site), {})) || {};
-    const { send, asks } = dueAsks(candidates(board), st.asks || {}, now());
+    const cands = candidates(board);
+    // the driver already tapped "Delivered" at every delivery stop (the app's check-ins at the load's geofences): that's
+    // their Yes — no second question
+    const taps = (await db.get(`taDriverCheckins:${site}`, {})) || {};
+    const mst = (await db.get(`taMilestones:${site}`, {})) || {};
+    const tapped = [];
+    for (const c of cands) {
+      if (st.asks && st.asks[c.trip] && st.asks[c.trip].answer) continue;
+      const stops = Object.keys((mst[c.trip] || {}).fences || {}).filter((k) => /^delivery:/.test(k)).map((k) => k.slice(9));
+      const steps = (taps[c.trip] || {}).steps || {};
+      if (stops.length && stops.every((k) => steps[`delivered:${k}`])) {
+        const last = stops.map((k) => steps[`delivered:${k}`]).sort((a, b) => String(a.at).localeCompare(String(b.at))).pop();
+        tapped.push({ c, ans: { choice: 'yes', text: null, by: (last && last.by) || 'Driver', at: (last && last.at) || new Date(now()).toISOString(), via: 'Delivered check-in' } });
+      }
+    }
+    const { send, asks } = dueAsks(cands.filter((c) => !tapped.some((x) => x.c.trip === c.trip)), st.asks || {}, now());
+    for (const { c, ans } of tapped) asks[c.trip] = { codes: c.codes, why: c.why, place: c.place, askedAt: ans.at, count: 0, answer: ans };
     await db.set(KEY(site), { asks });
+    for (const { c, ans } of tapped) await confirm(c.trip, 'yes', '', ans, site).catch((e) => console.warn('[done-ask] check-in:', e.message)); // eslint-disable-line no-await-in-loop
     for (const a of send) {
       const body = `Is load ${a.trip}${a.place ? ` to ${a.place}` : ''} delivered? Tap to answer.`;
       for (const c of a.codes) if (notify) await notify(c, { title: 'Jarvis has a question', body, data: { tab: 'now', ask: 'done', trip: a.trip } }).catch((e) => console.warn('[done-ask] push:', e.message)); // eslint-disable-line no-await-in-loop
@@ -87,12 +141,26 @@ export function initDoneAsk(app, { db, requireDriver = null, getBoard, notify = 
     if (!c && words.length < 2) return { code: 400, error: 'Tap an answer or type one.' };
     const ans = { choice: c, text: words || null, by: by || 'Driver', at: new Date(now()).toISOString() };
     await db.update(KEY(site), (cur) => { const x = { ...(cur || {}) }; x.asks = { ...(x.asks || {}) }; if (x.asks[trip] && !x.asks[trip].answer) x.asks[trip] = { ...x.asks[trip], answer: ans }; return x; }, {});
-    let finished = false;
+    return confirm(trip, c, words, ans, site);
+  }
+  // Yes (tapped, or "Delivered" checked in at every delivery stop) → Delivered + the email to Inbound
+  async function confirm(trip, c, words, ans, site = SITE) {
+    let finished = false; let emailed = false;
+    // the load as the board has it now (its next trip / next load), before it leaves the board
+    let item = null;
+    if (c === 'yes') { try { item = (((await getBoard(site)) || {}).trips || []).find((it) => tripNo(it) === String(trip)) || null; } catch { /* email without the next load */ } }
     if (c === 'yes' && finishTrip) {
-      try { await finishTrip(site, String(trip), `driver confirmed delivery in the app — ${ans.by}${words ? `: "${words}"` : ''}`, ans.by); finished = true; } catch (e) { console.warn('[done-ask] finish:', e.message); }
+      try { await finishTrip(site, String(trip), `driver confirmed delivery in the app${ans.via ? ` (${ans.via})` : ''} — ${ans.by}${words ? `: "${words}"` : ''}`, ans.by); finished = true; } catch (e) { console.warn('[done-ask] finish:', e.message); }
+    }
+    // Inbound: the driver is empty — update TruckMate (close this load, dispatch / start the next one)
+    if (c === 'yes' && sendMail) {
+      try {
+        const to = await recipients();
+        if (to.length) { const m = emptyEmail(item, ans, String(trip)); await sendMail({ to, subject: m.subject, html: m.html, text: m.text, attachments: m.attachments }); emailed = true; }
+      } catch (e) { console.warn('[done-ask] email:', e.message); }
     }
     console.log(`[done-ask] trip ${trip}: ${ans.by} answered ${c || 'in words'}${words ? ` "${words}"` : ''}`);
-    return { ok: true, finished };
+    return { ok: true, finished, emailed };
   }
   if (app && requireDriver) {
     app.get('/driver/me/done-ask', requireDriver, async (req, res) => { res.json({ ask: enabled ? await openFor(req.driver.code) : null }); });
@@ -103,5 +171,5 @@ export function initDoneAsk(app, { db, requireDriver = null, getBoard, notify = 
       return r.error ? res.status(r.code || 400).json({ error: r.error }) : res.json(r);
     });
   }
-  return { process, openFor, answer };
+  return { process, openFor, answer, confirm };
 }

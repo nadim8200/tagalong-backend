@@ -1490,7 +1490,7 @@ releaseApi = initRelease(app, { requireAuth: requireDispatch, db, docs, getBoard
 // LTL run done in the app + truck rolling again → "Rolling to your next pickup?" in the driver app; the answer emails dispatch
 initPickupAsk(app, { db, requireDriver: driverAuth.requireDriver, getBoard: (site) => truckmate.buildBoard(site), notify: (code, m) => driverAuth.notify(code, m), onAnswer: (trip, a) => (pickupFollow ? pickupFollow.driverAnswered(trip, a) : null), env: process.env });
 // "Is load X fully delivered?" in the driver app: a Yes closes a load Jarvis only guessed was finished
-initDoneAsk(app, { db, requireDriver: driverAuth.requireDriver, getBoard: (site) => truckmate.buildBoard(site), notify: (code, m) => driverAuth.notify(code, m), finishTrip: (site, n, reason, by) => truckmate.finishTrip(site, n, reason, by), env: process.env });
+initDoneAsk(app, { db, requireDriver: driverAuth.requireDriver, getBoard: (site) => truckmate.buildBoard(site), notify: (code, m) => driverAuth.notify(code, m), finishTrip: (site, n, reason, by) => truckmate.finishTrip(site, n, reason, by), sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('driver_empty'), env: process.env });
 // emails from Jarvis to our own people: a copy to the admin first, then the real send (staff addresses only)
 initStaffMail(app, { requireAdmin: requireCompanyAdmin, db, sendMail: (m, o = {}) => sendMail(m, { env: process.env, direct: true, noCopy: o.copy === false }) });
 // a dispatch message on a load reaches the driver profile's phones too (driverauth.js)
