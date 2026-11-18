@@ -82,6 +82,12 @@ test('Samsara trailers join the yard report: one list by trailer number, the new
   const m = mergeTrailers(tk, sam);
   assert.equal(m['7141'].source, 'Samsara + Thermo King'); assert.equal(m['7141'].location, 'Charlotte, NC'); assert.equal(m['7141'].returnF, 35);
   assert.equal(m['9001'].source, 'Samsara');
+  // Nov 18: 7366 dropped at Bartow (its own Thermo King GPS), still on truck 2301's TruckMate trip — the truck's GPS (Miami) is a guess
+  const tk2 = { 7366: { trailer: '7366', lat: 27.99, lng: -81.9, at: '2026-11-18T20:45:00Z', location: 'BARTOW YARD' } };
+  const guess = { trailer: '7366', lat: 25.83, lng: -80.31, at: '2026-11-18T22:36:00Z', via: 'With truck 2301', location: 'Miami, FL' };
+  assert.equal(mergeTrailers(tk2, { 7366: guess })['7366'].lat, 27.99, 'the trailer\'s own GPS wins over the truck it was booked on');
+  assert.equal(mergeTrailers(tk2, { 7366: { ...guess, at: '2026-11-19T10:00:00Z' } })['7366'].lat, 25.83, 'Thermo King quiet 12 h+: the truck\'s GPS is better than nothing');
+  assert.equal(mergeTrailers(tk2, { 7366: { ...guess, via: null } })['7366'].lat, 25.83, 'a real newer fix still wins');
   const r = yardReport({ units: m, items: [], points: {}, now: Date.parse('2026-11-17T20:30:00Z'), trackingSince: '2026-11-16T23:25:00Z' });
   assert.equal(r.trailers, 2);
   const p = r.parked.find((x) => x.trailer === '9001');

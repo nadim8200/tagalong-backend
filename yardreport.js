@@ -54,6 +54,7 @@ export function hubAt(p, points = {}) {
 export const trailerKey = (x) => String(x || '').trim().toUpperCase().replace(/^(TL|TRL|TRAILER)\s*/, '').replace(/\s+/g, '').replace(/^0+(?=\d)/, '');
 // One trailer list from Thermo King and Samsara (Nov 17: carriers' and other trailers without Thermo King show on Samsara).
 // Same trailer in both: the newer position wins (with its parked time); Thermo King's temperatures are always kept. Pure.
+const TK_TRUST_MS = 12 * 3600000;
 export function mergeTrailers(tk = {}, sam = {}) {
   const out = {};
   for (const u of Object.values(tk)) { const k = trailerKey(u.trailer); if (k) out[k] = { ...u, trailer: k, source: 'Thermo King' }; }
@@ -61,7 +62,12 @@ export function mergeTrailers(tk = {}, sam = {}) {
     const k = trailerKey(u.trailer); if (!k) continue;
     const cur = out[k];
     if (!cur) { out[k] = { ...u, trailer: k, source: 'Samsara' }; continue; }
-    if (u.lat != null && String(u.at || '') > String(cur.at || '')) {
+    // Samsara only has the TRUCK's GPS for a trailer ("With truck 2301": the trailer on that truck's TruckMate trip) or where it
+    // was last dropped — a guess. The trailer's own Thermo King GPS wins over it unless Thermo King has gone quiet (12 h).
+    // (Nov 18: 7366 dropped at Bartow showed in Miami with truck 2301.)
+    const guess = /^(With truck|Last known)/i.test(String(u.via || ''));
+    const tkFresh = cur.lat != null && Date.parse(u.at || '') - Date.parse(cur.at || '') < TK_TRUST_MS;
+    if (u.lat != null && String(u.at || '') > String(cur.at || '') && !(guess && tkFresh)) {
       out[k] = { ...cur, lat: u.lat, lng: u.lng, location: u.location || cur.location, at: u.at, mph: u.mph, parkedSince: u.parkedSince, atLeast: u.atLeast, watchStart: u.watchStart, source: 'Samsara + Thermo King' };
     } else out[k] = { ...cur, source: 'Thermo King + Samsara' };
   }
