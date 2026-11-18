@@ -101,6 +101,6 @@ test('one PDF of several pages from Gus is read as a batch, never as one rate co
 
 test('Gus and Valeria both send rate cons, and Render can add more', async () => {
   const { NEXT_LOAD_SENDERS } = await import('../inbox.js');
-  assert.deepEqual(NEXT_LOAD_SENDERS({}), ['gus@floridabeauty.us', 'vcabarcas@floridabeauty.us']);
-  assert.deepEqual(NEXT_LOAD_SENDERS({ NEXT_LOAD_SENDERS: 'Gus@floridabeauty.us, x@floridabeauty.us' }), ['gus@floridabeauty.us', 'vcabarcas@floridabeauty.us', 'x@floridabeauty.us']);
+  assert.deepEqual(NEXT_LOAD_SENDERS({}), ['gus@floridabeauty.us', 'vcabarcas@floridabeauty.us', 'rromero@floridabeauty.us']);
+  assert.deepEqual(NEXT_LOAD_SENDERS({ NEXT_LOAD_SENDERS: 'Gus@floridabeauty.us, x@floridabeauty.us' }), ['gus@floridabeauty.us', 'vcabarcas@floridabeauty.us', 'rromero@floridabeauty.us', 'x@floridabeauty.us']);
 });

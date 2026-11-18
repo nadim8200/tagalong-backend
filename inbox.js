@@ -233,7 +233,7 @@ export function isInternal(address, env = process.env) {
 // The nightly trip-sheet email ("OUTBOUND 10 TRIP SHEETS…", "Trip sheets 10/07"). Pure.
 // A batch of rate cons from our dispatch GM (or any staff email with several rate-con files):
 // read like a packet — every page, several rate cons per PDF — as NEXT loads. Pure.
-export const NEXT_LOAD_SENDERS = (env = process.env) => [...new Set(`gus@floridabeauty.us vcabarcas@floridabeauty.us ${env.NEXT_LOAD_SENDERS || ''}`.toLowerCase().split(/[,;\s]+/).filter(Boolean))];   // who sends rate cons and batches: Gus, Valeria, and any added in Render
+export const NEXT_LOAD_SENDERS = (env = process.env) => [...new Set(`gus@floridabeauty.us vcabarcas@floridabeauty.us rromero@floridabeauty.us ${env.NEXT_LOAD_SENDERS || ''}`.toLowerCase().split(/[,;\s]+/).filter(Boolean))];   // who sends rate cons and batches: Gus, Valeria, Ralph (his daily rate con email, Nov 18), and any added in Render
 export const isRateConBatch = (from, subject, text, attachments = [], env = process.env) => {
   const files = attachments.filter((a) => /pdf|image/i.test(a.contentType || '')).length;
   if (!files || !isInternal(from, env)) return false;
@@ -1264,13 +1264,16 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
     const e = (((await db.get(key(site), { list: [] })) || {}).list || []).find((x) => x.id === String(req.params.id));
     if (!e) return res.status(404).json({ error: 'not found' });
     if (!isInternal(e.from && e.from.address, env)) return res.status(400).json({ error: 'Only emails from our own staff carry instructions.' });
+    // a rate con sender's one PDF that was read as a single rate con (e.g. before they were a sender) → read it as a batch now
+    const asBatch = !e.packet && NEXT_LOAD_SENDERS(env).includes(String((e.from && e.from.address) || '').toLowerCase()) && (e.attachments || []).length === 1 && /pdf/i.test(e.attachments[0].contentType || '');
     // a trip-sheet / rate-con packet: read every attached page again (fetched from Outlook) — files trips missed before
-    if (e.packet && packets) {
+    if ((e.packet || asBatch) && packets) {
       try {
         const atts = await saveAttachments(site, e.id, null, { store: false });
         const files = atts.filter((a) => /pdf|image/i.test(a.contentType || '')).map((a) => ({ dataBase64: a.bytes, mediaType: a.contentType, filename: a.name }));
         if (!files.length) return res.status(422).json({ error: 'No trip-sheet pages found on that email any more.' });
-        const r = await packets(site, files, { by: `Jarvis (re-run of ${e.from.name || e.from.address}'s email)`, exact: !!e.rcBatch });
+        const r = await packets(site, files, { by: `Jarvis (re-run of ${e.from.name || e.from.address}'s email)`, exact: !!(e.rcBatch || asBatch) });
+        if (asBatch) await update(site, e.id, (x) => ({ ...x, rcBatch: true, packet: true }));
         const sheets = (r && r.trips) || [];
         await update(site, e.id, (x) => ({ ...x, tripSheets: sheets, packetResult: { ...(x.packetResult || {}), trips: sheets.length, unread: (r && r.unread) || [] }, packetError: r && (r.unread || []).length ? `Could not read trip sheet(s) ${r.unread.join(', ')} — re-send those pages.` : null }));
         return res.json({ ok: true, packet: true, trips: sheets.map((x) => x.trip), unread: (r && r.unread) || [] });
