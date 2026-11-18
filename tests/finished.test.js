@@ -88,7 +88,7 @@ test('Jarvis by truck number: the real load, not the truck\'s empty yard move', 
   assert.equal(findLoad([yard, ox], { truck: '2611' }).item.trip.tripNumber, '626845');
 });
 
-test('an LTL with its flowers delivered: truck moved on, or trailer on a newer started trip → Delivered (not Not closed); delivered alone stays', async () => {
+test('an LTL whose flowers look delivered (truck moved on, or trailer on a newer trip) stays on the board as "Probably finished" until the driver or dispatch says so (Nov 18)', async () => {
   const m = new Map();
   const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
   const recorded = [];
@@ -97,15 +97,21 @@ test('an LTL with its flowers delivered: truck moved on, or trailer on a newer s
   const next = T('627311', 'ARRSHIP', { unit: '733' });
   const items = [ltl, next];
   const r = await f.sweep('fb', items);
-  assert.deepEqual(items.map((i) => i.trip.tripNumber), ['627311']);
-  assert.deepEqual(recorded, [['627178', 'flowers delivered — truck 733 now on trip 627311']]);
-  assert.equal(r.unclosed.length, 0, 'not "Not closed"');
+  assert.deepEqual(items.map((i) => i.trip.tripNumber), ['627178', '627311'], 'a guess never takes it off the board');
+  assert.equal(recorded.length, 0);
+  assert.equal(r.unclosed.length, 0, 'not "Not closed" either');
+  assert.equal(ltl._finishGuess, 'flowers delivered, truck 733 now on trip 627311');
+  assert.equal(ltl._finishHint, 'Probably finished — flowers delivered, truck 733 now on trip 627311');
   const trl = T('627080', 'DEPCONS', { unit: '4551', more: { _flowerPhase: { phase: 'next-load', by: '627246' } } });
+  // the driver was asked and said not yet → the card says so
+  m.set('taDoneAsk:fb', { asks: { 627080: { askedAt: '2026-11-18T19:38:00Z', answer: { choice: 'no', text: 'two stops left in Ohio', by: 'Julio' } } } });
   const items2 = [trl];
   await f.sweep('fb', items2);
-  assert.equal(items2.length, 0); assert.deepEqual(recorded[1], ['627080', 'flowers delivered — trailer now on trip 627246']);
-  const waiting = T('627200', 'DEPSHIP', { unit: '800', more: { _flowerPhase: { phase: 'delivered' } } });
-  const items3 = [waiting];
+  assert.equal(items2.length, 1);
+  assert.equal(trl._finishHint, 'Probably finished — flowers delivered, trailer now on trip 627246 · 📱 Julio: No, still rolling with it — "two stops left in Ohio"');
+  // the driver (or dispatch) says Yes → Delivered
+  await f.finishNow('fb', '627080', 'driver confirmed delivery in the app — Julio', 'Julio');
+  const items3 = [T('627080', 'DEPCONS', { unit: '4551', more: { _flowerPhase: { phase: 'next-load', by: '627246' } } })];
   await f.sweep('fb', items3);
-  assert.equal(items3.length, 1, 'delivered, next load not picked up yet: stays (the card shows the next load)');
+  assert.equal(items3.length, 0, 'finished by the driver → off the board');
 });

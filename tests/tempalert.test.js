@@ -110,6 +110,10 @@ test('is the flower load on the trailer? next load on the same trailer, delivere
   assert.deepEqual(loadPhase(old, { trips: [old, nxt] }), { phase: 'next-load', by: '627315' }, '262042 loading for 627315 → 627079 is done');
   assert.equal(loadPhase(old, { trips: [old, it('627315', 'ASSGN')] }).phase, 'on', 'a newer trip only assigned doesn\'t count');
   assert.equal(loadPhase(old, { trips: [old, it('627001', 'DEPSHIP')] }).phase, 'on', 'an older trip doesn\'t count');
+  // Nov 18: 627335 (DEPSHIP, rolling to Santa Ana) was finished because trailer 7357 showed on 627349 — a load still
+  // loading or rolling is never "next load"; only at or past a receiver
+  for (const st of ['LOADEDTOGO', 'DISP', 'DEPSHIP', 'INTRAN']) assert.equal(loadPhase(it('627335', st, '7357'), { trips: [it('627335', st, '7357'), it('627349', 'DEPSHIP', '7357')] }).phase, st === 'INTRAN' || st === 'DEPSHIP' ? 'on' : 'loading', `${st}: still on`);
+  assert.equal(loadPhase(it('627243', 'ARRCONS'), { trips: [it('627243', 'ARRCONS'), it('627388', 'ARRSHIP')] }).phase, 'next-load', 'at the receiver + trailer at the next shipper → done');
   assert.equal(loadPhase(it('1', 'DEPSHIP', 'X', { freightBills: [{ actualDelivery: '2026-11-16T10:00:00' }, { actualDelivery: '2026-11-16T12:00:00' }] })).phase, 'delivered');
   assert.equal(loadPhase(it('1', 'DEPSHIP', 'X', { freightBills: [{ actualDelivery: '2026-11-16T10:00:00' }, {}] })).phase, 'on', 'one bill still to deliver');
   const sheet = { _manifest: { stops: [{ key: 'L', action: 'LOAD' }, { key: 'a', action: 'DELIVER' }, { key: 'b', action: 'DELIVER' }] } };

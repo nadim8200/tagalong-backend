@@ -4,7 +4,10 @@
 //   2. Geofence: every trip-sheet stop visited, or the LAST stop visited / delivered
 //   3. (suggestion only) the same company truck has since left a shipper on a newer trip
 //   4. A dispatcher clicked "Mark finished" (and can reopen it)
-//   5. An LTL whose flowers are delivered and whose truck / trailer is on a newer load (Nov 17)
+//   5. The driver tapped "Yes, all delivered" in the app (doneask.js)
+// Guesses never finish a load by themselves (Nov 18: four live loads were closed that way): the last stop only, an LTL
+// whose flowers look delivered with its trailer / truck on a newer trip — the load stays on the board with a "Probably
+// finished" line, Jarvis asks the driver in the app, and a Yes (or a dispatcher's Mark finished) closes it.
 // NOT CLOSED: the load's truck or trailer has picked up a newer load, but TruckMate
 // still has this one open. It leaves the active board and the alerts, waits in the
 // "Not closed" tab, and dispatch gets an email (once, then a daily reminder) to
@@ -85,8 +88,17 @@ export function finishReason(item, items = []) {
   }
   return null;
 }
-// Only facts finish a load by themselves; "truck moved on" is shown as a suggestion.
-export const isSure = (reason) => !!reason && !/moved on/.test(reason);
+// Only facts finish a load by themselves; "truck moved on" and "last stop" are shown as suggestions (the driver is asked).
+export const isSure = (reason) => !!reason && !/moved on|last stop/.test(reason);
+const etHm = (iso) => new Date(iso).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+// The driver's side of a "Probably finished" line (doneask.js state). Pure.
+export function askLine(a) {
+  if (!a) return '';
+  const ans = a.answer;
+  if (!ans) return ` · 📱 asked the driver ${etHm(a.askedAt)} ET, no answer yet`;
+  const said = { no: 'No, still rolling with it', some: 'Some stops left', yes: 'Yes, all delivered' }[ans.choice] || '';
+  return ` · 📱 ${ans.by || 'Driver'}: ${[said, ans.text ? `"${ans.text}"` : ''].filter(Boolean).join(' — ')}`;
+}
 
 const laneOf = (it) => `${String(tripOf(it).origZoneDesc || '—').replace(/,\s*\d{5}.*$/, '')} → ${String(tripOf(it).destZoneDesc || '—').replace(/,\s*\d{5}.*$/, '')}`;
 export const unclosedLine = (n, u) => `Trip ${n}: ${u.by} ${u.unit} is now on trip ${u.newTrip}, but trip ${n}${u.lane ? ` (${u.lane})` : ''} is still open in TruckMate${u.since ? ` since ${new Date(u.since).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}.`;
@@ -103,6 +115,7 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
   async function sweep(site, items, recs = {}) {
     if (!enabled || !items.length) return { finished: [], unclosed: [] };
     const fin = await db.get(key(site), {});
+    const asks = ((await db.get(`taDoneAsk:${site}`, {})) || {}).asks || {};
     const newly = [];
     const open = [];
     for (const it of items) {
@@ -112,13 +125,14 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
       const reason = finishReason(it, items);
       if (reason && isSure(reason)) { newly.push({ n, it, reason }); continue; }
       const mv = movedOn(it, items);
-      // an LTL whose flowers are delivered (tempalert.js: stops left + set for the next load) and whose truck has picked up a
-      // newer load, or whose trailer is on a newer trip that has started → finished (Delivered), not "Not closed" (Nov 17)
+      // an LTL whose flowers look delivered (tempalert.js) and whose trailer / truck is on a newer trip: stays on the board
+      // (temperatures still watched) until the driver says Yes in the app or dispatch marks it finished — not "Not closed"
       const fp = it._flowerPhase && it._flowerPhase.phase;
-      if (fp === 'next-load') { newly.push({ n, it, reason: `flowers delivered — trailer now on trip ${it._flowerPhase.by}` }); continue; }
-      if (fp === 'delivered' && mv) { newly.push({ n, it, reason: `flowers delivered — ${mv.by} ${mv.unit} now on trip ${mv.newTrip}` }); continue; }
+      const guess = fp === 'next-load' ? `flowers delivered, trailer now on trip ${it._flowerPhase.by}`
+        : fp === 'delivered' && mv ? `flowers delivered, ${mv.by} ${mv.unit} now on trip ${mv.newTrip}`
+          : !mv && reason ? reason : null;
+      if (guess) { it._finishGuess = guess; it._finishHint = `Probably finished — ${guess}${askLine(asks[n])}`; continue; }
       if (mv) { open.push({ n, it, mv }); continue; }
-      if (reason) it._finishHint = `Probably finished — ${reason}`;
     }
     if (newly.length) {
       const at = new Date().toISOString();
@@ -135,7 +149,7 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
     const book = await db.update(openKey(site), (cur) => {
       const a = {};
       for (const [n, v] of Object.entries(cur || {})) if (stillActive.has(n) && open.some((o) => o.n === n)) a[n] = v;
-      for (const { n, it, mv } of open) a[n] = { ...(a[n] || { since: at }), ...mv, lane: laneOf(it), status: String(tripOf(it).status || ''), driver: tripOf(it).driver || '' };
+      for (const { n, it, mv } of open) a[n] = { ...(a[n] || { since: at }), ...mv, lane: laneOf(it), status: String(tripOf(it).status || ''), driver: tripOf(it).driver || '', driver2: tripOf(it).driver2 || '', dest: String(tripOf(it).destZoneDesc || ''), driverAnswer: askLine(asks[n]).replace(/^ · /, '') || null };
       return a;
     }, {});
     const gone = new Set([...open.map((o) => o.n)]);
@@ -189,17 +203,21 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
     res.json(await db.update(cfgKey, (cur) => ({ ...(cur || {}), to, time, updatedBy: who(req), updatedAt: new Date().toISOString() }), {}));
   });
 
+  // a person (a dispatcher, or the driver in the app) says the load is done → Delivered, with its rundown
+  async function finishNow(site, n, reason, by) {
+    await db.update(key(site), (cur) => ({ ...(cur || {}), [n]: { at: new Date().toISOString(), reason, by, auto: false } }), {});
+    const active = await db.get(`taTruckMateActive:${site}`, { trips: {} });
+    const rec = (active.trips || {})[n];
+    if (rec && recordFinished) await recordFinished(site, rec.item, reason).catch(() => {});
+    if (rec && onFinished) Promise.resolve(onFinished(site, rec, reason)).catch(() => {});
+  }
   app.post('/truckmate/trips/:trip/finish', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const site = siteOf(req); const n = String(req.params.trip);
     const note = String((req.body && req.body.reason) || '').trim().slice(0, 200);
     const reason = `marked finished by ${who(req)}${note ? ` — ${note}` : ''}`;
     try {
-      await db.update(key(site), (cur) => ({ ...(cur || {}), [n]: { at: new Date().toISOString(), reason, by: who(req), auto: false } }), {});
-      const active = await db.get(`taTruckMateActive:${site}`, { trips: {} });
-      const rec = (active.trips || {})[n];
-      if (rec && recordFinished) await recordFinished(site, rec.item, reason).catch(() => {});
-      if (rec && onFinished) Promise.resolve(onFinished(site, rec, reason)).catch(() => {});
+      await finishNow(site, n, reason, who(req));
       res.json({ ok: true, trip: n, reason });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -213,5 +231,5 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  return { sweep, notify };
+  return { sweep, notify, finishNow };
 }

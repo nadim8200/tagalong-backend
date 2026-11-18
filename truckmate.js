@@ -925,5 +925,5 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
 
-  return { buildBoard, refreshFleet };   // refreshFleet: the fleet map's trucks + trailers (the Yards page reads its trailers)
+  return { buildBoard, refreshFleet, finishTrip: (site, n, reason, by) => finished.finishNow(site, String(n), reason, by) };   // refreshFleet: the fleet map's trucks + trailers (the Yards page reads its trailers)
 }

@@ -60,11 +60,15 @@ export function setPointMismatch(it) {
 // set it for the next load (627178, Nov 17: delivered in Boston, set −10°F, TruckMate not updated). Pure.
 const STARTED = /^(LOADINGMAN|LOADEDTOGO|DISP|ARRSHIP|DEPSHIP|INTRAN|ENROUTE|WAY|ARRCONS|DEPCONS)/i;
 const LOADING = /^(LOADINGMAN|LOADEDTOGO|DISP|ARRSHIP)/i;
+const AT_RECEIVER = /^(ARRCONS|DEPCONS)/i;
 const stOf = (it) => String(tripOf(it).status || '').trim();
 const tlOf = (it) => String(tripOf(it).trailer || '').trim().toUpperCase();
 export function loadPhase(it, { trips = [], visits = {}, milestones = {} } = {}) {
   const n = tripNo(it); const tl = tlOf(it);
-  if (tl) {
+  // only once this load is at or past a receiver (ARRCONS / DEPCONS): a newer trip on the same trailer while this one is
+  // still loading or rolling is a second load on the same trailer, a shuttle, or a split — not proof the flowers are off
+  // (Nov 18: 627335, 627334, 627278, 627390 were finished in error that way).
+  if (tl && AT_RECEIVER.test(stOf(it))) {
     const newer = trips.find((o) => o !== it && tlOf(o) === tl && Number(tripNo(o)) > Number(n) && STARTED.test(stOf(o)));
     if (newer) return { phase: 'next-load', by: tripNo(newer) };
   }
