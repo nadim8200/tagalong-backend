@@ -172,3 +172,53 @@ test('matching like a dispatcher: "RC-" prefix, bill trace numbers, truck + rout
   assert.equal(pend.length, 0);
   assert.equal(saved['624480'].broker, 'Arrive'); assert.match(saved['624480'].matchedBy, /route/);
 });
+
+test('a next-load batch (Rafael / Gus): the RC- sticker B number is kept on a waiting rate con and attaches it once that bill is on a trip on the same route; a re-read replaces, never doubles (Nov 18)', async () => {
+  const doc = await PDFDocument.create();
+  for (let i = 0; i < 2; i++) doc.addPage([200, 200]);
+  const pdf = Buffer.from(await doc.save()).toString('base64');
+  const S = { 1: { type: 'rate_confirmation', docKey: 'Arrive 10041856', rcBill: 'RC-B181111' }, 2: { type: 'rate_confirmation', docKey: 'CHR 574797750', rcBill: 'RC-B181222' } };
+  const READS = { 'Arrive 10041856': { broker: 'Arrive', loadNumber: '10041856', fbfBillNumber: 'B181111', truckNumber: '2403', pickups: [{ city: 'Bedford Park', state: 'IL' }], deliveries: [{ city: 'Vernon', state: 'CA' }] },
+    'CHR 574797750': { broker: 'C.H. Robinson', loadNumber: '574797750', fbfBillNumber: 'B181222', pickups: [{ city: 'Haines City', state: 'FL' }], deliveries: [{ city: 'Miami', state: 'FL' }] } };
+  const anthropic = { messages: { create: async ({ messages }) => ({ content: [{ type: 'text', text: JSON.stringify({ pages: messages[0].content.filter((c) => c.type === 'text' && c.text.startsWith('---')).map((c) => { const [, f, pg] = c.text.match(/File (\d+) · page (\d+)/); return { file: +f, page: +pg, summary: 'x', checkins: [], ...S[+pg] }; }) }) }] }) } };
+  let n = 0; const order = ['Arrive 10041856', 'CHR 574797750']; const saved = {};
+  const ratecon = { enabled: true, read: async () => ({ ...READS[order[n++ % 2]] }), save: async (s2, trip, rec) => { saved[trip] = rec; } };
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
+  const docs = { enabled: true, linkDocs: async () => {}, markDocs: async () => {}, deleteDocs: async () => {}, retypeDocs: async () => 1 };
+  // the truck is still on its current load; the bills aren't on any trip yet
+  const board = { trips: [{ trip: { tripNumber: '627400', powerUnit: '2403', status: 'DEPSHIP', origZoneDesc: 'MIAMI, FL', destZoneDesc: 'CHICAGO, IL, 60601' }, freightBills: [{ billNumber: 'B180001', endZoneDescription: 'CHICAGO, IL, 60601' }] }] };
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put() {}, delete() {} };
+  const api = initManifests(app, { requireAuth: () => {}, db, env: { NODE_ENV: 'test', ANTHROPIC_API_KEY: 'x' }, buildBoard: async () => board, docs, anthropic, ratecon });
+  const files = [{ dataBase64: pdf, mediaType: 'application/pdf', filename: '4472_001.pdf' }];
+  const r = await api.readPacketFromEmail('florida-beauty', files, { exact: true, by: 'Jarvis' });
+  assert.deepEqual(r.rateCons.map((x) => x.trip), [null, null], 'truck 2403 is on another load: no guessing');
+  const pending = async () => { let p; await routes['GET /truckmate/ratecons/pending']({ query: {} }, { json: (j) => { p = j; }, status() { return this; } }); return p; };
+  assert.deepEqual((await pending()).map((x) => [x.loadNumber, x.bill]), [['574797750', 'B181222'], ['10041856', 'B181111']], 'the sticker B numbers are kept');
+  await api.readPacketFromEmail('florida-beauty', files, { exact: true, by: 'Jarvis (re-run)' });
+  assert.equal((await pending()).length, 2, 'read again: replaced, not doubled');
+  // B181222 shows up on a trip on another route (a misread sticker) → stays waiting; B181111 on the right route → attaches
+  board.trips.push({ trip: { tripNumber: '627500', powerUnit: '1909', status: 'ASSGN', origZoneDesc: 'ATLANTA, GA', destZoneDesc: 'BOSTON, MA, 02101' }, freightBills: [{ billNumber: 'B181222', endZoneDescription: 'BOSTON, MA, 02101' }] });
+  board.trips.push({ trip: { tripNumber: '627510', powerUnit: '2403', status: 'ASSGN', origZoneDesc: 'BEDFORD PARK, IL', destZoneDesc: 'VERNON, CA, 90058' }, freightBills: [{ billNumber: 'B181111', endZoneDescription: 'VERNON, CA, 90058' }] });
+  assert.deepEqual((await pending()).map((x) => x.loadNumber), ['574797750']);
+  assert.equal(saved['627510'].broker, 'Arrive'); assert.equal(saved['627510'].matchedBy, 'bill B181111'); assert.equal(saved['627510'].fbfBillNumber, 'B181111');
+  assert.equal(saved['627500'], undefined);
+});
+
+test('a waiting rate con with no sticker finds its bill through Gus\'s sheet ("SUNSTATE 0564054 B181024") and attaches once that bill is on a trip on its route', async () => {
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? m.get(k) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? m.get(k) : fb); m.set(k, v); return v; } };
+  m.set('taRateConPending:florida-beauty', [{ id: 'rc9', record: { broker: 'SUNSTATE LOGISTICS INC', loadNumber: '0564054', fbfBillNumber: null, nextLoadBatch: true, pickups: [{ city: 'Auburndale', state: 'FL' }], deliveries: [{ city: 'Hatfield', state: 'MA' }] } }]);
+  m.set('taPlanSheet:florida-beauty', { loadBills: { '0564054': 'B181024' } });
+  const saved = {};
+  const ratecon = { enabled: true, read: async () => ({}), save: async (s2, trip, rec) => { saved[trip] = rec; } };
+  const board = { trips: [{ trip: { tripNumber: '627360', powerUnit: '2302', status: 'DEPSHIP', origZoneDesc: 'AUBURNDALE, FL', destZoneDesc: 'HATFIELD, MA, 01038' }, freightBills: [{ billNumber: 'B181024', endZoneDescription: 'HATFIELD, MA, 01038' }] }] };
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put() {}, delete() {} };
+  initManifests(app, { requireAuth: () => {}, db, env: { NODE_ENV: 'test', ANTHROPIC_API_KEY: 'x' }, buildBoard: async () => board, docs: { enabled: false }, anthropic: { messages: { create: async () => ({}) } }, ratecon });
+  let pend; await routes['GET /truckmate/ratecons/pending']({ query: {} }, { json: (j) => { pend = j; }, status() { return this; } });
+  assert.equal(pend.length, 0);
+  assert.equal(saved['627360'].fbfBillNumber, 'B181024');
+  assert.equal(saved['627360'].matchedBy, 'bill B181024 (Gus\'s sheet: load 0564054)');
+});

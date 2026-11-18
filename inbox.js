@@ -1273,7 +1273,20 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
         const files = atts.filter((a) => /pdf|image/i.test(a.contentType || '')).map((a) => ({ dataBase64: a.bytes, mediaType: a.contentType, filename: a.name }));
         if (!files.length) return res.status(422).json({ error: 'No trip-sheet pages found on that email any more.' });
         const r = await packets(site, files, { by: `Jarvis (re-run of ${e.from.name || e.from.address}'s email)`, exact: !!(e.rcBatch || asBatch) });
-        if (asBatch) await update(site, e.id, (x) => ({ ...x, rcBatch: true, packet: true }));
+        // a rate con batch: each rate con on the email (attached to its load, or waiting for it) — they're rate cons, not trip sheets
+        if (e.rcBatch || asBatch) {
+          const rcs = (r && r.rateCons) || [];
+          const name = (e.attachments && e.attachments[0] && e.attachments[0].name) || 'rate cons';
+          await update(site, e.id, (x) => ({ ...x, rcBatch: true, packet: true, rateCons: rcs.map((c) => ({ name: `${name} · page ${c.pages}`, broker: c.broker || null, loadNumber: c.loadNumber || null, trip: c.trip || null, matchedBy: c.matchedBy || null, pendingId: c.pendingId || null })), batchRateCons: rcs.map((c) => ({ trip: c.trip || null, pendingId: c.pendingId || null })), packetResult: { trips: 0, rateCons: rcs.length, kept: (r && r.kept) || 0, skipped: (r && r.skipped) || 0, unread: [] }, handledBy: 'Jarvis (rate cons read — next loads)' }));
+          // the waiting ones become next loads for their trucks (the truck from the rate con, the email or Gus's sheet) — no emails
+          if (nextLoads && rcs.length) {
+            try {
+              const got = (await nextLoads.consider(site, rcs.map((c) => ({ trip: c.trip || null, pendingId: c.pendingId || null })), { items: await board(site), emailText: e.text, from: e.from.name || e.from.address, emailId: e.id, subject: e.subject })).filter((x) => x.id);
+              if (got.length) await update(site, e.id, (x) => ({ ...x, nextLoads: got.map((n) => ({ id: n.id, truck: n.truck, load: n.rc.loadNumber, broker: n.rc.broker })) }));
+            } catch (err) { console.warn('[inbox] re-run next loads:', err.message); }
+          }
+          return res.json({ ok: true, packet: true, rcBatch: true, rateCons: rcs.map((c) => ({ trip: c.trip || null, broker: c.broker || null, loadNumber: c.loadNumber || null })) });
+        }
         const sheets = (r && r.trips) || [];
         await update(site, e.id, (x) => ({ ...x, tripSheets: sheets, packetResult: { ...(x.packetResult || {}), trips: sheets.length, unread: (r && r.unread) || [] }, packetError: r && (r.unread || []).length ? `Could not read trip sheet(s) ${r.unread.join(', ')} — re-send those pages.` : null }));
         return res.json({ ok: true, packet: true, trips: sheets.map((x) => x.trip), unread: (r && r.unread) || [] });

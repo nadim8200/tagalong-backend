@@ -149,7 +149,7 @@ export function nextTripTiming(nextItem, { eta = null, geo = () => null, now = D
 export function brief(rc, docIds = []) {
   const stop = (s) => (s ? { name: s.name || null, city: [s.city, s.state].filter(Boolean).join(', ') || null, date: s.date || null, time: s.time || s.appointment || null } : null);
   return {
-    broker: rc.broker || null, loadNumber: rc.loadNumber || null, bill: rc.fbfBillNumber || null,
+    broker: rc.broker || null, loadNumber: rc.loadNumber || null, bill: rc.fbfBillNumber || rc.stickerBill || null,
     pickup: stop((rc.pickups || [])[0]), delivery: stop((rc.deliveries || [])[(rc.deliveries || []).length - 1]), stops: (rc.pickups || []).length + (rc.deliveries || []).length,
     rate: rc.rate != null ? rc.rate : null, rateText: rc.rateText || null, tempSetting: rc.tempSetting || null,
     notes: [...(rc.handwrittenNotes || []), ...(rc.specialInstructions || [])].map(String).slice(0, 6), docIds: docIds.slice(0, 6),
@@ -179,6 +179,39 @@ export function verify(entry, items = [], sheets = [], { blobOf = billBlob, shee
   return null;
 }
 
+// Gus's planning sheet names this load as a truck's NEXT one (plansheet.js sheetBills): its B number in the truck's comments
+// (on the left it is the load the truck is on now), its broker load number in the comments, or — when the load isn't entered
+// yet — the broker and lane Gus writes ("BONGARD TN TO FL", "… THEN PIERSON FL TO FL 11/20"). Only when exactly one truck
+// fits. Pure. → { truck, how } | null
+const PLAN_KEY = `taPlanSheet:${SITE}`;
+const stateOf = (s) => (String((s && s.city) || '').match(/,\s*([A-Z]{2})\b/i) || [])[1];
+const words = (x) => String(x || '').toUpperCase().replace(/[^A-Z ]/g, ' ').split(/\s+/).filter((w) => w.length >= 3 && !/^(LLC|INC|THE|DBA|AND|LOGISTICS|TRANSPORTATION|FREIGHT|SOLUTIONS|COMPANY|GROUP|TRANS|CORP)$/.test(w));
+export function sheetLanes(txt) {
+  return String(txt || '').toUpperCase().split(/\bTHEN\b|·/).map((seg) => {
+    const m = seg.match(/([A-Z][A-Z .&'-]*?)\s+([A-Z]{2})\s+TO\s+([A-Z]{2})\b/);
+    return m ? { broker: words(m[1]), from: m[2], to: m[3] } : null;
+  }).filter(Boolean);
+}
+export function sheetTruck(rc, bills = {}, notes = {}) {
+  const b = billKey(rc && rc.bill);
+  const hit = b && bills[b];
+  if (hit && typeof hit === 'object') return hit.side === 'next' ? { truck: hit.truck, how: `Gus's sheet (${b} in truck ${hit.truck}'s comments)` } : null;
+  if (hit && typeof hit === 'string') return { truck: hit, how: `Gus's sheet (${b} next to truck ${hit})` };
+  const ln = billKey(rc && rc.loadNumber);
+  if (ln.length >= 5) {
+    const t = Object.entries(notes || {}).filter(([, txt]) => billKey(txt).includes(ln)).map(([tr]) => tr);
+    if (t.length === 1) return { truck: t[0], how: `Gus's sheet (load ${rc.loadNumber} in truck ${t[0]}'s comments)` };
+    if (t.length > 1) return null;
+  }
+  // broker + lane, the load not entered yet
+  const bw = words(rc && rc.broker); const from = stateOf(rc && rc.pickup); const to = stateOf(rc && rc.delivery);
+  if (!bw.length || !from || !to) return null;
+  const same = (a, c) => a === c || (a.length >= 5 && c.length >= 5 && (a.startsWith(c) || c.startsWith(a)));
+  const fits = Object.entries(notes || {}).filter(([, txt]) => sheetLanes(txt).some((l) => l.from === from.toUpperCase() && l.to === to.toUpperCase() && l.broker.some((w) => bw.some((x) => same(w, x))))).map(([tr]) => tr);
+  if (fits.length === 1) { const l = sheetLanes(notes[fits[0]]).find((x) => x.from === from.toUpperCase()); return { truck: fits[0], how: `Gus's sheet (truck ${fits[0]}: "${l.broker.join(' ')} ${l.from} TO ${l.to}")` }; }
+  return null;
+}
+
 export function initNextLoads({ db, env = process.env, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const key = `taNextLoads:${SITE}`;
@@ -190,12 +223,13 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
     const pending = (await db.get(`taRateConPending:${site}`, [])) || [];
     const saved = (await db.get(`taTruckMateRateCon:${site}`, {})) || {};
     const trucks = new Set(items.map(unitOf).filter(Boolean));
+    const plan = (await db.get(PLAN_KEY, {})) || {};
     const out = [];
     for (const e of entries) {
       const rec = e.pendingId ? ((pending.find((p) => p.id === e.pendingId) || {}).record) : (e.trip ? saved[e.trip] : null);
       if (!rec) continue;
       const matched = e.trip ? items.find((it) => tripNo(it) === e.trip) : null;
-      const found = truckFor(rec, { emailText, trucks, single: entries.length === 1 }) || (matched && unitOf(matched) ? { truck: unitOf(matched), how: `TruckMate trip ${e.trip}` } : null);
+      const found = truckFor(rec, { emailText, trucks, single: entries.length === 1 }) || (matched && unitOf(matched) ? { truck: unitOf(matched), how: `TruckMate trip ${e.trip}` } : null) || sheetTruck(brief(rec), plan.bills, plan.sheetNotes);
       // already the truck's run in progress → not a "next" load
       if (matched && ROLLING.test(String(tripOf(matched).status || ''))) { out.push({ trip: e.trip, skipped: 'already running' }); continue; }
       const entry = { id: e.pendingId || `t${e.trip}`, truck: found ? found.truck : null, truckHow: found ? found.how : null, trip: e.trip || null, pendingId: e.pendingId || null, rc: brief(rec, rec.docIds || []), from: from || null, emailId, subject: String(subject || '').slice(0, 200), at: new Date(now()).toISOString() };
@@ -244,7 +278,16 @@ export function initNextLoads({ db, env = process.env, now = () => Date.now() })
     }
     mark('next trips on the cards');
     if (!enabled) return { timing };
-    const list = (((await db.get(key, { list: [] })) || {}).list || []).filter((x) => x.truck && !x.doneAt);
+    let all = (((await db.get(key, { list: [] })) || {}).list || []);
+    // a next load with no truck yet: Gus's sheet may have its B number next to a truck by now
+    const plan = (await db.get(PLAN_KEY, {})) || {};
+    const found = all.filter((x) => !x.truck && !x.doneAt).map((x) => [x.id, sheetTruck(x.rc, plan.bills, plan.sheetNotes)]).filter(([, f]) => f);
+    if (found.length) {
+      const f = new Map(found);
+      all = ((await db.update(key, (cur) => ({ list: ((cur && cur.list) || []).map((x) => (!x.truck && f.has(x.id) ? { ...x, truck: f.get(x.id).truck, truckHow: f.get(x.id).how } : x)) }), { list: [] })) || {}).list || all;
+      mark(`trucks from Gus's sheet (${found.length})`);
+    }
+    const list = all.filter((x) => x.truck && !x.doneAt);
     mark(`waiting next loads (read, ${list.length})`);
     if (!list.length) return { timing };
     const sheets = Object.values((await db.get(`taTruckMateManifest:${site}`, {})) || {});

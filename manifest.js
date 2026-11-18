@@ -673,7 +673,10 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     let m = matchRateCon(rc, [...labels, rc.fbfBillNumber], brd, shs, savedRcs, { exact });
     if (!m && !exact && hintTrip && brd.has(String(hintTrip))) m = { trip: String(hintTrip), matchedBy: source === 'email' ? 'the trip / bill number in the email' : 'the load it was uploaded to' };
     const bill = (m || !exact) ? rc.fbfBillNumber || labels.find(Boolean) || null : null;
-    const record = { ...rc, fbfBillNumber: bill ? billKey(bill) : null, filename, pageCount, uploadedAt: new Date().toISOString(), uploadedBy: by, source, ...(exact ? { nextLoadBatch: true } : {}) };
+    // the RC- sticker read off a next-load scan, not matched yet: kept apart (never sent on as the bill) and checked again —
+    // with the route — once that bill is on a trip (Nov 18: the sticker is how most of Rafael's / Gus's rate cons find their load)
+    const read = rc.fbfBillNumber || labels.find(Boolean) || null;
+    const record = { ...rc, fbfBillNumber: bill ? billKey(bill) : null, ...(!bill && read ? { stickerBill: billKey(read) } : {}), filename, pageCount, uploadedAt: new Date().toISOString(), uploadedBy: by, source, ...(exact ? { nextLoadBatch: true } : {}) };
     if (m) {
       if (docs && docs.enabled && docs.retypeDocs && docIds.length) { try { record.version = await docs.retypeDocs({ site, ids: docIds, kind: 'ratecon', trip: m.trip }); record.docIds = docIds; } catch (e) { record.docError = e.message; } }
       record.matchedBy = m.matchedBy;
@@ -682,7 +685,9 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     }
     if (docs && docs.enabled && docs.retypeDocs && docIds.length) { try { await docs.retypeDocs({ site, ids: docIds, kind: 'ratecon', trip: null }); record.docIds = docIds; } catch (e) { record.docError = e.message; } }
     const id = `rc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-    await db.update(pendingKey(site), (cur) => [{ id, record }, ...(Array.isArray(cur) ? cur : [])].slice(0, 100), []);
+    // read again (a re-run, or the same batch from Gus and Rafael): replaces the waiting copy instead of adding a second one
+    const same = (r) => r && ((record.loadNumber && r.loadNumber === record.loadNumber && (r.broker || '') === (record.broker || '')) || (!record.loadNumber && record.filename && r.filename === record.filename));
+    await db.update(pendingKey(site), (cur) => [{ id, record }, ...(Array.isArray(cur) ? cur : []).filter((x) => !same(x.record))].slice(0, 100), []);
     record.pendingId = id;
     return { trip: null, matchedBy: null, pendingId: id, record };
   }
@@ -712,11 +717,17 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
     if (!list.length || !ratecon) return 0;
     const board = await boardIndex(site);
     const sheets = Object.values((await db.get(storeKey(site), {})) || {});
+    // Gus's sheet ties broker load numbers to B numbers ("FIRST STAR 806370 B181012", plansheet.js loadBills)
+    const sheetBill = ((await db.get('taPlanSheet:florida-beauty', {})) || {}).loadBills || {};
     let n = 0;
     for (const { id, record } of list) {
-      const m = matchRateCon(record, [record.fbfBillNumber], board, sheets, {}, { exact: !!record.nextLoadBatch });   // next-load rate cons: exact matches only
+      const viaSheet = sheetBill[String(record.loadNumber || '').toUpperCase().replace(/[^A-Z0-9]/g, '')] || null;
+      const m = matchRateCon(record, [record.fbfBillNumber, record.stickerBill, viaSheet], board, sheets, {}, { exact: !!record.nextLoadBatch });   // next-load rate cons: exact matches only
       if (!m) continue;
       const rec = { ...record, matchedBy: m.matchedBy };
+      if (!rec.fbfBillNumber && rec.stickerBill && /^bill /.test(m.matchedBy) && billKey(m.matchedBy.slice(5)) === rec.stickerBill) rec.fbfBillNumber = rec.stickerBill;   // the sticker checked out
+      else if (!rec.fbfBillNumber && viaSheet && /^bill /.test(m.matchedBy) && billKey(m.matchedBy.slice(5)) === viaSheet) { rec.fbfBillNumber = viaSheet; rec.matchedBy = `${m.matchedBy} (Gus's sheet: load ${record.loadNumber})`; }
+      delete rec.stickerBill;
       delete rec.pendingId;
       if (docs && docs.enabled && docs.retypeDocs && (rec.docIds || []).length) rec.version = await docs.retypeDocs({ site, ids: rec.docIds, kind: 'ratecon', trip: m.trip }); // eslint-disable-line no-await-in-loop
       await ratecon.save(site, m.trip, rec); // eslint-disable-line no-await-in-loop
@@ -728,7 +739,7 @@ export function initManifests(app, { requireAuth, db, env = process.env, buildBo
 
   app.get('/truckmate/ratecons/pending', requireAuth, async (req, res) => {
     try { await rematchRateCons(siteOf(req)); } catch (e) { console.warn('[manifest] rematch rate cons:', e.message); }
-    try { res.json(((await db.get(pendingKey(siteOf(req)), [])) || []).map(({ id, record }) => ({ id, broker: record.broker, loadNumber: record.loadNumber, bill: record.fbfBillNumber, truck: record.truckNumber, summary: record.summary, filename: record.filename, uploadedAt: record.uploadedAt }))); }
+    try { res.json(((await db.get(pendingKey(siteOf(req)), [])) || []).map(({ id, record }) => ({ id, broker: record.broker, loadNumber: record.loadNumber, bill: record.fbfBillNumber || record.stickerBill || null, truck: record.truckNumber, summary: record.summary, filename: record.filename, uploadedAt: record.uploadedAt }))); }
     catch (e) { res.status(500).json({ error: e.message }); }
   });
   app.post('/truckmate/ratecons/assign', requireAuth, async (req, res) => {
