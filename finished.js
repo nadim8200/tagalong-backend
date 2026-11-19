@@ -250,20 +250,22 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
   });
 
   // a person (a dispatcher, or the driver in the app) says the load is done → Delivered, with its rundown
-  async function finishNow(site, n, reason, by) {
-    await db.update(key(site), (cur) => ({ ...(cur || {}), [n]: { at: new Date().toISOString(), reason, by, auto: false } }), {});
+  // removed: the dispatcher took it off the board without a delivery (cancelled, duplicate, old) — listed with that reason, no rundown
+  async function finishNow(site, n, reason, by, { removed = false } = {}) {
+    await db.update(key(site), (cur) => ({ ...(cur || {}), [n]: { at: new Date().toISOString(), reason, by, auto: false, ...(removed ? { removed: true } : {}) } }), {});
     const active = await db.get(`taTruckMateActive:${site}`, { trips: {} });
     const rec = (active.trips || {})[n];
     if (rec && recordFinished) await recordFinished(site, rec.item, reason).catch(() => {});
-    if (rec && onFinished) Promise.resolve(onFinished(site, rec, reason)).catch(() => {});
+    if (rec && onFinished && !removed) Promise.resolve(onFinished(site, rec, reason)).catch(() => {});
   }
   app.post('/truckmate/trips/:trip/finish', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const site = siteOf(req); const n = String(req.params.trip);
     const note = String((req.body && req.body.reason) || '').trim().slice(0, 200);
-    const reason = `marked finished by ${who(req)}${note ? ` — ${note}` : ''}`;
+    const removed = !!(req.body && req.body.remove);
+    const reason = `${removed ? 'taken off the board (not delivered)' : 'marked finished'} by ${who(req)}${note ? ` — ${note}` : ''}`;
     try {
-      await finishNow(site, n, reason, who(req));
+      await finishNow(site, n, reason, who(req), { removed });
       res.json({ ok: true, trip: n, reason });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });

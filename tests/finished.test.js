@@ -165,3 +165,18 @@ test('TruckMate went quiet on the last stop (completed there; the connector stop
   assert.match(done[0], /^completed in TruckMate/);
   assert.match(m.get('taFinished:fb')['627168'].reason, /no TruckMate change for 27h/);
 });
+
+test('dispatcher closes a load by hand: completed → Delivered + rundown; taken off the board → listed as not delivered, no rundown (Nov 19)', async () => {
+  const m = new Map([['taTruckMateActive:fb', { trips: { 625241: { item: { trip: { tripNumber: '625241' } } }, 627421: { item: { trip: { tripNumber: '627421' } } } } }]]);
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const rundowns = []; const recorded = []; const routes = {};
+  const app = { post: (p, ...h) => { routes[p] = h.at(-1); }, get: () => {}, put: () => {} };
+  initFinished(app, { requireAuth: () => {}, db, onFinished: (s, rec, reason) => rundowns.push(reason), recordFinished: async (s, it, reason) => recorded.push(reason) });
+  const out = []; const res = { json(v) { out.push(v); }, status() { return this; } };
+  await routes['/truckmate/trips/:trip/finish']({ params: { trip: '625241' }, body: { reason: 'cancelled by the broker', remove: true }, query: { site: 'fb' }, user: { name: 'Ana' } }, res);
+  await routes['/truckmate/trips/:trip/finish']({ params: { trip: '627421' }, body: { reason: 'POD in' }, query: { site: 'fb' }, user: { name: 'Ana' } }, res);
+  assert.deepEqual(out.map((o) => o.reason), ['taken off the board (not delivered) by Ana — cancelled by the broker', 'marked finished by Ana — POD in']);
+  assert.deepEqual(recorded, out.map((o) => o.reason));
+  assert.deepEqual(rundowns, ['marked finished by Ana — POD in'], 'no rundown for a load taken off the board');
+  assert.equal(m.get('taFinished:fb')['625241'].removed, true);
+});
