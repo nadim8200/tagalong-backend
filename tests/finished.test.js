@@ -152,6 +152,8 @@ test('TruckMate went quiet on the last stop (completed there; the connector stop
   assert.equal(quietDone({ trip: { ...it.trip, status: 'DEPSHIP' } }, rec, g, null, NOW), null, 'not at the consignee');
   assert.equal(quietDone({ trip: { ...it.trip, powerUnit: 'OC1013' } }, rec, g, null, NOW), null, 'outside carrier');
   assert.equal(quietDone(it, rec, g, { answer: { choice: 'no' } }, NOW), null, 'driver said not yet');
+  const two = { trip: { ...it.trip, status: 'DEPCONS', activeLeg: '3', legCount: '3', powerUnit: '39' }, freightBills: [{ billNumber: 'T085707', endZoneDescription: 'OXNARD, CA, 93036' }, { billNumber: 'T085707-AA', endZoneDescription: 'SANTA PAULA, CA, 93060', actualDelivery: '2026-11-18T16:50:59' }] };
+  assert.equal(quietDone(two, rec, 'left the last delivery — SANTA PAULA (GPS)', null, NOW), null, 'one stop delivered in TruckMate, the other still open (627375)');
   // in the sweep: leaves the board for Delivered, with the reason
   const m = new Map([['taMilestones:fb', { 627168: { ms: { 'left:WEST PALM BEACH, FL, 33404': { at: 'x' } } } }]]);
   const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };

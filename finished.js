@@ -126,6 +126,9 @@ export function quietDone(item, rec, guess, ask, now = Date.now()) {
   const quiet = now - rec.updatedAt;
   if (quiet < QUIET_MS) return null;
   if (ask && ask.answer && ask.answer.choice !== 'yes') return null;
+  // TruckMate itself shows a stop still open: some bills delivered, others not (627375: Santa Paula done, Oxnard not — Nov 19)
+  const bills = (item && (item.freightBills || item.orders)) || t.freightBills || [];
+  if (bills.some((b) => b && b.actualDelivery) && bills.some((b) => b && !b.actualDelivery)) return null;
   return `completed in TruckMate — at the last consignee (${String(t.status).toUpperCase()}), ${guess}, no TruckMate change for ${Math.floor(quiet / 3600000)}h`;
 }
 
