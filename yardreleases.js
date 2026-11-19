@@ -259,6 +259,10 @@ function shape(id, x, { trailerHubs, finished, assignments = {}, fleet = {}, now
   else if (ss && ss.stage === 'out') { stage = 'out'; evidence = `${r.sheet === 'BARTOW YARD' ? 'Bartow' : 'Miami'} yard sheet: ${r.status}`; }
   else if (x.drop && x.drop.at) { stage = 'at-yard'; evidence = `Driver tapped "I dropped the trailer" (${x.drop.by || 'driver'})`; }
   else if (atYardGps) { stage = 'at-yard'; evidence = `Trailer ${trailer} GPS at the yard (${gps.source || 'GPS'})`; }
+  else if (it && (/^SPTLD/i.test(S(t.status)) || /^YARD$/i.test(S(t.currentZone)))) {   // TruckMate itself: spotted loaded at the yard (Nov 19)
+    const h = [...((it._times && it._times.statusHistory) || [])].reverse().find((e) => /^SPTLD/i.test(S(e.status)));
+    stage = 'at-yard'; evidence = `TruckMate: ${S(t.statusDesc) || S(t.status)} at the yard${h && h.at ? ` since ${new Date(h.at).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} ET` : ''}`;
+  }
   else if (ss && ss.stage === 'at-yard') { stage = 'at-yard'; evidence = `${r.sheet === 'BARTOW YARD' ? 'Bartow' : 'Miami'} yard sheet: ${r.status}`; }
   else { stage = 'coming'; evidence = null; }
   const review = !!(ss && ss.review);

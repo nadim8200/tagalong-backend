@@ -138,3 +138,28 @@ test('a broker load whose truck parked at the rate con\'s delivery address and l
   assert.equal(leftEveryDelivery(it, { 627400: { ms: {}, fences: { 'delivery:s1': { inAt: 'a' } } } }), null, 'still at the receiver');
   assert.equal(leftEveryDelivery(it, { 627400: { ms: {}, fences: { 'pickup:0': { leftAt: 'x' } } } }), null, 'only the pickup');
 });
+
+test('TruckMate went quiet on the last stop (completed there; the connector stops sending it) + GPS left → Delivered (Nov 19)', async () => {
+  const { quietDone, QUIET_MS } = await import('../finished.js');
+  const NOW = Date.parse('2026-11-19T14:30:00Z');
+  const it = { trip: { tripNumber: '627168', status: 'ARRCONS', activeLeg: '2', legCount: '2', powerUnit: '2211' }, freightBills: [{ billNumber: 'B180991', endZoneDescription: 'WEST PALM BEACH, FL, 33404' }] };
+  const rec = { updatedAt: NOW - 27 * 3600000 };
+  const g = 'left the last delivery — WEST PALM BEACH (GPS)';
+  assert.equal(quietDone(it, rec, g, null, NOW), 'completed in TruckMate — at the last consignee (ARRCONS), left the last delivery — WEST PALM BEACH (GPS), no TruckMate change for 27h');
+  assert.equal(quietDone(it, { updatedAt: NOW - QUIET_MS + 60000 }, g, null, NOW), null, 'TruckMate still talking');
+  assert.equal(quietDone(it, rec, null, null, NOW), null, 'no GPS sign it left');
+  assert.equal(quietDone({ trip: { ...it.trip, activeLeg: '8', legCount: '9' } }, rec, g, null, NOW), null, 'not the last leg (LTL mid-route)');
+  assert.equal(quietDone({ trip: { ...it.trip, status: 'DEPSHIP' } }, rec, g, null, NOW), null, 'not at the consignee');
+  assert.equal(quietDone({ trip: { ...it.trip, powerUnit: 'OC1013' } }, rec, g, null, NOW), null, 'outside carrier');
+  assert.equal(quietDone(it, rec, g, { answer: { choice: 'no' } }, NOW), null, 'driver said not yet');
+  // in the sweep: leaves the board for Delivered, with the reason
+  const m = new Map([['taMilestones:fb', { 627168: { ms: { 'left:WEST PALM BEACH, FL, 33404': { at: 'x' } } } }]]);
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const done = [];
+  const f = initFinished({ post: () => {}, get: () => {}, put: () => {} }, { requireAuth: () => {}, db, now: () => NOW, recordFinished: async (s, i, r) => done.push(r) });
+  const items = [JSON.parse(JSON.stringify(it))];
+  await f.sweep('fb', items, { 627168: rec });
+  assert.equal(items.length, 0);
+  assert.match(done[0], /^completed in TruckMate/);
+  assert.match(m.get('taFinished:fb')['627168'].reason, /no TruckMate change for 27h/);
+});

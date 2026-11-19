@@ -110,6 +110,25 @@ export function leftEveryDelivery(item, milestones = {}) {
   const left = (pl) => !!((ms.ms && (ms.ms[`left:${pl}`] || ms.ms[`delivered:${pl}`])) || (ms.waits && ms.waits[pl] && ms.waits[pl].leftAt));
   return places.every(left) ? `left the last delivery — ${cityOf(places[places.length - 1]) || places[places.length - 1]} (GPS)` : null;
 }
+// TruckMate went quiet on its last stop (Nov 19). The connector only reads OPEN trips, so when dispatch completes a load
+// in TruckMate it just stops coming — the board kept the last thing it heard (ARRIVE CONSIGNEE) for 36 h. A load is done
+// when all of it holds: TruckMate's own status says the truck is at / left the consignee on the trip's LAST leg, GPS (or
+// the truck / trailer on a newer trip) says it left, TruckMate hasn't sent a change for 3 hours, and the driver didn't say
+// "not yet". Not for outside carriers (no GPS of ours). → reason | null. Pure.
+export const QUIET_MS = 3 * 3600000;
+const LAST_STOP = /^(ARRCONS|DEPCONS)$/i;
+export function quietDone(item, rec, guess, ask, now = Date.now()) {
+  const t = tripOf(item);
+  if (!guess || !rec || !rec.updatedAt || (item && item._oc) || /^OC/i.test(String(t.powerUnit || ''))) return null;
+  if (!LAST_STOP.test(String(t.status || '').trim())) return null;
+  const leg = Number(t.activeLeg); const legs = Number(t.legCount);
+  if (!(legs > 0 && leg >= legs)) return null;
+  const quiet = now - rec.updatedAt;
+  if (quiet < QUIET_MS) return null;
+  if (ask && ask.answer && ask.answer.choice !== 'yes') return null;
+  return `completed in TruckMate — at the last consignee (${String(t.status).toUpperCase()}), ${guess}, no TruckMate change for ${Math.floor(quiet / 3600000)}h`;
+}
+
 const etHm = (iso) => new Date(iso).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
 // The driver's side of a "Probably finished" line (doneask.js state). Pure.
 export function askLine(a) {
@@ -153,6 +172,8 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
         : fp === 'delivered' && mv ? `flowers delivered, ${mv.by} ${mv.unit} now on trip ${mv.newTrip}`
           : !mv && reason ? reason
             : !mv && !NOT_STARTED.test(String(tripOf(it).status || '')) ? leftEveryDelivery(it, milestones) : null;
+      const quiet = quietDone(it, recs[n], guess, asks[n], now());
+      if (quiet) { newly.push({ n, it, reason: quiet }); continue; }
       if (guess) { it._finishGuess = guess; it._finishHint = `Probably finished — ${guess}${askLine(asks[n])}`; continue; }
       if (mv) { open.push({ n, it, mv }); continue; }
     }

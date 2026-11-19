@@ -58,7 +58,7 @@ test('stages only from evidence: the sheet\'s words, a drop tap, the trailer GPS
   const items = [
     T('627403', { _samsara: { location: 'Hudson, NH', lat: 42.76, lng: -71.44 } }),
     T('627401', {}, { trailer: '7323', powerUnit: '2602' }),
-    T('627164', {}, { trailer: '2022', powerUnit: '2019' }),
+    T('627164', { _times: { statusHistory: [{ status: 'DEPSHIP', at: '2026-11-16T13:34:00Z' }, { status: 'SPTLD', at: '2026-11-18T21:00:00Z' }] } }, { trailer: '2022', powerUnit: '2019', status: 'SPTLD', statusDesc: 'SPOTTED LOADED', currentZone: 'YARD' }),
     T('627177', { _release: { hub: 'MIAMI', at: '2026-11-18T12:00:00Z', by: 'Ana' } }, { trailer: '262045', powerUnit: '2615' }),
     T('627033', {}, { trailer: '7342' }),
     T('627500', { _loadSheet: { release: { yard: 'Bartow yard', dropped: { at: '2026-11-18T20:00:00Z', by: 'Jose' } } } }, { trailer: '7400' }),
@@ -72,6 +72,7 @@ test('stages only from evidence: the sheet\'s words, a drop tap, the trailer GPS
   assert.equal(by('627177').stage, 'at-yard'); assert.match(by('627177').evidence, /GPS at the yard \(Thermo King\)/);
   assert.deepEqual(by('627177').sources.map((s) => s.name), ['Miami yard sheet', 'Release form']);
   assert.equal(by('627033').stage, 'out');
+  assert.equal(by('627164').stage, 'at-yard'); assert.equal(by('627164').evidence, 'TruckMate: SPOTTED LOADED at the yard since Nov 18, 4:00 PM ET');   // TruckMate's own spotted-loaded (Nov 19)
   assert.equal(by('627143').stage, 'completed'); assert.deepEqual(by('627143').issues, [], 'DONE and off the board: nothing to flag');
   assert.deepEqual(by('627401').issues, []);
   assert.equal(by('627306').stage, 'cancelled');
@@ -81,7 +82,7 @@ test('stages only from evidence: the sheet\'s words, a drop tap, the trailer GPS
   assert.equal(by('627445'), undefined, 'a Bartow row whose load isn\'t on the board is a regional load being planned');
   const c = counts(list);
   assert.equal(c.MIAMI.active, 5); assert.equal(c.MIAMI.completed, 1); assert.equal(c.MIAMI.cancelled, 1); assert.equal(c.BARTOW.active, 2);
-  assert.deepEqual(cardMark(by('627164')), { hub: 'MIAMI', yard: 'Miami', stage: 'coming', review: false, localDriver: 'JULIO GUTIERREZ', localTruck: '2019', appt: by('627164').appt, sourceStatus: null, sources: ['Miami yard sheet'] });
+  assert.deepEqual(cardMark(by('627164')), { hub: 'MIAMI', yard: 'Miami', stage: 'at-yard', review: false, localDriver: 'JULIO GUTIERREZ', localTruck: '2019', appt: by('627164').appt, sourceStatus: null, sources: ['Miami yard sheet'] });
 });
 
 test('conflicts are shown, never guessed away: the sheet says DONE but TruckMate still has the trip rolling', () => {
