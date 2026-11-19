@@ -49,6 +49,7 @@ test('BARTOW YARD tab: loads by day; local driver "TK 987 HERLAN QUINTANA (0243)
 test('stages only from evidence: the sheet\'s words, a drop tap, the trailer GPS at that yard; unknown words → Needs review', () => {
   assert.deepEqual(sheetStage('DONE'), { stage: 'completed' });
   assert.deepEqual(sheetStage('RELEASE CANCELLED'), { stage: 'cancelled' });
+  for (const w of ['CANELED', 'CANCELED', 'Canceled', 'CXL', 'cancelado']) assert.deepEqual(sheetStage(w), { stage: 'cancelled' }, w);
   assert.deepEqual(sheetStage('AT RECEIVER'), { stage: 'out' });
   assert.deepEqual(sheetStage('3 PALLET PARTIAL TO THE COOLER'), { review: true });
   assert.equal(sheetStage(''), null);
@@ -188,4 +189,49 @@ test('local fleet toggle: any driver can be added to a yard (they show in that y
   assert.ok(localsFor('BARTOW', fleet).some((d) => d.code === '6100'));
   const f = fleetOf(fleet);
   assert.deepEqual([f['0243'], f['4712'], f['6100'], f['1344']], ['MIAMI', null, 'BARTOW', 'MIAMI']);
+});
+
+test('reschedule: a new redelivery date replaces the passed one (the sheet\'s kept as apptWas); clearing it goes back to the sheet', async () => {
+  const { initYardReleases } = await import('../yardreleases.js');
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  m.set('taYardSheets', { miami: parseMiami(MIAMI, { year: 2026 }), bartow: [] });
+  const board = { trips: [{ trip: { tripNumber: '627164', powerUnit: '2019', status: 'DEPSHIP', trailer: '2022' }, freightBills: [{ billNumber: 'B180987' }] }] };
+  const routes = {}; const logs = [];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put() {} };
+  initYardReleases(app, { requireAuth: () => {}, db, getBoard: async () => board, log: async (...a) => logs.push(a), env: { NODE_ENV: 'test' }, now: () => Date.parse('2026-11-20T15:00:00Z') });
+  const call = async (k, req) => { let out; let code = 200; await routes[k]({ user: { name: 'Nadim' }, query: {}, body: {}, ...req }, { json: (j) => { out = j; }, status(c) { code = c; return this; } }); return { code, out }; };
+  const id = '627164|B180987';
+  assert.equal((await call('POST /truckmate/releases/reschedule', { body: { id, date: '11/21' } })).code, 400);
+  const r = await call('POST /truckmate/releases/reschedule', { body: { id, date: '2026-11-21', time: '14:00', note: 'Receiver closed Thursday' } });
+  assert.deepEqual(r.out.release.appt, { date: '2026-11-21', time: '14:00', tz: 'America/New_York', zone: 'Eastern', raw: '2:00 PM' });
+  assert.equal(r.out.release.apptWas.date, '2026-11-19');
+  assert.deepEqual([r.out.release.rescheduled.by, r.out.release.rescheduled.note], ['Nadim', 'Receiver closed Thursday']);
+  assert.match(logs[0][2].text, /Redelivery rescheduled to 2026-11-21 14:00 — Receiver closed Thursday/);
+  await call('POST /truckmate/releases/reschedule', { body: { id, date: null } });
+  const list = await call('GET /truckmate/releases', {});
+  assert.equal(list.out.releases.find((x) => x.id === id).appt.date, '2026-11-19');
+});
+
+test('wrong yard: a Miami-tab delivery in Winter Haven is flagged for Central Florida; moving it puts it there (its picked driver cleared when not on that list)', async () => {
+  const { hubForCity, initYardReleases } = await import('../yardreleases.js');
+  assert.equal(hubForCity('WINTER HAVEN, FL'), 'BARTOW'); assert.equal(hubForCity('POMPANO BEACH, FL'), 'MIAMI'); assert.equal(hubForCity('PORT SAINT LUCIE, FL'), null);
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const rows = [MIAMI[0], ['', '', '', '', '', '', '11/15/2026'], ['', 'HERLAN QUINTANA', '', '', '7298', 'B180900', '627000', '-10F', '8:00 PM', 'WALMART', 'WINTER HAVEN', '', '']];
+  m.set('taYardSheets', { miami: parseMiami(rows, { year: 2026 }), bartow: [] });
+  m.set('taReleaseAssign:florida-beauty', { '627000|B180900': { code: '4712', name: 'Leandro Pineda', unit: '605' } });
+  const board = { trips: [{ trip: { tripNumber: '627000', powerUnit: '2100', status: 'DEPSHIP', trailer: '7298' }, freightBills: [{ billNumber: 'B180900' }] }] };
+  const routes = {};
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put() {} };
+  initYardReleases(app, { requireAuth: () => {}, db, getBoard: async () => board, env: { NODE_ENV: 'test' }, now: () => Date.parse('2026-11-16T15:00:00Z') });
+  const call = async (k, req) => { let out; await routes[k]({ user: { name: 'Nadim' }, query: {}, body: {}, ...req }, { json: (j) => { out = j; }, status() { return this; } }); return out; };
+  let rel = (await call('GET /truckmate/releases', {})).releases[0];
+  assert.equal(rel.hub, 'MIAMI'); assert.deepEqual(rel.otherYard, { hub: 'BARTOW', name: 'Central Florida', why: 'The delivery is in Winter Haven — usually the Central Florida yard\'s' });
+  rel = (await call('POST /truckmate/releases/move', { body: { id: '627000|B180900', hub: 'BARTOW' } })).release;
+  assert.deepEqual([rel.hub, rel.movedFrom, rel.otherYard, rel.yard.name], ['BARTOW', 'MIAMI', undefined, 'Central Florida']);
+  assert.deepEqual([rel.local.driver, rel.local.code, rel.local.how], ['Herlan Quintana', '0243', 'sheet'], 'the Miami pick is cleared; the sheet\'s name now matches the Central Florida list');
+  assert.match(rel.sources.at(-1).name, /Moved from the Miami yard/);
+  rel = (await call('POST /truckmate/releases/move', { body: { id: '627000|B180900', hub: null } })).release;
+  assert.equal(rel.hub, 'MIAMI');
 });

@@ -23,6 +23,8 @@ import { releasePdf, cleanForm } from './release.js';
 
 const SITE = 'florida-beauty';
 const ASSIGN = `taReleaseAssign:${SITE}`;   // release id → { code, name, unit, by, at, sent: { at, to, result } } — a manual pick wins over the sheet
+const RESCHED = `taReleaseResched:${SITE}`; // release id → { date, time, note, by, at }: a new redelivery date set in the console (the sheet's stays as written)
+const MOVES = `taReleaseMoves:${SITE}`;    // release id → { hub, by, at }: moved to the other yard in the console (Miami ⇄ Central Florida)
 const LINKS = 'taReleaseLinks';
 const FLEET = 'taLocalFleet';               // driver code → { hub | null, name, units, by, at }: dispatch's local-fleet toggles (Driver profiles)             // token → { trip, id, form, exp }: the release form PDF the driver opens from the text
 const KEY = 'taYardSheets';                // { readAt, error, miami: [rows], bartow: [rows] }
@@ -145,7 +147,7 @@ export function parseBartow(rows = [], { year = new Date().getFullYear() } = {})
 export function sheetStage(status) {
   const s = U(status);
   if (!s) return null;
-  if (/CANCEL/.test(s)) return { stage: 'cancelled' };
+  if (/CANCEL|CANCL|CANCE?L?L?ED|CANELL?ED|CANC\b|CXL/.test(s)) return { stage: 'cancelled' };   // the sheet's spellings too ("CANELED", Nov 18)
   if (/^DONE\b|DELIVERED|COMPLETE/.test(s)) return { stage: 'completed' };
   if (/AT RECEIVER|EN ROUTE|ON THE WAY|OUT FOR DELIVERY|ROLLING/.test(s)) return { stage: 'out' };
   if (/AT (THE )?YARD|DROPPED|IN YARD/.test(s)) return { stage: 'at-yard' };
@@ -157,7 +159,7 @@ export const HUB_KEYS = { Miami: 'MIAMI', Ventura: 'VENTURA', Memphis: 'MEMPHIS'
 // Everything we know → the releases. Pure.
 // sheets: { miami, bartow } rows · items: the board · trailerHubs: trailer → { hub, at, source } · plan: { sheetNotes }
 // history: id → last release seen (for completed / cancelled ones whose load left the board) · finished: trip → { at, reason }
-export function buildReleases({ sheets = {}, items = [], trailerHubs = {}, plan = {}, history = {}, finished = {}, assignments = {}, fleet = {}, now = Date.now() } = {}) {
+export function buildReleases({ sheets = {}, items = [], trailerHubs = {}, plan = {}, history = {}, finished = {}, assignments = {}, fleet = {}, resched = {}, moves = {}, now = Date.now() } = {}) {
   const byTrip = new Map(items.map((it) => [tripNo(it), it]));
   const byBill = new Map(); items.forEach((it) => billsOf(it).forEach((b) => { const k = billKey(b && b.billNumber); if (k) byBill.set(k, it); }));
   const found = (r) => (r.trip && byTrip.get(r.trip)) || (r.bill && byBill.get(billKey(r.bill))) || null;
@@ -197,7 +199,15 @@ export function buildReleases({ sheets = {}, items = [], trailerHubs = {}, plan 
     put(`${tripNo(it)}|`, { trip: tripNo(it), bill: null, hub, item: it, sources: [{ name: 'Empty list', text: S(txt).slice(0, 120) }] });
   }
   const list = [];
-  for (const [id, x] of out) list.push(shape(id, x, { trailerHubs, finished, assignments, fleet, now }));
+  for (const [id, x0] of out) {
+    const mv = moves[id] && moves[id].hub && moves[id].hub !== x0.hub ? moves[id] : null;
+    const x = mv ? { ...x0, hub: mv.hub, sources: [...x0.sources, { name: `Moved from the ${hubName(x0.hub)} yard`, at: mv.at, by: mv.by }] } : x0;
+    const rel = withResched(shape(id, x, { trailerHubs, finished, assignments, fleet, now }), resched[id]);
+    rel.movedFrom = mv ? x0.hub : null;
+    const better = hubForCity(rel.destination);
+    if (better && better !== rel.hub && !mv) rel.otherYard = { hub: better, name: hubName(better), why: `The delivery is in ${String(rel.destination).split(',')[0].trim().replace(/\b\w/g, (c) => c.toUpperCase()).replace(/\B\w/g, (c) => c.toLowerCase())} — usually the ${hubName(better)} yard's` };
+    list.push(rel);
+  }
   // completed / cancelled ones whose rows aged off or whose load left the board: kept for 3 days
   for (const [id, h] of Object.entries(history)) {
     if (list.some((x) => x.id === id)) continue;
@@ -308,6 +318,28 @@ export function driverText(rel, form = null, link = null, rcNotes = []) {
   return lines.join('\n');
 }
 
+// Which local yard usually redelivers to a Florida city: South Florida → Miami; the middle of the state → Central Florida. Only
+// clear cases (a city in neither list says nothing). Pure.
+const hubName = (h) => (HUBS.find((x) => x.key === h) || {}).name || h;
+const SOUTH_FL = /\b(MIAMI|MEDLEY|DORAL|HIALEAH|OPA[- ]?LOCKA|HOMESTEAD|FLORIDA CITY|SWEETWATER|AVENTURA|FORT LAUDERDALE|FT LAUDERDALE|HOLLYWOOD|PEMBROKE|MIRAMAR|DAVIE|PLANTATION|SUNRISE|WESTON|POMPANO|DEERFIELD|CORAL SPRINGS|MARGATE|TAMARAC|LAUDERHILL|LAUDERDALE|OAKLAND PARK|DFB|BOCA RATON|DELRAY|BOYNTON|LAKE WORTH|WEST PALM|PALM BEACH|JUPITER|RIVIERA BEACH)\b/i;
+const CENTRAL_FL = /\b(WINTER HAVEN|LAKELAND|BARTOW|AUBURNDALE|HAINES CITY|LAKE WALES|DAVENPORT|PLANT CITY|MULBERRY|ORLANDO|KISSIMMEE|SANFORD|APOPKA|OCOEE|TAMPA|BRANDON|CLEARWATER|ST\.? PETERSBURG|SAINT PETERSBURG|SARASOTA|BRADENTON|PALMETTO|OCALA|LEESBURG|GAINESVILLE|DAYTONA|JACKSONVILLE|MACCLENNY|PIERSON|DELAND)\b/i;
+export function hubForCity(dest) {
+  const d = String(dest || '');
+  if (CENTRAL_FL.test(d)) return 'BARTOW';
+  if (SOUTH_FL.test(d)) return 'MIAMI';
+  return null;
+}
+
+// A new redelivery date set in the console replaces the sheet's appointment (kept as apptWas). Pure.
+export function withResched(rel, rs) {
+  if (!rs || !rs.date) return rel;
+  const tz = (rel.appt && rel.appt.tz) || 'America/New_York';
+  const zone = (rel.appt && rel.appt.zone) || 'Eastern';
+  const [h, m] = String(rs.time || '').split(':').map(Number);
+  const raw = rs.time ? `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}` : null;
+  return { ...rel, apptWas: rel.appt || null, appt: { date: rs.date, time: rs.time || null, tz, zone, raw }, rescheduled: { by: rs.by || null, at: rs.at || null, note: rs.note || null } };
+}
+
 // counts per yard: active = not completed / cancelled. Pure.
 export function counts(list = []) {
   const out = Object.fromEntries(HUBS.map((h) => [h.key, { active: 0, coming: 0, 'at-yard': 0, out: 0, completed: 0, cancelled: 0 }]));
@@ -344,7 +376,7 @@ export function initYardReleases(app, { requireAuth, db, getBoard, trailerHubs =
     const st = (await db.get(KEY, {})) || {};
     const trips = items || (((await getBoard(site)) || {}).trips || []);
     const list = buildReleases({ sheets: st, items: trips, trailerHubs: await trailerHubs().catch(() => ({})), plan: (await db.get(`taPlanSheet:${SITE}`, {})) || {},
-      history: (await db.get(HISTORY, {})) || {}, finished: (await db.get(`taFinished:${site}`, {})) || {}, assignments: (await db.get(ASSIGN, {})) || {}, fleet: await fleetStore(), now: now() });
+      history: (await db.get(HISTORY, {})) || {}, finished: (await db.get(`taFinished:${site}`, {})) || {}, assignments: (await db.get(ASSIGN, {})) || {}, fleet: await fleetStore(), resched: (await db.get(RESCHED, {})) || {}, moves: (await db.get(MOVES, {})) || {}, now: now() });
     return { list, readAt: st.readAt || null, error: st.error || null };
   }
   let lastKept = 0;
@@ -400,6 +432,36 @@ export function initYardReleases(app, { requireAuth, db, getBoard, trailerHubs =
         const m = await message(rel, d, false); const c = await cellOf(d.code);
         res.json({ text: m.text, hasForm: m.hasForm, formSent: m.formSent, phone: c.phone, optedOut: c.optedOut });
       } catch (e) { res.status(502).json({ error: e.message }); }
+    });
+    // move a release to the other yard (Miami ⇄ Central Florida): { id, hub } — hub null puts it back where the sheet has it
+    app.post('/truckmate/releases/move', requireAuth, async (req, res) => {
+      if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+      const b = req.body || {}; const id = String(b.id || '');
+      const who = (req.user && (req.user.name || req.user.email)) || 'dispatch';
+      const hub = b.hub ? String(b.hub).toUpperCase() : null;
+      if (!id) return res.status(400).json({ error: 'Which release?' });
+      if (hub && !HUBS.some((h) => h.key === hub)) return res.status(400).json({ error: 'Pick a yard.' });
+      await db.update(MOVES, (cur) => { const c = { ...(cur || {}) }; if (hub) c[id] = { hub, by: who, at: new Date(now()).toISOString() }; else delete c[id]; return c; }, {});
+      // a driver picked for the old yard isn't on the new yard's list: the pick is cleared (the new yard picks its own)
+      if (hub) await db.update(ASSIGN, (cur) => { const c = { ...(cur || {}) }; if (c[id] && !localsFor(hub, {}).some((d) => d.code === c[id].code)) delete c[id]; return c; }, {});
+      const rel = (await current()).list.find((r) => r.id === id);
+      if (log && rel && rel.trip) await log(SITE, rel.trip, { type: 'note', kind: 'release-move', text: hub ? `Release moved to the ${hubName(hub)} yard` : 'Release put back on the yard the sheet has it', by: who }).catch(() => {});
+      res.json({ ok: true, release: rel || null });
+    });
+    // a new redelivery date / time (the old one passed): { id, date: 'YYYY-MM-DD', time: 'HH:MM' | '', note } — date null clears it
+    app.post('/truckmate/releases/reschedule', requireAuth, async (req, res) => {
+      if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+      const b = req.body || {}; const id = String(b.id || '');
+      const who = (req.user && (req.user.name || req.user.email)) || 'dispatch';
+      if (!id) return res.status(400).json({ error: 'Which release?' });
+      if (!b.date) { await db.update(RESCHED, (cur) => { const c = { ...(cur || {}) }; delete c[id]; return c; }, {}); return res.json({ ok: true, cleared: true }); }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(b.date))) return res.status(400).json({ error: 'Pick a date.' });
+      if (b.time && !/^\d{2}:\d{2}$/.test(String(b.time))) return res.status(400).json({ error: 'That time doesn\'t look right.' });
+      const rec = { date: String(b.date), time: b.time ? String(b.time) : null, note: S(b.note).slice(0, 200) || null, by: who, at: new Date(now()).toISOString() };
+      await db.update(RESCHED, (cur) => ({ ...(cur || {}), [id]: rec }), {});
+      const rel = (await current()).list.find((r) => r.id === id);
+      if (log && rel && rel.trip) await log(SITE, rel.trip, { type: 'note', kind: 'release-reschedule', text: `Redelivery rescheduled to ${rec.date}${rec.time ? ` ${rec.time}` : ''}${rec.note ? ` — ${rec.note}` : ''}`, by: who }).catch(() => {});
+      res.json({ ok: true, release: rel || null });
     });
     // assign a local driver (manual — it stays over what the sheet says); send: also text them the load and the release form
     app.post('/truckmate/releases/assign', requireAuth, async (req, res) => {
