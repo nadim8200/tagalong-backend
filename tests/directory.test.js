@@ -156,3 +156,11 @@ test('employees one at a time: add, edit, erase; a manager only adds, erases and
   await go(erase, { user: {}, params: { id } }); assert.equal(code, 404);
   assert.equal((await db.get('taStaffErased', []))[0].by, 'Val');
 });
+
+test('a possessive still finds the person: "whats effies extension" → Effie (Nov 19)', async () => {
+  const { findStaff } = await import('../directory.js');
+  const people = [{ name: 'Effie Afek', department: 'Billing', ext: '206' }, { name: 'Rosa Ross', department: 'Dispatch' }];
+  assert.deepEqual(findStaff(people, 'effies').map((p) => p.name), ['Effie Afek']);
+  assert.deepEqual(findStaff(people, "effie's extension").map((p) => p.name), ['Effie Afek']);
+  assert.deepEqual(findStaff(people, 'ross').map((p) => p.name), ['Rosa Ross']);
+});

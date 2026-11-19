@@ -23,7 +23,8 @@ export const publicView = (p, main = MAIN_NUMBER) => ({ name: p.name, department
 export function findStaff(people, query, max = 6) {
   const q = fold(query);
   if (q.length < 2) return [];
-  const words = q.split(' ').filter((w) => w.length > 1);
+  // "Effies" / "Effie's" (said or typed as a possessive) still finds Effie (Nov 19)
+  const words = q.split(' ').filter((w) => w.length > 1).map((w) => (w.length > 4 && /S$/.test(w) && people.some((p) => fold(p.name).split(' ').includes(w.slice(0, -1))) ? w.slice(0, -1) : w));
   const act = people.filter((p) => p.active !== false);
   const full = act.filter((p) => fold(p.name) === q || (words.length >= 2 && words.every((w) => fold(p.name).split(' ').some((x) => x.startsWith(w)))));
   if (full.length) return full.slice(0, max);
