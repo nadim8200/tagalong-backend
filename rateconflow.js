@@ -172,13 +172,21 @@ export function initRateConFlow({ db, docs = null, sendMail, recipients, saveOnL
       const kind = kindOf({ subject: email.subject, text: email.text, rc: rec, filename: rec.filename }, earlier);
       if (kind === 'new' && earlier) continue;   // the same rate con again
       const entry = { id: `rc${now().toString(36)}${i}`, at: new Date(now()).toISOString(), kind, by: email.from.name || email.from.address, emailId: email.id, subject: String(email.subject || '').slice(0, 200), trip: namedTrip, seenTrips: items.filter((x) => [digits(tripOf(x).powerUnit), digits(tripOf(x).trailer)].some((v) => v && (v === digits(rc.truck) || v === digits(rc.trailer)))).map(tripNo), pendingId: e.pendingId || null, rc, docIds: (rec.docIds || []).slice(0, 6), status: kind === 'new' ? 'waiting' : 'sending', tries: 0 };
+      // already in TruckMate: the rate con carries our B# barcode sticker, or it was filed straight onto a trip on the board —
+      // Inbound doesn't need to enter it (Nov 18, staff: "all those loads already in system and dispatched … just for Jarvis to file it")
+      const inSystem = rec.fbfBillNumber || rec.stickerBill ? `B# ${rec.fbfBillNumber || rec.stickerBill} on the rate con` : e.trip ? `on trip ${e.trip}` : null;
+      if (inSystem) entry.inSystem = inSystem;
       fresh.push(entry);
       if (kind !== 'new') changed.push({ entry, earlier });
     }
     if (!fresh.length) return { added: 0 };
     await put(site, (l) => [...fresh, ...l]);
-    const newOnes = fresh.filter((x) => x.kind === 'new');
-    if (newOnes.length && !alreadyWithTeam) {
+    const newOnes = fresh.filter((x) => x.kind === 'new' && !x.inSystem);   // only the ones still to be entered go to Inbound
+    // the day's batch (one scan of many rate cons, from Gus or Rafael): a record of loads already worked on — filed, never sent
+    // to Inbound as new loads to enter (Nov 18)
+    const dayBatch = !!email.rcBatch || entries.length >= 4;
+    if (dayBatch) await put(site, (l) => l.map((x) => (fresh.some((n) => n.id === x.id) ? { ...x, dayBatch: true } : x)));
+    if (newOnes.length && !alreadyWithTeam && !dayBatch) {
       try {
         const to = await recipients('ratecon_inbound');
         const { attachments, left } = await files(site, newOnes);

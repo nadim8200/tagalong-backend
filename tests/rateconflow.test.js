@@ -160,3 +160,22 @@ test('a misread trip or bill never reaches Accounting: Traffic Tech Riviera Beac
   const withRef = { ...redwood, freightBills: [{ billNumber: 'B1', referenceNumber: 'LDS15583376' }] };
   assert.equal(findLoad({ rc, trip: '626282' }, [withRef]).by, 'trip 626282', 'the load number settles it');
 });
+
+test('a rate con with our B# barcode (or filed straight onto a trip) is already in the system: filed, no "new rate con" email to Inbound (Nov 18)', async () => {
+  const h = flow({ p1: { ...REC, fbfBillNumber: 'B181012' }, p2: { ...REC, loadNumber: '806370', stickerBill: 'B181024' }, p3: { ...REC, loadNumber: '574189230' } });
+  await h.f.received('s', { email, entries: [{ pendingId: 'p1' }, { pendingId: 'p2' }] });
+  assert.equal(h.mails.length, 0, 'all already in TruckMate');
+  const list = (await h.db.get('taRateConFlow:s', { list: [] })).list;
+  assert.deepEqual(list.map((x) => x.inSystem).sort(), ['B# B181012 on the rate con', 'B# B181024 on the rate con']);
+  await h.f.received('s', { email: { ...email, id: 'e2' }, entries: [{ pendingId: 'p3' }] });
+  assert.equal(h.mails.length, 1, 'the one with no B# still goes to Inbound to enter');
+});
+
+test('the day\'s batch (one scan of many rate cons) is a record of loads already worked on: filed, never sent to Inbound — even pages with no readable B#', async () => {
+  const h = flow({ p1: { ...REC, loadNumber: '1001' }, p2: { ...REC, loadNumber: '1002' }, p3: { ...REC, loadNumber: '1003' }, p4: { ...REC, loadNumber: '1004' } });
+  await h.f.received('s', { email: { ...email, rcBatch: true, subject: 'TUESDAYS RATE CONS' }, entries: [{ pendingId: 'p1' }, { pendingId: 'p2' }] });
+  await h.f.received('s', { email: { ...email, id: 'e3' }, entries: [{ pendingId: 'p3' }, { pendingId: 'p4' }, { pendingId: 'p1' }, { pendingId: 'p2' }] });
+  assert.equal(h.mails.length, 0);
+  const list = (await h.db.get('taRateConFlow:s', { list: [] })).list;
+  assert.ok(list.length >= 2 && list.every((x) => x.dayBatch));
+});
