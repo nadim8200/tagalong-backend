@@ -184,7 +184,8 @@ export function initRateConFlow({ db, docs = null, sendMail, recipients, saveOnL
     const newOnes = fresh.filter((x) => x.kind === 'new' && !x.inSystem);   // only the ones still to be entered go to Inbound
     // the day's batch (one scan of many rate cons, from Gus or Rafael): a record of loads already worked on — filed, never sent
     // to Inbound as new loads to enter (Nov 18)
-    const dayBatch = !!email.rcBatch || entries.length >= 4;
+    // (a multi-page PDF of ONE load is not one — Gus scans single rate cons as several pages too)
+    const dayBatch = entries.length >= 4 || /\bRATE\s*CONS?\b|\bBATCH\b|FOR YOUR RECORDS/i.test(String(email.subject || ''));
     if (dayBatch) await put(site, (l) => l.map((x) => (fresh.some((n) => n.id === x.id) ? { ...x, dayBatch: true } : x)));
     if (newOnes.length && !alreadyWithTeam && !dayBatch) {
       try {

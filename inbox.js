@@ -622,7 +622,8 @@ export function initInbox(app, { ocLoads = null, requireAuth, db, stopReview = n
       email.toJarvis = (m.toRecipients || []).some((r) => String((r && r.emailAddress && r.emailAddress.address) || '').toLowerCase() === String(mailConfig(env).from || '').toLowerCase());
       email.rcBatch = !isPacketEmail(email.subject, attachments) && isRateConBatch(from.address, email.subject, text, attachments, env);
       // Gus's scanner puts a whole batch in one PDF: more than one page is read as a batch, page by page, never as one rate con
-      if (!email.rcBatch && !isPacketEmail(email.subject, attachments) && NEXT_LOAD_SENDERS(env).includes(from.address.toLowerCase()) && attachments.length === 1 && /pdf/i.test(attachments[0].contentType || '')) {
+      // (not paperwork: a POD / BOL / lumper receipt scan from the same people is never a rate con batch — "POD M5063280", Nov 18)
+      if (!email.rcBatch && !isPacketEmail(email.subject, attachments) && !/\b(POD|BOL|LUMPER|RECEIPTS?|SCALE TICKET|INVOICE|PROOF OF DELIVERY)\b/i.test(email.subject || '') && NEXT_LOAD_SENDERS(env).includes(from.address.toLowerCase()) && attachments.length === 1 && /pdf/i.test(attachments[0].contentType || '')) {
         try { email.rcBatch = (await PDFDocument.load(Buffer.from(attachments[0].bytes, 'base64'), { ignoreEncryption: true })).getPageCount() > 1; } catch { /* read it as usual */ } // eslint-disable-line no-await-in-loop
       }
       email.packet = isPacketEmail(email.subject, attachments) || email.rcBatch;

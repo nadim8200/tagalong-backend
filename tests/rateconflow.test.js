@@ -174,8 +174,16 @@ test('a rate con with our B# barcode (or filed straight onto a trip) is already 
 test('the day\'s batch (one scan of many rate cons) is a record of loads already worked on: filed, never sent to Inbound — even pages with no readable B#', async () => {
   const h = flow({ p1: { ...REC, loadNumber: '1001' }, p2: { ...REC, loadNumber: '1002' }, p3: { ...REC, loadNumber: '1003' }, p4: { ...REC, loadNumber: '1004' } });
   await h.f.received('s', { email: { ...email, rcBatch: true, subject: 'TUESDAYS RATE CONS' }, entries: [{ pendingId: 'p1' }, { pendingId: 'p2' }] });
+  await h.f.received('s', { email: { ...email, id: 'e9', rcBatch: true, subject: 'for your records ' }, entries: [{ pendingId: 'p3' }] });
   await h.f.received('s', { email: { ...email, id: 'e3' }, entries: [{ pendingId: 'p3' }, { pendingId: 'p4' }, { pendingId: 'p1' }, { pendingId: 'p2' }] });
   assert.equal(h.mails.length, 0);
   const list = (await h.db.get('taRateConFlow:s', { list: [] })).list;
   assert.ok(list.length >= 2 && list.every((x) => x.dayBatch));
+});
+
+
+test('one load\'s rate con scanned as several pages (Gus: "MOELLER LOAD 5074034 VA TO FL") is not the day\'s batch: still goes to Inbound to enter', async () => {
+  const h = flow({ p1: { ...REC, loadNumber: '5074034' } });
+  await h.f.received('s', { email: { ...email, rcBatch: true, subject: 'MOELLER LOAD 5074034 VA TO FL TR 724 TL 2050' }, entries: [{ pendingId: 'p1' }] });
+  assert.equal(h.mails.length, 1);
 });
