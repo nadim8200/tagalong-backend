@@ -796,7 +796,24 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
   // ---- voice: speech → text for phones / browsers without built-in speech recognition ----
   // The phone records a short clip; it's transcribed here (OpenAI, key set in Render) and
   // never stored. Browsers that recognize speech themselves don't send audio at all.
-  app.get('/jarvis/voice', requireAuth, (req, res) => res.json({ serverStt: !!env.OPENAI_API_KEY }));
+  app.get('/jarvis/voice', requireAuth, (req, res) => res.json({ serverStt: !!env.OPENAI_API_KEY, tts: !!env.OPENAI_API_KEY }));
+  // ---- voice: Jarvis's own voice in Ask Jarvis (Nov 19) — a natural OpenAI voice instead of the browser's robotic one.
+  // Text → mp3, never stored. Voice / style can be changed in Render (JARVIS_VOICE, JARVIS_VOICE_STYLE).
+  app.post('/jarvis/speak', requireAuth, async (req, res) => {
+    if (!env.OPENAI_API_KEY) return res.status(503).json({ error: 'Jarvis\'s voice needs OPENAI_API_KEY in Render.' });
+    const b = req.body || {};
+    const text = String(b.text || '').trim().slice(0, 1500);
+    if (!text) return res.status(400).json({ error: 'Nothing to say.' });
+    const es = /^es/i.test(String(b.lang || ''));
+    const style = env.JARVIS_VOICE_STYLE || 'Jarvis, an AI dispatcher: calm, composed and quietly confident, with a crisp, polished delivery and a light British accent. Natural pace, warm but efficient — never robotic.';
+    try {
+      const r = await fetchFn('https://api.openai.com/v1/audio/speech', { method: 'POST', headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: env.TTS_MODEL || 'gpt-4o-mini-tts', voice: env.JARVIS_VOICE || 'onyx', input: text, response_format: 'mp3', instructions: es ? `${style} Speak natural Latin American Spanish.` : style }) });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); return res.status(502).json({ error: (j.error && j.error.message) || `Voice failed (${r.status})` }); }
+      res.set('content-type', 'audio/mpeg');
+      return res.send(Buffer.from(await r.arrayBuffer()));
+    } catch (e) { return res.status(502).json({ error: e.message }); }
+  });
   app.post('/jarvis/transcribe', requireAuth, async (req, res) => {
     if (!env.OPENAI_API_KEY) return res.status(503).json({ error: 'Voice typing on this device needs OPENAI_API_KEY in Render. (Chrome, Edge and Safari can do it without it.)' });
     const b = req.body || {};

@@ -206,3 +206,21 @@ test('client lookup carries the customer\'s geofence; load details carry committ
   const out = h.claude.sent[3].messages.at(-1).content[0].content;
   assert.match(out, /committedTimes/); assert.match(out, /10\/24 06:34 AM/); assert.match(out, /"minutesThere":40/);
 });
+
+test('Jarvis\'s voice: text → a natural OpenAI voice (mp3), only with a key; Spanish asks for Latin American Spanish', async () => {
+  const routes = {}; const seen = [];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); } };
+  const mk = (env) => { Object.keys(routes).forEach((k) => delete routes[k]); initJarvisChat(app, { requireAuth: (q, r, n) => n(), db: memDb(), getBoard: async () => ({ trips: [] }), env, fetchFn: async (url, opts) => { seen.push({ url, body: JSON.parse(opts.body) }); return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }; } }); };
+  const call = async (key, body) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.json = j; }, set(k, v) { out[k] = v; }, send(b) { out.sent = b; } }; await routes[key]({ body, user: { id: 7 } }, res); return out; };
+  mk({});
+  assert.equal((await call('GET /jarvis/voice', {})).json.tts, false);
+  assert.equal((await call('POST /jarvis/speak', { text: 'hi' })).status, 503);
+  mk({ OPENAI_API_KEY: 'sk-test' });
+  assert.equal((await call('GET /jarvis/voice', {})).json.tts, true);
+  const r = await call('POST /jarvis/speak', { text: 'Good afternoon, Nadim. Jarvis here — what can I do for you?', lang: 'en-US' });
+  assert.equal(r['content-type'], 'audio/mpeg'); assert.equal(r.sent.length, 3);
+  assert.match(seen[0].url, /audio\/speech/); assert.equal(seen[0].body.voice, 'onyx'); assert.match(seen[0].body.instructions, /calm, composed/);
+  await call('POST /jarvis/speak', { text: 'Buenas tardes', lang: 'es-US' });
+  assert.match(seen[1].body.instructions, /Latin American Spanish/);
+  assert.equal((await call('POST /jarvis/speak', { text: '  ' })).status, 400);
+});
