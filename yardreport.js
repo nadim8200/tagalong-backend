@@ -4,6 +4,7 @@
 // coming down to Florida (loads delivering in FL, with truck, trailer, where they are and the ETA), so the yard manager
 // can plan; and trailers parked away from the hubs for 2+ days (Thermo King positions). Read only; no ARTIS.
 // ---------------------------------------------------------------
+import { yardForCity } from './flzones.js';
 import { MIAMI_YARDS, haversineMi, brokerLoad } from './watchtower.js';
 import { KNOWN_YARDS } from './loadsheet.js';
 import { geocodePlace } from './meetwatch.js';
@@ -27,6 +28,8 @@ const tripNo = (it) => String(tripOf(it).tripNumber || '');
 export const HUB_NAMES = { MIAMI: 'Miami', VENTURA: 'Ventura', MEMPHIS: 'Memphis', BARTOW: 'Central Florida (Bartow)' };
 // South Florida: the cities trucks deliver around the Miami yard (Miami-Dade, Broward, Palm Beach). Pure.
 const SOUTH_FL = /\b(MIAMI|MEDLEY|DORAL|HIALEAH|OPA[- ]?LOCKA|HOMESTEAD|FLORIDA CITY|SWEETWATER|MIAMI GARDENS|MIAMI LAKES|NORTH MIAMI|AVENTURA|FORT LAUDERDALE|FT LAUDERDALE|HOLLYWOOD|PEMBROKE|MIRAMAR|DAVIE|PLANTATION|SUNRISE|WESTON|POMPANO|DEERFIELD|CORAL SPRINGS|MARGATE|TAMARAC|LAUDERHILL|LAUDERDALE|BOCA RATON|DELRAY|BOYNTON|LAKE WORTH|WEST PALM|PALM BEACH|JUPITER|WELLINGTON|ROYAL PALM|LOXAHATCHEE|RIVIERA BEACH)\b/i;
+// the Miami yard's zone (flzones.js: Naples down, and up the east coast through West Palm); the list above only for cities neither zone names
+const isSouthFl = (d) => { const y = yardForCity(d); return y ? y === 'MIAMI' : SOUTH_FL.test(String(d || '')); };
 
 // The hub a load is headed to, from its destination (the last delivery's place, else TruckMate's destination):
 // South Florida → Miami, the rest of Florida → Central Florida (Bartow), Memphis area (TN / MS / AR) → Memphis,
@@ -37,7 +40,7 @@ export function hubForDest(item) {
   const last = bills.map((b) => b && (b.endZoneDescription || b.endZone)).filter(Boolean).pop();
   const d = String(last || t.destZoneDesc || t.descZoneDesc || '').toUpperCase();
   const st = (d.match(/,\s*([A-Z]{2})\b/) || [])[1] || null;
-  if (st === 'FL') return SOUTH_FL.test(d) ? 'MIAMI' : 'BARTOW';
+  if (st === 'FL') return isSouthFl(d) ? 'MIAMI' : 'BARTOW';
   if (st === 'TN' || st === 'MS' || st === 'AR') return 'MEMPHIS';
   if (st === 'CA') return 'VENTURA';
   return null;
@@ -113,7 +116,7 @@ export function yardReport({ units = {}, items = [], etas = {}, points = {}, now
       const t = tripOf(it); const s = it._samsara || {}; const e = (etas[tripNo(it)] || {}).stops || []; const last = e[e.length - 1] || null;
       const tk = it._tkApi || null;
       return { trip: tripNo(it), status: t.status || null, truck: String(t.powerUnit || '').trim() || null, trailer: String(t.trailer || '').trim() || null, from: t.origZoneDesc || null, to: t.destZoneDesc || null,
-        southFlorida: SOUTH_FL.test(String(t.destZoneDesc || '')), driver: (s.driver1Info && s.driver1Info.name) || s.driver1 || (it._oc && it._oc.driverName) || null,
+        southFlorida: isSouthFl(t.destZoneDesc), driver: (s.driver1Info && s.driver1Info.name) || s.driver1 || (it._oc && it._oc.driverName) || null,
         where: s.location || (tk && tk.location) || null, gpsAt: s.gpsAt || (tk && tk.at) || null, mph: s.speedMph ?? null,
         milesLeft: last && last.miles != null ? Math.round(Number(last.miles)) : null, etaMs: last && last.etaMs ? last.etaMs : null,
         reeferF: tk ? tk.returnF : null, setF: tk ? tk.setF : null, supplyF: tk ? (tk.supplyF ?? null) : null, broker: /^B/i.test(String(((it.freightBills || [])[0] || {}).billNumber || '')) };
@@ -155,7 +158,7 @@ export function truckReport({ idx = {}, items = [], etas = {}, points = {}, now 
     const row = {
       unit, drivers, crew: drivers.length >= 2 ? 'Team' : drivers.length === 1 ? 'Solo' : 'No driver',
       trip: it ? tripNo(it) : null, status: t ? t.status || null : null, from: t ? t.origZoneDesc || null : null, to: t ? t.destZoneDesc || null : null,
-      southFlorida: !!(t && SOUTH_FL.test(String(t.destZoneDesc || ''))), toFlorida: !!(t && /,\s*FL\b/i.test(String(t.destZoneDesc || ''))),
+      southFlorida: !!(t && isSouthFl(t.destZoneDesc)), toFlorida: !!(t && /,\s*FL\b/i.test(String(t.destZoneDesc || ''))),
       where: (g.reverseGeo && g.reverseGeo.formattedLocation) || null, lat: g.latitude ?? null, lng: g.longitude ?? null,
       mph: g.speedMilesPerHour != null ? Math.round(g.speedMilesPerHour) : null, gpsAt: g.time || null,
       etaMs: last && last.etaMs ? last.etaMs : null, milesLeft: last && last.miles != null ? Math.round(Number(last.miles)) : null,

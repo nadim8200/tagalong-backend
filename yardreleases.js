@@ -20,6 +20,7 @@ import { tzOf, zoneName } from './localtime.js';
 import { haversineMi } from './watchtower.js';
 import { randomBytes } from 'crypto';
 import { releasePdf, cleanForm } from './release.js';
+import { yardForCity } from './flzones.js';
 
 const SITE = 'florida-beauty';
 const ASSIGN = `taReleaseAssign:${SITE}`;   // release id → { code, name, unit, by, at, sent: { at, to, result } } — a manual pick wins over the sheet
@@ -321,14 +322,7 @@ export function driverText(rel, form = null, link = null, rcNotes = []) {
 // Which local yard usually redelivers to a Florida city: South Florida → Miami; the middle of the state → Central Florida. Only
 // clear cases (a city in neither list says nothing). Pure.
 const hubName = (h) => (HUBS.find((x) => x.key === h) || {}).name || h;
-const SOUTH_FL = /\b(MIAMI|MEDLEY|DORAL|HIALEAH|OPA[- ]?LOCKA|HOMESTEAD|FLORIDA CITY|SWEETWATER|AVENTURA|FORT LAUDERDALE|FT LAUDERDALE|HOLLYWOOD|PEMBROKE|MIRAMAR|DAVIE|PLANTATION|SUNRISE|WESTON|POMPANO|DEERFIELD|CORAL SPRINGS|MARGATE|TAMARAC|LAUDERHILL|LAUDERDALE|OAKLAND PARK|DFB|BOCA RATON|DELRAY|BOYNTON|LAKE WORTH|WEST PALM|PALM BEACH|JUPITER|RIVIERA BEACH)\b/i;
-const CENTRAL_FL = /\b(WINTER HAVEN|LAKELAND|BARTOW|AUBURNDALE|HAINES CITY|LAKE WALES|DAVENPORT|PLANT CITY|MULBERRY|ORLANDO|KISSIMMEE|SANFORD|APOPKA|OCOEE|TAMPA|BRANDON|CLEARWATER|ST\.? PETERSBURG|SAINT PETERSBURG|SARASOTA|BRADENTON|PALMETTO|OCALA|LEESBURG|GAINESVILLE|DAYTONA|JACKSONVILLE|MACCLENNY|PIERSON|DELAND)\b/i;
-export function hubForCity(dest) {
-  const d = String(dest || '');
-  if (CENTRAL_FL.test(d)) return 'BARTOW';
-  if (SOUTH_FL.test(d)) return 'MIAMI';
-  return null;
-}
+export const hubForCity = (dest) => yardForCity(dest);   // flzones.js: Miami = Naples down + the east coast through West Palm; Central Florida = Elkton to Fort Myers
 
 // A new redelivery date set in the console replaces the sheet's appointment (kept as apptWas). Pure.
 export function withResched(rel, rs) {

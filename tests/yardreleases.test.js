@@ -215,7 +215,7 @@ test('reschedule: a new redelivery date replaces the passed one (the sheet\'s ke
 
 test('wrong yard: a Miami-tab delivery in Winter Haven is flagged for Central Florida; moving it puts it there (its picked driver cleared when not on that list)', async () => {
   const { hubForCity, initYardReleases } = await import('../yardreleases.js');
-  assert.equal(hubForCity('WINTER HAVEN, FL'), 'BARTOW'); assert.equal(hubForCity('POMPANO BEACH, FL'), 'MIAMI'); assert.equal(hubForCity('PORT SAINT LUCIE, FL'), null);
+  assert.equal(hubForCity('WINTER HAVEN, FL'), 'BARTOW'); assert.equal(hubForCity('POMPANO BEACH, FL'), 'MIAMI'); assert.equal(hubForCity('PORT SAINT LUCIE, FL'), 'BARTOW');
   const m = new Map();
   const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
   const rows = [MIAMI[0], ['', '', '', '', '', '', '11/15/2026'], ['', 'HERLAN QUINTANA', '', '', '7298', 'B180900', '627000', '-10F', '8:00 PM', 'WALMART', 'WINTER HAVEN', '', '']];
