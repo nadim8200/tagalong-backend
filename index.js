@@ -83,6 +83,7 @@ import { initDvr } from './dvr.js';
 import { initThermoKing } from './thermoking.js';
 import { initYardReport } from './yardreport.js';
 import { initYardReleases } from './yardreleases.js';
+import { initDriveTime } from './drivetime.js';
 import { initTrailerWatch } from './trailerwatch.js';
 import { initRelease } from './release.js';
 import { initPickupAsk } from './pickupask.js';
@@ -1489,6 +1490,8 @@ const trailerWatch = initTrailerWatch({ db, sendMail: (m) => sendMail(m, { env: 
 const yardReport = initYardReport(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), getFleet: () => truckmate.refreshFleet('florida-beauty'), onTrailers: (u, i, p) => trailerWatch.check(u, i, p) });
 // Yard releases: Gus's MIAMI YARD / BARTOW YARD tabs + release forms + trailer drops → Yards → Releases, and a marker on each card
 yardReleases = initYardReleases(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), trailerHubs: () => yardReport.trailerHubs(), formFor: (t) => (releaseApi ? releaseApi.formFor(t) : null), roster: () => driverAuth.roster(), sendSms: (m) => rc.sendSms('__shared', m), log: (...a) => comms.log(...a), env: process.env });
+// Driving time on the truck card: a driver's last 24 h of ELD duty status, read when dispatch opens it
+initDriveTime(app, { requireAuth: requireDispatch, getBoard: (site) => truckmate.buildBoard(site), env: process.env });
 // Driver Release Form: the Release button on a load card → the form filled from the load → emailed as a PDF + the rate con
 releaseApi = initRelease(app, { requireAuth: requireDispatch, db, docs, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), log: (...a) => comms.log(...a), trainingActive: () => training.active(), hubOf: (it) => yardReport.hubOf(it) });
 // LTL run done in the app + truck rolling again → "Rolling to your next pickup?" in the driver app; the answer emails dispatch
