@@ -224,3 +224,45 @@ test('Jarvis\'s voice: text → a natural OpenAI voice (mp3), only with a key; S
   assert.match(seen[1].body.instructions, /Latin American Spanish/);
   assert.equal((await call('POST /jarvis/speak', { text: '  ' })).status, 400);
 });
+
+test('Jarvis sees everything new (Nov 19): yard releases, closed loads and who closed them, entered time, the driver\'s "done" answer, the 24-h driving log', async () => {
+  const { releaseRows, closedRows } = await import('../jarvischat.js');
+  const NOW = Date.parse('2026-11-19T15:00:00Z');
+  const REL = { trip: { tripNumber: '627164', powerUnit: '2019', trailer: '2022', status: 'SPTLD', destZoneDesc: 'PORT SAINT LUCIE, FL, 34987' }, freightBills: [{ billNumber: 'B180987', billToName: 'COSTCO' }],
+    _yardRelease: { hub: 'MIAMI', yard: 'Miami', stage: 'at-yard', review: true, localDriver: 'JULIO GUTIERREZ', localTruck: '2019', appt: { date: '2026-11-19', time: '05:30', tz: 'America/New_York', raw: '5:30 AM' }, sourceStatus: 'A', sources: ['Miami yard sheet'] } };
+  const [r] = releaseRows([REL, { trip: { tripNumber: '1' } }], {}, NOW);
+  assert.deepEqual([r.trip, r.yard, r.stage, r.late, r.localDriver, r.customer, r.redelivery, r.needsCheck], ['627164', 'Miami', 'at the yard', true, 'JULIO GUTIERREZ', 'COSTCO', '2026-11-19 5:30 AM', true]);
+  assert.equal(releaseRows([REL], { yard: 'bartow' }, NOW).length, 0);
+  const delivered = { items: [
+    { tripNumber: '625241', deliveredAt: '2026-11-19T14:00:00Z', reason: 'taken off the board (not delivered) by Ana — cancelled by the broker', billNumbers: ['B180538'] },
+    { tripNumber: '627168', deliveredAt: '2026-11-19T13:00:00Z', reason: 'completed in TruckMate — at the last consignee (ARRCONS), left the last delivery — WEST PALM BEACH (GPS), no TruckMate change for 27h' },
+    { tripNumber: '600000', deliveredAt: '2026-11-10T13:00:00Z' },
+  ] };
+  const rows = closedRows(delivered, { 625241: { by: 'Ana', removed: true } }, {}, NOW);
+  assert.deepEqual(rows.map((x) => [x.trip, x.how, x.by]), [['625241', 'taken off the board — not delivered', 'Ana'], ['627168', 'closed from TruckMate', null]]);
+  assert.equal(closedRows(delivered, {}, { trip: '600000' }, NOW)[0].how, 'closed from TruckMate');
+  // through the tools
+  const db = memDb();
+  await db.set('taTruckMateDelivered:florida-beauty', delivered);
+  await db.set('taDoneAsk:florida-beauty', { asks: { 627159: { askedAt: '2026-11-18T23:16:00Z', answer: { choice: 'no', text: 'still unloading', by: 'Carlos Rojas', at: '2026-11-18T23:30:00Z' } } } });
+  const GUESS = { trip: { tripNumber: '627159', powerUnit: '4566', status: 'ARRCONS' }, freightBills: [], _finishGuess: 'left the last delivery — POMPANO BEACH (GPS)', _times: { createdAt: '2026-11-13T21:53:53.000Z', createdBy: 'BBARCELO' } };
+  const app = { get: () => {}, post: () => {} };
+  const chat = initJarvisChat(app, { requireAuth: (q, rs, n) => n(), db, getBoard: async () => ({ trips: [JSON.parse(JSON.stringify(REL)), JSON.parse(JSON.stringify(GUESS)), { trip: { tripNumber: '627494', powerUnit: null } }], unclosed: [] }), env: { ANTHROPIC_API_KEY: 'k' } });
+  const c = { user: { id: 7, name: 'Rosa' }, did: [], proposed: [] };
+  const yr = await chat.runTool('yard_releases', { yard: 'miami' }, c);
+  assert.equal(yr.count, 1); assert.equal(yr.late, 1);
+  const cl = await chat.runTool('closed_loads', { trip: '625241' }, c);
+  assert.equal(cl.loads[0].how, 'taken off the board — not delivered');
+  assert.match((await chat.runTool('closed_loads', { trip: '627159' }, c)).note, /still on the active board/);
+  const sum = await chat.runTool('board_summary', {}, c);
+  assert.deepEqual([sum.waitingForTruck, sum.atTheYards, sum.probablyFinished], [1, 1, 1]);
+  const ld = await chat.runTool('load_details', { trip: '627159' }, c);
+  assert.deepEqual(ld.enteredInTruckMate, { at: 'Fri, Nov 13, 4:53 PM ET', by: 'BBARCELO' });
+  assert.equal(ld.finishCheck.driverAnswer.text, 'still unloading');
+  assert.equal(ld.finishCheck.driverAnswer.by, 'Carlos Rojas');
+  assert.equal((await chat.runTool('load_details', { trip: '627164' }, c)).yardRelease.localDriver, 'JULIO GUTIERREZ');
+  assert.match((await chat.runTool('driving_log', { truck: '4566' }, c)).note, /Samsara isn't connected|No ELD driver/);
+  // customers never get these
+  const cust = { ...c, customer: { id: 'x' } };
+  assert.equal((await chat.runTool('yard_releases', {}, cust)).error, 'Not available.');
+});

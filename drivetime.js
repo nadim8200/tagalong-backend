@@ -27,6 +27,17 @@ export function dayOf(logs = [], driverId, now = Date.now(), hours = 24) {
   return { from, to: now, segments, totals, lastDroveAt: lastDrive ? Math.min(lastDrive.to || now, now) : null, statusSince: since };
 }
 
+// One board load → each ELD driver's last 24 hours (also what Jarvis reads for "when did he last drive?"). →
+// { drivers: [...] } or { drivers: [], note }. Throws only when Samsara fails.
+export async function driveTimeFor(it, { env = process.env, logsFn = driverHosLogs, now = Date.now() } = {}) {
+  const s = (it && it._samsara) || {};
+  const crew = [[s.driver1, s.hos], [s.driver2, s.hos2]].filter(([, h]) => h && h.driverId);
+  const token = samsaraTokenFrom(env);
+  if (!crew.length || !token) return { drivers: [], note: !token ? 'Samsara isn\'t connected.' : 'No ELD driver on this truck in Samsara.' };
+  const logs = await logsFn(token, crew.map(([, h]) => h.driverId), new Date(now - 26 * HOUR).toISOString(), new Date(now).toISOString());
+  return { at: new Date(now).toISOString(), drivers: crew.map(([name, h]) => ({ name: name || h.driverName || null, driverId: h.driverId, ...dayOf(logs, h.driverId, now) })) };
+}
+
 export function initDriveTime(app, { requireAuth, getBoard, env = process.env, logsFn = driverHosLogs, now = () => Date.now() }) {
   const cache = new Map();   // trip → { at, out }
   app.get('/truckmate/drivetime/:trip', requireAuth, async (req, res) => {
@@ -36,13 +47,9 @@ export function initDriveTime(app, { requireAuth, getBoard, env = process.env, l
       if (hit && now() - hit.at < 5 * MIN) return res.json(hit.out);
       const it = (((await getBoard('florida-beauty')) || {}).trips || []).find((x) => String(tripOf(x).tripNumber) === trip);
       if (!it) return res.status(404).json({ error: 'That load isn\'t on the board.' });
-      const s = it._samsara || {};
-      const crew = [[s.driver1, s.hos], [s.driver2, s.hos2]].filter(([, h]) => h && h.driverId);
-      const token = samsaraTokenFrom(env);
-      if (!crew.length || !token) return res.json({ drivers: [], note: !token ? 'Samsara isn\'t connected.' : 'No ELD driver on this truck in Samsara.' });
       const t = now();
-      const logs = await logsFn(token, crew.map(([, h]) => h.driverId), new Date(t - 26 * HOUR).toISOString(), new Date(t).toISOString());
-      const out = { at: new Date(t).toISOString(), drivers: crew.map(([name, h]) => ({ name: name || h.driverName || null, driverId: h.driverId, ...dayOf(logs, h.driverId, t) })) };
+      const out = await driveTimeFor(it, { env, logsFn, now: t });
+      if (!out.drivers.length) return res.json(out);
       cache.set(trip, { at: t, out });
       res.json(out);
     } catch (e) { res.status(502).json({ error: `Samsara didn't answer: ${e.message}` }); }

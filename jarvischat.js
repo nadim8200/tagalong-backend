@@ -17,6 +17,8 @@
 import { stopsLeft } from './loadstops.js';
 import { randomBytes } from 'crypto';
 import { slimItem } from './assistant.js';
+import { driveTimeFor } from './drivetime.js';
+import { apptMs } from './yardreleases.js';
 import { findLoad, customerStops, customerView, isOcLoad, spokenName, nameScore } from './voice.js';
 import { contactsFor } from './statusmail.js';
 import { customerAnswer, loadAnswer } from './dispatchcards.js';
@@ -32,6 +34,39 @@ const API = 'https://api.anthropic.com/v1/messages';
 const MAX_STEPS = 8;
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
+
+// ---- what Jarvis can also see (Nov 19: "Jarvis has to be integrated with everything") ----------------------------
+const etStamp = (ms) => (ms ? new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET' : null);
+const unassignedLoad = (it) => !tripOf(it).powerUnit && !(it && (it._oc || it._ocEmail));
+const yardStage = (it) => !!(it && it._yardRelease && /^(at-yard|out|completed)$/.test(it._yardRelease.stage));
+// The Yards → Releases list from the board: loads at / coming to the Miami and Bartow yards for redelivery (Gus's yard
+// sheets + TruckMate + trailer GPS), the local driver on each, the redelivery time and whether it's past. Pure.
+export function releaseRows(all = [], { yard = '', stage = '' } = {}, now = Date.now()) {
+  const STAGE = { coming: 'coming to the yard', 'at-yard': 'at the yard', out: 'out for delivery', completed: 'delivered', cancelled: 'cancelled' };
+  return all.filter((it) => it && it._yardRelease).map((it) => {
+    const r = it._yardRelease; const t = tripOf(it);
+    const a = r.appt || {};
+    const due = apptMs(a.date ? a : null);
+    const bills = it.freightBills || [];
+    return {
+      trip: tripNo(it), yard: r.yard || r.hub, stage: STAGE[r.stage] || r.stage, needsCheck: !!r.review || undefined, sheetStatus: r.sourceStatus || null,
+      redelivery: a.date ? `${a.date}${a.raw ? ` ${a.raw}` : ''}` : null, late: !!(due && due < now && !/^(completed|cancelled)$/.test(r.stage)) || undefined,
+      localDriver: r.localDriver || null, localTruck: r.localTruck || null, trailer: t.trailer || null,
+      customer: (bills[0] && bills[0].billToName) || null, deliverTo: t.destZoneDesc || null, bills: bills.map((b) => b.billNumber).filter(Boolean), sources: r.sources || [],
+    };
+  }).filter((x) => (!yard || String(x.yard || '').toLowerCase().includes(String(yard).toLowerCase())) && (!stage || String(x.stage).includes(String(stage).toLowerCase())));
+}
+// Loads that left the board: who / what closed each one and why — TruckMate, Jarvis (facts), the driver in the app, a
+// dispatcher's Close (completed, or taken off the board as not delivered). Newest first. Pure.
+export function closedRows(delivered = {}, finished = {}, { trip = '', hours = 48 } = {}, now = Date.now()) {
+  const items = (delivered.items || []).filter((x) => (trip ? String(x.tripNumber) === String(trip) : now - Date.parse(x.deliveredAt || 0) <= hours * 3600000));
+  return items.map((x) => {
+    const f = finished[String(x.tripNumber)] || {};
+    const reason = x.reason || f.reason || 'TruckMate: delivered';
+    const how = /^taken off the board/i.test(reason) ? 'taken off the board — not delivered' : /^marked finished by/i.test(reason) ? 'closed by a dispatcher' : /driver/i.test(reason) ? 'the driver said it was delivered' : /^completed in TruckMate|TruckMate/i.test(reason) ? 'closed from TruckMate' : 'closed by Jarvis';
+    return { trip: String(x.tripNumber), closed: etStamp(Date.parse(x.deliveredAt)), how, reason, by: f.by || null, bills: x.billNumbers || [], destination: x.destinationZone || null, reopened: !!f.reopened || undefined, handled: !!x.acknowledged };
+  });
+}
 const newId = () => randomBytes(6).toString('hex');
 const unitKey = (u) => String(u == null ? '' : u).trim().toLowerCase().replace(/^0+(?=\d)/, '');
 const minsText = (m) => (m < 60 ? `${Math.round(m)} min` : `${Math.floor(m / 60)}h ${Math.round(m % 60)}m`);
@@ -114,6 +149,9 @@ export const TOOLS = [
   { name: 'miles', description: 'Mile calculator: driving miles between any two points — a truck (live GPS), a customer on a load, our Miami or Ventura hub, or any city / zip / address. A truck or trip with no "to" → miles to each stop it has left, leg by leg, with HOS-aware ETAs. Use for "how many miles from 2403 to its next stop?", "miles from Miami to Carbone Derry", "how far is Boston from Hartford?". STAFF ONLY.', input_schema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, truck: { type: 'string' }, trip: { type: 'string' } } } },
   { name: 'usual_arrival', description: 'STAFF ONLY. When our trucks usually get to an LTL customer (learned from past arrivals, or set). A REPLY TO A "Running late" / "Later still" EMAIL (Saray checks them): if they say it is correct / right / ok, change nothing and just thank them; if they say when it really gets there, SET it right away with the customer, city, hub (the "from Miami / Ventura" on the email) and outbound_weekday (the outbound date\'s weekday on the email) from that email, days_after_outbound from the day they name (Wednesday outbound → Friday = 2), time, trip and asked (their words) — no script, no confirmation question. Otherwise ONLY Nadim, Ronen or Saray may SET a delivery time ("add a delivery time for a customer"). Script — ask one at a time until you have all: 1) which customer (and the city if it has several places), 2) from which hub — Miami or Ventura, 3) what time it is set to get there and which day — the second or the third day after the outbound day, early morning, day or night (so 4 in the early morning = 4 AM; 8 at night = 8 PM). Then repeat it back ("Pyramid Oxnard, from Miami, 4 AM on the third day — Monday outbound gets there Thursday 4 AM") and only after they say yes call this with time + hub + days_after_outbound (second day = 2, third day = 3). When an LTL load\'s ETA runs 1 h 30 min past this time an alert goes out.', input_schema: { type: 'object', properties: { customer: { type: 'string' }, city: { type: 'string' }, state: { type: 'string', description: '2 letters' }, hub: { type: 'string', enum: ['Miami', 'Ventura'] }, time: { type: 'string', description: 'to SET: the local delivery time, e.g. 4 AM' }, days_after_outbound: { type: 'number', description: '2 = second day, 3 = third day after the outbound day' }, outbound_weekday: { type: 'string', description: 'Only when they say it applies to one outbound day, e.g. "Thursday outbounds get there Monday 4 AM" → Thursday (then days_after_outbound = 4). Leave out for every day.' }, trip: { type: 'string', description: 'The trip of the running-late email being answered, if any' }, asked: { type: 'string', description: 'What the person wrote, short (their own words)' } }, required: ['customer'] } },
   { name: 'stop_times', description: 'How long trucks took at their stops (customer geofence in → out): arrived, left, time there — for a trip, a truck and / or a customer, over the last few days; plus any truck at a stop right now and how long so far. Use for "how long was 734 at Direct Flowers?", "how long are trucks taking at Carbone?", "is 2403 still at the stop?". STAFF ONLY.', input_schema: { type: 'object', properties: { trip: { type: 'string' }, truck: { type: 'string' }, customer: { type: 'string' }, days: { type: 'number', description: '1–30, default 7' } } } },
+  { name: 'yard_releases', description: 'STAFF ONLY. The Yards → Releases list: loads at, or coming to, the Miami and Bartow (Central Florida) yards for redelivery to the customer — from Gus\'s yard sheets, TruckMate (spotted loaded) and the trailer GPS. Each has its stage (coming / at the yard / out for delivery / delivered / cancelled), the redelivery date and time, whether it\'s late, the local driver and truck, the customer, trailer and bills. Use for "what\'s at the Miami yard", "who is doing the Costco redelivery", "any late redeliveries".', input_schema: { type: 'object', properties: { yard: { type: 'string', description: 'miami or bartow (central florida) — empty for both' }, stage: { type: 'string', description: 'coming | at the yard | out | delivered | cancelled' } } } },
+  { name: 'closed_loads', description: 'STAFF ONLY. Loads that left the board (the Delivered tab): when, and who or what closed each one and why — TruckMate delivered/completed it, Jarvis closed it on facts, the driver answered "all delivered" in the app, or a dispatcher used Close (completed, or taken off the board as NOT delivered: cancelled, duplicate, old). For one trip, or the last hours. Use for "why did 627168 leave the board", "who closed 625241", "what was taken off the board today".', input_schema: { type: 'object', properties: { trip: { type: 'string' }, hours: { type: 'number', description: 'how far back, default 48' } } } },
+  { name: 'driving_log', description: 'STAFF ONLY. A truck\'s drivers\' last 24 hours of duty status from the Samsara ELD (the card\'s "Driving time"): time off duty / sleeper / driving / on duty, when each driver last drove, and since when they\'re in their current status. Use for "when did 2019 last drive", "how long has he been off duty", "did the team switch". For the clocks left (drive / shift / cycle) use truck_hours.', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck / unit number, or a driver name' } }, required: ['truck'] } },
   { name: 'truck_hours', description: 'Driving hours (hours of service) for a truck or driver: each driver\'s duty status, drive time left, shift (14-hr) left, 70-hr cycle left and when a break is due (Samsara ELD) — plus the truck\'s current load and where it is. Use for "how many hours does 2217 have", "can 2403 make it", "is the team rested".', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck / unit number, or a driver name' } }, required: ['truck'] } },
   { name: 'loads_to_place', description: 'A PLACE only (never a customer name — use customer_etas for those): every load on the board with a stop in a city / state (e.g. "Lombard, IL", "Chicago", "NJ") — trip, truck, customer at that stop, delivered or not, and the live ETA. Use for questions like "update on deliveries to Lombard IL".', input_schema: { type: 'object', properties: { place: { type: 'string' } }, required: ['place'] } },
   { name: 'update_email', description: 'EMAIL REPLIES ONLY: when the email asks where loads are / their status / ETAs, list the trips that answer it (and dispatch follow-ups). The reply is then built from live data in the standard delivery-update format — do not write the load details yourself.', input_schema: { type: 'object', properties: { customer: { type: 'string', description: 'Customer / receiver name the update is about (as on the loads), or the place' }, destination: { type: 'string', description: 'Delivery city / state if the question was about a place' }, trips: { type: 'array', items: { type: 'string' } }, followUps: { type: 'array', items: { type: 'object', properties: { issue: { type: 'string' }, next: { type: 'string' }, owner: { type: 'string' }, status: { type: 'string', enum: ['Pending', 'Completed'] } } } } }, required: ['trips'] } },
@@ -230,7 +268,7 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         const f = String(input.filter || '').toUpperCase();
         const rows = all.map((it) => { const t = tripOf(it); const tn = truckNow(it, w); return `${tripNo(it)} · ${t.status || ''} · truck ${t.powerUnit || '—'} trl ${t.trailer || '—'} · ${t.origZoneDesc || '—'} → ${t.destZoneDesc || '—'} · now ${tn.location || 'no GPS'} (${tn.gps}, ${tn.motion})${tn.nextStop ? ` · next ${tn.nextStop.stop} ETA ${tn.nextStop.eta}` : ''}${it._hold ? ` · HOLD: ${it._hold.note}` : ''}`; })
           .filter((r) => !f || r.toUpperCase().includes(f));
-        return { activeLoads: all.length, alerts: { critical: al.filter((a) => a.severity === 'critical').length, warning: al.filter((a) => a.severity !== 'critical').length }, notClosed: ((board && board.unclosed) || []).length, loads: rows.slice(0, 80), more: Math.max(0, rows.length - 80) };
+        return { activeLoads: all.length, alerts: { critical: al.filter((a) => a.severity === 'critical').length, warning: al.filter((a) => a.severity !== 'critical').length }, notClosed: ((board && board.unclosed) || []).length, waitingForTruck: all.filter((it) => unassignedLoad(it) && !yardStage(it)).length, atTheYards: all.filter(yardStage).length, probablyFinished: all.filter((it) => it._finishGuess).length, loads: rows.slice(0, 80), more: Math.max(0, rows.length - 80) };
       }
       case 'find_load': {
         const q = String(input.query || '');
@@ -445,6 +483,28 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         const r = await stopTimes.query({ trip: input.trip, truck: input.truck, customer: input.customer, days: input.days, fits });
         return { ...r, note: r.count || r.atStopNow.length ? 'Time there = from the truck entering the customer\'s geofence to leaving it.' : 'No finished stops found for that in this period (stop times are kept from Oct 23, 2026 on, 30 days).' };
       }
+      case 'yard_releases': {
+        if (ctx.customer) return { error: 'Not available.' };
+        const rows = releaseRows(all, { yard: input.yard || '', stage: input.stage || '' });
+        return rows.length ? { count: rows.length, late: rows.filter((r) => r.late).length, releases: rows.slice(0, 60) } : { count: 0, note: 'No yard releases on the board right now (for that yard / stage).' };
+      }
+      case 'closed_loads': {
+        if (ctx.customer) return { error: 'Not available.' };
+        const rows = closedRows((await db.get(`taTruckMateDelivered:${SITE}`, {})) || {}, (await db.get(`taFinished:${SITE}`, {})) || {}, { trip: input.trip || '', hours: Number(input.hours) || 48 });
+        if (input.trip && !rows.length) return { found: false, note: byTrip(input.trip) ? `Trip ${input.trip} is still on the active board.` : `No record of trip ${input.trip} leaving the board.` };
+        return { count: rows.length, loads: rows.slice(0, 60) };
+      }
+      case 'driving_log': {
+        if (ctx.customer) return { error: 'Not available.' };
+        const q = String(input.truck || '').trim(); const num = q.replace(/[^0-9A-Z]/gi, '').replace(/^0+/, '');
+        let its = num && /\d/.test(num) ? all.filter((it) => String(tripOf(it).powerUnit || '').replace(/^0+/, '').toUpperCase() === num.toUpperCase()) : [];
+        if (!its.length && q) { const Q = q.toUpperCase(); its = all.filter((it) => { const s2 = it._samsara || {}; return [s2.driver1, s2.driver2].some((d) => d && String(d).toUpperCase().includes(Q)); }); }
+        if (!its.length) return { found: false, note: `Truck / driver "${q}" is not on a load on the live board.` };
+        const it = its.find((x) => /^(depship|depcons|arrcons|arrship|intran|enroute)/i.test(String(tripOf(x).status || ''))) || its[0];
+        const d = await driveTimeFor(it, { env });
+        const hm = (m) => `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+        return { found: true, truck: tripOf(it).powerUnit, trip: tripNo(it), note: d.note || undefined, drivers: d.drivers.map((x) => ({ name: x.name, last24h: { offDuty: hm(x.totals.off), sleeper: hm(x.totals.sleeper), driving: hm(x.totals.driving), onDuty: hm(x.totals.on) }, lastDrove: etStamp(x.lastDroveAt), inCurrentStatusSince: etStamp(x.statusSince), changes: x.segments.length })) };
+      }
       case 'truck_hours': {
         const q = String(input.truck || '').trim();
         const w = await watch();
@@ -563,6 +623,16 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
           etas: eta ? (eta.stops || []).map((s) => ({ stop: s.label, eta: fmtLocal(s.etaMs, s.label), miles: s.miles, appointment: s.apptMs ? fmtLocal(s.apptMs, s.label) : null })) : null,
           stopsAlreadyPassed: eta ? (eta.passed || []).map((s) => s.label) : [],
           hold: it._hold || null, tasks: (it._tasks || []).filter((t) => !t.done).map((t) => t.title),
+          ...(ctx.customer ? {} : await (async () => {
+            const ask = (((await db.get(`taDoneAsk:${SITE}`, {})) || {}).asks || {})[n] || null;
+            const times = it._times || {};
+            return {
+              enteredInTruckMate: times.createdAt ? { at: etStamp(Date.parse(times.createdAt)), by: times.createdBy || null } : null,
+              waitingForTruck: unassignedLoad(it) || undefined,
+              yardRelease: it._yardRelease ? releaseRows([it])[0] : null,
+              finishCheck: it._finishGuess ? { probablyFinished: it._finishGuess, askedDriver: ask ? etStamp(Date.parse(ask.askedAt)) : null, driverAnswer: ask && ask.answer ? { choice: ask.answer.choice, text: ask.answer.text || null, by: ask.answer.by || null, at: etStamp(Date.parse(ask.answer.at)) } : null } : null,
+            };
+          })()),
           notes: notes.slice(-15).map((x) => ({ at: x.at, by: x.by, kind: x.kind, text: x.text, transfer: x.transfer || undefined })),
           driverChat: it._ocChat || null, pickupFollow: it._pickupFollow || null,
           nextInTruckMate: it._tmNext || [],
