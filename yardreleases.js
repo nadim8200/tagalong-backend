@@ -17,7 +17,8 @@
 // ---------------------------------------------------------------
 import { googleToken, readSheet } from './plansheet.js';
 import { tzOf, zoneName } from './localtime.js';
-import { haversineMi } from './watchtower.js';
+import { haversineMi, localToUtcMs } from './watchtower.js';
+import { staffEmail } from './staffmail.js';
 import { randomBytes } from 'crypto';
 import { releasePdf, cleanForm } from './release.js';
 import { yardForCity } from './flzones.js';
@@ -28,6 +29,8 @@ const RESCHED = `taReleaseResched:${SITE}`; // release id → { date, time, note
 const MOVES = `taReleaseMoves:${SITE}`;    // release id → { hub, by, at }: moved to the other yard in the console (Miami ⇄ Central Florida)
 const LINKS = 'taReleaseLinks';
 const FLEET = 'taLocalFleet';               // driver code → { hub | null, name, units, by, at }: dispatch's local-fleet toggles (Driver profiles)             // token → { trip, id, form, exp }: the release form PDF the driver opens from the text
+const ALERTED = 'taReleaseLate';           // release id|appointment → when the "redelivery not done" email went
+export const LATE_AFTER_MIN = 60;
 const KEY = 'taYardSheets';                // { readAt, error, miami: [rows], bartow: [rows] }
 const HISTORY = `taYardReleases:${SITE}`;  // id → last known release (completed / cancelled kept 3 days)
 const MIN = 60000; const DAY = 86400000;
@@ -160,7 +163,7 @@ export const HUB_KEYS = { Miami: 'MIAMI', Ventura: 'VENTURA', Memphis: 'MEMPHIS'
 // Everything we know → the releases. Pure.
 // sheets: { miami, bartow } rows · items: the board · trailerHubs: trailer → { hub, at, source } · plan: { sheetNotes }
 // history: id → last release seen (for completed / cancelled ones whose load left the board) · finished: trip → { at, reason }
-export function buildReleases({ sheets = {}, items = [], trailerHubs = {}, plan = {}, history = {}, finished = {}, assignments = {}, fleet = {}, resched = {}, moves = {}, now = Date.now() } = {}) {
+export function buildReleases({ sheets = {}, items = [], trailerHubs = {}, plan = {}, history = {}, finished = {}, assignments = {}, fleet = {}, resched = {}, moves = {}, unitLive = () => null, now = Date.now() } = {}) {
   const byTrip = new Map(items.map((it) => [tripNo(it), it]));
   const byBill = new Map(); items.forEach((it) => billsOf(it).forEach((b) => { const k = billKey(b && b.billNumber); if (k) byBill.set(k, it); }));
   const found = (r) => (r.trip && byTrip.get(r.trip)) || (r.bill && byBill.get(billKey(r.bill))) || null;
@@ -203,7 +206,7 @@ export function buildReleases({ sheets = {}, items = [], trailerHubs = {}, plan 
   for (const [id, x0] of out) {
     const mv = moves[id] && moves[id].hub && moves[id].hub !== x0.hub ? moves[id] : null;
     const x = mv ? { ...x0, hub: mv.hub, sources: [...x0.sources, { name: `Moved from the ${hubName(x0.hub)} yard`, at: mv.at, by: mv.by }] } : x0;
-    const rel = withResched(shape(id, x, { trailerHubs, finished, assignments, fleet, now }), resched[id]);
+    const rel = withTracking(withResched(shape(id, x, { trailerHubs, finished, assignments, fleet, now }), resched[id]), unitLive, now);
     rel.movedFrom = mv ? x0.hub : null;
     const better = hubForCity(rel.destination);
     if (better && better !== rel.hub && !mv) rel.otherYard = { hub: better, name: hubName(better), why: `The delivery is in ${String(rel.destination).split(',')[0].trim().replace(/\b\w/g, (c) => c.toUpperCase()).replace(/\B\w/g, (c) => c.toLowerCase())} — usually the ${hubName(better)} yard's` };
@@ -334,6 +337,43 @@ export function withResched(rel, rs) {
   return { ...rel, apptWas: rel.appt || null, appt: { date: rs.date, time: rs.time || null, tz, zone, raw }, rescheduled: { by: rs.by || null, at: rs.at || null, note: rs.note || null } };
 }
 
+// Tracking the redelivery (Nov 19): the local truck's GPS (Samsara, by its unit number); at the delivery city → "out for
+// delivery" with that as the evidence (only from coming / at yard — the sheet's words still win). And when the appointment
+// is an hour past and it isn't done: late. Pure.
+const cityKey = (x) => U(String(x || '').split(',')[0]).replace(/\./g, '').replace(/\bSAINT\b/g, 'ST').replace(/\bFORT\b/g, 'FT').replace(/\s+/g, ' ').trim();   // "Port Saint Lucie" = "Port St. Lucie"
+export function apptMs(appt) {
+  if (!appt || !appt.date) return null;
+  const ms = localToUtcMs(`${appt.date}T${appt.time || '23:59'}`, appt.tz || 'America/New_York');
+  return Number.isFinite(ms) ? ms : null;
+}
+export function withTracking(rel, unitLive = () => null, now = Date.now()) {
+  const unit = rel.local && rel.local.truck;
+  const live = unit ? unitLive(unit) : null;
+  const out = { ...rel, local: { ...rel.local, live: live || null } };
+  const fresh = live && live.at && now - Date.parse(live.at) < 30 * MIN;
+  if (fresh && (rel.stage === 'coming' || rel.stage === 'at-yard') && rel.destination && live.location && cityKey(live.location) === cityKey(rel.destination)) {
+    out.stage = 'out'; out.evidence = `Local truck ${unit} GPS in ${String(live.location).split(',')[0]} (Samsara)`;
+  }
+  const due = apptMs(rel.appt);
+  out.late = !!(due && rel.stage !== 'completed' && rel.stage !== 'cancelled' && now - due >= LATE_AFTER_MIN * MIN);
+  return out;
+}
+// The releases to email about now: late, and not told for this appointment yet. Pure.
+export function lateToTell(list = [], told = {}) {
+  return list.filter((r) => r.late && !r.fromHistory && !told[`${r.id}|${r.appt && r.appt.date}|${r.appt && r.appt.time}`]);
+}
+export function lateEmail(rels) {
+  const one = rels.length === 1;
+  const fmt = (r) => `${r.appt.date.slice(5).replace('-', '/')} ${r.appt.raw || r.appt.time || ''}`.trim();
+  return staffEmail({
+    subject: one ? `Redelivery not done — ${rels[0].customer || 'trip ' + rels[0].trip} (${rels[0].yard.name} yard), appt ${fmt(rels[0])}` : `${rels.length} redeliveries not done past their appointment`,
+    category: 'Yard releases', headline: one ? `Redelivery not done — trip ${rels[0].trip || '—'}` : `${rels.length} redeliveries not done`, greeting: 'Hi team,',
+    body: 'These yard redeliveries are an hour past their appointment and not marked done on the yard sheet.\n\n{{updates}}\n\nPlease check with the local driver, then mark it DONE on the yard sheet, or set a new date in Yards → Releases.',
+    updates: rels.slice(0, 6).map((r) => ({ icon: 'clock', title: `${r.customer || 'Customer?'} · ${r.destination || ''} · appt ${fmt(r)}`, text: `Trip ${r.trip || '—'} · trailer ${r.trailer || '—'} · ${r.yard.name} yard · ${r.local && r.local.driver ? `local driver ${r.local.driver}${r.local.truck ? ` (TK ${r.local.truck})` : ''}` : 'no local driver yet'}${r.local && r.local.live && r.local.live.location ? ` · truck now: ${r.local.live.location}` : ''}${r.sourceStatus ? ` · sheet: ${r.sourceStatus}` : ''}` })),
+    closing: 'Jarvis',
+  });
+}
+
 // counts per yard: active = not completed / cancelled. Pure.
 export function counts(list = []) {
   const out = Object.fromEntries(HUBS.map((h) => [h.key, { active: 0, coming: 0, 'at-yard': 0, out: 0, completed: 0, cancelled: 0 }]));
@@ -346,7 +386,7 @@ export function cardMark(r) {
   return { hub: r.hub, yard: r.yard.name, stage: r.stage, review: r.review, localDriver: r.local.driver, localTruck: r.local.truck, appt: r.appt, sourceStatus: r.sourceStatus, sources: r.sources.map((s) => s.name) };
 }
 
-export function initYardReleases(app, { requireAuth, db, getBoard, trailerHubs = async () => ({}), formFor = async () => null, roster = async () => [], sendSms = null, log = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() } = {}) {
+export function initYardReleases(app, { requireAuth, db, getBoard, trailerHubs = async () => ({}), formFor = async () => null, roster = async () => [], sendSms = null, log = null, liveUnits = async () => null, sendMail = null, lateTo = async () => [], env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() } = {}) {
   const enabled = !!(db && db.enabled);
   // read the two yard tabs (no AI — straight values)
   async function read() {
@@ -363,14 +403,27 @@ export function initYardReleases(app, { requireAuth, db, getBoard, trailerHubs =
       return st;
     } catch (e) { await db.update(KEY, (c) => ({ ...(c || {}), error: e.message, failedAt: new Date(now()).toISOString() }), {}); return null; }
   }
-  if (enabled && env.NODE_ENV !== 'test') { const t = setInterval(() => { read().catch(() => {}); }, READ_MS); if (t.unref) t.unref(); setTimeout(() => { read().catch(() => {}); }, 45000); }
+  // late redeliveries: one email per release and appointment, to the "Redelivery not done" list
+  async function tellLate() {
+    if (!enabled || !sendMail) return [];
+    const { list } = await current();
+    const told = (await db.get(ALERTED, {})) || {};
+    const due = lateToTell(list, told);
+    if (!due.length) return [];
+    const to = await lateTo();
+    if (to.length) { const m = lateEmail(due); await sendMail({ to, subject: m.subject, html: m.html, text: m.text, attachments: m.attachments }); }
+    const at = new Date(now()).toISOString();
+    await db.update(ALERTED, (cur) => { const c = { ...(cur || {}) }; for (const r of due) c[`${r.id}|${r.appt.date}|${r.appt.time}`] = at; for (const k of Object.keys(c)) if (now() - Date.parse(c[k]) > 10 * DAY) delete c[k]; return c; }, {});
+    return due;
+  }
+  if (enabled && env.NODE_ENV !== 'test') { const t = setInterval(() => { read().then(() => tellLate()).catch((e) => console.warn('[yard-releases]', e.message)); }, READ_MS); if (t.unref) t.unref(); setTimeout(() => { read().catch(() => {}); }, 45000); }
 
   const fleetStore = async () => (enabled ? ((await db.get(FLEET, {})) || {}) : {});
   async function current(site = SITE, items = null) {
     const st = (await db.get(KEY, {})) || {};
     const trips = items || (((await getBoard(site)) || {}).trips || []);
     const list = buildReleases({ sheets: st, items: trips, trailerHubs: await trailerHubs().catch(() => ({})), plan: (await db.get(`taPlanSheet:${SITE}`, {})) || {},
-      history: (await db.get(HISTORY, {})) || {}, finished: (await db.get(`taFinished:${site}`, {})) || {}, assignments: (await db.get(ASSIGN, {})) || {}, fleet: await fleetStore(), resched: (await db.get(RESCHED, {})) || {}, moves: (await db.get(MOVES, {})) || {}, now: now() });
+      history: (await db.get(HISTORY, {})) || {}, finished: (await db.get(`taFinished:${site}`, {})) || {}, assignments: (await db.get(ASSIGN, {})) || {}, fleet: await fleetStore(), resched: (await db.get(RESCHED, {})) || {}, moves: (await db.get(MOVES, {})) || {}, unitLive: await liveUnits().catch(() => null) || (() => null), now: now() });
     return { list, readAt: st.readAt || null, error: st.error || null };
   }
   let lastKept = 0;
@@ -512,5 +565,5 @@ export function initYardReleases(app, { requireAuth, db, getBoard, trailerHubs =
       } catch (e) { res.status(500).send('Could not open the release form.'); }
     });
   }
-  return { read, current, overlay };
+  return { read, current, overlay, tellLate };
 }

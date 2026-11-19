@@ -235,3 +235,22 @@ test('wrong yard: a Miami-tab delivery in Winter Haven is flagged for Central Fl
   rel = (await call('POST /truckmate/releases/move', { body: { id: '627000|B180900', hub: null } })).release;
   assert.equal(rel.hub, 'MIAMI');
 });
+
+test('tracking the redelivery: the local truck\'s GPS on the release; in the delivery city → out for delivery; an hour past the appointment and not done → late, emailed once', async () => {
+  const { withTracking, lateToTell, lateEmail, apptMs } = await import('../yardreleases.js');
+  const now = Date.parse('2026-11-18T16:30:00Z');   // 11:30 AM ET
+  const rel = { id: '627176|B180995', trip: '627176', trailer: '7402', customer: 'COSTCO', destination: 'PORT SAINT LUCIE, FL', yard: { name: 'Miami' }, stage: 'at-yard', sourceStatus: null,
+    appt: { date: '2026-11-18', time: '09:00', tz: 'America/New_York', zone: 'Eastern', raw: '9:00 AM' }, local: { driver: 'Julio Hernandez', truck: '935' } };
+  assert.equal(apptMs(rel.appt), Date.parse('2026-11-18T14:00:00Z'));
+  const gps = { location: 'Port St. Lucie, FL', speedMph: 0, at: '2026-11-18T16:25:00Z' };
+  const t = withTracking(rel, (u) => (u === '935' ? gps : null), now);
+  assert.deepEqual([t.stage, t.evidence, t.local.live.location, t.late], ['out', 'Local truck 935 GPS in Port St. Lucie (Samsara)', 'Port St. Lucie, FL', true]);
+  assert.equal(withTracking({ ...rel, stage: 'completed' }, () => gps, now).late, false, 'done is never late');
+  assert.equal(withTracking(rel, () => null, Date.parse('2026-11-18T14:30:00Z')).late, false, 'not an hour yet');
+  const due = lateToTell([t], {});
+  assert.equal(due.length, 1);
+  assert.equal(lateToTell([t], { '627176|B180995|2026-11-18|09:00': 'x' }).length, 0, 'told once per appointment');
+  const m = lateEmail(due);
+  assert.match(m.subject, /Redelivery not done — COSTCO \(Miami yard\), appt 11\/18 9:00 AM/);
+  assert.match(m.text, /local driver Julio Hernandez \(TK 935\) · truck now: Port St\. Lucie, FL/);
+});

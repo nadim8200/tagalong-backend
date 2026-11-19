@@ -105,7 +105,7 @@ import { initStatusMail } from './statusmail.js';
 import { initAssistant } from './assistant.js';
 import { initVoice } from './voice.js';
 import { initStopVisits } from './stopvisits.js';
-import { listAddresses, samsaraTokenFrom, correlate, getLiveIndex } from './samsara.js';
+import { listAddresses, samsaraTokenFrom, correlate, getLiveIndex, unitGps } from './samsara.js';
 import { initNotify } from './notify.js';
 import { initFleet } from './fleet.js';
 import { initRingCentral, setSmsGuard } from './ringcentral.js';
@@ -1489,7 +1489,9 @@ thermoKing = initThermoKing({ app, requireAuth: requireDispatch, requireAdmin, d
 const trailerWatch = initTrailerWatch({ db, sendMail: (m) => sendMail(m, { env: process.env }), to: async () => ['ntellez@floridabeauty.us'] });
 const yardReport = initYardReport(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), getFleet: () => truckmate.refreshFleet('florida-beauty'), onTrailers: (u, i, p) => trailerWatch.check(u, i, p) });
 // Yard releases: Gus's MIAMI YARD / BARTOW YARD tabs + release forms + trailer drops → Yards → Releases, and a marker on each card
-yardReleases = initYardReleases(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), trailerHubs: () => yardReport.trailerHubs(), formFor: (t) => (releaseApi ? releaseApi.formFor(t) : null), roster: () => driverAuth.roster(), sendSms: (m) => rc.sendSms('__shared', m), log: (...a) => comms.log(...a), env: process.env });
+yardReleases = initYardReleases(app, { requireAuth: requireDispatch, db, getBoard: (site) => truckmate.buildBoard(site), trailerHubs: () => yardReport.trailerHubs(), formFor: (t) => (releaseApi ? releaseApi.formFor(t) : null), roster: () => driverAuth.roster(), sendSms: (m) => rc.sendSms('__shared', m), log: (...a) => comms.log(...a),
+  liveUnits: async () => { const tok = samsaraTokenFrom(process.env); if (!tok) return null; const idx = await getLiveIndex(tok); return (u) => unitGps(idx, u); },
+  sendMail: (m) => sendMail(m, { env: process.env }), lateTo: () => alertRecipients.resolve('redelivery_late'), env: process.env });
 // Driving time on the truck card: a driver's last 24 h of ELD duty status, read when dispatch opens it
 initDriveTime(app, { requireAuth: requireDispatch, getBoard: (site) => truckmate.buildBoard(site), env: process.env });
 // Driver Release Form: the Release button on a load card → the form filled from the load → emailed as a PDF + the rate con

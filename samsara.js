@@ -109,6 +109,14 @@ export async function driverHosLogs(token, driverIds, startIso, endIso) {
   return out;
 }
 
+// A truck's GPS from the live index (any unit Samsara has — local yard trucks too). → { location, lat, lng, speedMph, at } | null
+export function unitGps(idx, unit) {
+  const st = idx && idx.statsByUnit && idx.statsByUnit[norm(unit)];
+  const g = st && st.gps;
+  if (!g || g.latitude == null) return null;
+  return { location: (g.reverseGeo && g.reverseGeo.formattedLocation) || null, lat: g.latitude, lng: g.longitude, speedMph: g.speedMilesPerHour != null ? Math.round(g.speedMilesPerHour) : null, at: g.time || null };
+}
+
 // Resolve a TruckMate power-unit number to its Samsara vehicle {id, name, …}.
 export function vehicleForUnit(idx, unit) {
   return (idx && idx.vehByUnit && idx.vehByUnit[norm(unit)]) || null;
