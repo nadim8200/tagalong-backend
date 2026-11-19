@@ -17,6 +17,7 @@ export function samsaraTokenFrom(env = process.env) {
 
 // GET that follows Samsara's cursor pagination and returns the merged `data`
 // array. Non-list endpoints (no `data` array) return the raw JSON.
+export const SAMSARA_TIMEOUT_MS = 20000;
 async function sGet(token, path, { paginate = true, maxPages = 25 } = {}) {
   const headers = { Authorization: `Bearer ${token}` };
   const out = [];
@@ -24,7 +25,8 @@ async function sGet(token, path, { paginate = true, maxPages = 25 } = {}) {
   for (let i = 0; i < maxPages; i++) {
     const sep = path.includes('?') ? '&' : '?';
     const url = `${API}${path}${after ? `${sep}after=${encodeURIComponent(after)}` : ''}`;
-    const r = await fetch(url, { headers });
+    // a Samsara call never hangs: 20 s and it gives up (Nov 19: one live read took 8 minutes and held every board build)
+    const r = await fetch(url, { headers, signal: AbortSignal.timeout(SAMSARA_TIMEOUT_MS) });
     if (!r.ok) {
       const body = await r.text().catch(() => '');
       throw new Error(`Samsara ${r.status} on ${path}: ${body.slice(0, 180)}`);
@@ -530,18 +532,26 @@ export function correlate(item, idx) {
 // Cached live index so /truckmate/active doesn't re-pull all of Samsara per hit.
 let _idxCache = { at: 0, token: '', idx: null };
 let _idxWait = null;   // one Samsara pull at a time: everyone asking while it runs shares it
+export const STALE_OK_MS = 30 * 60000;
 export async function getLiveIndex(token, ttlMs = 60000) {
   const now = Date.now();
-  if (_idxCache.idx && _idxCache.token === token && (now - _idxCache.at) < ttlMs) return _idxCache.idx;
-  if (_idxWait && _idxWait.token === token) return _idxWait.p;
-  const p = (async () => {
-    const idx = indexSnapshot(await snapshot(token));
-    await addRestSince(token, idx).catch((e) => console.warn('[samsara] rest since:', e.message));
-    _idxCache = { at: Date.now(), token, idx };
-    return idx;
-  })();
-  _idxWait = { token, p };
-  try { return await p; } finally { if (_idxWait && _idxWait.p === p) _idxWait = null; }
+  const mine = _idxCache.idx && _idxCache.token === token;
+  if (mine && (now - _idxCache.at) < ttlMs) return _idxCache.idx;
+  let p = _idxWait && _idxWait.token === token ? _idxWait.p : null;
+  if (!p) {
+    p = (async () => {
+      const idx = indexSnapshot(await snapshot(token));
+      await addRestSince(token, idx).catch((e) => console.warn('[samsara] rest since:', e.message));
+      _idxCache = { at: Date.now(), token, idx };
+      return idx;
+    })();
+    const me = p;
+    _idxWait = { token, p: me };
+    me.catch((e) => console.warn('[samsara] live:', e.message)).finally(() => { if (_idxWait && _idxWait.p === me) _idxWait = null; });
+  }
+  // the last read (up to 30 min old) is served right away while Samsara answers — a slow Samsara never holds the board
+  if (mine && (now - _idxCache.at) < STALE_OK_MS) return _idxCache.idx;
+  return p;
 }
 
 // When a driver's current rest began: walk back from their latest duty log while it's off duty / sleeper
