@@ -266,3 +266,46 @@ test('Jarvis sees everything new (Nov 19): yard releases, closed loads and who c
   const cust = { ...c, customer: { id: 'x' } };
   assert.equal((await chat.runTool('yard_releases', {}, cust)).error, 'Not available.');
 });
+
+test('Jarvis sees driver-app check-ins and the driver profiles / local fleet (staff only)', async () => {
+  const { checkinRows, driverRows } = await import('../jarvischat.js');
+  assert.deepEqual(checkinRows({ steps: { loaded: { at: '2026-11-18T14:00:00Z', by: 'Carlos' }, 'at-shipper': { at: '2026-11-18T12:00:00Z', by: 'Carlos' }, 'delivered:3.0|COSTCO|PORT SAINT LUCIE|FL': { at: '2026-11-19T15:00:00Z', by: 'Carlos' } } }).map((x) => x.step),
+    ['At the shipper', 'Loaded & leaving', 'Delivered — 3.0|COSTCO|PORT SAINT LUCIE|FL']);
+  const data = { profiles: { '0992': { name: 'Yordan Gonzalez', phones: [{ number: '(786) 474-0992', label: 'cell' }] }, 5937: { name: 'Yordanis Gonzalez', phones: [{ number: '(645) 200-3042' }] } },
+    fleet: { '0992': { hub: 'MIAMI', name: 'Yordan Gonzalez' } }, samsara: { 5937: { name: 'Yordanis Gonzalez', phone: '+17864740992' } }, pins: { '0992': {} },
+    items: [{ trip: { tripNumber: '627164', driver: '0992', powerUnit: '2019', status: 'SPTLD', destZoneDesc: 'PORT SAINT LUCIE, FL' } }] };
+  const y = driverRows(data, 'yordan gonzalez');
+  assert.equal(y.length, 1); assert.equal(y[0].localFleet, 'Miami yard'); assert.equal(y[0].onLoad.trip, '627164'); assert.equal(y[0].driverAppSignedIn, true);
+  assert.deepEqual(driverRows(data, '786-474-0992').map((d) => d.code).sort(), ['0992', '5937']);   // that cell shows on both (Samsara has it on 5937)
+  assert.deepEqual(driverRows(data, '5937')[0].phones.map((p) => p.number), ['(645) 200-3042', '+17864740992']);
+  const db = memDb();
+  await db.set('taDriverCheckins:florida-beauty', { 627164: { steps: { 'at-shipper': { at: '2026-11-18T12:00:00Z', by: 'Julio' } } } });
+  await db.set('taDriverProfiles:florida-beauty', data.profiles); await db.set('taLocalFleet', data.fleet);
+  const chat = initJarvisChat({ get: () => {}, post: () => {} }, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: JSON.parse(JSON.stringify(data.items)), unclosed: [] }), env: { ANTHROPIC_API_KEY: 'k' } });
+  const c = { user: { id: 7 }, did: [], proposed: [] };
+  assert.equal((await chat.runTool('driver_checkins', { trip: '627164' }, c)).checkins[0].step, 'At the shipper');
+  assert.match((await chat.runTool('driver_checkins', { trip: '1' }, c)).note, /hasn't checked in/);
+  assert.equal((await chat.runTool('driver_profiles', { query: 'miami' }, c)).drivers[0].name, 'Yordan Gonzalez');
+  assert.equal((await chat.runTool('load_details', { trip: '627164' }, c)).driverCheckins[0].by, 'Julio');
+  assert.equal((await chat.runTool('driver_profiles', {}, { ...c, customer: { id: 'x' } })).error, 'Not available.');
+});
+
+test('voice picker: anyone hears a voice first; only an admin changes Jarvis\'s voice for everyone', async () => {
+  const routes = {}; const seen = [];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.at(-1); }, post: (p, ...h) => { routes[`POST ${p}`] = h.at(-1); }, put: (p, ...h) => { routes[`PUT ${p}`] = h.at(-1); } };
+  const db = memDb();
+  initJarvisChat(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: [] }), env: { OPENAI_API_KEY: 'sk-test' }, fetchFn: async (url, opts) => { seen.push(JSON.parse(opts.body)); return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([1]).buffer }; } });
+  const call = async (key, body, user = { id: 7, name: 'Rosa' }) => { const out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.json = j; }, set() {}, send(b) { out.sent = b; } }; await routes[key]({ body, user }, res); return out; };
+  const v = (await call('GET /jarvis/voice', {})).json;
+  assert.equal(v.voice, 'onyx'); assert.equal(v.voices.length, 11); assert.equal(v.canChange, false);
+  await call('POST /jarvis/speak', { text: 'Good afternoon, Rosa.', voice: 'fable' });
+  assert.equal(seen[0].voice, 'fable');                                                       // a preview in another voice
+  assert.equal((await call('PUT /jarvis/voice', { voice: 'ash' })).status, 403);              // a dispatcher can't change it
+  const admin = { id: 1, name: 'nadim', admin: true };
+  assert.equal((await call('PUT /jarvis/voice', { voice: 'robot' }, admin)).status, 400);
+  assert.equal((await call('PUT /jarvis/voice', { voice: 'ash' }, admin)).json.voice, 'ash');
+  const after = (await call('GET /jarvis/voice', {}, admin)).json;
+  assert.deepEqual([after.voice, after.canChange, after.changedBy], ['ash', true, 'nadim']);
+  await call('POST /jarvis/speak', { text: 'Hello.' });
+  assert.equal(seen[1].voice, 'ash');                                                         // everyone hears the saved voice
+});

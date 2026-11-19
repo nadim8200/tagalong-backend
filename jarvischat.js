@@ -33,6 +33,8 @@ const SITE = 'florida-beauty';
 const API = 'https://api.anthropic.com/v1/messages';
 const MAX_STEPS = 8;
 const tripOf = (it) => (it && it.trip) || it || {};
+// the OpenAI voices Jarvis can speak with (the voice picker in Ask Jarvis)
+export const JARVIS_VOICES = ['onyx', 'ash', 'echo', 'ballad', 'verse', 'fable', 'alloy', 'sage', 'coral', 'nova', 'shimmer'];
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
 
 // ---- what Jarvis can also see (Nov 19: "Jarvis has to be integrated with everything") ----------------------------
@@ -56,6 +58,34 @@ export function releaseRows(all = [], { yard = '', stage = '' } = {}, now = Date
     };
   }).filter((x) => (!yard || String(x.yard || '').toLowerCase().includes(String(yard).toLowerCase())) && (!stage || String(x.stage).includes(String(stage).toLowerCase())));
 }
+// What a load's driver tapped in the driver app (check-ins), in order. steps: { [step]: { at, by } }. Pure.
+export function checkinRows(rec = {}) {
+  const label = (k) => (k === 'at-shipper' ? 'At the shipper' : k === 'loaded' ? 'Loaded & leaving' : /^arrived:/.test(k) ? `Arrived — ${k.slice(8)}` : /^delivered:/.test(k) ? `Delivered — ${k.slice(10)}` : k);
+  return Object.entries((rec && rec.steps) || {}).map(([k, v]) => ({ step: label(k), at: etStamp(Date.parse((v && v.at) || '')), ms: Date.parse((v && v.at) || '') || 0, by: (v && v.by) || null }))
+    .sort((a, b) => a.ms - b.ms).map(({ ms, ...x }) => x);
+}
+// Driver profiles + the local fleet: who a driver is, their phone numbers, which local yard (if any) and the load they're
+// on now. profiles: code → { name, phones }; fleet: code → { hub, name }; samsara: code → { name, phone }. Pure.
+export function driverRows({ profiles = {}, fleet = {}, samsara = {}, pins = {}, items = [] } = {}, q = '') {
+  const norm = (c) => String(c || '').trim().toUpperCase();
+  const codes = new Set([...Object.keys(profiles), ...Object.keys(fleet), ...Object.keys(samsara)].map(norm));
+  const Q = String(q || '').trim().toUpperCase();
+  return [...codes].map((code) => {
+    const p = profiles[code] || profiles[code.toLowerCase()] || {}; const f = fleet[code] || {}; const s2 = samsara[code] || {};
+    const name = p.name || f.name || s2.name || null;
+    const phones = [...(p.phones || []).map((x) => ({ number: x.number, label: x.label || null })), ...(s2.phone ? [{ number: s2.phone, label: 'Samsara' }] : [])]
+      .filter((x, i, a) => x.number && a.findIndex((y) => String(y.number).replace(/\D/g, '').slice(-10) === String(x.number).replace(/\D/g, '').slice(-10)) === i);
+    const on = items.find((it) => [tripOf(it).driver, tripOf(it).driver2].some((c) => norm(c) === code));
+    return { code, name, phones, localFleet: f.hub ? (/BARTOW|CENTRAL/i.test(f.hub) ? 'Central Florida (Bartow) yard' : 'Miami yard') : null, driverAppSignedIn: !!pins[code] || undefined,
+      onLoad: on ? { trip: tripNo(on), truck: tripOf(on).powerUnit || null, status: tripOf(on).status || null, to: tripOf(on).destZoneDesc || null } : null };
+  }).filter((d) => {
+    if (!Q) return true;
+    const digits = Q.replace(/\D/g, '');
+    if (digits.length >= 4 && d.phones.some((x) => String(x.number).replace(/\D/g, '').includes(digits))) return true;
+    return [d.code, d.name].some((v) => v && String(v).toUpperCase().includes(Q));
+  }).sort((a, b) => String(a.name || '~').localeCompare(String(b.name || '~')));
+}
+
 // Loads that left the board: who / what closed each one and why — TruckMate, Jarvis (facts), the driver in the app, a
 // dispatcher's Close (completed, or taken off the board as not delivered). Newest first. Pure.
 export function closedRows(delivered = {}, finished = {}, { trip = '', hours = 48 } = {}, now = Date.now()) {
@@ -151,6 +181,8 @@ export const TOOLS = [
   { name: 'stop_times', description: 'How long trucks took at their stops (customer geofence in → out): arrived, left, time there — for a trip, a truck and / or a customer, over the last few days; plus any truck at a stop right now and how long so far. Use for "how long was 734 at Direct Flowers?", "how long are trucks taking at Carbone?", "is 2403 still at the stop?". STAFF ONLY.', input_schema: { type: 'object', properties: { trip: { type: 'string' }, truck: { type: 'string' }, customer: { type: 'string' }, days: { type: 'number', description: '1–30, default 7' } } } },
   { name: 'yard_releases', description: 'STAFF ONLY. The Yards → Releases list: loads at, or coming to, the Miami and Bartow (Central Florida) yards for redelivery to the customer — from Gus\'s yard sheets, TruckMate (spotted loaded) and the trailer GPS. Each has its stage (coming / at the yard / out for delivery / delivered / cancelled), the redelivery date and time, whether it\'s late, the local driver and truck, the customer, trailer and bills. Use for "what\'s at the Miami yard", "who is doing the Costco redelivery", "any late redeliveries".', input_schema: { type: 'object', properties: { yard: { type: 'string', description: 'miami or bartow (central florida) — empty for both' }, stage: { type: 'string', description: 'coming | at the yard | out | delivered | cancelled' } } } },
   { name: 'closed_loads', description: 'STAFF ONLY. Loads that left the board (the Delivered tab): when, and who or what closed each one and why — TruckMate delivered/completed it, Jarvis closed it on facts, the driver answered "all delivered" in the app, or a dispatcher used Close (completed, or taken off the board as NOT delivered: cancelled, duplicate, old). For one trip, or the last hours. Use for "why did 627168 leave the board", "who closed 625241", "what was taken off the board today".', input_schema: { type: 'object', properties: { trip: { type: 'string' }, hours: { type: 'number', description: 'how far back, default 48' } } } },
+  { name: 'driver_checkins', description: 'STAFF ONLY. What a load\'s driver tapped in the driver app, in order, with times: at the shipper, loaded & leaving, arrived / delivered at each stop — plus whether Jarvis asked them if the load is finished and what they answered. Use for "did the driver check in at the receiver", "when did he say he was loaded".', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
+  { name: 'driver_profiles', description: 'STAFF ONLY. The Driver profiles list: a driver\'s name, driver ID, phone numbers (the ones dispatch added and the Samsara one), whether they\'re in a local fleet (Miami yard or Central Florida / Bartow yard), whether they\'ve signed in to the driver app, and the load they\'re on now. Search by name, driver ID or phone; empty → everyone. Use for "what\'s Yordan\'s number", "who are the Miami local drivers", "whose number is 786-474-0992".', input_schema: { type: 'object', properties: { query: { type: 'string', description: 'a name, driver ID, phone number, or "miami" / "bartow" for a local fleet' } } } },
   { name: 'driving_log', description: 'STAFF ONLY. A truck\'s drivers\' last 24 hours of duty status from the Samsara ELD (the card\'s "Driving time"): time off duty / sleeper / driving / on duty, when each driver last drove, and since when they\'re in their current status. Use for "when did 2019 last drive", "how long has he been off duty", "did the team switch". For the clocks left (drive / shift / cycle) use truck_hours.', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck / unit number, or a driver name' } }, required: ['truck'] } },
   { name: 'truck_hours', description: 'Driving hours (hours of service) for a truck or driver: each driver\'s duty status, drive time left, shift (14-hr) left, 70-hr cycle left and when a break is due (Samsara ELD) — plus the truck\'s current load and where it is. Use for "how many hours does 2217 have", "can 2403 make it", "is the team rested".', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck / unit number, or a driver name' } }, required: ['truck'] } },
   { name: 'loads_to_place', description: 'A PLACE only (never a customer name — use customer_etas for those): every load on the board with a stop in a city / state (e.g. "Lombard, IL", "Chicago", "NJ") — trip, truck, customer at that stop, delivered or not, and the live ETA. Use for questions like "update on deliveries to Lombard IL".', input_schema: { type: 'object', properties: { place: { type: 'string' } }, required: ['place'] } },
@@ -494,6 +526,23 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         if (input.trip && !rows.length) return { found: false, note: byTrip(input.trip) ? `Trip ${input.trip} is still on the active board.` : `No record of trip ${input.trip} leaving the board.` };
         return { count: rows.length, loads: rows.slice(0, 60) };
       }
+      case 'driver_checkins': {
+        if (ctx.customer) return { error: 'Not available.' };
+        const n = String(input.trip || '').trim();
+        const rec = (((await db.get(`taDriverCheckins:${SITE}`, {})) || {})[n]) || null;
+        const ask = (((await db.get(`taDoneAsk:${SITE}`, {})) || {}).asks || {})[n] || null;
+        const rows = checkinRows(rec || {});
+        return { trip: n, onBoard: !!byTrip(n), checkins: rows, note: rows.length ? undefined : 'The driver hasn\'t checked in on this load in the driver app.',
+          finishedQuestion: ask ? { asked: etStamp(Date.parse(ask.askedAt)), why: ask.why || null, answer: ask.answer ? { choice: ask.answer.choice, text: ask.answer.text || null, by: ask.answer.by || null, at: etStamp(Date.parse(ask.answer.at)) } : 'no answer yet' } : null };
+      }
+      case 'driver_profiles': {
+        if (ctx.customer) return { error: 'Not available.' };
+        const q = String(input.query || '').trim();
+        const local = /^(miami|bartow|central)/i.test(q) ? q.toLowerCase() : '';
+        let rows = driverRows({ profiles: (await db.get(`taDriverProfiles:${SITE}`, {})) || {}, fleet: (await db.get('taLocalFleet', {})) || {}, samsara: (await db.get(`taDriverSamsara:${SITE}`, {})) || {}, pins: (await db.get(`taDriverPins:${SITE}`, {})) || {}, items: all }, local ? '' : q);
+        if (local) rows = rows.filter((d) => d.localFleet && d.localFleet.toLowerCase().includes(local.startsWith('miami') ? 'miami' : 'bartow'));
+        return rows.length ? { count: rows.length, drivers: rows.slice(0, 40) } : { count: 0, note: `No driver profile matches "${q}".` };
+      }
       case 'driving_log': {
         if (ctx.customer) return { error: 'Not available.' };
         const q = String(input.truck || '').trim(); const num = q.replace(/[^0-9A-Z]/gi, '').replace(/^0+/, '');
@@ -626,7 +675,9 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
           ...(ctx.customer ? {} : await (async () => {
             const ask = (((await db.get(`taDoneAsk:${SITE}`, {})) || {}).asks || {})[n] || null;
             const times = it._times || {};
+            const taps = checkinRows((((await db.get(`taDriverCheckins:${SITE}`, {})) || {})[n]) || {});
             return {
+              driverCheckins: taps.length ? taps : null,
               enteredInTruckMate: times.createdAt ? { at: etStamp(Date.parse(times.createdAt)), by: times.createdBy || null } : null,
               waitingForTruck: unassignedLoad(it) || undefined,
               yardRelease: it._yardRelease ? releaseRows([it])[0] : null,
@@ -866,7 +917,24 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
   // ---- voice: speech → text for phones / browsers without built-in speech recognition ----
   // The phone records a short clip; it's transcribed here (OpenAI, key set in Render) and
   // never stored. Browsers that recognize speech themselves don't send audio at all.
-  app.get('/jarvis/voice', requireAuth, (req, res) => res.json({ serverStt: !!env.OPENAI_API_KEY, tts: !!env.OPENAI_API_KEY }));
+  // the voice picker (Nov 19): one voice for everyone, saved here; admins change it, anyone can listen to each one first
+  const VOICE_KEY = 'taJarvisVoice';
+  const isAdmin = (u) => !!(u && (u.admin || u.role === 'admin' || u.companyAdmin));
+  const savedVoice = async () => (db && db.enabled ? ((await db.get(VOICE_KEY, {})) || {}) : {});
+  const voiceNow = async () => { const v = (await savedVoice()).voice; return JARVIS_VOICES.includes(v) ? v : (JARVIS_VOICES.includes(env.JARVIS_VOICE) ? env.JARVIS_VOICE : 'onyx'); };
+  app.get('/jarvis/voice', requireAuth, async (req, res) => {
+    const cur = await savedVoice().catch(() => ({}));
+    res.json({ serverStt: !!env.OPENAI_API_KEY, tts: !!env.OPENAI_API_KEY, voice: await voiceNow().catch(() => 'onyx'), voices: JARVIS_VOICES, canChange: isAdmin(req.user), changedBy: cur.by || null, changedAt: cur.at || null });
+  });
+  if (typeof app.put === 'function') app.put('/jarvis/voice', requireAuth, async (req, res) => {
+    if (!isAdmin(req.user)) return res.status(403).json({ error: 'Only an admin can change Jarvis\'s voice.' });
+    const v = String((req.body && req.body.voice) || '');
+    if (!JARVIS_VOICES.includes(v)) return res.status(400).json({ error: 'Pick one of the listed voices.' });
+    if (!(db && db.enabled)) return res.status(503).json({ error: 'Needs the database.' });
+    const by = (req.user && (req.user.name || req.user.email)) || 'admin';
+    await db.set(VOICE_KEY, { voice: v, by, at: new Date().toISOString() });
+    res.json({ ok: true, voice: v });
+  });
   // ---- voice: Jarvis's own voice in Ask Jarvis (Nov 19) — a natural OpenAI voice instead of the browser's robotic one.
   // Text → mp3, never stored. Voice / style can be changed in Render (JARVIS_VOICE, JARVIS_VOICE_STYLE).
   app.post('/jarvis/speak', requireAuth, async (req, res) => {
@@ -878,7 +946,7 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
     const style = env.JARVIS_VOICE_STYLE || 'Jarvis, an AI dispatcher: calm, composed and quietly confident, with a crisp, polished delivery and a light British accent. Natural pace, warm but efficient — never robotic.';
     try {
       const r = await fetchFn('https://api.openai.com/v1/audio/speech', { method: 'POST', headers: { authorization: `Bearer ${env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model: env.TTS_MODEL || 'gpt-4o-mini-tts', voice: env.JARVIS_VOICE || 'onyx', input: text, response_format: 'mp3', instructions: es ? `${style} Speak natural Latin American Spanish.` : style }) });
+        body: JSON.stringify({ model: env.TTS_MODEL || 'gpt-4o-mini-tts', voice: JARVIS_VOICES.includes(b.voice) ? b.voice : await voiceNow(), input: text, response_format: 'mp3', instructions: es ? `${style} Speak natural Latin American Spanish.` : style }) });
       if (!r.ok) { const j = await r.json().catch(() => ({})); return res.status(502).json({ error: (j.error && j.error.message) || `Voice failed (${r.status})` }); }
       res.set('content-type', 'audio/mpeg');
       return res.send(Buffer.from(await r.arrayBuffer()));
