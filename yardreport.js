@@ -242,5 +242,17 @@ export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => ge
   if (app && requireAuth) app.get('/truckmate/yard-report', requireAuth, async (req, res) => { try { res.json(await report()); } catch (e) { res.status(502).json({ error: e.message }); } });
   // the hub a release is for: where the load is headed (releases are given during the run, not at a yard)
   const hubOf = async (item) => hubForDest(item);
-  return { report, trucks, hubOf, readSamsara };
+  // where each trailer is now, when it's at a yard (its own GPS first — mergeTrailers), and its Thermo King reading:
+  // { trailer: { hub | null, at, source, returnF, setF, powerOn } }
+  async function trailerHubs() {
+    const units = mergeTrailers(((await db.get('taThermoKing', {})) || {}).units || {}, ((await db.get(SAM, {})) || {}).units || {});
+    const pts = await points(); const out = {};
+    for (const u of Object.values(units)) {
+      const h = hubAt(u, pts);
+      const temp = u.returnF != null ? { returnF: u.returnF, setF: u.setF ?? null, powerOn: u.powerOn ?? null } : null;
+      if (h || temp) out[u.trailer] = { hub: h || null, at: u.at || null, source: u.source || null, via: u.via || null, ...(temp || {}) };
+    }
+    return out;
+  }
+  return { report, trucks, hubOf, readSamsara, trailerHubs };
 }

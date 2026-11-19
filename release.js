@@ -173,6 +173,18 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
   const itemOf = async (trip) => ((((await getBoard(SITE)) || {}).trips) || []).find((x) => tripNo(x) === String(trip)) || null;
   // the form filled from the load, the recipients used last time, and earlier releases on this load
+  // the release form for a load as it stands: the last one sent, else the draft filled the same way the console's form is
+  async function formFor(trip, by = 'Jarvis') {
+    const sent = enabled ? (((await db.get(SENT(SITE), {})) || {})[String(trip)] || []) : [];
+    const last = sent[sent.length - 1];
+    if (last && last.fields) return { form: cleanForm({ ...last.fields, trip: last.fields.trip || String(trip) }), sent: true };
+    const it = await itemOf(trip);
+    if (!it) return null;
+    const rcf = await rateConFor(it, db, SITE).catch(() => null);
+    const draft0 = releaseDraft(rcf ? { ...it, _ratecon: { data: rcf.rc, docIds: rcf.rc.docIds } } : it, { by, now: now() });
+    const draft = rcf && rcf.next ? { ...draft0, trip: rcf.next.trip || '', fb: rcf.next.fb || '' } : draft0;
+    return { form: cleanForm(draft), sent: false };
+  }
   app.get('/truckmate/release/:trip', requireAuth, async (req, res) => {
     const it = await itemOf(req.params.trip);
     if (!it) return res.status(404).json({ error: 'That load is not on the board.' });
@@ -223,5 +235,5 @@ export function initRelease(app, { requireAuth, db, docs = null, getBoard, sendM
     const all = (await db.get(SENT(site), {})) || {};
     for (const it of trips || []) { const m = releaseMark(all[tripNo(it)] || []); if (m) it._release = m; }
   }
-  return { overlay };
+  return { overlay, formFor };
 }
