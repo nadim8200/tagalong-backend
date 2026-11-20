@@ -14,14 +14,24 @@ test('stop reports: boxes need the count; missing needs a number when reported; 
   assert.match(cleanStopReport({ kind: 'nope', stop: 'X' }).error, /Unknown/);
 });
 
-test('stop email: missing boxes with the count against TruckMate, words escaped, scans and photos listed; log lines', () => {
-  const r = { ...cleanStopReport({ kind: 'boxes', stop: 'SOUTH WINDSOR, CT', stopName: 'FLOWERS & PRODUCE BY TERRA', boxes: 78, pallets: 2, reportMissing: true, missing: 2, expected: 80, note: 'Faltan <2> cajas de rosas' }).report, at: '2026-11-19T22:00:00Z' };
-  const m = stopEmail(r, { trip: '627549', driver: 'Ferney Urrego', truck: '4504', trailer: '18094', links: [{ id: 'p1', label: 'Photo 1', url: 'https://x/sr/f/a' }], attached: ['p1'], scans: [{ paper: 'POD', bill: 'M5064641', confirmation: 'FB-123456', attached: true }] });
-  assert.equal(m.subject, 'MISSING BOXES // 2 BOXES // TRIP 627549 // SOUTH WINDSOR, CT');
-  assert.match(m.html, /78 of 80 in TruckMate/); assert.match(m.html, /Faltan &lt;2&gt; cajas/); assert.match(m.html, /POD · M5064641 · confirmation FB-123456/); assert.match(m.html, /Photo 1<\/a> <span[^>]*>· attached/);
-  assert.equal(logLine(r, 'Ferney Urrego'), 'Ferney Urrego at FLOWERS & PRODUCE BY TERRA: delivered 78 boxes of 80, 2 pallets — 2 MISSING · "Faltan <2> cajas de rosas"');
-  const p = { ...cleanStopReport({ kind: 'problem', stop: 'CLIFTON, NJ', why: 'refused' }).report, at: '2026-11-19T22:00:00Z' };
-  assert.equal(stopEmail(p, { trip: '627549' }).subject, 'ISSUE AT A STOP // CUSTOMER REFUSED // TRIP 627549 // CLIFTON, NJ');
+test('stop email (Jarvis layout): shortage leads with the count and the customer, count strip, TruckMate source, driver words escaped, scans and photos with their real status; log lines', () => {
+  const r = { ...cleanStopReport({ kind: 'boxes', stop: 'SOUTH WINDSOR, CT', stopName: 'FLOWERS & PRODUCE BY TERRA', boxes: 78, pallets: 2, reportMissing: true, missing: 2, expected: 80, note: 'Faltan <2> cajas' }).report, at: '2026-11-19T22:00:00Z' };
+  const m = stopEmail(r, { trip: '627549', driver: 'Ferney Urrego', driverCode: '986', truck: '4504', trailer: '18094', links: [{ id: 'p1', label: 'Photo 1', url: 'https://x/sr/f/a' }, { id: 'p2', label: 'Photo 2', url: 'https://x/sr/f/b' }], attached: ['p1'], scans: [{ paper: 'POD', bill: 'M5064641', confirmation: 'FB-123456', attached: true }] });
+  assert.equal(m.subject, '2 boxes missing | South Windsor, CT | Trip 627549');
+  assert.match(m.html, /2 boxes missing/i); assert.match(m.html, />Delivery shortage<\/h1>/); assert.match(m.html, /FLOWERS &amp; PRODUCE BY TERRA/); assert.match(m.html, /South Windsor, CT/);
+  assert.match(m.html, /78 of 80 expected boxes delivered\./); assert.match(m.html, /EXPECTED[\s\S]*80[\s\S]*DELIVERED[\s\S]*78[\s\S]*MISSING[\s\S]*2[\s\S]*PALLETS[\s\S]*2/);
+  assert.match(m.html, /78 of 80 in TruckMate/); assert.match(m.html, /Faltan &lt;2&gt; cajas/); assert.match(m.html, /Original message · Spanish/);
+  assert.match(m.html, /POD · M5064641[\s\S]*Confirmation FB-123456 · Attached to this email/);
+  assert.match(m.html, /Photo 1<\/a><\/b><br><span[^>]*>Attached to this email · link works 30 days/); assert.match(m.html, /Photo 2<\/a><\/b><br><span[^>]*>Not attached/);
+  assert.match(m.html, /Ferney Urrego \(ID 986\)/); assert.doesNotMatch(m.html, /TEST · SAMPLE DATA/);
+  assert.equal(logLine(r, 'Ferney Urrego'), 'Ferney Urrego at FLOWERS & PRODUCE BY TERRA: delivered 78 boxes of 80, 2 pallets — 2 MISSING · "Faltan <2> cajas"');
+  const p = { ...cleanStopReport({ kind: 'problem', stop: 'CLIFTON, NJ', stopName: 'MAIN WHOLESALE FLORIST-CLIFTON', why: 'refused', note: 'Rechazaron 1 caja, llegó aplastada.' }).report, at: '2026-11-19T22:00:00Z' };
+  const pm = stopEmail(p, { trip: '627549', others: [{ label: 'Earlier count', text: 'delivered 89 boxes of 90, 3 pallets' }] });
+  assert.equal(pm.subject, 'Customer refusal | Clifton, NJ | Trip 627549');
+  assert.match(pm.html, /CUSTOMER REFUSAL/); assert.match(pm.html, /Earlier count<\/td><td[^>]*>delivered 89 boxes of 90, 3 pallets/); assert.match(pm.html, /The earlier delivery count is shown separately below/);
+  assert.doesNotMatch(pm.html, /Scanned paperwork/i, 'no paperwork section when nothing was scanned');
+  const long = stopEmail({ ...r, stopName: 'A VERY LONG CUSTOMER NAME WHOLESALE FLORIST & PRODUCE DISTRIBUTION COMPANY OF NEW ENGLAND LLC', note: '' }, { trip: '1' });
+  assert.match(long.html, /DISTRIBUTION COMPANY OF NEW ENGLAND LLC/); assert.doesNotMatch(long.html, /Driver&#39;s message/i, 'no empty message panel');
 });
 
 test('left the cooler: fresh GPS out of Miami with the trailer, or rolling after TruckMate says departed; old GPS or no trailer proves nothing', () => {
@@ -77,7 +87,7 @@ test('stop reports from the app: only the driver\'s load, once per key, photo on
   const sent = await call('POST /driver/me/loads/:trip/stopreports/:id/send', { params: { ...P, id: box.body.id } });
   assert.equal(sent.status, 200); assert.equal(mails.length, 1);
   assert.deepEqual(mails[0].to, ['ntellez@floridabeauty.us']);
-  assert.match(mails[0].subject, /^MISSING BOXES \/\/ 2 BOXES \/\/ TRIP 627549/);
+  assert.equal(mails[0].subject, '2 boxes missing | South Windsor, CT | Trip 627549');
   assert.equal(mails[0].attachments.length, 3, 'the scanned POD + both photos from that stop');
   assert.equal(mails[0].attachments[0].contentType, 'application/pdf');
   assert.equal((await call('POST /driver/me/loads/:trip/stopreports/:id/send', { params: { ...P, id: box.body.id } })).body.already, true);

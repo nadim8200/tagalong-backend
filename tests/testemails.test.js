@@ -5,14 +5,16 @@ import { testEmails, samplePhoto, initTestEmails } from '../testemails.js';
 test('test emails: breakdown, accident, breakdown update, missing boxes, problem — all marked TEST, only to ntellez', async () => {
   const m = testEmails(Date.parse('2026-11-19T23:00:00Z'));
   assert.deepEqual(m.map((x) => x.subject), [
-    '[TEST] BREAKDOWN // TRAILER 18094 // TIRE // TRIP 627549 // BK-TEST-042',
-    '[TEST] BREAKDOWN // TRUCK 4504 // ACCIDENT // TRIP 627549 // BK-TEST-043',
-    '[TEST] UPDATE // BREAKDOWN // TRAILER 18094 // TIRE // TRIP 627549 // BK-TEST-042',
-    '[TEST] MISSING BOXES // 2 BOXES // TRIP 627549 // SOUTH WINDSOR, CT',
-    '[TEST] ISSUE AT A STOP // CUSTOMER REFUSED // TRIP 627549 // CLIFTON, NJ',
+    '[TEST] Tire breakdown | Trailer 18094 | Trip 627549 | BK-TEST-042',
+    '[TEST] Accident reported | Truck 4504 | Trip 627549 | BK-TEST-043',
+    '[TEST] Breakdown update | BK-TEST-042 | Trip 627549',
+    '[TEST] 2 boxes missing | South Windsor, CT | Trip 627549',
+    '[TEST] Customer refusal | Clifton, NJ | Trip 627549',
   ]);
-  assert.ok(m.every((x) => /TEST · sample data/.test(x.html)));
-  assert.match(m[1].html, /Police on the scene<\/td><td[^>]*><b>yes/);
+  assert.ok(m.every((x) => /TEST · SAMPLE DATA · NOT A REAL REPORT/.test(x.html) && /^TEST · SAMPLE DATA/.test(x.text)));
+  assert.ok(m.every((x) => !/sample-link/.test(x.html + x.text)), 'no fake links');
+  assert.match(m[2].html, /Status needs reconciliation/);
+  assert.match(m[1].html, /Police on the scene<\/td><td[^>]*>Yes</);
   assert.match(m[3].html, /64 of 66 in TruckMate/);
   assert.equal(samplePhoto(10, 20, 30)[0], 0xff, 'a real JPEG');
   const routes = {}; const sent = [];

@@ -18,6 +18,7 @@ import express from 'express';
 import { makeToken, readToken } from './breakdownreport.js';
 import { readableFile } from './heic.js';
 import { loadsFor } from './driverauth.js';
+import { jarvisEmail, section, quote, facts, metrics, fileBox, etTime, cityState, isSpanish } from './jarvismail.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taStopReports:${SITE}`;      // trip → [report]
@@ -29,8 +30,6 @@ export const KINDS = ['boxes', 'problem', 'photo', 'scan'];
 export const WHY = ['damaged', 'refused', 'closed', 'wait', 'temp', 'other'];
 const WHY_LABEL = { damaged: 'Damaged product', refused: 'Customer refused', closed: 'Closed / not receiving', wait: 'Waiting at the door', temp: 'Temperature', other: 'Other' };
 const S = (x, n = 120) => String(x == null ? '' : x).replace(/\s+/g, ' ').trim().slice(0, n);
-const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const et = (ms) => new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const count = (x) => (x === '' || x == null ? null : Number.isInteger(Number(x)) && Number(x) >= 0 && Number(x) <= 9999 ? Number(x) : NaN);
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
@@ -62,27 +61,36 @@ export function cleanStopReport(b = {}) {
   return { report: r };
 }
 
-// The email: missing boxes, or a problem, at one stop. Pure. → { subject, html, text }
-export function stopEmail(r, { trip, driver, truck, trailer, others = [], links = [], attached = [], scans = [] }) {
-  const stopLabel = [r.stopName, r.stop].filter(Boolean).join(' — ');
+// The email: missing boxes, or a problem, at one stop — in the Jarvis layout (jarvismail.js), customer first. Pure. → { subject, html, text }
+const PROBLEM_TITLE = { damaged: 'Damaged product', refused: 'Customer refusal', closed: 'Closed / not receiving', wait: 'Waiting at the door', temp: 'Temperature problem', other: 'Problem at a stop' };
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : (w === 'box' ? 'es' : 's')}`;
+export function stopEmail(r, { trip, driver, driverCode = null, truck, trailer, others = [], links = [], attached = [], scans = [], test = false }) {
   const shortage = r.kind === 'boxes';
-  const subject = shortage ? `MISSING BOXES // ${r.missing} BOX${r.missing === 1 ? '' : 'ES'} // TRIP ${trip} // ${r.stop}` : `ISSUE AT A STOP // ${WHY_LABEL[r.why].toUpperCase()} // TRIP ${trip} // ${r.stop}`;
-  const rows = [['Trip', trip], ['Stop', stopLabel], ['Driver', driver || 'Driver'], ['Truck / trailer', `${truck || '—'} / ${trailer || '—'}`],
-    ...(shortage ? [['Boxes delivered', `${r.boxes}${r.expected ? ` of ${r.expected} in TruckMate` : ''}`], ...(r.pallets != null ? [['Pallets delivered', String(r.pallets)]] : []), ['Missing', `${r.missing} box${r.missing === 1 ? '' : 'es'}`]] : [['What happened', WHY_LABEL[r.why]]]),
-    ...others.map((o) => [o.label, o.text]), ['Reported', `${et(Date.parse(r.at))} ET`]];
-  const tone = shortage ? '#B45309' : '#B91C1C';
-  const files = links.map((l) => `<li style="margin:3px 0"><a href="${esc(l.url)}" style="color:#1D4ED8">${esc(l.label)}</a>${attached.includes(l.id) ? ' <span style="color:#5B6778">· attached</span>' : ''}</li>`).join('');
-  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#14213D;max-width:600px">
-<div style="background:#142F54;color:#fff;padding:12px 16px;border-radius:8px 8px 0 0"><b style="letter-spacing:1px">FLORIDA BEAUTY FLORA</b><br><span style="font-size:12px;letter-spacing:2px;color:#C9D6EA">${shortage ? 'MISSING BOXES AT A STOP' : 'ISSUE AT A STOP'} · DRIVER APP</span></div>
-<div style="border:1px solid #D9E0EA;border-top:0;border-radius:0 0 8px 8px;padding:14px 16px">
-<div style="display:inline-block;background:${tone};color:#fff;font-weight:bold;font-size:13px;letter-spacing:1px;padding:5px 10px;border-radius:6px">${shortage ? `${r.missing} BOX${r.missing === 1 ? '' : 'ES'} MISSING` : esc(WHY_LABEL[r.why].toUpperCase())}</div>
-<table style="border-collapse:collapse;margin-top:12px">${rows.map(([k, v]) => `<tr><td style="padding:3px 14px 3px 0;color:#5B6778;vertical-align:top">${esc(k)}</td><td style="padding:3px 0"><b>${esc(v)}</b></td></tr>`).join('')}</table>
-<p style="margin:12px 0 4px;color:#5B6778">What the driver wrote</p><div style="white-space:pre-line;background:#F4F6FA;border-radius:8px;padding:10px 12px">${esc(r.note || '(nothing written)')}</div>
-${scans.length ? `<p style="margin:12px 0 4px;color:#5B6778">Paperwork scanned at this stop</p><ul style="margin:0;padding-left:18px">${scans.map((s) => `<li>${esc([s.paper, s.bill, s.confirmation ? `confirmation ${s.confirmation}` : null].filter(Boolean).join(' · '))}${s.attached ? ' <span style="color:#5B6778">· attached</span>' : ''}</li>`).join('')}</ul>` : ''}
-${links.length ? `<p style="margin:12px 0 4px;color:#5B6778">Photos from this stop (links work for ${LINK_DAYS} days)</p><ul style="margin:0;padding-left:18px">${files}</ul>` : '<p style="color:#5B6778">No photos.</p>'}
-<p style="margin-top:14px">Jarvis · AI Dispatcher<br>Florida Beauty Flora</p></div></div>`;
-  const text = [subject, ...rows.map(([k, v]) => `${k}: ${v}`), '', 'What the driver wrote:', r.note || '(nothing written)', ...(scans.length ? ['', 'Paperwork scanned at this stop:', ...scans.map((s) => [s.paper, s.bill, s.confirmation].filter(Boolean).join(' · '))] : []),
-    '', ...links.map((l) => `${l.label}: ${l.url}`), '', 'Jarvis · AI Dispatcher', 'Florida Beauty Flora'].join('\n');
+  const customer = r.stopName || r.stop;
+  const place = cityState(r.stop);
+  const title = shortage ? 'Delivery shortage' : PROBLEM_TITLE[r.why] || 'Problem at a stop';
+  const subject = shortage ? [`${plural(r.missing, 'box')} missing`, place, `Trip ${trip}`].join(' | ') : [title, place, `Trip ${trip}`].join(' | ');
+  const when = etTime(Date.parse(r.at));
+  const tone = shortage ? 'amber' : ['refused', 'damaged'].includes(r.why) ? 'red' : 'amber';
+  const earlier = others.length > 0;
+  const lead = shortage ? (r.expected ? `${r.boxes} of ${r.expected} expected boxes delivered.` : `${plural(r.boxes, 'box')} delivered; ${plural(r.missing, 'box')} missing.`)
+    : `Reported by the driver at this stop.${earlier ? ' The earlier delivery count is shown separately below.' : ''}`;
+  const metricsStrip = shortage ? metrics([['EXPECTED', r.expected != null ? r.expected : '—'], ['DELIVERED', r.boxes], ['MISSING', r.missing, '#b45309'], ['PALLETS', r.pallets != null ? r.pallets : '—']]) : '';
+  const msg = r.note ? section("Driver's message", quote(r.note, `Original message${isSpanish(r.note) ? ' · Spanish' : ''}`)) : '';
+  const driverRows = facts([['Driver', `${driver || 'Driver'}${driverCode ? ` (ID ${driverCode})` : ''}`], ['Truck / trailer', `${truck || '—'} / ${trailer || '—'}`], ['Trip', trip]]);
+  const details = shortage ? facts([['Boxes delivered', r.expected ? `${r.boxes} of ${r.expected} in TruckMate` : String(r.boxes)], ['Pallets delivered', r.pallets != null ? String(r.pallets) : 'Not given'], ['Missing', plural(r.missing, 'box')], ...others.map((o) => [o.label, o.text])])
+    : facts([['What happened', PROBLEM_TITLE[r.why] || r.why], ...others.map((o) => [o.label, o.text])]);
+  const paper = scans.length ? section('Scanned paperwork', scans.map((s) => fileBox([s.paper, s.bill].filter(Boolean).join(' · ') || 'Paperwork', [s.confirmation ? `Confirmation ${s.confirmation}` : null, s.attached ? 'Attached to this email' : 'In the trip documents (not attached)'].filter(Boolean).join(' · '))).join('')) : '';
+  const photos = section('Photos & videos', links.length ? links.map((l) => fileBox(l.label, attached.includes(l.id) ? `Attached to this email${l.url ? ` · link works ${LINK_DAYS} days` : ''}` : `Not attached (too big for one email) · link works ${LINK_DAYS} days`, l.url)).join('')
+    : '<p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#65778c">No photos.</p>');
+  const body = [metricsStrip, msg, section('Driver & equipment', driverRows), section('Delivery details', details), paper, photos].join('');
+  const html = jarvisEmail({ test, preheader: [customer, place, shortage ? `${plural(r.missing, 'box')} missing` : title].filter(Boolean).join(' · '), eyebrow: shortage ? `${plural(r.missing, 'box')} missing` : (PROBLEM_TITLE[r.why] || 'Problem').toUpperCase(),
+    tone, title, subtitle: customer, place, meta: [`Trip ${trip}`, when], lead, body });
+  const text = [test ? 'TEST · SAMPLE DATA · NOT A REAL REPORT\n' : null, `${title.toUpperCase()} — ${customer}, ${place}`, `Trip ${trip} · ${when}`, '', lead,
+    shortage ? `Expected ${r.expected != null ? r.expected : '—'} · Delivered ${r.boxes} · Missing ${r.missing} · Pallets ${r.pallets != null ? r.pallets : '—'}` : `What happened: ${PROBLEM_TITLE[r.why] || r.why}`, ...others.map((o) => `${o.label}: ${o.text}`), '',
+    `Driver's message: ${r.note || '(nothing written)'}`, '', `Driver: ${driver || 'Driver'}${driverCode ? ` (ID ${driverCode})` : ''}`, `Truck / trailer: ${truck || '—'} / ${trailer || '—'}`, `Trip: ${trip}`,
+    ...(scans.length ? ['', 'Scanned paperwork:', ...scans.map((s) => `${[s.paper, s.bill, s.confirmation ? `confirmation ${s.confirmation}` : null].filter(Boolean).join(' · ')}${s.attached ? ' (attached)' : ''}`)] : []),
+    '', ...links.map((l) => `${l.label}${attached.includes(l.id) ? ' (attached)' : ''}: ${l.url}`), '', 'Jarvis · AI Dispatcher · Florida Beauty Flora'].filter((x) => x != null).join('\n');
   return { subject, html, text };
 }
 
@@ -210,9 +218,9 @@ export function initStopReports(app, { db, secret, requireDriver, requireAuth = 
       const { rows } = await db.pool.query('SELECT id, filename, media_type, data FROM ta_stop_files WHERE id = ANY($1)', [photos.map((f) => f.id)]);
       for (const f of photos) { const row = rows.find((x) => x.id === f.id); if (row && row.data.length <= room) { room -= row.data.length; attached.push(f.id); attachments.push({ name: row.filename || 'photo.jpg', contentType: row.media_type, bytes: row.data }); } }
     }
-    const others = here.filter((x) => x.id !== r.id && x.kind !== 'scan' && x.kind !== 'photo').map((x) => ({ label: x.kind === 'problem' ? 'Also reported' : 'Earlier count', text: logLine(x, null).replace(/^Driver /, '') }));
+    const others = here.filter((x) => x.id !== r.id && x.kind !== 'scan' && x.kind !== 'photo').map((x) => ({ label: x.kind === 'problem' ? 'Also reported' : 'Earlier count', text: logLine(x, null).replace(/^Driver (at [^:]+: )?/, '').replace(/^reported a problem at [^:]+: /, '') }));
     const t = tripOf((await items()).find((it) => tripNo(it) === m.trip));
-    const mail = stopEmail(r, { trip: m.trip, driver: r.by, truck: t.powerUnit || m.load.truck, trailer: t.trailer || m.load.trailer, others, links, attached, scans });
+    const mail = stopEmail(r, { trip: m.trip, driver: r.by, driverCode: r.driverCode, truck: t.powerUnit || m.load.truck, trailer: t.trailer || m.load.trailer, others, links, attached, scans });
     await sendMail({ to, subject: mail.subject, html: mail.html, text: mail.text, attachments });
     const sentAt = new Date(now()).toISOString();
     await patch(m.trip, r.id, (x) => ({ ...x, sentAt, sentTo: to }));

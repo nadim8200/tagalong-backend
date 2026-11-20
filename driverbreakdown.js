@@ -21,6 +21,7 @@ import { makeToken, readToken } from './breakdownreport.js';
 import { readableFile } from './heic.js';
 import { loadsFor } from './driverauth.js';
 import { DEPARTMENTS } from './staff-directory.js';
+import { jarvisEmail, section, quote, facts, notice, fileBox, location, telHref, mapUrl, etTime, isSpanish } from './jarvismail.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taDriverBreakdowns:${SITE}`;   // id → report
@@ -101,25 +102,60 @@ export function reportRows(r) {
   ];
 }
 
-// The email: the first report, or an update (more info / photos) on it. Pure. → { subject, html, text }
-export function breakdownEmail(r, links = [], attachedIds = [], note = null) {
-  const unit = r.part === 'truck' ? `TRUCK ${r.truck || ''}` : r.part === 'trailer' ? `TRAILER ${r.trailer || ''}` : `REEFER ${r.trailer || ''}`;
-  const subject = `${note ? 'UPDATE // ' : ''}BREAKDOWN // ${unit.trim()} // ${LABEL[r.category].toUpperCase()}${r.trip ? ` // TRIP ${r.trip}` : ''} // ${r.id}`;
-  const banner = r.status === 'stopped' ? ['DRIVER IS STOPPED', '#B91C1C'] : r.status === 'moving' ? ['REPORTED WHILE MOVING', '#B45309'] : ['DRIVER IS NOT SURE IF THE VEHICLE CAN MOVE', '#B45309'];
-  const rows = reportRows(r);
+// The email: the first report, or an update (more info / photos) on it, in the Jarvis layout (jarvismail.js). Pure.
+// opts.rcStatus = the road call's status now (only "awaiting approval" says so); opts.test = the TEST / SAMPLE DATA line.
+const TITLE = { tire: 'Tire breakdown', engine: 'Engine problem', brakes: 'Brake problem', air: 'Air leak', lights: 'Lights / electrical problem', other: 'Breakdown reported',
+  temp: 'Reefer temperature problem', nostart: "Reefer won't start", alarm: 'Reefer alarm', fuel: 'Reefer fuel / leak', accident: 'Accident reported' };
+const EYEBROW = { stopped: 'VEHICLE STOPPED', moving: 'REPORTED WHILE MOVING', unsure: 'DRIVER NOT SURE IF IT CAN MOVE' };
+const YN = (v) => (v === 'yes' ? 'Yes' : v === 'no' ? 'No' : v === 'unknown' ? 'Driver not sure' : 'Not answered');
+const AWAITING = ['gathering', 'ready'];
+const CONSOLE = 'https://mytagalong.app/truckmate';
+// the console opens on the load with the dispatch breakdown form filled in from this report. Pure.
+export const consoleLink = (r) => (r.trip ? `${CONSOLE}?trip=${encodeURIComponent(r.trip)}&bk=${encodeURIComponent(r.id)}` : null);
+const SERVICE_HERE = /(lleg[oó]|arriv|aqu[ií]|est[aá]n? (aqu|cambi|repar|arregl)|cambiando|changing|repair|fixing|on site|en sitio|gr[uú]a|tow truck|mec[aá]nico|mechanic)/i;
+export function breakdownEmail(r, links = [], attachedIds = [], note = null, opts = {}) {
+  const unit = r.part === 'truck' ? `Truck ${r.truck || ''}`.trim() : `${PART_LABEL[r.part]} ${r.trailer || ''}`.trim();
+  const accident = r.category === 'accident';
+  const title = note ? 'Service update' : TITLE[r.category] || 'Breakdown reported';
+  const subtitle = `${unit} · ${LABEL[r.category]}`;
+  const subject = note ? ['Breakdown update', r.id, r.trip ? `Trip ${r.trip}` : null].filter(Boolean).join(' | ')
+    : [TITLE[r.category] || 'Breakdown reported', unit, r.trip ? `Trip ${r.trip}` : null, r.id].filter(Boolean).join(' | ');
+  const at = note ? note.at : r.at;
+  const awaiting = !opts.rcStatus || AWAITING.includes(opts.rcStatus);
+  const lead = note ? `Driver-reported update on ${r.id}. It is not confirmation that anything is fixed.`
+    : r.roadCall ? (awaiting ? `Review ${accident ? 'accident details and ' : ''}road call ${r.roadCall} in the console. Approval is required to send road service.` : `Road call ${r.roadCall} is ${opts.rcStatus} in the console.`)
+      : 'No road call is open for this report. Call the driver.';
+  const conflict = note && r.roadCall && awaiting && SERVICE_HERE.test(note.text || '')
+    ? notice('Status needs reconciliation', `Road call ${r.roadCall} is still open and awaiting approval to send service, but the driver's update says service is there or working. Check the road call before requesting another service.`) : '';
   const words = note ? note.text : [r.text, r.more ? `More: ${r.more}` : null].filter(Boolean).join('\n\n');
-  const files = links.map((l) => `<li style="margin:3px 0"><a href="${esc(l.url)}" style="color:#1D4ED8">${esc(l.kind === 'video' ? `Video ${l.n}` : `Photo ${l.n}`)}</a>${l.kind === 'video' ? ` <span style="color:#5B6778">(${Math.max(1, Math.round(l.size / 1048576))} MB)</span>` : ''}${attachedIds.includes(l.id) ? ' <span style="color:#5B6778">· attached</span>' : ''}</li>`).join('');
-  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#14213D;max-width:600px">
-<div style="background:#142F54;color:#fff;padding:12px 16px;border-radius:8px 8px 0 0"><b style="letter-spacing:1px">FLORIDA BEAUTY FLORA</b><br><span style="font-size:12px;letter-spacing:2px;color:#C9D6EA">${note ? 'BREAKDOWN UPDATE FROM THE DRIVER' : 'BREAKDOWN REPORTED IN THE DRIVER APP'}</span></div>
-<div style="border:1px solid #D9E0EA;border-top:0;border-radius:0 0 8px 8px;padding:14px 16px">
-<div style="display:inline-block;background:${banner[1]};color:#fff;font-weight:bold;font-size:13px;letter-spacing:1px;padding:5px 10px;border-radius:6px">${esc(banner[0])}</div>
-<table style="border-collapse:collapse;margin-top:12px">${rows.filter(([, v]) => v !== '').map(([k, v]) => `<tr><td style="padding:3px 14px 3px 0;color:#5B6778;vertical-align:top">${esc(k)}</td><td style="padding:3px 0"><b>${/^https:\/\//.test(v) ? `<a href="${esc(v)}" style="color:#1D4ED8">Open map</a>` : esc(v)}</b></td></tr>`).join('')}</table>
-<p style="margin:12px 0 4px;color:#5B6778">${note ? `What the driver added (${esc(et(Date.parse(note.at)))} ET)` : 'What the driver wrote'}</p><div style="white-space:pre-line;background:#F4F6FA;border-radius:8px;padding:10px 12px">${esc(words || '(no words — see the photos / videos)')}</div>
-${links.length ? `<p style="margin:12px 0 4px;color:#5B6778">Photos and videos (links work for ${LINK_DAYS} days)</p><ul style="margin:0;padding-left:18px">${files}</ul>` : '<p style="color:#5B6778">No photos or videos.</p>'}
-${r.roadCall ? `<p style="margin-top:12px">Road call <b>${esc(r.roadCall)}</b> is open in the console (Road calls): approve it there to send road service.</p>` : ''}
-<p style="margin-top:14px">Jarvis · AI Dispatcher<br>Florida Beauty Flora</p></div></div>`;
-  const text = [`BREAKDOWN — ${banner[0]}${note ? ' (update)' : ''}`, ...rows.filter(([, v]) => v !== '').map(([k, v]) => `${k}: ${v}`), '', note ? 'What the driver added:' : 'What the driver wrote:', words || '(no words — see the photos / videos)', '',
-    ...links.map((l) => `${l.kind === 'video' ? 'Video' : 'Photo'} ${l.n}: ${l.url}`), ...(r.roadCall ? ['', `Road call ${r.roadCall} is open in the console.`] : []), '', 'Jarvis · AI Dispatcher', 'Florida Beauty Flora'].join('\n');
+  const langNote = (t, when) => [`Original message${isSpanish(t) ? ' · Spanish' : ''}`, when].filter(Boolean).join(' · ');
+  const tel = telHref(r.callback);
+  const driver = facts([['Driver', `${r.by || 'Driver'}${r.driverCode ? ` (ID ${r.driverCode})` : ''}`], ['Callback', tel ? { html: `<a href="${tel}" style="color:#192d48">${esc(fmtPhone(r.callback))}</a>` } : 'Not given'],
+    ['Truck / trailer', `${r.truck || '—'} / ${r.trailer || '—'}`], r.trip ? ['Trip', r.trip] : null]);
+  const tire = r.category === 'tire' ? section('Tire details', facts([['Tires', r.tires.length ? r.tires.map((t) => tireLabel(t, r.part)).join('; ') : r.tireUnsure ? 'Driver is not sure which tire' : 'Not reported'],
+    ['Tire size', r.tireSize || (r.sizeUnknown ? "Driver doesn't know" : 'Not reported')]])) : '';
+  const A = r.answers || {};
+  const acc = accident ? section('Accident details · driver reported', facts([['Anyone hurt', YN(A.hurt)], ['Other vehicles involved', YN(A.others)], ['Police on the scene', YN(A.policeHere)], ['Police report', A.police || 'Not given']])) : '';
+  const other = !accident && Object.keys(A).length ? section('Problem details · driver reported', facts(Object.entries(A).map(([k, v]) => [ANSWER_LABEL[k] || k, ['yes', 'no', 'unknown'].includes(v) ? YN(v) : v]))) : '';
+  const rf = r.reefer;
+  const reefer = rf ? section('Reefer readings', facts([['Current', rf.current != null ? `${rf.current}°F` : '—'], ['Set point', rf.set != null ? `${rf.set}°F` : '—'], ['Return air', rf.ret != null ? `${rf.ret}°F` : '—'], ['Discharge air', rf.discharge != null ? `${rf.discharge}°F` : '—'],
+    ['Unit', rf.power || '—'], rf.mode ? ['Mode', rf.mode] : null, rf.alarm ? ['Alarm', rf.alarm] : null, rf.fuel != null ? ['Fuel', `${rf.fuel}%`] : null, ['Readings from', `${rf.source === 'telemetry' ? 'Samsara' : 'the driver'}${rf.at ? ` (${etTime(Date.parse(rf.at))})` : ''}`]])) : '';
+  const files = links.length ? links.map((l) => fileBox(`${l.kind === 'video' ? 'Video' : 'Photo'} ${l.n}`, attachedIds.includes(l.id) ? `Attached to this email${l.url ? ` · link works ${LINK_DAYS} days` : ''}` : `Not attached${l.kind === 'video' ? '' : ' (too big for one email)'} · link works ${LINK_DAYS} days`, l.url)).join('')
+    : `<p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#65778c">No photos or videos.</p>`;
+  const quoteBlock = section(note ? 'Latest driver update' : "Driver's message", words ? quote(words, langNote(words, note ? etTime(Date.parse(note.at)) : null)) : '<p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#65778c">The driver did not write anything.</p>');
+  const body = [quoteBlock, conflict, section('Driver & equipment', driver), tire, acc, other, reefer, section('Reported location', location(r.location || {})), section('Photos & videos', files)].join('');
+  const html = jarvisEmail({ test: opts.test, preheader: [subtitle, EYEBROW[r.status], r.by].filter(Boolean).join(' · '), eyebrow: note ? `DRIVER UPDATE · ${EYEBROW[r.status]}` : EYEBROW[r.status],
+    tone: note ? 'blue' : accident ? 'red' : 'amber', title, subtitle, meta: [r.id, etTime(Date.parse(at))], lead, body,
+    action: !note && consoleLink(r) ? { label: 'Open in the console', url: consoleLink(r) } : null });
+  const L = r.location || {}; const map = mapUrl(L.lat, L.lng);
+  const text = [opts.test ? 'TEST · SAMPLE DATA · NOT A REAL REPORT\n' : null, `${title.toUpperCase()} — ${EYEBROW[r.status]}`, `${subtitle} · ${r.id} · ${etTime(Date.parse(at))}`, '', lead, '',
+    !note && consoleLink(r) ? `Open in the console: ${consoleLink(r)}` : null,
+    `${note ? 'Latest driver update' : "Driver's message"}: ${words || '(nothing written)'}`, conflict ? `\nSTATUS NEEDS RECONCILIATION: road call ${r.roadCall} is still awaiting approval, but the driver says service is there.` : null, '',
+    `Driver: ${r.by || 'Driver'}${r.driverCode ? ` (ID ${r.driverCode})` : ''}`, `Callback: ${fmtPhone(r.callback) || 'Not given'}`, `Truck / trailer: ${r.truck || '—'} / ${r.trailer || '—'}`, r.trip ? `Trip: ${r.trip}` : null,
+    ...(r.category === 'tire' ? [`Tires: ${r.tires.length ? r.tires.map((t) => tireLabel(t, r.part)).join('; ') : r.tireUnsure ? 'not sure' : 'not reported'}`, `Tire size: ${r.tireSize || (r.sizeUnknown ? "doesn't know" : 'not reported')}`] : []),
+    ...(accident ? [`Anyone hurt: ${YN(A.hurt)}`, `Other vehicles involved: ${YN(A.others)}`, `Police on the scene: ${YN(A.policeHere)}`, `Police report: ${A.police || 'Not given'}`] : Object.entries(A).map(([k, v]) => `${ANSWER_LABEL[k] || k}: ${v}`)),
+    map ? `Location: ${Number(L.lat).toFixed(5)}, ${Number(L.lng).toFixed(5)} (${L.source === 'truck' ? 'truck GPS' : "driver's phone"}${L.at ? `, as of ${etTime(Date.parse(L.at))}` : ''}) · ${map}` : 'Location: not sent', '',
+    ...links.map((l) => `${l.kind === 'video' ? 'Video' : 'Photo'} ${l.n}${attachedIds.includes(l.id) ? ' (attached)' : ''}: ${l.url}`), '', 'Jarvis · AI Dispatcher · Florida Beauty Flora'].filter((x) => x != null).join('\n');
   return { subject, html, text };
 }
 
@@ -234,7 +270,7 @@ export function initDriverBreakdowns(app, { db, secret, requireDriver, requireAu
       if (push && push.sendToEmails) {
         try {
           const to = await pushTo();
-          if (to.length) await push.sendToEmails(to, { title: `🚨 Breakdown reported — truck ${r.truck || '?'}`, body: breakdownPushBody(r), data: { type: 'breakdown', id, path: '/truckmate?tab=roadcalls' } });
+          if (to.length) await push.sendToEmails(to, { title: `🚨 Breakdown reported — truck ${r.truck || '?'}`, body: breakdownPushBody(r), data: { type: 'breakdown', id, path: r.trip ? `/truckmate?trip=${encodeURIComponent(r.trip)}&bk=${encodeURIComponent(id)}` : '/truckmate?tab=roadcalls' } });
         } catch (e) { console.warn('[breakdown] push:', e.message); }
       }
       if (log && r.trip) await log(SITE, r.trip, { type: 'note', kind: 'breakdown', text: `Breakdown ${id} from ${r.by || 'the driver'} in the app: ${PART_LABEL[r.part]} · ${LABEL[r.category]} (${STATE_LABEL[r.status]})${r.text ? ` — ${r.text.slice(0, 200)}` : ''}`, by: r.by || 'driver app' }).catch(() => {});
@@ -317,6 +353,14 @@ export function initDriverBreakdowns(app, { db, secret, requireDriver, requireAu
         // the driver's photos / videos as signed links (the console shows them on the road call)
         links: (r.files || []).map((f) => ({ kind: f.kind, name: f.name, note: f.note || null, url: `${baseUrl}/bk/f/${makeToken({ f: f.id }, secret, now(), PURPOSE, LINK_DAYS)}` })) })) });
     });
+    // a dispatcher sent the dispatch breakdown email from this report (the console form filled in from it): the card stops asking
+    app.post('/truckmate/breakdowns/:id/forwarded', requireAuth, async (req, res) => {
+      const r = (await all())[String(req.params.id)];
+      if (!r) return res.status(404).json({ error: 'Not found' });
+      const at = new Date(now()).toISOString();
+      await patch(r.id, (x) => ({ ...x, forwardedAt: x.forwardedAt || at, forwardedBy: x.forwardedBy || (req.user && (req.user.name || req.user.email)) || 'dispatcher', forwardedSubject: S((req.body || {}).subject, 200) || x.forwardedSubject || null, updatedAt: at }));
+      return res.json({ ok: true });
+    });
     // a dispatcher closes the report (the road call, when there is one, keeps its own status)
     app.post('/truckmate/breakdowns/:id/status', requireAuth, async (req, res) => {
       const st = (req.body || {}).status;
@@ -341,7 +385,8 @@ export function initDriverBreakdowns(app, { db, secret, requireDriver, requireAu
       const { rows } = await db.pool.query('SELECT id, filename, media_type, data FROM ta_breakdown_files WHERE id = ANY($1)', [photos.map((f) => f.id)]);
       for (const f of photos) { const row = rows.find((x) => x.id === f.id); if (row && row.data.length <= room) { room -= row.data.length; attachedIds.push(f.id); attachments.push({ name: row.filename || `photo-${attachments.length + 1}.jpg`, contentType: row.media_type, bytes: row.data }); } }
     }
-    const m = breakdownEmail(r, links, attachedIds, note);
+    const rc = await rcOf(r).catch(() => null);
+    const m = breakdownEmail(r, links, attachedIds, note, { rcStatus: rc ? rc.status : null });
     if (!to.length) throw new Error('No one is on the breakdown list.');
     if (!sendMail) throw new Error('Email is not set up.');
     await sendMail({ to, subject: m.subject, html: m.html, text: m.text, attachments });
