@@ -704,7 +704,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       if (kind === 'breakdown' && roadHook) Promise.resolve(roadHook(link.site, String(link.trip), { docIds: stored.map((d) => d.id), via: 'upload link', by })).catch(() => {});
       if (kind === 'temp' && photoHook) Promise.resolve(photoHook(link.site, String(link.trip), { docIds: stored.map((d) => d.id), via: 'upload link', by, forced: true })).catch(() => {});
       if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at: new Date().toISOString(), source: 'driver app', text: `Driver sent the ${kind === 'temp' ? 'reefer temp photo' : kind === 'breakdown' ? 'breakdown photos' : PAPER_KINDS[kind].label}${bill ? ` for bill ${bill}` : ''}${boxes != null ? `, ${boxes} boxes` : ''} (${stored.length} ${stored.length === 1 ? 'file' : 'files'})${confirmation ? ` · confirmation ${confirmation}` : ''}`, by }]);
-      res.json({ ok: true, count: stored.length, ...(confirmation ? { confirmation, bill } : {}) });
+      res.json({ ok: true, count: stored.length, docIds: stored.map((d) => String(d.id)), ...(confirmation ? { confirmation, bill } : {}) });
     } catch (e) { res.status(400).json({ error: e.message || 'Could not upload.' }); }
   });
 

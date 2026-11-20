@@ -81,6 +81,7 @@ import { initCommitments, lateMessage } from './commitments.js';
 import { initLtlTempAlert } from './tempalert.js';
 import { initDvr } from './dvr.js';
 import { initDriverBreakdowns } from './driverbreakdown.js';
+import { initStopReports } from './stopreports.js';
 import { initThermoKing } from './thermoking.js';
 import { initYardReport } from './yardreport.js';
 import { initYardReleases } from './yardreleases.js';
@@ -1485,6 +1486,8 @@ driverNotify = (...a) => driverAuth.notify(...a);
 initDvr(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, requireAuth: requireDispatch, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('dvr'), log: (...a) => comms.log(...a) });
 // breakdowns from the driver app (Breakdown tab): stored, a road call opened for dispatch to approve, one email with the photos
 initDriverBreakdowns(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, requireAuth: requireDispatch, getBoard: (site) => truckmate.buildBoard(site), roadCalls: () => roadCalls, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('driver_breakdown'), entries: async () => ((await alertRecipients.lists()).driver_breakdown || []), training, push, pushTo: () => pushRules.emailsFor(['breakdown', 'callback-urgent', 'priority']), log: (...a) => comms.log(...a), env: process.env });
+// at a stop on a load without a trip sheet: boxes / pallets / missing, a problem, photos, the scanned papers (driver app)
+initStopReports(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, requireAuth: requireDispatch, getBoard: (site) => truckmate.buildBoard(site), docs, sendMail: (m) => sendMail(m, { env: process.env }), recipients: { shortage: () => alertRecipients.resolve('stop_shortage'), issue: () => alertRecipients.resolve('stop_issue') }, log: (...a) => comms.log(...a) });
 // Thermo King TracKing (read only, every 15 min): live reefer readings for the cards and temp alerts — THERMOKING_* in Render
 thermoKing = initThermoKing({ app, requireAuth: requireDispatch, requireAdmin, db, env: process.env });
 // yard report: trailers at each hub yard (Thermo King GPS) + what's coming down to Florida

@@ -9,6 +9,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from 'node:crypto';
 import { stopsOf } from './statusmail.js';
 import { CHECKINS, validStep } from './checkins.js';
+import { leftCooler, withDetected } from './autodepart.js';
 import { KNOWN_YARDS } from './loadsheet.js';
 
 // The driver release a dispatcher submitted on this load (release.js keeps them per trip, newest last) → what the driver
@@ -195,10 +196,20 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       // check-ins (not on LTL runs, whose stops are marked done instead): the stops to tap and what was tapped already
       const book = (await db.get(CHECKINS(SITE), {})) || {};
       const items2 = await board();
+      // loading steps the driver skipped: once Jarvis sees the truck leave the cooler with its trailer (first time kept)
+      const DEP = `taAutoDepart:${SITE}`;
+      let departed = null;
       for (const l of [...loads.current, ...loads.next]) {
         if (l.ltl) continue;
         const it = items2.find((x) => tripNo(x) === l.trip);
-        l.checkin = { stops: stopsOf(it).map((x) => ({ key: x.key, number: x.number, name: x.name || (x.customers || [])[0] || null, place: x.place, delivered: !!x.delivered })), steps: (book[l.trip] || {}).steps || {} };
+        const steps = (book[l.trip] || {}).steps || {};
+        let seen = null;
+        if (!(steps['at-shipper'] && steps.loaded) && loads.current.includes(l)) {
+          if (!departed) departed = (await db.get(DEP, {})) || {}; // eslint-disable-line no-await-in-loop
+          seen = departed[l.trip] || null;
+          if (!seen) { const d = leftCooler(it, now()); if (d) { seen = d; departed = await db.update(DEP, (cur) => ({ ...Object.fromEntries(Object.entries(cur || {}).slice(-300)), [l.trip]: (cur || {})[l.trip] || d }), {}); } } // eslint-disable-line no-await-in-loop
+        }
+        l.checkin = { stops: stopsOf(it).map((x) => ({ key: x.key, number: x.number, name: x.name || (x.customers || [])[0] || null, place: x.place, delivered: !!x.delivered })), steps: withDetected(steps, seen) };
       }
       // a release the dispatcher submitted: the driver sees which stops are released, and at which hub
       const rels = (await db.get(`taReleases:${SITE}`, {})) || {};
