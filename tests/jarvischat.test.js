@@ -309,3 +309,26 @@ test('voice picker: anyone hears a voice first; only an admin changes Jarvis\'s 
   await call('POST /jarvis/speak', { text: 'Hello.' });
   assert.equal(seen[1].voice, 'ash');                                                         // everyone hears the saved voice
 });
+
+test('Jarvis reads the whole Phone & Messages inbox and his own call transcripts (staff only)', async () => {
+  const db = memDb();
+  const now = Date.now(); const ago = (h) => new Date(now - h * 3600000).toISOString();
+  await db.set('taMsgThreads:florida-beauty', {
+    'p:7867945307': { id: 'p:7867945307', kind: 'person', name: 'Carlos Rojas', role: 'driver', trip: '627159', truck: '4566', last: { at: ago(2), text: 'still unloading' } },
+    'g:abc': { id: 'g:abc', kind: 'group', name: 'Miami yard', members: [{ name: 'Gus', phone: '3055550111' }], last: { at: ago(5), text: 'costco moved to 9' } },
+  });
+  await db.set('taMsgLog:florida-beauty:p:7867945307', [{ at: ago(3), dir: 'out', by: 'Ana', text: 'Are you empty?' }, { at: ago(2), dir: 'in', text: 'still unloading' }]);
+  await db.set('taMsgLog:florida-beauty:g:abc', [{ at: ago(5), dir: 'in', name: 'Gus', text: 'Costco moved to 9 AM tomorrow' }]);
+  await db.set('taJarvisCalls:florida-beauty', [{ callId: 'c1', at: ago(1), direction: 'outbound', phone: '+17867945307', trip: '627159', minutes: 1.2, summary: 'Driver says 30 more minutes to unload.', transcript: 'Agent: Hi Carlos… User: thirty more minutes' }]);
+  const chat = initJarvisChat({ get: () => {}, post: () => {} }, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: [], unclosed: [] }), env: { ANTHROPIC_API_KEY: 'k' } });
+  const c = { user: { id: 7 }, did: [], proposed: [] };
+  const carlos = await chat.runTool('text_messages', { who: 'carlos' }, c);
+  assert.equal(carlos.conversations[0].with, 'Carlos Rojas');
+  assert.deepEqual(carlos.conversations[0].messages.map((m) => [m.from, m.text]), [['Ana', 'Are you empty?'], ['Carlos Rojas', 'still unloading']]);
+  assert.equal((await chat.runTool('text_messages', { who: '627159' }, c)).conversations[0].with, 'Carlos Rojas');   // by trip
+  const words = await chat.runTool('text_messages', { words: 'costco' }, c);
+  assert.equal(words.conversations[0].with, 'Miami yard'); assert.equal(words.conversations[0].messages[0].from, 'Gus');
+  const calls = await chat.runTool('jarvis_calls', { query: '627159', full: true }, c);
+  assert.equal(calls.calls[0].direction, 'Jarvis called'); assert.match(calls.calls[0].transcript, /thirty more minutes/);
+  assert.equal((await chat.runTool('text_messages', {}, { ...c, customer: { id: 'x' } })).error, 'Not available.');
+});

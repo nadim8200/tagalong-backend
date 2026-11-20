@@ -105,8 +105,9 @@ test('setup creates Jarvis in Retell (Claude, English + Spanish + Hebrew, our to
   const llm = v.retellCalls.find((c) => c.url.endsWith('/create-retell-llm')).body;
   assert.equal(llm.model, undefined, 'no retired top-level model field'); assert.equal(llm.model_temperature, undefined);
   assert.equal(llm.model_config.type, 'cascading'); assert.match(llm.model_config.primary.model, /^claude/); assert.equal(llm.model_config.temperature, 0.2);
-  assert.deepEqual(llm.general_tools.map((t) => t.name), ['lookup_load', 'boxes_check', 'dispatch_log', 'report_breakdown', 'breakdown_update', 'breakdown_fixed', 'answer_stop', 'follow_up_load', 'report_missing_boxes', 'take_message', 'past_loads', 'set_delivery_time', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'customer_instructions', 'text_instructions', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
-  assert.equal(llm.general_tools[0].url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
+  assert.deepEqual(llm.general_tools.map((t) => t.name), ['ask_jarvis', 'lookup_load', 'boxes_check', 'dispatch_log', 'report_breakdown', 'breakdown_update', 'breakdown_fixed', 'answer_stop', 'follow_up_load', 'report_missing_boxes', 'take_message', 'past_loads', 'set_delivery_time', 'eta_vs_actual', 'stop_times', 'miles', 'schedule_callback', 'email_manifest', 'customer_instructions', 'text_instructions', 'staff_directory', 'confirm_delivered', 'report_problem', 'road_call_details', 'end_call', 'transfer_to_dispatch']);
+  assert.equal(llm.general_tools.find((t) => t.name === 'lookup_load').url, 'https://tagalong-backend-fdzx.onrender.com/retell/fn/lookup_load');
+  assert.equal(llm.general_tools[0].timeout_ms, 45000, 'ask_jarvis waits for the full Jarvis answer');
   const agent = v.retellCalls.find((c) => c.url.endsWith('/create-agent')).body;
   assert.deepEqual(agent.language, ['en-US', 'es-419', 'he-IL']);
   assert.match(llm.general_prompt, /English, Spanish or Hebrew/);
@@ -769,7 +770,7 @@ test('📞 Call Jarvis from the console: a live web call as staff; only our serv
     assert.equal(v.retellCalls.some((c) => c.url.endsWith('/v2/create-web-call')), false, 'never the deprecated v2');
     const sent = v.retellCalls.find((c) => c.url.endsWith('/v3/create-web-call'));
     assert.equal(sent.body.agent_id, 'agent_1');
-    assert.deepEqual(sent.body.metadata, { purpose: 'console', staff: true, by: 'Rosa Diaz', email: null });
+    assert.deepEqual(sent.body.metadata, { purpose: 'console', staff: true, by: 'Rosa Diaz', email: null, userId: null });
     assert.match(sent.body.retell_llm_dynamic_variables.greeting, /, Rosa! This is Jarvis/);
     assert.equal(JSON.stringify(sent.body).includes(KEY), false, 'the key never goes in the request body');
     assert.equal((await v.hit('POST /voice/web-call', {}, { user: { name: 'Rosa Diaz' } })).code, 429, 'no double start');
@@ -1089,4 +1090,22 @@ test('a short number is a truck before it is a reference: "4550" finds the truck
   ];
   const hit = findLoad(items, { trip: '4550', bill: '4550', loadNumber: '4550', truck: '4550', trailer: '4550' });
   assert.equal(hit.item.trip.tripNumber, '626344'); assert.equal(hit.by, 'truck number');
+});
+
+test('ask_jarvis on a live call: staff only; the question goes to the full Jarvis brain and its answer is spoken (Nov 19)', async () => {
+  const { setStaffBrain } = await import('../voice.js');
+  const asked = [];
+  setStaffBrain(async (q) => { asked.push(q); return 'Effie Afek in Billing, extension 206.'; });
+  const directory = { load: async () => ({ people: [{ id: 's8', name: 'Ana', phone: '305-555-0100' }] }) };
+  const v = setup({}, { directory });
+  const outsider = await v.hit('POST /retell/fn/ask_jarvis', { args: { question: 'whats effies extension' }, call: { direction: 'inbound', from_number: '+13125550000' } });
+  assert.equal(outsider.out.ok, false); assert.match(outsider.out.say, /staff only/);
+  assert.equal(asked.length, 0, 'a caller who is not staff never reaches the brain');
+  const web = await v.hit('POST /retell/fn/ask_jarvis', { args: { question: 'whats effies extension' }, call: { call_id: 'call_9', call_type: 'web_call', metadata: { purpose: 'console', staff: true, by: 'nadim', userId: '1' } } });
+  assert.equal(web.out.ok, true); assert.equal(web.out.answer, 'Effie Afek in Billing, extension 206.');
+  assert.deepEqual(asked[0], { question: 'whats effies extension', userId: '1', name: 'nadim', callId: 'call_9' });
+  const phone = await v.hit('POST /retell/fn/ask_jarvis', { args: { question: 'where is 2211' }, call: { call_id: 'call_10', direction: 'inbound', from_number: '+13055550100' } });
+  assert.equal(phone.out.ok, true); assert.equal(asked[1].userId, 'staff:s8'); assert.equal(asked[1].name, 'Ana');
+  assert.equal((await v.hit('POST /retell/fn/ask_jarvis', { args: { question: 'x' }, call: {} }, { sign: false })).code, 401);
+  setStaffBrain(null);
 });

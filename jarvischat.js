@@ -15,11 +15,11 @@
 // sheets, rate cons). Each dispatcher has their own chat threads.
 // ---------------------------------------------------------------
 import { stopsLeft } from './loadstops.js';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { slimItem } from './assistant.js';
 import { driveTimeFor } from './drivetime.js';
 import { apptMs } from './yardreleases.js';
-import { findLoad, customerStops, customerView, isOcLoad, spokenName, nameScore } from './voice.js';
+import { findLoad, customerStops, customerView, isOcLoad, spokenName, nameScore, setStaffBrain } from './voice.js';
 import { contactsFor } from './statusmail.js';
 import { customerAnswer, loadAnswer } from './dispatchcards.js';
 import { fmtLocal } from './localtime.js';
@@ -84,6 +84,20 @@ export function driverRows({ profiles = {}, fleet = {}, samsara = {}, pins = {},
     if (digits.length >= 4 && d.phones.some((x) => String(x.number).replace(/\D/g, '').includes(digits))) return true;
     return [d.code, d.name].some((v) => v && String(v).toUpperCase().includes(Q));
   }).sort((a, b) => String(a.name || '~').localeCompare(String(b.name || '~')));
+}
+
+// Phone & Messages (the shared company inbox): which conversations match a name, phone, trip, truck or words. threads:
+// id → { name, role, trip, truck, members, last }. Newest first. Pure.
+export function matchThreads(threads = {}, q = '', { since = 0 } = {}) {
+  const Q = String(q || '').trim().toUpperCase(); const digits = Q.replace(/\D/g, '');
+  const list = Object.values(threads || {}).filter((t) => t && !t.deleted && (Date.parse((t.last && t.last.at) || 0) || 0) >= since);
+  const hit = (t) => {
+    if (!Q) return true;
+    const phones = [String(t.id || '').replace(/^p:/, ''), ...((t.members || []).map((m) => m && m.phone))].map((x) => String(x || '').replace(/\D/g, '')).filter(Boolean);
+    if (digits.length >= 4 && (phones.some((x) => x.includes(digits)) || [t.trip, t.truck].some((v) => v && String(v) === digits))) return true;
+    return [t.name, t.role, ...((t.members || []).map((m) => m && m.name))].some((v) => v && String(v).toUpperCase().includes(Q));
+  };
+  return list.filter(hit).sort((a, b) => (Date.parse((b.last && b.last.at) || 0) || 0) - (Date.parse((a.last && a.last.at) || 0) || 0));
 }
 
 // Loads that left the board: who / what closed each one and why — TruckMate, Jarvis (facts), the driver in the app, a
@@ -181,6 +195,8 @@ export const TOOLS = [
   { name: 'stop_times', description: 'How long trucks took at their stops (customer geofence in → out): arrived, left, time there — for a trip, a truck and / or a customer, over the last few days; plus any truck at a stop right now and how long so far. Use for "how long was 734 at Direct Flowers?", "how long are trucks taking at Carbone?", "is 2403 still at the stop?". STAFF ONLY.', input_schema: { type: 'object', properties: { trip: { type: 'string' }, truck: { type: 'string' }, customer: { type: 'string' }, days: { type: 'number', description: '1–30, default 7' } } } },
   { name: 'yard_releases', description: 'STAFF ONLY. The Yards → Releases list: loads at, or coming to, the Miami and Bartow (Central Florida) yards for redelivery to the customer — from Gus\'s yard sheets, TruckMate (spotted loaded) and the trailer GPS. Each has its stage (coming / at the yard / out for delivery / delivered / cancelled), the redelivery date and time, whether it\'s late, the local driver and truck, the customer, trailer and bills. Use for "what\'s at the Miami yard", "who is doing the Costco redelivery", "any late redeliveries".', input_schema: { type: 'object', properties: { yard: { type: 'string', description: 'miami or bartow (central florida) — empty for both' }, stage: { type: 'string', description: 'coming | at the yard | out | delivered | cancelled' } } } },
   { name: 'closed_loads', description: 'STAFF ONLY. Loads that left the board (the Delivered tab): when, and who or what closed each one and why — TruckMate delivered/completed it, Jarvis closed it on facts, the driver answered "all delivered" in the app, or a dispatcher used Close (completed, or taken off the board as NOT delivered: cancelled, duplicate, old). For one trip, or the last hours. Use for "why did 627168 leave the board", "who closed 625241", "what was taken off the board today".', input_schema: { type: 'object', properties: { trip: { type: 'string' }, hours: { type: 'number', description: 'how far back, default 48' } } } },
+  { name: 'text_messages', description: 'STAFF ONLY. The Phone & Messages inbox: every text conversation on the company line and in the driver app — drivers, staff, customers, groups — with what each side wrote and when. Search by a person\'s name, phone number, trip or truck, and/or by words in the messages; empty = the newest conversations. Use for "what did Carlos text", "did the 2211 driver reply", "any texts about the Costco load", "what did Gus write in the group".', input_schema: { type: 'object', properties: { who: { type: 'string', description: 'a name, phone number, trip or truck' }, words: { type: 'string', description: 'words to look for in the messages' }, hours: { type: 'number', description: 'how far back, default 72' } } } },
+  { name: 'jarvis_calls', description: 'STAFF ONLY. Every phone call Jarvis himself had — drivers and customers he called or who called him, staff on the phone line, voice chats from the console: when, with whom, how long, the summary and the whole transcript. Search by phone, trip, name or words; empty = the latest calls. (The dispatchers\' own RingCentral calls are call_transcripts.) Use for "what did the driver tell Jarvis on the phone", "did Jarvis call the receiver", "read me that call".', input_schema: { type: 'object', properties: { query: { type: 'string', description: 'a phone number, trip, name or words from the call' }, hours: { type: 'number', description: 'how far back, default 72' }, full: { type: 'boolean', description: 'true = include the whole transcript' } } } },
   { name: 'driver_checkins', description: 'STAFF ONLY. What a load\'s driver tapped in the driver app, in order, with times: at the shipper, loaded & leaving, arrived / delivered at each stop — plus whether Jarvis asked them if the load is finished and what they answered. Use for "did the driver check in at the receiver", "when did he say he was loaded".', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
   { name: 'driver_profiles', description: 'STAFF ONLY. The Driver profiles list: a driver\'s name, driver ID, phone numbers (the ones dispatch added and the Samsara one), whether they\'re in a local fleet (Miami yard or Central Florida / Bartow yard), whether they\'ve signed in to the driver app, and the load they\'re on now. Search by name, driver ID or phone; empty → everyone. Use for "what\'s Yordan\'s number", "who are the Miami local drivers", "whose number is 786-474-0992".', input_schema: { type: 'object', properties: { query: { type: 'string', description: 'a name, driver ID, phone number, or "miami" / "bartow" for a local fleet' } } } },
   { name: 'driving_log', description: 'STAFF ONLY. A truck\'s drivers\' last 24 hours of duty status from the Samsara ELD (the card\'s "Driving time"): time off duty / sleeper / driving / on duty, when each driver last drove, and since when they\'re in their current status. Use for "when did 2019 last drive", "how long has he been off duty", "did the team switch". For the clocks left (drive / shift / cycle) use truck_hours.', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck / unit number, or a driver name' } }, required: ['truck'] } },
@@ -525,6 +541,33 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         const rows = closedRows((await db.get(`taTruckMateDelivered:${SITE}`, {})) || {}, (await db.get(`taFinished:${SITE}`, {})) || {}, { trip: input.trip || '', hours: Number(input.hours) || 48 });
         if (input.trip && !rows.length) return { found: false, note: byTrip(input.trip) ? `Trip ${input.trip} is still on the active board.` : `No record of trip ${input.trip} leaving the board.` };
         return { count: rows.length, loads: rows.slice(0, 60) };
+      }
+      case 'text_messages': {
+        if (ctx.customer) return { error: 'Not available.' };
+        const since = Date.now() - (Number(input.hours) || 72) * 3600000;
+        const threads = (await db.get(`taMsgThreads:${SITE}`, {})) || {};
+        let list = matchThreads(threads, input.who || '', { since: input.who ? 0 : since });
+        const words = String(input.words || '').trim().toLowerCase();
+        const out = [];
+        for (const t of list.slice(0, words ? 40 : 6)) {
+          const log = ((await db.get(`taMsgLog:${SITE}:${t.id}`, [])) || []); // eslint-disable-line no-await-in-loop
+          const msgs = log.filter((m) => Date.parse(m.at) >= (input.who ? 0 : since)).filter((m) => !words || String(m.text || '').toLowerCase().includes(words));
+          if (words && !msgs.length) continue;
+          out.push({ with: t.name || String(t.id).replace(/^p:/, ''), kind: t.kind || 'person', role: t.role || null, trip: t.trip || null, truck: t.truck || null,
+            messages: msgs.slice(-15).map((m) => ({ at: etStamp(Date.parse(m.at)), from: m.dir === 'in' ? (m.name || t.name || 'them') : (m.by || 'us'), via: m.via || m.channel || null, text: m.text || ((m.files || []).length ? `[${m.files.length} attachment(s)]` : '') })) });
+          if (out.length >= 6) break;
+        }
+        list = null;
+        return out.length ? { count: out.length, conversations: out } : { count: 0, note: 'No text conversations match that.' };
+      }
+      case 'jarvis_calls': {
+        if (ctx.customer) return { error: 'Not available.' };
+        const since = Date.now() - (Number(input.hours) || 72) * 3600000;
+        const q = String(input.query || '').trim().toLowerCase(); const digits = q.replace(/\D/g, '');
+        const calls = ((await db.get(`taJarvisCalls:${SITE}`, [])) || []).filter((c) => (q ? true : Date.parse(c.at) >= since)).filter((c) => !q
+          || (digits.length >= 4 && (String(c.phone || '').replace(/\D/g, '').includes(digits) || String(c.trip || '') === digits))
+          || [c.by, c.summary, c.transcript].some((v) => v && String(v).toLowerCase().includes(q)));
+        return calls.length ? { count: calls.length, calls: calls.slice(0, 8).map((c) => ({ at: etStamp(Date.parse(c.at)), direction: c.direction === 'outbound' ? 'Jarvis called' : c.by ? 'console voice chat' : 'called Jarvis', phone: c.phone || null, with: c.by || null, trip: c.trip || null, minutes: c.minutes, summary: c.summary || null, transcript: input.full ? (c.transcript || null) : String(c.transcript || '').slice(0, 600) || null })) } : { count: 0, note: 'No Jarvis calls match that.' };
       }
       case 'driver_checkins': {
         if (ctx.customer) return { error: 'Not available.' };
@@ -901,6 +944,13 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
   }
 
   // ---- endpoints ----
+  // the live voice call (voice.js ask_jarvis): a staff question on the call gets this same brain, answered for speaking;
+  // each call is one conversation in that person's Ask Jarvis chats
+  setStaffBrain(async ({ question, userId, name, callId }) => {
+    const threadId = createHash('sha1').update(`call:${callId || 'x'}`).digest('hex').slice(0, 12);
+    const r = await turn({ user: { id: String(userId || 'x'), name: name || 'dispatcher' }, threadId, text: String(question || '').slice(0, 2000), spoken: true });
+    return r.answer;
+  });
   app.post('/jarvis/chat', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const user = userOf(req);
@@ -924,7 +974,9 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
   const voiceNow = async () => { const v = (await savedVoice()).voice; return JARVIS_VOICES.includes(v) ? v : (JARVIS_VOICES.includes(env.JARVIS_VOICE) ? env.JARVIS_VOICE : 'onyx'); };
   app.get('/jarvis/voice', requireAuth, async (req, res) => {
     const cur = await savedVoice().catch(() => ({}));
-    res.json({ serverStt: !!env.OPENAI_API_KEY, tts: !!env.OPENAI_API_KEY, voice: await voiceNow().catch(() => 'onyx'), voices: JARVIS_VOICES, canChange: isAdmin(req.user), changedBy: cur.by || null, changedAt: cur.at || null });
+    // live: the Retell agent is set up, so Ask Jarvis talks as a live call (voice.js /voice/web-call)
+    const live = !!(String(env.RETELL_API_KEY || '').trim() && db && db.enabled && ((await db.get('taRetellCfg', {}).catch(() => ({}))) || {}).agentId);
+    res.json({ serverStt: !!env.OPENAI_API_KEY, tts: !!env.OPENAI_API_KEY, live, voice: await voiceNow().catch(() => 'onyx'), voices: JARVIS_VOICES, canChange: isAdmin(req.user), changedBy: cur.by || null, changedAt: cur.at || null });
   });
   if (typeof app.put === 'function') app.put('/jarvis/voice', requireAuth, async (req, res) => {
     if (!isAdmin(req.user)) return res.status(403).json({ error: 'Only an admin can change Jarvis\'s voice.' });

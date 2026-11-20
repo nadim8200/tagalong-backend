@@ -133,6 +133,12 @@ Remember who you are talking to: once a lookup tells you the caller's business (
 // "country" to the phone network. Pure.
 export const countryList = (env = process.env) => String(env.RETELL_COUNTRIES || 'US,CA,PR').split(',').map((x) => x.trim().toUpperCase()).filter((x) => /^[A-Z]{2}$/.test(x));
 
+// The live call from Ask Jarvis (Nov 19): any real staff question goes to the same Jarvis brain as the console chat
+// (every tool: loads, yards, texts, call transcripts, emails, drivers…) and its answer is spoken. jarvischat.js
+// registers the brain here; only staff calls (console voice chat or a staff phone) may use it.
+let staffBrain = null;
+export const setStaffBrain = (fn) => { staffBrain = fn || null; };
+
 function tools(base, transferNumber) {
   const fn = (name, description, properties, required = []) => ({
     type: 'custom', name, url: `${base}/retell/fn/${name}`, method: 'POST', description,
@@ -141,6 +147,9 @@ function tools(base, transferNumber) {
     timeout_ms: 15000,
   });
   const list = [
+    { ...fn('ask_jarvis', 'STAFF ONLY (the console voice chat, or a call from a Florida Beauty staff phone). Ask the full Jarvis brain anything about the operation and say its answer: any load, truck, trailer or driver; yard releases; closed / delivered loads; texts with drivers and the whole Phone & Messages inbox; the dispatchers\' recorded calls and Jarvis\'s own calls (summaries and transcripts); emails; alerts; driving hours; driver profiles and phone numbers; staff extensions. Use it for every staff question that isn\'t small talk. Pass the question in the staff member\'s own words, with the numbers they gave.', {
+      question: { type: 'string', description: 'the question, in the staff member\'s words (include trip / truck / names / numbers they said)' },
+    }, ['question']), timeout_ms: 45000 },
     fn('lookup_load', 'Find the caller\'s load and its live status by trip, bill, truck or trailer number (any one is enough). With none, the caller\'s phone number is used.', {
       trip_number: { type: 'string', description: 'Florida Beauty trip number, usually 6 digits, e.g. 624393' },
       bill_number: { type: 'string', description: 'FBF bill number (e.g. B180354), PO, BOL or reference number' },
@@ -1006,6 +1015,21 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     } catch (e) { return res.json({ ok: false, say: `That did not work (${e.message}). Offer to have dispatch check.` }); }
   });
   // staff only (phone on the Employees list): Jarvis's notes from the Dispatch email group
+  // a staff question on a live call → the full Jarvis brain (jarvischat.js), answered for speaking
+  app.post('/retell/fn/ask_jarvis', verified, async (req, res) => {
+    const a = argsOf(req); const call = callOf(req);
+    try {
+      const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
+      const me = consoleCall(call) ? null : people.find((p) => p && p.active !== false && p.phone && last10(p.phone) === last10(callerPhone(call)));
+      if (!consoleCall(call) && !me) return res.json({ ok: false, say: 'That information is for Florida Beauty staff only. Offer to take a message.' });
+      if (!staffBrain) return res.json({ ok: false, say: 'The full Jarvis lookup isn\'t connected right now. Use the other tools or offer to check on screen.' });
+      const question = String(a.question || '').trim();
+      if (!question) return res.json({ ok: false, say: 'Ask what they need.' });
+      const md = (call && call.metadata) || {};
+      const answer = await staffBrain({ question, userId: md.userId || (me ? `staff:${me.id}` : null), name: md.by || (me && me.name) || 'staff', callId: call && call.call_id });
+      return res.json({ ok: true, answer, say: 'Say this answer naturally and briefly, in the caller\'s language. Anything waiting for Confirm is on their screen.' });
+    } catch (e) { return res.json({ ok: false, say: `That lookup failed (${e.message}). Say you couldn't get it right now and offer to check on screen.` }); }
+  });
   app.post('/retell/fn/dispatch_log', verified, async (req, res) => {
     const a = argsOf(req); const call = callOf(req);
     try {
@@ -1958,8 +1982,8 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
       // v3 (v2 is deprecated since Oct 18, 2026): same body; the answer also says how to connect (transport / ICE servers)
       const call = await retell('/v3/create-web-call', { body: {
         agent_id: cfg.agentId,
-        metadata: { purpose: 'console', staff: true, by, email: (req.user && req.user.email) || null },
-        retell_llm_dynamic_variables: { greeting: staffGreeting(by.includes('@') ? '' : by), call_context: `This is a live voice chat from the dispatch console with ${by}, Florida Beauty staff (signed in to the console). Treat them exactly like staff calling from an Employees-list phone: help with any load — they may get any ETA and any detail. Keep answers short and conversational; they can interrupt you.` },
+        metadata: { purpose: 'console', staff: true, by, email: (req.user && req.user.email) || null, userId: req.user && req.user.id != null ? String(req.user.id) : null },
+        retell_llm_dynamic_variables: { greeting: String((req.body && req.body.greeting) || '').replace(/[<>{}]/g, '').slice(0, 220) || staffGreeting(by.includes('@') ? '' : by), call_context: `This is a live voice chat from the dispatch console with ${by}, Florida Beauty staff (signed in to the console). For any question about the operation — loads, trucks, drivers, yards, texts, calls, transcripts, emails, alerts, hours, staff — call ask_jarvis with their question and say its answer; it sees everything in the console. Treat them exactly like staff calling from an Employees-list phone: help with any load — they may get any ETA and any detail. Keep answers short and conversational; they can interrupt you.` },
       } });
       await db.update(callsKey, (cur) => [{ callId: call.call_id, at: new Date().toISOString(), direction: 'web', phone: null, trip: null, purpose: 'console', by, status: call.call_status || 'registered' }, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []);
       return res.json({ ok: true, callId: call.call_id, accessToken: call.access_token, transport: call.transport || null, iceServers: call.ice_servers || null, url: call.url || null });
