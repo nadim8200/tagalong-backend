@@ -76,7 +76,7 @@ export function cleanReport(b = {}) {
 }
 
 const ANSWER_LABEL = { code: 'Warning light / code', starts: 'Engine starts', symptoms: 'What the driver notices', warning: 'Warning / symptom', pressure: 'Air pressure', leak: 'Hears an air leak', leakWhere: 'Leak location',
-  component: 'Light / part', pattern: 'Happens', area: 'Area', hurt: 'Anyone hurt', others: 'Other vehicles involved', police: 'Police report' };
+  component: 'Light / part', pattern: 'Happens', area: 'Area', hurt: 'Anyone hurt', others: 'Other vehicles involved', policeHere: 'Police on the scene', police: 'Police report' };
 const where = (r) => { const L = r.location || {}; return [L.address || L.text, L.ref].filter(Boolean).join(' · ') || null; };
 const RC_MAIN = '305-395-5415';      // the RingCentral main number (company "florida beauty"): rings the dispatchers
 const fmt10 = (x) => { const d = last10(x); return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}` : String(x || ''); };
