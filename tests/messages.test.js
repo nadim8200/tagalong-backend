@@ -289,3 +289,24 @@ test('peek: the inbox loading a conversation in the background never marks it re
   await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' } });
   assert.equal(await unread(), 0);
 });
+
+test('admins move misplaced messages to the right conversation, or take out duplicates; nothing is sent', async () => {
+  const h = setup({ live: true });
+  const ADMIN = { id: 'a1', name: 'Nadim Tellez', role: 'admin' };
+  await h.inbox.fromSms('3055550101', { type: 'text', to: '3055550101', text: 'Old group copy', by: 'Giovanni', extId: 'x1' });
+  await h.inbox.fromSms('3055550101', { type: 'reply', from: '3055550101', text: 'Ok', extId: 'x2' });
+  await h.inbox.add({ id: 'g:aaaaaaaaaa', kind: 'group', members: [{ phone: '3055550101' }, { phone: '3055550102' }], name: 'Team' }, { dir: 'out', via: 'sms', text: 'Old group copy', by: 'Giovanni' });
+  const own = (await call(h.app, 'GET /truckmate/messages/thread/:id', ADMIN, { params: { id: 'p:3055550101' } })).body.messages;
+  const [copy, ok] = own.map((m) => m.id);
+  assert.equal((await call(h.app, 'POST /admin/messages/move', GEO, { body: { from: 'p:3055550101', ids: [copy] } })).code, 403, 'admins only');
+  const r1 = await call(h.app, 'POST /admin/messages/move', ADMIN, { body: { from: 'p:3055550101', ids: [copy] } });
+  assert.equal(r1.body.moved, 1);
+  const r2 = await call(h.app, 'POST /admin/messages/move', ADMIN, { body: { from: 'p:3055550101', to: 'g:aaaaaaaaaa', ids: [ok] } });
+  assert.equal(r2.body.moved, 1);
+  assert.deepEqual((await call(h.app, 'GET /truckmate/messages/thread/:id', ADMIN, { params: { id: 'p:3055550101' } })).body.messages, []);
+  const g = (await call(h.app, 'GET /truckmate/messages/thread/:id', ADMIN, { params: { id: 'g:aaaaaaaaaa' } })).body.messages;
+  assert.deepEqual(g.map((m) => m.text), ['Old group copy', 'Ok']);
+  const list = (await call(h.app, 'GET /truckmate/messages', ADMIN)).body.threads;
+  assert.equal(list.find((t) => t.id === 'g:aaaaaaaaaa').last.text, 'Ok');
+  assert.equal(h.sent.length, 0, 'nothing sent');
+});

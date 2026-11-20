@@ -296,6 +296,24 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       return found ? res.json({ ok: true }) : res.status(404).json({ error: 'No such conversation.' });
     });
 
+    // Admins: move messages to the right conversation (or take out duplicates when `to` is empty). Nothing is sent. Nov 20: group
+    // texts sent before routing was kept had copies in each driver's own conversation, and replies to them landed there too.
+    app.post('/admin/messages/move', requireAuth, async (req, res) => {
+      if (!guard(req, res)) return;
+      const u = req.user || {}; if (!(u.admin || u.role === 'admin')) return res.status(403).json({ error: 'Admins only.' });
+      const b = req.body || {}; const from = String(b.from || ''); const to = b.to ? String(b.to) : null;
+      const ids = new Set((Array.isArray(b.ids) ? b.ids : []).map(String));
+      const all = (await db.get(THREADS, {})) || {};
+      if (!all[from] || (to && !all[to]) || !ids.size || from === to) return res.status(400).json({ error: 'Pick the conversation, the messages and where they go.' });
+      let moved = [];
+      await db.update(logKey(from), (cur) => { const list = Array.isArray(cur) ? cur : []; moved = list.filter((m) => ids.has(m.id)); return list.filter((m) => !ids.has(m.id)); }, []);
+      if (to && moved.length) await db.update(logKey(to), (cur) => [...(Array.isArray(cur) ? cur : []).filter((x) => !ids.has(x.id)), ...moved].sort((a, c) => (Date.parse(a.at) || 0) - (Date.parse(c.at) || 0)).slice(-500), []);
+      // each conversation's preview and reply times follow what it now holds
+      const fix = async (id) => { const log = (await db.get(logKey(id), [])) || []; const m = log[log.length - 1]; await db.update(THREADS, (cur) => { const a = { ...(cur || {}) }; if (!a[id]) return a; const t = { ...a[id] }; t.last = m ? { at: m.at, text: String(m.text || '').slice(0, 140), dir: m.dir, by: m.by || null, via: m.via } : null; t.inbound = log.filter((x) => x.dir === 'in').map((x) => x.at).slice(-100); a[id] = t; return a; }, {}); };
+      await fix(from); if (to) await fix(to);
+      res.json({ ok: true, moved: moved.length, from, to, by: nameOf(u) });
+    });
+
     app.post('/truckmate/messages/thread/:id/unread', requireAuth, async (req, res) => {
       if (!guard(req, res)) return;
       const me = userKey(req.user);
