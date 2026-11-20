@@ -1,0 +1,80 @@
+// ---------------------------------------------------------------
+// The stops a company driver works through in the driver app: one list, one screen, whatever the load has.
+//   · a trip sheet → its delivery stops in its order (address, appointment, receiving hours, call-aheads, notes), each with the
+//     TruckMate bills for its city; a TruckMate city the sheet doesn't have is added after, so no stop is ever dropped
+//   · no trip sheet → TruckMate's bills, one stop per customer, in route order from where the load started (the same distance
+//     order the console's ETAs use; places come from the saved zip lookups — nothing is asked from ARTIS)
+// The step key stays the TruckMate stop label ("SOUTH WINDSOR, CT, 06074") wherever one customer has the city, so check-ins
+// already tapped keep matching; a second customer in the same city gets "label · customer". Pure.
+// ---------------------------------------------------------------
+import { ltlStops } from './stopflow.js';
+
+const tripOf = (it) => (it && it.trip) || it || {};
+const billsOf = (it) => (it && (it.freightBills || it.orders)) || tripOf(it).freightBills || [];
+const labelOf = (b) => String(b.endZoneDescription || b.endZone || '').trim();
+const cityKey = (x) => String(x || '').toUpperCase().replace(/[^A-Z ]/g, '').replace(/\s+/g, ' ').trim();
+const labelCity = (label) => cityKey(String(label).split(',')[0]);
+const zipOf = (x) => (String(x || '').match(/\b(\d{5})\b/) || [])[1] || null;
+const cleanName = (x) => String(x || '').replace(/\s*\*+\s*$/, '').trim();
+const MIAMI = { lat: 25.82, lng: -80.32 };
+const miles = (a, b) => { const R = 3958.8; const r = (d) => (d * Math.PI) / 180; const dLat = r(b.lat - a.lat); const dLng = r(b.lng - a.lng); const h = Math.sin(dLat / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dLng / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(h)); };
+const billRow = (b) => ({ bill: String(b.billNumber || b.bill || ''), pieces: Number(b.pieces) || 0 });
+const done = (bs) => bs.length > 0 && bs.every((b) => !!b.actualDelivery);
+
+// → [{ key, number, name, place, address, appt, receivingHours, callAhead, instructions, references, boxes, sheetBoxes, bills, delivered, source }]
+export function driverStops(item, { geo = {} } = {}) {
+  const bills = billsOf(item).filter((b) => labelOf(b));
+  const raw = ((item && item._manifest && item._manifest.stops) || []).filter((s) => s && /DELIVER/i.test(s.action || ''));
+  const sheet = ltlStops(item);
+  if (sheet && sheet.length) {
+    const taken = new Set();
+    const cityCount = new Map();
+    const matched = sheet.map((s, i) => {
+      const r = raw[i] || {};
+      const cities = [cityKey(s.city), labelCity(r.tmPlace || '')].filter(Boolean);
+      const mine = bills.filter((b) => cities.includes(labelCity(labelOf(b))));
+      const label = mine.length ? labelOf(mine[0]) : null;
+      if (label) cityCount.set(label, (cityCount.get(label) || 0) + 1);
+      return { s, r, mine, label };
+    });
+    const out = matched.map(({ s, r, mine, label }, i) => {
+      mine.forEach((b) => taken.add(b));
+      const place = label ? label.replace(/,\s*\d{5}(-\d{4})?\s*$/, '') : [s.city, s.state].filter(Boolean).join(', ');
+      return { key: label && cityCount.get(label) === 1 ? label : s.key, number: i + 1, name: s.customer || (mine[0] && cleanName(mine[0].billToName)) || null, place, address: s.address || null,
+        appt: s.appt || null, receivingHours: s.receivingHours || null, callAhead: s.callAhead || [], instructions: s.instructions || [], references: s.references || [],
+        boxes: mine.length ? mine.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : s.boxes, sheetBoxes: s.boxes, bills: mine.map(billRow), delivered: done(mine), source: 'trip sheet', zip: s.zip || zipOf(label) || null, tmPlace: r.tmPlace || null };
+    });
+    // a TruckMate stop the trip sheet doesn't list: still the driver's stop
+    const left = bills.filter((b) => !taken.has(b));
+    return [...out, ...fromBills(left, { geo, start: out.length })];
+  }
+  return fromBills(bills, { geo, start: 0, origin: zipOf(tripOf(item).origZoneDesc || tripOf(item).origin) });
+}
+
+// TruckMate bills → one stop per customer, nearest to where the load started first. Pure.
+function fromBills(bills, { geo = {}, start = 0, origin = null }) {
+  const groups = new Map();
+  for (const b of bills) {
+    const label = labelOf(b); const who = cleanName(b.billToName) || null;
+    const k = `${label}|${cityKey(who)}`;
+    const g = groups.get(k) || { label, name: who, bills: [] };
+    g.bills.push(b); groups.set(k, g);
+  }
+  const perLabel = new Map(); for (const g of groups.values()) perLabel.set(g.label, (perLabel.get(g.label) || 0) + 1);
+  const o = (origin && geo[origin]) || MIAMI;
+  const dist = (g) => { const p = geo[zipOf(g.label)]; return p && p.lat != null ? miles(o, p) : Infinity; };
+  const list = [...groups.values()].map((g, i) => ({ g, i, d: dist(g) })).sort((a, b) => (a.d - b.d) || (a.i - b.i));
+  return list.map(({ g }, n) => ({ key: perLabel.get(g.label) === 1 ? g.label : `${g.label} · ${g.name || 'customer'}`, number: start + n + 1, name: g.name, place: g.label.replace(/,\s*\d{5}(-\d{4})?\s*$/, ''),
+    address: null, appt: null, receivingHours: null, callAhead: [], instructions: [], references: [], boxes: g.bills.reduce((s, b) => s + (Number(b.pieces) || 0), 0), sheetBoxes: null,
+    bills: g.bills.map(billRow), delivered: done(g.bills), source: 'TruckMate', zip: zipOf(g.label), cityLabel: g.label }));
+}
+
+// A step on a stop of a city shared by several customers ("arrived:LABEL · NAME") → the city step too, once, so the progress
+// emails (which go by city) still see it. Pure. → extra step or null
+export function cityStep(step, stops) {
+  const m = String(step || '').match(/^(arrived|delivered):(.+)$/);
+  if (!m) return null;
+  const s = stops.find((x) => x.key === m[2]);
+  if (!s || !s.cityLabel || s.cityLabel === s.key) return null;
+  return `${m[1]}:${s.cityLabel}`;
+}

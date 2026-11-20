@@ -7,9 +7,9 @@
 // one, or clear it so the driver makes a new one. A new PIN signs the driver out everywhere. It's kept encrypted, so an admin can read it out.
 // ---------------------------------------------------------------
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from 'node:crypto';
-import { stopsOf } from './statusmail.js';
 import { CHECKINS, validStep } from './checkins.js';
 import { leftCooler, withDetected } from './autodepart.js';
+import { driverStops, cityStep } from './driverstops.js';
 import { KNOWN_YARDS } from './loadsheet.js';
 
 // The driver release a dispatcher submitted on this load (release.js keeps them per trip, newest last) → what the driver
@@ -193,14 +193,14 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       if (unreadFor) for (const l of [...loads.current, ...loads.next]) l.unread = await unreadFor(SITE, l.trip).catch(() => 0); // eslint-disable-line no-await-in-loop
       // an LTL load: the trip sheet's stops, each marked done with boxes and signed paperwork (stopflow.js)
       if (stopFlow) { const items = await board(); for (const l of [...loads.current, ...loads.next]) l.ltl = await stopFlow.forDriver(items.find((it) => tripNo(it) === l.trip)); } // eslint-disable-line no-await-in-loop
-      // check-ins (not on LTL runs, whose stops are marked done instead): the stops to tap and what was tapped already
+      // check-ins: one stop list for every load (trip sheet when there is one, else TruckMate's bills in route order) and what was tapped
       const book = (await db.get(CHECKINS(SITE), {})) || {};
       const items2 = await board();
+      const geo = (await db.get('taGeoZip', {}).catch(() => ({}))) || {};
       // loading steps the driver skipped: once Jarvis sees the truck leave the cooler with its trailer (first time kept)
       const DEP = `taAutoDepart:${SITE}`;
       let departed = null;
       for (const l of [...loads.current, ...loads.next]) {
-        if (l.ltl) continue;
         const it = items2.find((x) => tripNo(x) === l.trip);
         const steps = (book[l.trip] || {}).steps || {};
         let seen = null;
@@ -209,7 +209,7 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
           seen = departed[l.trip] || null;
           if (!seen) { const d = leftCooler(it, now()); if (d) { seen = d; departed = await db.update(DEP, (cur) => ({ ...Object.fromEntries(Object.entries(cur || {}).slice(-300)), [l.trip]: (cur || {})[l.trip] || d }), {}); } } // eslint-disable-line no-await-in-loop
         }
-        l.checkin = { stops: stopsOf(it).map((x) => ({ key: x.key, number: x.number, name: x.name || (x.customers || [])[0] || null, place: x.place, delivered: !!x.delivered })), steps: withDetected(steps, seen) };
+        l.checkin = { stops: driverStops(it, { geo }).map(({ zip, tmPlace, cityLabel, ...x }) => x), steps: withDetected(steps, seen) };
       }
       // a release the dispatcher submitted: the driver sees which stops are released, and at which hub
       const rels = (await db.get(`taReleases:${SITE}`, {})) || {};
@@ -280,9 +280,21 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     if (![...loads.current, ...loads.next].some((l) => l.trip === trip)) return res.status(404).json({ error: 'That load is not yours.' });
     const step = String((req.body || {}).step || '').slice(0, 160);
     const it = (await board()).find((x) => tripNo(x) === trip);
-    if (!validStep(step, stopsOf(it).map((x) => x.key))) return res.status(400).json({ error: 'That step is not on this load.' });
+    const stops = driverStops(it, { geo: (await db.get('taGeoZip', {}).catch(() => ({}))) || {} });
+    if (!validStep(step, stops.map((x) => x.key))) return res.status(400).json({ error: 'That step is not on this load.' });
     const at = new Date(now()).toISOString();
-    const next = await db.update(CHECKINS(SITE), (cur) => { const c = { ...(cur || {}) }; const r = c[trip] || { steps: {} }; c[trip] = { ...r, steps: { ...r.steps, [step]: (r.steps || {})[step] || { at, by: req.driver.name } } }; return c; }, {});
+    // two customers in one city: the city step goes in too (arrived at the first, delivered once all of them are), for the progress emails
+    const city = cityStep(step, stops);
+    const next = await db.update(CHECKINS(SITE), (cur) => {
+      const c = { ...(cur || {}) }; const r = c[trip] || { steps: {} };
+      const steps = { ...r.steps, [step]: (r.steps || {})[step] || { at, by: req.driver.name } };
+      if (city && !steps[city]) {
+        const label = city.replace(/^(arrived|delivered):/, '');
+        const all = stops.filter((x) => x.cityLabel === label);
+        if (/^arrived:/.test(city) || all.every((x) => steps[`delivered:${x.key}`])) steps[city] = { at, by: req.driver.name };
+      }
+      c[trip] = { ...r, steps }; return c;
+    }, {});
     return res.json({ ok: true, steps: ((next || {})[trip] || {}).steps || {} });
   });
   // the driver opened a load on their phone (the Current load or Next load tab): dispatch sees "Opened"
