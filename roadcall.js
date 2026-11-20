@@ -143,13 +143,13 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
   const step = (rc) => ({ ...rc, missing: missing(rc), status: ['gathering', 'ready'].includes(rc.status) ? (missing(rc).length ? 'gathering' : 'ready') : rc.status });
 
   // open (or add to the open one for that truck / trip)
-  async function open({ trip = null, truck = null, source = 'console', by = null, type = null, details = null, tire = null, location = null, safe = null, loaded = null, driver = null, quiet = false } = {}) {
+  async function open({ trip = null, truck = null, source = 'console', by = null, type = null, details = null, tire = null, location = null, safe = null, loaded = null, driver = null, quiet = false, report = null } = {}) {
     if (!enabled) return null;
     const all = await list();
     const cur = all.find((x) => !['completed', 'cancelled'].includes(x.status) && ((trip && x.trip === String(trip)) || (truck && x.truck === String(truck))) && now() - Date.parse(x.at) < 24 * 60 * MIN);
-    if (cur) return update(cur.id, { type, details, tire, location, safe, loaded, driver }, by || source);
+    if (cur) return update(cur.id, { type, details, tire, location, safe, loaded, driver, report }, by || source);
     const item = await boardItem(trip);
-    let rc = fromBoard({ id: id4(now()), at: new Date(now()).toISOString(), source, by, trip: trip ? String(trip) : (item ? tripNo(item) : null), truck, type: type || null, details: details || null, tire: tire || null, safe, loaded, driver, location, photos: [], log: [{ at: new Date(now()).toISOString(), by: by || source, text: 'Road call opened' }], status: 'gathering' }, item);
+    let rc = fromBoard({ id: id4(now()), at: new Date(now()).toISOString(), source, by, trip: trip ? String(trip) : (item ? tripNo(item) : null), truck, report: report || null, type: type || null, details: details || null, tire: tire || null, safe, loaded, driver, location, photos: [], log: [{ at: new Date(now()).toISOString(), by: by || source, text: 'Road call opened' }], status: 'gathering' }, item);
     rc = step(rc);
     await save(rc);
     if (help && help.raise) help.raise({ source: source === 'call' ? 'call' : source === 'text' ? 'text' : 'app', ref: `roadcall:${rc.id}`, role: 'driver', from: { name: rc.driver && rc.driver.name, phone: rc.driver && rc.driver.phone }, trip: rc.trip, need: `ROAD CALL ${rc.id} — ${rc.type || 'breakdown'}: ${rc.details || ''}`.slice(0, 400), urgent: true }).catch(() => {});

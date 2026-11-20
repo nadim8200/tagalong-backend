@@ -121,6 +121,12 @@ ${r.roadCall ? `<p style="margin-top:12px">Road call <b>${esc(r.roadCall)}</b> i
   return { subject, html, text };
 }
 
+// The push dispatch gets. Pure.
+export function breakdownPushBody(r) {
+  const unit = r.part === 'truck' ? null : `${PART_LABEL[r.part]}${r.trailer ? ` ${r.trailer}` : ''}`;
+  return [[unit, LABEL[r.category]].filter(Boolean).join(' '), STATE_LABEL[r.status], r.by, where(r)].filter(Boolean).join(' · ').slice(0, 180);
+}
+
 // The steps the driver sees, from real events only: the road call's status / provider, or a dispatcher closing it. Pure.
 export function timeline(r, rc = null) {
   const s = rc ? rc.status : null;
@@ -157,7 +163,7 @@ export function sendsTo(entries = [], training = false) {
 const id4 = (now) => `BK-${new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: '2-digit', day: '2-digit' }).replace('/', '')}-${String(crypto.randomInt(100, 1000))}`;
 
 export function initDriverBreakdowns(app, { db, secret, requireDriver, requireAuth, getBoard = null, roadCalls = () => null, sendMail = null, recipients = async () => [], entries = async () => [], training = null,
-  log = null, env = process.env, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
+  log = null, push = null, pushTo = async () => [], env = process.env, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
   const enabled = !!(db && db.enabled && db.pool);
   let ready = null;
   const table = () => {
@@ -206,7 +212,7 @@ export function initDriverBreakdowns(app, { db, secret, requireDriver, requireAu
         try {
           const L = r.location;
           const t0 = r.tires[0];
-          const rc = await rcs.open({ trip: r.trip, truck: r.truck, source: 'app', by: `driver app ${r.by || r.driverCode}`, quiet: true,
+          const rc = await rcs.open({ trip: r.trip, truck: r.truck, source: 'app', by: `driver app ${r.by || r.driverCode}`, quiet: true, report: id,
             type: r.category === 'tire' ? 'tire' : 'mechanical',
             details: `${PART_LABEL[r.part]} · ${LABEL[r.category]} (${STATE_LABEL[r.status]})${r.text ? `: ${r.text}` : ''}`.slice(0, 300),
             tire: r.category === 'tire' ? { ...(r.tireSize ? { size: r.tireSize } : {}), qty: Math.max(1, r.tires.length), ...(t0 ? { position: { axle: r.part === 'truck' ? (t0.axle === 1 ? 'steer' : 'drive') : 'trailer', side: t0.side, pos: t0.pos, label: r.tires.map((t) => tireLabel(t, r.part)).join('; ') } } : {}) } : null,
@@ -214,6 +220,13 @@ export function initDriverBreakdowns(app, { db, secret, requireDriver, requireAu
             driver: { name: r.by, ...(r.callback ? { phone: r.callback } : {}) } });
           if (rc && rc.id) { await patch(id, (x) => ({ ...x, roadCall: rc.id })); r.roadCall = rc.id; }
         } catch (e) { console.warn('[breakdown] road call:', e.message); }
+      }
+      // the alarm on dispatch's phones: time-sensitive push with sound, the truck number first
+      if (push && push.sendToEmails) {
+        try {
+          const to = await pushTo();
+          if (to.length) await push.sendToEmails(to, { title: `🚨 Breakdown reported — truck ${r.truck || '?'}`, body: breakdownPushBody(r), data: { type: 'breakdown', id, path: '/truckmate?tab=roadcalls' } });
+        } catch (e) { console.warn('[breakdown] push:', e.message); }
       }
       if (log && r.trip) await log(SITE, r.trip, { type: 'note', kind: 'breakdown', text: `Breakdown ${id} from ${r.by || 'the driver'} in the app: ${PART_LABEL[r.part]} · ${LABEL[r.category]} (${STATE_LABEL[r.status]})${r.text ? ` — ${r.text.slice(0, 200)}` : ''}`, by: r.by || 'driver app' }).catch(() => {});
       return res.json({ ok: true, id, roadCall: r.roadCall || null });
@@ -291,7 +304,9 @@ export function initDriverBreakdowns(app, { db, secret, requireDriver, requireAu
   if (app && requireAuth) {
     app.get('/truckmate/breakdowns', requireAuth, async (req, res) => {
       const rcs = roadCalls(); const list = rcs && rcs.list ? await rcs.list().catch(() => []) : [];
-      res.json({ reports: Object.values(await all()).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 100).map((r) => ({ ...r, ...timeline(r, list.find((x) => x.id === r.roadCall) || null), rows: reportRows(r) })) });
+      res.json({ reports: Object.values(await all()).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 100).map((r) => ({ ...r, ...timeline(r, list.find((x) => x.id === r.roadCall) || null), rows: reportRows(r),
+        // the driver's photos / videos as signed links (the console shows them on the road call)
+        links: (r.files || []).map((f) => ({ kind: f.kind, name: f.name, note: f.note || null, url: `${baseUrl}/bk/f/${makeToken({ f: f.id }, secret, now(), PURPOSE, LINK_DAYS)}` })) })) });
     });
     // a dispatcher closes the report (the road call, when there is one, keeps its own status)
     app.post('/truckmate/breakdowns/:id/status', requireAuth, async (req, res) => {

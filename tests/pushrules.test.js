@@ -33,7 +33,7 @@ test('first time: built from the older settings; saving keeps Priority 1 in step
   assert.deepEqual(await pr.emailsFor('priority'), ['boss@floridabeauty.us']);
   let out; const res = { json: (j) => { out = j; }, status() { return this; } };
   await routes['GET /admin/push-rules']({}, res);
-  assert.equal(out.types.length, 8);
+  assert.equal(out.types.length, 9);
   assert.deepEqual(out.suggestions.map((s) => s.email), ['leo@floridabeauty.us'], 'dispatchers not on the list yet are suggested');
   await routes['PUT /admin/push-rules']({ body: { people: [...out.people, { email: 'leo@floridabeauty.us', types: { callback: true, priority: true } }] }, user: { name: 'Nadim' } }, res);
   assert.deepEqual(await pr.emailsFor('callback'), ['rosa@floridabeauty.us', 'leo@floridabeauty.us']);

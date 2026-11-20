@@ -14,6 +14,7 @@ export const TYPES = [
   ['text-in', 'Texts received', 'Driver texts and driver-app messages'],
   ['text-out', 'Texts sent', 'Texts and app messages Jarvis / dispatch sent'],
   ['driver', 'Driver waits & problems', 'Long waits / detention and driver-reported problems'],
+  ['breakdown', 'Breakdowns from the driver app', 'A driver reports a breakdown in the app: alarm with the truck number (people on Urgent call backs or Priority 1 get it too)'],
   ['priority', 'Priority 1 alerts', 'Critical Watchtower alerts (repeat until someone takes it)'],
 ];
 const KEYS = TYPES.map((t) => t[0]);

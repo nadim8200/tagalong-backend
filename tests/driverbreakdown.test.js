@@ -76,13 +76,13 @@ function harness({ mailFails = false } = {}) {
   } };
   const db = { enabled: true, pool, get: async (k, d) => (k in kv ? JSON.parse(JSON.stringify(kv[k])) : d), set: async (k, v) => { kv[k] = v; }, update: async (k, f, d) => { kv[k] = f(k in kv ? JSON.parse(JSON.stringify(kv[k])) : d); return kv[k]; } };
   const routes = {}; const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
-  const mails = []; const opened = []; const rcs = [];
+  const mails = []; const opened = []; const rcs = []; const pushes = [];
   const roadCalls = { open: async (o) => { opened.push(o); const rc = { id: 'RC-1119-555', status: 'gathering', log: [] }; rcs.push(rc); return rc; }, update: async () => null, list: async () => rcs };
   const requireDriver = (req, res, next) => { req.driver = { code: req.headers.drv || '986', name: 'Ferney Urrego', phone: '7863142671' }; req.user = { phone: '7863142671' }; return next(); };
   const board = { trips: [{ trip: { tripNumber: '627549', driver: '986', status: 'DEPSHIP', powerUnit: '4504', trailer: '18094' }, _samsara: { lat: 27.4, lng: -80.3, location: 'I-95 N, Fort Pierce, FL', gpsAt: '2026-11-19T21:41:00Z', source: 'Samsara', tempF: 41.2, setpointF: 34, reeferState: 'On', tempAt: '2026-11-19T21:30:00Z' } }] };
   initDriverBreakdowns(app, { db, secret: 's', requireDriver, requireAuth: (q, r, n) => n(), getBoard: async () => board, roadCalls: () => roadCalls,
     sendMail: async (m) => { if (mailFails) throw new Error('down'); mails.push(m); }, recipients: async () => ['dispatches@floridabeauty.us', 'carlos@floridabeauty.us'], entries: async () => ['Dispatch', 'Carlos Vega'],
-    training: { active: async () => null }, env: {}, now: () => Date.parse('2026-11-19T21:43:00Z') });
+    training: { active: async () => null }, push: { sendToEmails: async (to, m) => { pushes.push({ to, ...m }); return []; } }, pushTo: async () => ['rosa@floridabeauty.us'], env: {}, now: () => Date.parse('2026-11-19T21:43:00Z') });
   const call = async (key, { body = {}, params = {}, query = {}, headers = {} } = {}) => {
     let out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; return this; }, send(t) { out.body = t; return this; }, setHeader(k, v) { out[k] = v; }, end(b) { out.raw = b; } };
     const req = { body, params, query, headers, _body: true };
@@ -91,7 +91,7 @@ function harness({ mailFails = false } = {}) {
     const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next();
     await Promise.race([fin, new Promise((ok) => { setTimeout(ok, 200); })]); return out;
   };
-  return { call, mails, opened, rcs, files };
+  return { call, mails, opened, rcs, files, pushes };
 }
 
 test('breakdown from the app: context, one report per key, files once per key, one email, an update with its own photo, status on the list', async () => {
@@ -109,7 +109,12 @@ test('breakdown from the app: context, one report per key, files once per key, o
   assert.equal(made.status, 200); const { id } = made.body;
   assert.match(id, /^BK-1119-\d{3}$/);
   assert.equal((await h.call('POST /driver/me/breakdowns', { body })).body.id, id, 'a retry is the same report');
-  assert.equal(h.opened.length, 1); assert.equal(h.opened[0].quiet, true); assert.equal(h.opened[0].type, 'tire'); assert.equal(h.opened[0].tire.position.axle, 'trailer');
+  assert.equal(h.pushes.length, 1, 'one alarm, not one per retry');
+  assert.deepEqual(h.pushes[0].to, ['rosa@floridabeauty.us']);
+  assert.equal(h.pushes[0].title, '🚨 Breakdown reported — truck 4504');
+  assert.match(h.pushes[0].body, /^Trailer 18094 Tire · Stopped · Ferney Urrego/);
+  assert.deepEqual([h.pushes[0].data.type, h.pushes[0].data.path], ['breakdown', '/truckmate?tab=roadcalls']);
+  assert.equal(h.opened.length, 1); assert.equal(h.opened[0].quiet, true); assert.equal(h.opened[0].report, id, 'the road call knows its report'); assert.equal(h.opened[0].type, 'tire'); assert.equal(h.opened[0].tire.position.axle, 'trailer');
 
   const jpg = Buffer.from('ffd8ffe000104a464946', 'hex');
   const up = (q = {}, hd = {}, b = jpg) => h.call('POST /driver/me/breakdowns/:id/files', { params: { id }, query: { name: 'tire.jpg', ...q }, headers: { 'content-type': 'image/jpeg', ...hd }, body: b });
@@ -129,6 +134,8 @@ test('breakdown from the app: context, one report per key, files once per key, o
   await h.call('POST /driver/me/breakdowns/:id/send', { params: { id }, query: { note: n.body.noteId } });
   assert.equal(h.mails.length, 2); assert.match(h.mails[1].subject, /^UPDATE/); assert.equal(h.mails[1].attachments.length, 1, 'only the update\'s photo');
 
+  const con = await h.call('GET /truckmate/breakdowns');
+  assert.equal(con.body.reports[0].links.length, 2); assert.match(con.body.reports[0].links[0].url, /\/bk\/f\/.+/); assert.equal(con.body.reports[0].links[1].note, n.body.noteId);
   let list = await h.call('GET /driver/me/breakdowns');
   assert.deepEqual([list.body.reports[0].id, list.body.reports[0].state, list.body.reports[0].photos], [id, 'waiting', 2]);
   h.rcs[0].status = 'tech en route'; h.rcs[0].provider = { name: 'Michelin ONCall', eta: '10:30 PM', at: '2026-11-19T22:05:00Z' };
