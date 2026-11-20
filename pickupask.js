@@ -8,6 +8,7 @@
 import { isLtl } from './usualarrival.js';
 import { loadsFor } from './driverauth.js';
 import { plannedPickup } from './pickupfollow.js';
+import { asStatusAsk } from './training.js';
 
 const SITE = 'florida-beauty';
 const KEY = (site) => `taPickupAsk:${site}`;     // { done: { ltlTrip: { at, codes, unit } }, asks: { nextTrip: { afterTrip, codes, askedAt, place, when, answer } } }
@@ -98,7 +99,7 @@ export function initPickupAsk(app, { db, requireDriver = null, getBoard, notify 
     await db.set(KEY(site), { done, asks: nextAsks });
     for (const a of asks) {
       const body = `Load ${a.trip}${a.place ? ` · pickup ${a.place}` : ''}${a.when ? ` · ${a.when}` : ''}. Tap Yes or No.`;
-      for (const c of a.codes) if (notify) await notify(c, { title: a.before ? 'Rolling to your pickup?' : 'Rolling to your next pickup?', body, data: { tab: 'now', ask: 'pickup', trip: a.trip } }).catch((e) => console.warn('[pickup-ask] push:', e.message)); // eslint-disable-line no-await-in-loop
+      for (const c of a.codes) if (notify) await asStatusAsk(() => notify(c, { title: a.before ? 'Rolling to your pickup?' : 'Rolling to your next pickup?', body, data: { tab: 'now', ask: 'pickup', trip: a.trip } })).catch((e) => console.warn('[pickup-ask] push:', e.message)); // eslint-disable-line no-await-in-loop
       console.log(`[pickup-ask] trip ${a.trip}: asked ${a.codes.join(', ')} ${a.afterTrip ? `after LTL ${a.afterTrip}` : '1 h before pickup'}`);
     }
     return asks;

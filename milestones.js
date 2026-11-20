@@ -28,6 +28,7 @@ import { sendMail, mailConfig } from './mailer.js';
 import { geocodePlace } from './meetwatch.js';
 import { fencesFor, isLtlRun, stepFences, nextAsk, fenceText, askKey } from './loadfences.js';
 import { CHECKINS, milestoneKeys } from './checkins.js';
+import { asStatusAsk } from './training.js';
 
 const MIN = 60000;
 const tripOf = (it) => (it && it.trip) || it || {};
@@ -183,11 +184,11 @@ export function initMilestones(app, { requireAuth, db, ringcentral = null, comms
       const tap = event === 'arrive' ? (fence.kind === 'pickup' ? "I'm at the shipper" : "I'm at the receiver") : (fence.kind === 'pickup' ? 'Loaded & leaving' : 'Delivered');
       const msg = { title: event === 'arrive' ? `At ${where}?` : `Left ${where}?`, body: `Load ${trip}: tap "${tap}" in TagAlong so dispatch and the customer know.`, data: { tab: 'now', trip } };
       const rs = [];
-      for (const c of codes) rs.push(await notifyDriver(c, msg).catch(() => null)); // eslint-disable-line no-await-in-loop
+      for (const c of codes) rs.push(await asStatusAsk(() => notifyDriver(c, msg)).catch(() => null)); // eslint-disable-line no-await-in-loop
       if (rs.some((r) => r && (r.sent || r.held))) { if (comms && comms.log) await comms.log(site, trip, { type: 'note', kind: 'driver-checkin', text: `App notification to the driver: ${msg.title} ${msg.body}`, by: 'Jarvis (driver check-in)' }); return { via: 'app' }; }
     }
     if (item._oc && driverLinks && driverLinks.messageDriver) {
-      const r = await driverLinks.messageDriver(site, trip, text, 'Jarvis (driver check-in)').catch(() => null);
+      const r = await asStatusAsk(() => driverLinks.messageDriver(site, trip, text, 'Jarvis (driver check-in)')).catch(() => null);
       if (r && r.sent) return { via: r.via };
     }
     const rcpt = recipientFor(item, 1, await db.get(`taSmsConsent:${site}`, {}));

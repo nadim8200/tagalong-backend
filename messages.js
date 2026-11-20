@@ -13,6 +13,7 @@
 // Conversations: 'p:<10 digits>' one person, 'g:<id>' a group (members fixed when it's made; a truck or driver
 // change never edits them). Data: taMsgThreads / taMsgLog:<id> / taMsgRead / taMsgPins / taMsgSeen.
 import { randomBytes } from 'node:crypto';
+import { sentByHand } from './training.js';
 
 const SITE = 'florida-beauty';
 const THREADS = `taMsgThreads:${SITE}`;
@@ -93,15 +94,34 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     }, {});
     return m;
   }
+  // where a person's text reply goes: the group dispatch last texted them from, else their own conversation
+  const REPLY_TO = 'taMsgReplyTo';   // last10 → { thread, at }
+  const noteLastText = (phones, threadId) => db.update(REPLY_TO, (cur) => { const all = { ...(cur || {}) }; for (const ph of phones) { const k = last10(ph); if (threadId) all[k] = { thread: threadId, at: iso() }; else delete all[k]; } return all; }, {});
+  async function replyThread(phone) {
+    const r = ((await db.get(REPLY_TO, {})) || {})[last10(phone)];
+    if (!r || !r.thread) return null;
+    const t = ((await db.get(THREADS, {})) || {})[r.thread];
+    return t && !t.deleted ? t : null;
+  }
+  // the sender's full name from the Employees list (else their login name), as the texts are signed
+  async function fullName(u) {
+    const em = String((u && u.email) || '').toLowerCase();
+    const p = em && staff ? ((await staff().catch(() => [])) || []).find((x) => String(x.email || '').toLowerCase() === em) : null;
+    const n = (p && p.name) || nameOf(u);
+    return String(n).replace(/\b\w/g, (c) => c.toUpperCase());
+  }
   const personThread = (phone, w = {}) => ({ id: personId(phone), kind: 'person', phone: last10(phone), name: w.name || null, role: w.role || null, createdAt: iso() });
 
   // ---- what already happens elsewhere lands here (hooks from comms.js) ----
   // a text on the company line, either way (comms keeps its own per-phone thread too)
   async function fromSms(phone, e) {
-    if (!enabled || last10(phone).length !== 10 || (e.type !== 'text' && e.type !== 'reply') || e.inboxId) return;
+    if (!enabled || last10(phone).length !== 10 || (e.type !== 'text' && e.type !== 'reply')) return;
+    if (e.type === 'text' && !e.group) await noteLastText([phone], null);   // texted one-on-one: their next reply comes back to their own conversation
+    if (e.inboxId || e.group) return;   // a group text shows only in its group
     const w = activity && activity.lookup ? await activity.lookup(phone).catch(() => null) : null;
     const dir = e.type === 'reply' ? 'in' : 'out';
-    await add(personThread(phone, w || {}), { at: e.at, dir, via: 'sms', text: e.text, by: dir === 'in' ? ((w && w.name) || null) : (e.by || 'Dispatch'), from: dir === 'in' ? last10(phone) : null, trip: e.trip || null, status: dir === 'out' ? (ringcentral && ringcentral.wasHeld && ringcentral.wasHeld(phone, e.text) ? 'held' : 'sent') : null },
+    const where = dir === 'in' ? await replyThread(phone) : null;
+    await add(where || personThread(phone, w || {}), { at: e.at, dir, via: 'sms', text: e.text, by: dir === 'in' ? ((w && w.name) || null) : (e.by || 'Dispatch'), from: dir === 'in' ? last10(phone) : null, trip: e.trip || null, status: dir === 'out' ? (ringcentral && ringcentral.wasHeld && ringcentral.wasHeld(phone, e.text) ? 'held' : 'sent') : null },
       e.extId ? `sms:${e.extId}` : `sms:${dir}:${last10(phone)}:${e.at || ''}:${String(e.text || '').slice(0, 60)}`);
   }
   // a driver-app message on a load: one driver → their conversation; team drivers → the load's group
@@ -276,7 +296,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       res.json({ ok: true });
     });
 
-    app.post('/truckmate/messages/send', requireAuth, async (req, res) => {
+    app.post('/truckmate/messages/send', requireAuth, sentByHand, async (req, res) => {
       if (!guard(req, res)) return;
       const b = req.body || {};
       const text = String(b.text || '').trim().slice(0, 1000);
@@ -298,7 +318,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       if (!can[via].ok) return res.status(409).json({ error: can[via].why });
       if (upload.length && via === 'sms') return res.status(409).json({ error: 'Pictures and files go through the app for now (picture texts aren\'t set up yet). Switch to App.' });
       if (upload.length && !(docs && docs.storeDocs && docs.enabled !== false)) return res.status(503).json({ error: 'File storage isn\'t set up on the server.' });
-      const by = nameOf(req.user);
+      const by = await fullName(req.user);
       try {
         let status = 'sent'; let note = null;
         // the attachments are stored first (PDF or pictures, 14 MB each); the message carries their ids
@@ -306,23 +326,26 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
         const files = stored.map((d, i) => ({ id: String(d.id), name: String((upload[d.fileIndex != null ? d.fileIndex : i] || {}).filename || '').slice(0, 120) || null, type: String((upload[d.fileIndex != null ? d.fileIndex : i] || {}).mediaType || '') || null }));
         if (via === 'app') {
           const k = `${can.app.trip}|${text || `📎 ${files.length === 1 ? 'A file' : `${files.length} files`} from dispatch`}`; appSending.set(k, now());
-          let r = await driverLinks.messageDriver(SITE, can.app.trip, text, by, { docIds: files.map((f) => f.id) });
+          // the load's drivers' cells, so training mode can let approved drivers' messages through
+          const phones = ((loads.find((x) => x.trip === can.app.trip) || {}).drivers || []).map((d) => d.phone).filter(Boolean);
+          let r = await driverLinks.messageDriver(SITE, can.app.trip, text, by, { docIds: files.map((f) => f.id), phones });
           // the load has no driver-app chat yet: open it (nothing is sent to set it up — it's what the driver app does too) and send again
           if (r && /no active driver link/.test(String(r.skipped || '')) && driverLinks.ensureDocsLink) {
             await driverLinks.ensureDocsLink(SITE, can.app.trip, by);
-            r = await driverLinks.messageDriver(SITE, can.app.trip, text, by, { docIds: files.map((f) => f.id) });
+            r = await driverLinks.messageDriver(SITE, can.app.trip, text, by, { docIds: files.map((f) => f.id), phones });
           }
           if (r && r.skipped) { appSending.delete(k); return res.status(409).json({ error: `Not sent: ${r.skipped}.` }); }
           status = /held/.test(String((r && r.via) || '')) ? 'held' : 'sent';
           note = (r && r.via) || null;
         } else if (t.kind === 'group') {
-          // the same text to each person: each also sees it in their own conversation, where their reply lands
+          // the same text to each person, shown only here (not in each one's own conversation); their replies come back here
           const l = loads.find((x) => x.trip === t.trip);
           const res2 = [];
           for (const mbr of t.members || []) {
-            try { const r = await ringcentral.sendSms('__shared', { to: mbr.phone, text, by }); res2.push(r && r.id === 'training' ? 'held' : 'sent'); if (comms && comms.log) await comms.log(SITE, l ? l.trip : null, { type: 'text', kind: 'custom', to: mbr.phone, text, by }).catch(() => {}); } // eslint-disable-line no-await-in-loop
+            try { const r = await ringcentral.sendSms('__shared', { to: mbr.phone, text, by }); res2.push(r && r.id === 'training' ? 'held' : 'sent'); if (comms && comms.log) await comms.log(SITE, l ? l.trip : null, { type: 'text', kind: 'custom', to: mbr.phone, text, by, group: t.id }).catch(() => {}); } // eslint-disable-line no-await-in-loop
             catch (e) { res2.push(`failed for ${mbr.name || mbr.phone}: ${e.message}`); }
           }
+          await noteLastText((t.members || []).filter((mbr, i) => !/^failed/.test(res2[i] || '')).map((mbr) => mbr.phone), t.id);
           const bad = res2.filter((x) => /^failed/.test(x));
           if (bad.length === res2.length) throw new Error(bad.join(' · '));
           status = res2.every((x) => x === 'held') ? 'held' : 'sent';

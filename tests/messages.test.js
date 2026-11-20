@@ -12,12 +12,12 @@ const BOARD = [{ trip: { tripNumber: '626130', powerUnit: '4566', trailer: '7300
   { trip: { tripNumber: '626200', powerUnit: '2403' }, _samsara: { driver1: 'Ana Diaz', driver1Info: { phone: '7865550199' } } }];
 
 const setup = ({ live = false, appResult = { sent: true, via: 'app (push)' }, docs = null } = {}) => {
-  const db = mem(); const app = fakeApp(); const sent = []; let t = Date.parse('2026-11-04T15:00:00Z');
+  const db = mem(); const app = fakeApp(); const sent = []; const appPhones = []; let t = Date.parse('2026-11-04T15:00:00Z');
   const comms = { log: async () => {} };
-  const driverLinks = { messageDriver: async (site, trip, text, by, opts = {}) => { sent.push(['app', trip, text, by, ...((opts.docIds || []).length ? [opts.docIds] : [])]); return appResult; } };
+  const driverLinks = { messageDriver: async (site, trip, text, by, opts = {}) => { sent.push(['app', trip, text, by, ...((opts.docIds || []).length ? [opts.docIds] : [])]); appPhones.push(opts.phones); return appResult; } };
   const ringcentral = { configFor: async () => (live ? { fromNumber: '+17867233912' } : {}), sendSms: async (o, m) => { sent.push(['sms', m.to, m.text, m.by]); return { id: 'm1', status: 'Queued' }; }, wasHeld: (to, text) => /^HELD/.test(String(text)) };
   const inbox = initMessages(app, { requireAuth: () => {}, db, getBoard: async () => ({ trips: BOARD }), activity: { lookup: async (p) => (String(p).endsWith('0199') ? { role: 'driver', name: 'Ana Diaz' } : { role: 'unknown' }) }, ringcentral, driverLinks, comms, docs, now: () => t });
-  return { db, app, sent, inbox, at: (ms) => { t = ms; } };
+  return { db, app, sent, appPhones, inbox, at: (ms) => { t = ms; } };
 };
 
 test('the drivers on each load, with clean phones; same people regardless of order', () => {
@@ -39,6 +39,7 @@ test('two dispatchers see the same conversation; each send keeps who sent it; un
   assert.equal(g.body.threads[0].unread, 0, 'Geo read it'); assert.equal(v.body.threads[0].unread, 1, 'still unread for Valeria');
   const s = await call(h.app, 'POST /truckmate/messages/send', VAL, { body: { thread: 'p:7865550199', text: 'Thanks Ana', via: 'app', clientId: 'c-1' } });
   assert.equal(s.code, 200); assert.deepEqual(h.sent[0], ['app', '626200', 'Thanks Ana', 'Valeria']);
+  assert.deepEqual(h.appPhones[0], ['7865550199'], 'the load\'s driver cells go along, so training mode lets approved drivers through');
   // the load-log echo of our own app send isn't stored twice
   await h.inbox.fromApp('626200', { type: 'text', kind: 'app-message', to: 'driver app', text: 'Thanks Ana', by: 'Valeria' });
   const th = await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' } });
@@ -236,6 +237,21 @@ test('group text: once texting is live and everyone agreed to texts, the same te
   assert.equal(s.code, 200);
   assert.deepEqual(h.sent.filter((x) => x[0] === 'sms').map((x) => [x[1], x[2]]), [['3055550101', 'Appointment moved to 9 AM'], ['3055550102', 'Appointment moved to 9 AM']]);
   assert.equal(s.body.message.status, 'sent'); assert.match(s.body.message.note, /texted each person \(2 of 2\)/);
+  // the group text shows only in the group, not in Carlos's own conversation (comms hands each copy back tagged with the group)
+  await h.inbox.fromSms('3055550101', { type: 'text', to: '3055550101', text: 'Appointment moved to 9 AM', by: 'Nadim Tellez', group: g.id });
+  const own = (await call(h.app, 'GET /truckmate/messages', GEO)).body.threads.find((t) => t.id === 'p:3055550101');
+  assert.ok(!own || !/Appointment moved/.test((own.last || {}).text || ''), 'not in his own conversation');
+  // his text reply goes back to the group…
+  await h.inbox.fromSms('3055550101', { type: 'reply', from: '3055550101', text: 'Copy 9 AM', extId: 'gr1' });
+  let gm = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: g.id } })).body.messages;
+  assert.equal(gm[gm.length - 1].text, 'Copy 9 AM'); assert.equal(gm[gm.length - 1].dir, 'in');
+  // …until dispatch texts him one-on-one: then his replies come back to his own conversation
+  await h.inbox.fromSms('3055550101', { type: 'text', to: '3055550101', text: 'Just you: call me', by: 'Nadim Tellez' });
+  await h.inbox.fromSms('3055550101', { type: 'reply', from: '3055550101', text: 'Calling', extId: 'gr2' });
+  gm = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: g.id } })).body.messages;
+  assert.ok(!gm.some((m) => m.text === 'Calling'));
+  const mine = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:3055550101' } })).body.messages;
+  assert.deepEqual(mine.map((m) => m.text).slice(-2), ['Just you: call me', 'Calling']);
 });
 
 test('conversations go newest first by the last message in or out; a message logged without a time never sticks to the top', async () => {

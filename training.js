@@ -6,6 +6,7 @@
 // test addresses. Password-reset emails still go to the person (they're private).
 // Inbound calls / emails work as usual. Admins turn it on and off.
 // ---------------------------------------------------------------
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { TRAINING_SLOT, trainingRow } from './latemail.js';
 
 const KEY = 'taTrainingMode';
@@ -49,6 +50,17 @@ export function guardWithAllow(m, to, allow) {
   return ok.length || okCc.length ? { ...r, to: [...new Set([...r.to, ...ok, ...okCc])] } : r;
 }
 
+// Sent by hand: a dispatcher typed it and pressed Send (Phone & Messages, the trip card's Text / app chat, the tracking-link text).
+// Those go out for real to anyone while training is on (Nov 20, Nadim Tellez: "open all numbers so dispatch can work with the
+// text and calling app"). What Jarvis sends on its own is still held — except to AUTO_ALLOW (Nadim's cell only).
+export const byHand = new AsyncLocalStorage();
+export const sentByHand = (req, res, next) => byHand.run(true, next);   // Express middleware on the send routes
+export const AUTO_ALLOW = ['3055040711'];
+// Jarvis's status-check pushes in the driver app ("Delivered?", "Loaded & leaving?", "Rolling to your pickup?") stay on for every
+// driver (Nov 20, Nadim Tellez: "only on push, not text messages") — the text fallback is still held.
+export const statusAsk = new AsyncLocalStorage();
+export const asStatusAsk = (fn) => statusAsk.run(true, fn);
+
 export function initTraining(app, { requireAuth, requireAdmin, db, sendDirect }) {
   const enabled = !!(db && db.enabled);
   let cache = { at: 0, cfg: { on: false, to: [] } };
@@ -68,8 +80,11 @@ export function initTraining(app, { requireAuth, requireAdmin, db, sendDirect })
   async function hold(kind, info) {
     const c = await active();
     if (!c) return null;
-    // an approved person → goes out for real; app messages carry the driver's phones (Nov 19: Ferney & Wilber's app)
-    if (info && [info.to, ...(Array.isArray(info.phones) ? info.phones : [])].some((x) => x && allowedMatch(c.allow, x))) return null;
+    if (byHand.getStore() && kind !== 'call') return null;   // a dispatcher's own text / app message
+    if (kind === 'app' && statusAsk.getStore()) return null;   // a status-check push to the driver app
+    // Jarvis on its own reaches only Nadim (Nov 20: "do not send any automatic communications to anybody … only to me")
+    const auto = Array.isArray(c.autoAllow) ? c.autoAllow : AUTO_ALLOW;
+    if (info && [info.to, ...(Array.isArray(info.phones) ? info.phones : [])].some((x) => x && allowedMatch(auto, x))) return null;
     // held texts are dropped quietly — no "Jarvis would have texted" email — unless an admin turns copies back on
     if (kind === 'text' && !c.textCopies) return { training: true, held: kind, to: info.to || null, quiet: true };
     const copy = heldCopy(kind, info);

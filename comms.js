@@ -12,6 +12,7 @@
 // stop confirmed by the driver.
 // ---------------------------------------------------------------
 import { wantsContact } from './helpdesk.js';
+import { sentByHand } from './training.js';
 
 const COMPANY = 'Florida Beauty Flora dispatch';
 const last10 = (p) => String(p || '').replace(/\D+/g, '').slice(-10);
@@ -134,7 +135,7 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  app.post('/truckmate/trips/:trip/text', requireAuth, async (req, res) => {
+  app.post('/truckmate/trips/:trip/text', requireAuth, sentByHand, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     if (!ringcentral) return res.status(503).json({ error: 'RingCentral is not connected.' });
     const site = siteOf(req);

@@ -8,6 +8,7 @@
 // if it still looks finished.
 // ---------------------------------------------------------------
 import { staffEmail } from './staffmail.js';
+import { asStatusAsk } from './training.js';
 
 const SITE = 'florida-beauty';
 const KEY = (site) => `taDoneAsk:${site}`;     // { asks: { trip: { codes, why, place, askedAt, count, answer } } }
@@ -117,7 +118,7 @@ export function initDoneAsk(app, { db, requireDriver = null, getBoard, notify = 
     for (const { c, ans } of tapped) await confirm(c.trip, 'yes', '', ans, site).catch((e) => console.warn('[done-ask] check-in:', e.message)); // eslint-disable-line no-await-in-loop
     for (const a of send) {
       const body = `Is load ${a.trip}${a.place ? ` to ${a.place}` : ''} delivered? Tap to answer.`;
-      for (const c of a.codes) if (notify) await notify(c, { title: 'Jarvis has a question', body, data: { tab: 'now', ask: 'done', trip: a.trip } }).catch((e) => console.warn('[done-ask] push:', e.message)); // eslint-disable-line no-await-in-loop
+      for (const c of a.codes) if (notify) await asStatusAsk(() => notify(c, { title: 'Jarvis has a question', body, data: { tab: 'now', ask: 'done', trip: a.trip } })).catch((e) => console.warn('[done-ask] push:', e.message)); // eslint-disable-line no-await-in-loop
       console.log(`[done-ask] trip ${a.trip}: asked ${a.codes.join(', ')}${a.again ? ' again' : ''} — ${a.why}`);
     }
     return send;

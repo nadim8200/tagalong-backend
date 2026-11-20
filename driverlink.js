@@ -36,6 +36,7 @@
 import crypto from 'crypto';
 import { wantsContact } from './helpdesk.js';
 import { scanPdf } from './scanpdf.js';
+import { sentByHand } from './training.js';
 
 // What a driver can send as paperwork, like Transflo's document types. Each needs the freight bill number on the paper.
 export const PAPER_KINDS = { pod: { label: 'POD', file: 'POD', docType: 'proof_of_delivery' }, bol: { label: 'BOL', file: 'BOL', docType: 'bill_of_lading' }, lumper: { label: 'lumper receipt', file: 'LUMPER', docType: 'lumper_receipt' }, receipt: { label: 'receipt', file: 'RECEIPT', docType: 'receipt' }, other: { label: 'paperwork', file: 'DOC', docType: 'other_paperwork' } };
@@ -420,7 +421,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   }
 
   // Text the link from the company's RingCentral number. Only on a dispatcher click.
-  app.post('/truckmate/oc/:trip/link/send', requireAuth, async (req, res) => {
+  app.post('/truckmate/oc/:trip/link/send', requireAuth, sentByHand, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     if (!ringcentral) return res.status(503).json({ error: 'RingCentral is not connected.' });
     const site = siteOf(req);
@@ -728,13 +729,13 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
   }
   const linkForTrip = async (site, trip) => { const tok = ((await db.get(siteKey(site), { byTrip: {} })).byTrip || {})[trip]; return tok ? db.get(linkKey(tok), null) : null; };
   // dispatch (or Jarvis) → driver: stored for the app + a push to the phone when the app is installed
-  async function messageDriver(site, trip, text, by = 'dispatcher', { docIds = [] } = {}) {
+  async function messageDriver(site, trip, text, by = 'dispatcher', { docIds = [], phones = [] } = {}) {
     const files = (docIds || []).map(String).filter((x) => /^\d+$/.test(x)).slice(0, 6);
     const body = String(text || '').trim() || (files.length ? `📎 ${files.length === 1 ? 'A file' : `${files.length} files`} from dispatch` : '');
     if (!body) throw new Error('Write a message first.');
     const link = await linkForTrip(site, String(trip));
     if (!link || !isLive(linkStatus(link))) return { skipped: 'no active driver link on this load' };
-    if (training) { const held = await training.hold('app', { to: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'the driver app', phones: ((link.info && link.info.drivers) || []).map((d) => d && d.phone).filter(Boolean), trip, text: body }); if (held) { if (comms && comms.log) await comms.log(site, String(trip), { type: 'text', kind: 'app-message', to: 'driver app', text: body, by, held: true, noThread: true }); return { sent: true, via: 'held — training mode', ...held }; } }
+    if (training) { const held = await training.hold('app', { to: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'the driver app', phones: [...((link.info && link.info.drivers) || []).map((d) => d && d.phone), ...(phones || [])].filter(Boolean), trip, text: body }); if (held) { if (comms && comms.log) await comms.log(site, String(trip), { type: 'text', kind: 'app-message', to: 'driver app', text: body, by, held: true, noThread: true }); return { sent: true, via: 'held — training mode', ...held }; } }
     const m = await addMessage(site, String(trip), { from: 'dispatch', by, text: body, docIds: files });
     if (onDispatchMessage) Promise.resolve(onDispatchMessage(site, String(trip), body, by)).catch(() => {});   // the driver profile's phones hear it too
     let pushed = false;
@@ -837,7 +838,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       res.json({ ...t, driver: { name: (item && item._oc && item._oc.driverName) || (link && link.driverName) || null, phone } });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
-  app.post('/truckmate/oc/:trip/messages', requireAuth, async (req, res) => {
+  app.post('/truckmate/oc/:trip/messages', requireAuth, sentByHand, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     try {
       const r = await messageDriver(siteOf(req), String(req.params.trip), req.body && req.body.text, who(req));

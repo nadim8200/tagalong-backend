@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initTraining, redirectEmail, heldCopy } from '../training.js';
+import { initTraining, redirectEmail, heldCopy, sentByHand, asStatusAsk } from '../training.js';
 
 function memDb() { const m = new Map(); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, JSON.parse(JSON.stringify(v))) }; }
 
@@ -52,12 +52,23 @@ test('training mode: approved staff (Ronen) get Jarvis\'s email for real; everyo
   assert.equal(allowedMatch(['305-555-0100'], '+13055550100'), true);
 });
 
-test('training: a driver on the approved list gets his app messages and pushes for real (matched by his phone)', async () => {
+test('training: a dispatcher\'s own texts / app messages go to anyone; what Jarvis sends on its own reaches only Nadim', async () => {
   const db = memDb(); const app = { get: () => {}, put: () => {} };
-  await db.set('taTrainingMode', { on: true, to: ['ntellez@floridabeauty.us'], allow: ['7863142671', '3058967966'] });
+  await db.set('taTrainingMode', { on: true, to: ['ntellez@floridabeauty.us'], allow: ['7863142671', 'ronen@floridabeauty.us'] });
   const t = initTraining(app, { requireAuth: (q, s, n) => n(), requireAdmin: (q, s, n) => n(), db, sendDirect: async () => {} });
   assert.ok(await t.active());
-  assert.equal(await t.hold('app', { to: 'driver 986', phones: ['(786) 314-2671'], text: 'Is load 627549 delivered?' }), null, 'Ferney: goes out');
-  assert.equal(await t.hold('text', { to: '+13058967966', text: 'hi' }), null, 'Wilber: texts go out');
-  assert.equal((await t.hold('app', { to: 'driver 1344', phones: ['7865682446'], text: 'x' })).held, 'app', 'anyone else: still held');
+  // sent by hand (the send routes run inside sentByHand): out for real, to any number
+  await new Promise((done) => sentByHand({}, {}, async () => {
+    assert.equal(await t.hold('text', { to: '+17865682446', text: 'hi' }), null, 'any number, by hand');
+    assert.equal(await t.hold('app', { to: 'driver 1344', phones: ['7865682446'], text: 'x' }), null, 'app message by hand');
+    assert.equal((await t.hold('call', { to: '7865682446', text: 'x' })).held, 'call', 'a Jarvis call stays held even from a dispatcher\'s screen');
+    done();
+  }));
+  // Jarvis on its own: only Nadim's cell — not Ferney (still on the email allow list), not anyone else
+  assert.equal(await t.hold('text', { to: '(305) 504-0711', text: 'temp alert' }), null, 'Nadim: goes out');
+  assert.equal((await t.hold('app', { to: 'driver 986', phones: ['(786) 314-2671'], text: 'Is load 627549 delivered?' })).held, 'app', 'Ferney: Jarvis push held');
+  assert.equal((await t.hold('text', { to: '+13052063095', text: 'hi' })).held, 'text', 'Ronen: held');
+  // Jarvis's status-check pushes ("Delivered?", "Rolling to your pickup?") go to every driver's app; the same ask by text stays held
+  assert.equal(await asStatusAsk(() => t.hold('app', { to: 'driver 1344', phones: ['7865682446'], text: 'Is load 627549 delivered?' })), null, 'status push: out');
+  assert.equal((await asStatusAsk(() => t.hold('text', { to: '7865682446', text: 'Delivered?' }))).held, 'text', 'status text: held');
 });
