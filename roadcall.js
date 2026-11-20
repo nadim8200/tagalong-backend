@@ -143,7 +143,7 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
   const step = (rc) => ({ ...rc, missing: missing(rc), status: ['gathering', 'ready'].includes(rc.status) ? (missing(rc).length ? 'gathering' : 'ready') : rc.status });
 
   // open (or add to the open one for that truck / trip)
-  async function open({ trip = null, truck = null, source = 'console', by = null, type = null, details = null, tire = null, location = null, safe = null, loaded = null, driver = null } = {}) {
+  async function open({ trip = null, truck = null, source = 'console', by = null, type = null, details = null, tire = null, location = null, safe = null, loaded = null, driver = null, quiet = false } = {}) {
     if (!enabled) return null;
     const all = await list();
     const cur = all.find((x) => !['completed', 'cancelled'].includes(x.status) && ((trip && x.trip === String(trip)) || (truck && x.truck === String(truck))) && now() - Date.parse(x.at) < 24 * 60 * MIN);
@@ -153,7 +153,8 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
     rc = step(rc);
     await save(rc);
     if (help && help.raise) help.raise({ source: source === 'call' ? 'call' : source === 'text' ? 'text' : 'app', ref: `roadcall:${rc.id}`, role: 'driver', from: { name: rc.driver && rc.driver.name, phone: rc.driver && rc.driver.phone }, trip: rc.trip, need: `ROAD CALL ${rc.id} — ${rc.type || 'breakdown'}: ${rc.details || ''}`.slice(0, 400), urgent: true }).catch(() => {});
-    await notify(rc, `🛠 Road call opened (${rc.type || 'breakdown'})`);
+    // quiet: the caller sends its own email (a breakdown from the driver app)
+    if (!quiet) await notify(rc, `🛠 Road call opened (${rc.type || 'breakdown'})`);
     return rc;
   }
   async function update(id, patch = {}, by = 'dispatcher') {

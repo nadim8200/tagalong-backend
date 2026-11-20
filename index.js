@@ -80,6 +80,7 @@ import { initMilestones } from './milestones.js';
 import { initCommitments, lateMessage } from './commitments.js';
 import { initLtlTempAlert } from './tempalert.js';
 import { initDvr } from './dvr.js';
+import { initDriverBreakdowns } from './driverbreakdown.js';
 import { initThermoKing } from './thermoking.js';
 import { initYardReport } from './yardreport.js';
 import { initYardReleases } from './yardreleases.js';
@@ -1482,6 +1483,8 @@ const driverAuth = initDriverAuth(app, { requireAuth, requireAdmin: requireCompa
 driverNotify = (...a) => driverAuth.notify(...a);
 // the driver vehicle inspection report (DVIR) from the driver app: email to Maintenance + Dispatch, photos / short videos kept in the database
 initDvr(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, requireAuth: requireDispatch, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('dvr'), log: (...a) => comms.log(...a) });
+// breakdowns from the driver app (Breakdown tab): stored, a road call opened for dispatch to approve, one email with the photos
+initDriverBreakdowns(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, requireAuth: requireDispatch, getBoard: (site) => truckmate.buildBoard(site), roadCalls: () => roadCalls, sendMail: (m) => sendMail(m, { env: process.env }), recipients: () => alertRecipients.resolve('driver_breakdown'), entries: async () => ((await alertRecipients.lists()).driver_breakdown || []), training, log: (...a) => comms.log(...a), env: process.env });
 // Thermo King TracKing (read only, every 15 min): live reefer readings for the cards and temp alerts — THERMOKING_* in Render
 thermoKing = initThermoKing({ app, requireAuth: requireDispatch, requireAdmin, db, env: process.env });
 // yard report: trailers at each hub yard (Thermo King GPS) + what's coming down to Florida
