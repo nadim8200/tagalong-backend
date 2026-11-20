@@ -68,7 +68,8 @@ export function initTraining(app, { requireAuth, requireAdmin, db, sendDirect })
   async function hold(kind, info) {
     const c = await active();
     if (!c) return null;
-    if (info && allowedMatch(c.allow, info.to)) return null;          // an approved person → goes out for real
+    // an approved person → goes out for real; app messages carry the driver's phones (Nov 19: Ferney & Wilber's app)
+    if (info && [info.to, ...(Array.isArray(info.phones) ? info.phones : [])].some((x) => x && allowedMatch(c.allow, x))) return null;
     // held texts are dropped quietly — no "Jarvis would have texted" email — unless an admin turns copies back on
     if (kind === 'text' && !c.textCopies) return { training: true, held: kind, to: info.to || null, quiet: true };
     const copy = heldCopy(kind, info);

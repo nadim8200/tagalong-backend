@@ -734,7 +734,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
     if (!body) throw new Error('Write a message first.');
     const link = await linkForTrip(site, String(trip));
     if (!link || !isLive(linkStatus(link))) return { skipped: 'no active driver link on this load' };
-    if (training) { const held = await training.hold('app', { to: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'the driver app', trip, text: body }); if (held) { if (comms && comms.log) await comms.log(site, String(trip), { type: 'text', kind: 'app-message', to: 'driver app', text: body, by, held: true, noThread: true }); return { sent: true, via: 'held — training mode', ...held }; } }
+    if (training) { const held = await training.hold('app', { to: (link.info && link.info.drivers && link.info.drivers[0] && link.info.drivers[0].name) || 'the driver app', phones: ((link.info && link.info.drivers) || []).map((d) => d && d.phone).filter(Boolean), trip, text: body }); if (held) { if (comms && comms.log) await comms.log(site, String(trip), { type: 'text', kind: 'app-message', to: 'driver app', text: body, by, held: true, noThread: true }); return { sent: true, via: 'held — training mode', ...held }; } }
     const m = await addMessage(site, String(trip), { from: 'dispatch', by, text: body, docIds: files });
     if (onDispatchMessage) Promise.resolve(onDispatchMessage(site, String(trip), body, by)).catch(() => {});   // the driver profile's phones hear it too
     let pushed = false;

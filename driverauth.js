@@ -9,6 +9,20 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from 'node:crypto';
 import { stopsOf } from './statusmail.js';
 import { CHECKINS, validStep } from './checkins.js';
+import { KNOWN_YARDS } from './loadsheet.js';
+
+// The driver release a dispatcher submitted on this load (release.js keeps them per trip, newest last) → what the driver
+// app shows (Nov 19): released at which hub, its yard address + directions, who authorized it and when, and the stops it
+// covers. null when there's no release. Pure.
+export function releasedFor(list = []) {
+  const r = Array.isArray(list) && list.length ? list[list.length - 1] : null;
+  if (!r || !r.fields) return null;
+  const hub = String(r.fields.hub || '').trim().toUpperCase();
+  const y = KNOWN_YARDS[hub] || null;
+  const stops = (r.fields.stops || []).filter((x) => x && (x.consignee || x.city || x.zip))
+    .map((x) => ({ consignee: x.consignee || null, city: x.city || null, state: x.state || null, zip: x.zip || null }));
+  return { hub: hub || null, yard: y ? y.name : null, address: y ? y.address : null, map: y ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(y.address)}` : null, at: r.at || null, by: r.by || null, stops };
+}
 
 const SITE = 'florida-beauty';
 const PINS = `taDriverPins:${SITE}`;        // driver ID → { enc, setAt, by }
@@ -186,6 +200,9 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
         const it = items2.find((x) => tripNo(x) === l.trip);
         l.checkin = { stops: stopsOf(it).map((x) => ({ key: x.key, number: x.number, name: x.name || (x.customers || [])[0] || null, place: x.place, delivered: !!x.delivered })), steps: (book[l.trip] || {}).steps || {} };
       }
+      // a release the dispatcher submitted: the driver sees which stops are released, and at which hub
+      const rels = (await db.get(`taReleases:${SITE}`, {})) || {};
+      for (const l of [...loads.current, ...loads.next]) l.released = releasedFor(rels[l.trip]);
       for (const l of [...loads.current, ...loads.next]) if (l.crew && l.crew.coDriver && !l.crew.coDriver.name) { const c = await byCode(l.crew.coDriver.code).catch(() => null); if (c) l.crew.coDriver.name = c.name || null; } // eslint-disable-line no-await-in-loop
       if (trips.length) await db.update(tripsKey(req.driver.code), (cur) => [...new Set([...trips, ...(Array.isArray(cur) ? cur : [])])].slice(0, 300), []);
       // the last time the driver was in the app (dispatch sees it on the load), written at most every 5 minutes
@@ -324,7 +341,11 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     if (!push || !enabled) return { skipped: 'push not set up' };
     const tokens = ((await db.get(PUSH, {})) || {})[norm(code)] || [];
     if (!tokens.length) return { skipped: 'no phone signed in' };
-    if (training) { const held = await training.hold('app', { to: `driver ${code}`, text: `${title}: ${body}` }); if (held) return { held: true }; }
+    if (training) {
+      const d = await byCode(code).catch(() => null);
+      const phones = d ? (d.phones || [{ number: d.phone }]).map((x) => x && x.number).filter(Boolean) : [];
+      const held = await training.hold('app', { to: `driver ${code}`, phones, text: `${title}: ${body}` }); if (held) return { held: true };
+    }
     const dead = await push.sendToTokens(tokens, { title, body, data: { ...data, path: `/driver${data.tab ? `?tab=${data.tab}` : ''}` } });
     if (dead.length) await db.update(PUSH, (cur) => ({ ...(cur || {}), [norm(code)]: ((cur || {})[norm(code)] || []).filter((x) => !dead.includes(x.token)) }), {});
     return { sent: tokens.length - dead.length };

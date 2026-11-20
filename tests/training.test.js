@@ -51,3 +51,13 @@ test('training mode: approved staff (Ronen) get Jarvis\'s email for real; everyo
   assert.deepEqual(other.to, ['ntellez@floridabeauty.us']);
   assert.equal(allowedMatch(['305-555-0100'], '+13055550100'), true);
 });
+
+test('training: a driver on the approved list gets his app messages and pushes for real (matched by his phone)', async () => {
+  const db = memDb(); const app = { get: () => {}, put: () => {} };
+  await db.set('taTrainingMode', { on: true, to: ['ntellez@floridabeauty.us'], allow: ['7863142671', '3058967966'] });
+  const t = initTraining(app, { requireAuth: (q, s, n) => n(), requireAdmin: (q, s, n) => n(), db, sendDirect: async () => {} });
+  assert.ok(await t.active());
+  assert.equal(await t.hold('app', { to: 'driver 986', phones: ['(786) 314-2671'], text: 'Is load 627549 delivered?' }), null, 'Ferney: goes out');
+  assert.equal(await t.hold('text', { to: '+13058967966', text: 'hi' }), null, 'Wilber: texts go out');
+  assert.equal((await t.hold('app', { to: 'driver 1344', phones: ['7865682446'], text: 'x' })).held, 'app', 'anyone else: still held');
+});

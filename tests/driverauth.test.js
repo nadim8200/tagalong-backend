@@ -310,3 +310,12 @@ test('driver check-ins: the stops to tap come with the load; a tap is saved once
   const again = await h.call('GET /driver/me', { token });
   assert.deepEqual(Object.keys(again.body.current.find((x) => x.trip === '626265').checkin.steps).sort(), ['arrived:' + key, 'at-shipper'].sort());
 });
+
+test('a submitted driver release shows on the driver\'s load: the hub, the yard address, who / when, the released stops (Nov 19)', async () => {
+  const { releasedFor } = await import('../driverauth.js');
+  assert.equal(releasedFor([]), null);
+  const r = releasedFor([{ at: '2026-11-18T10:00:00Z', fields: { hub: 'BARTOW', stops: [] } }, { at: '2026-11-19T20:00:00Z', by: 'Ana', fields: { hub: 'MIAMI', stops: [{ consignee: 'COSTCO', city: 'PORT SAINT LUCIE', state: 'FL', zip: '34987' }, { consignee: '' }] } }]);
+  assert.deepEqual([r.hub, r.yard, r.address, r.by], ['MIAMI', 'Miami yard', '2355 NW 70th Ave, Miami, FL 33122', 'Ana']);   // the newest release
+  assert.deepEqual(r.stops, [{ consignee: 'COSTCO', city: 'PORT SAINT LUCIE', state: 'FL', zip: '34987' }]);                 // blank rows dropped
+  assert.match(r.map, /google\.com\/maps/);
+});
