@@ -100,7 +100,7 @@ test('breakdown from the app: context, one report per key, files once per key, o
   assert.deepEqual([ctx.body.loads[0].truck, ctx.body.loads[0].trailer, ctx.body.loads[0].gps.source, ctx.body.loads[0].gps.at], ['4504', '18094', 'truck', '2026-11-19T21:41:00Z']);
   assert.deepEqual([ctx.body.loads[0].reefer.current, ctx.body.loads[0].reefer.power], [41.2, 'on']);
   assert.equal(ctx.body.driver.phone, '7863142671');
-  assert.equal(ctx.body.dispatch.kind, 'office', 'no dispatch number set → the office line, labelled as such');
+  assert.deepEqual(ctx.body.dispatch, { phone: '305-395-5415', kind: 'dispatch' }, 'RingCentral not reachable → the main number as we know it');
   assert.deepEqual([ctx.body.sendsTo.dispatch, ctx.body.sendsTo.maintenance], [true, true]);
 
   const body = { clientId: 'c1', ...base, tires: [{ axle: 2, side: 'right', pos: 'outer' }], tireSize: '295/75R22.5', text: 'Lost air', callback: '7863142671', location: { source: 'truck', lat: 27.4, lng: -80.3, at: '2026-11-19T21:41:00Z' } };

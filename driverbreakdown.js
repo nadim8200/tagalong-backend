@@ -20,7 +20,7 @@ import express from 'express';
 import { makeToken, readToken } from './breakdownreport.js';
 import { readableFile } from './heic.js';
 import { loadsFor } from './driverauth.js';
-import { DEPARTMENTS, MAIN_NUMBER } from './staff-directory.js';
+import { DEPARTMENTS } from './staff-directory.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taDriverBreakdowns:${SITE}`;   // id → report
@@ -78,6 +78,8 @@ export function cleanReport(b = {}) {
 const ANSWER_LABEL = { code: 'Warning light / code', starts: 'Engine starts', symptoms: 'What the driver notices', warning: 'Warning / symptom', pressure: 'Air pressure', leak: 'Hears an air leak', leakWhere: 'Leak location',
   component: 'Light / part', pattern: 'Happens', area: 'Area', hurt: 'Anyone hurt', others: 'Other vehicles involved', police: 'Police report' };
 const where = (r) => { const L = r.location || {}; return [L.address || L.text, L.ref].filter(Boolean).join(' · ') || null; };
+const RC_MAIN = '305-395-5415';      // the RingCentral main number (company "florida beauty"): rings the dispatchers
+const fmt10 = (x) => { const d = last10(x); return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}` : String(x || ''); };
 const fmtPhone = (d) => (d && d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : d || null);
 
 // The rows the email (and the console) show. Pure.
@@ -163,7 +165,7 @@ export function sendsTo(entries = [], training = false) {
 const id4 = (now) => `BK-${new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: '2-digit', day: '2-digit' }).replace('/', '')}-${String(crypto.randomInt(100, 1000))}`;
 
 export function initDriverBreakdowns(app, { db, secret, requireDriver, requireAuth, getBoard = null, roadCalls = () => null, sendMail = null, recipients = async () => [], entries = async () => [], training = null,
-  log = null, push = null, pushTo = async () => [], env = process.env, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
+  log = null, push = null, pushTo = async () => [], mainNumber = async () => null, env = process.env, baseUrl = 'https://tagalong-backend-fdzx.onrender.com', now = () => Date.now() }) {
   const enabled = !!(db && db.enabled && db.pool);
   let ready = null;
   const table = () => {
@@ -175,6 +177,13 @@ export function initDriverBreakdowns(app, { db, secret, requireDriver, requireAu
   const patch = (id, fn) => db.update(KEY, (cur) => { const c = { ...(cur || {}) }; if (c[id]) c[id] = fn(c[id]); return c; }, {});
   const rcOf = async (r) => { const rcs = roadCalls(); if (!r.roadCall || !rcs || !rcs.list) return null; return ((await rcs.list().catch(() => [])) || []).find((x) => x.id === r.roadCall) || null; };
   const own = async (req, res) => { const r = (await all())[String(req.params.id)]; if (!r || r.driverCode !== String(req.driver.code)) { res.status(404).json({ error: 'That report is not yours.' }); return null; } return r; };
+  // the number the driver's "Call dispatch" dials: DRIVER_DISPATCH_PHONE if set, else the RingCentral main number (it rings the
+  // dispatchers), else that same main number as we know it (RingCentral admin, Nov 19)
+  const dispatchLine = async () => {
+    if (env.DRIVER_DISPATCH_PHONE) return { phone: fmt10(env.DRIVER_DISPATCH_PHONE), kind: 'dispatch' };
+    const rcMain = await mainNumber().catch(() => null);
+    return { phone: fmt10(last10(rcMain).length === 10 ? rcMain : RC_MAIN), kind: 'dispatch' };
+  };
   const board = async () => (getBoard ? (((await getBoard(SITE).catch(() => null)) || {}).trips || []) : []);
 
   if (app && requireDriver) {
@@ -189,7 +198,7 @@ export function initDriverBreakdowns(app, { db, secret, requireDriver, requireAu
       });
       const t = training && training.active ? await training.active().catch(() => null) : null;
       res.json({ driver: { name: req.driver.name || null, code: String(req.driver.code), phone: last10(req.user && req.user.phone) || last10(req.driver.phone) || null },
-        loads, dispatch: env.DRIVER_DISPATCH_PHONE ? { phone: last10(env.DRIVER_DISPATCH_PHONE) || env.DRIVER_DISPATCH_PHONE, kind: 'dispatch' } : { phone: MAIN_NUMBER, kind: 'office' },
+        loads, dispatch: await dispatchLine(),
         sendsTo: sendsTo(await entries().catch(() => []), !!t), ready: enabled });
     });
     app.post('/driver/me/breakdowns', requireDriver, async (req, res) => {

@@ -237,6 +237,17 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
     } catch (e) { console.warn('[ringcentral] auto texting number:', e.message); return null; }
   }
 
+  // The company's main RingCentral number (it rings the dispatchers) — asked once a day. → '+1…' or null
+  let main = { at: 0, number: null };
+  async function mainNumber() {
+    if (main.number && Date.now() - main.at < 24 * 3600000) return main.number;
+    try {
+      const j = await rcFetch('__shared', '/restapi/v1.0/account/~');
+      main = { at: Date.now(), number: (j && j.mainNumber) || null };
+    } catch (e) { console.warn('[ringcentral] main number:', e.message); }
+    return main.number;
+  }
+
   // ---- send SMS ----
   // the signer's full name (Employees list) — set by index.js once the directory is up
   let nameFor = async (u) => (u && (u.name || u.email)) || null;
@@ -444,5 +455,5 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   const setOnCall = (fn) => { onCall = fn; };
 
   const hasOwnConfig = async (owner) => !!((await db.get(cfgKey, {})) || {})[owner];
-  return { hasOwnConfig, mediaBytes, sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, autoFrom, wasHeld, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
+  return { mainNumber, hasOwnConfig, mediaBytes, sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, autoFrom, wasHeld, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
 }
