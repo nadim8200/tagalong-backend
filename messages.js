@@ -98,10 +98,17 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
   const REPLY_TO = 'taMsgReplyTo';   // last10 → { thread, at }
   const noteLastText = (phones, threadId) => db.update(REPLY_TO, (cur) => { const all = { ...(cur || {}) }; for (const ph of phones) { const k = last10(ph); if (threadId) all[k] = { thread: threadId, at: iso() }; else delete all[k]; } return all; }, {});
   async function replyThread(phone) {
-    const r = ((await db.get(REPLY_TO, {})) || {})[last10(phone)];
-    if (!r || !r.thread) return null;
-    const t = ((await db.get(THREADS, {})) || {})[r.thread];
-    return t && !t.deleted ? t : null;
+    const k = last10(phone);
+    const all = (await db.get(THREADS, {})) || {};
+    const r = ((await db.get(REPLY_TO, {})) || {})[k];
+    if (r && r.thread) { const t = all[r.thread]; return t && !t.deleted ? t : null; }
+    // nothing recorded (a group text sent before routing was kept): the conversation dispatch last texted them in wins
+    const groups = Object.values(all).filter((t) => t.kind === 'group' && !t.deleted && (t.members || []).some((m) => last10(m.phone) === k));
+    if (!groups.length) return null;
+    const lastText = async (id) => ((await db.get(logKey(id), [])) || []).filter((m) => m.dir === 'out' && m.via === 'sms').reduce((a, m) => Math.max(a, Date.parse(m.at) || 0), 0);
+    let best = null; let at = await lastText(personId(k));
+    for (const g of groups) { const t = await lastText(g.id); if (t > at) { at = t; best = g; } } // eslint-disable-line no-await-in-loop
+    return best;
   }
   // the sender's full name from the Employees list (else their login name), as the texts are signed
   async function fullName(u) {
@@ -253,7 +260,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       }
       const ts = (t) => Date.parse((t.last || {}).at) || Date.parse(t.createdAt) || 0;   // newest message in or out first; a bad time never jumps the list
       const threads = Object.values(all || {}).filter((t) => !t.deleted).sort((a, b) => ts(b) - ts(a)).slice(0, 400).map((t) => view(t, me, reads || {}, pins || {}));
-      res.json({ me: nameOf(req.user), threads, pins: (pins || {})[me] || [], texting: { live, groupSms: live } });
+      res.json({ me: await fullName(req.user), threads, pins: (pins || {})[me] || [], texting: { live, groupSms: live } });
     });
 
     app.get('/truckmate/messages/thread/:id', requireAuth, async (req, res) => {

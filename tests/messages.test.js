@@ -252,6 +252,13 @@ test('group text: once texting is live and everyone agreed to texts, the same te
   assert.ok(!gm.some((m) => m.text === 'Calling'));
   const mine = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:3055550101' } })).body.messages;
   assert.deepEqual(mine.map((m) => m.text).slice(-2), ['Just you: call me', 'Calling']);
+  // nothing recorded (a group text from before): the conversation dispatch last texted him in decides
+  await h.db.set('taMsgReplyTo', {});
+  await call(h.app, 'POST /truckmate/messages/send', GEO, { body: { thread: g.id, text: 'Group: dock 4', via: 'sms', clientId: 'c-20' } });
+  await h.db.set('taMsgReplyTo', {});
+  await h.inbox.fromSms('3055550102', { type: 'reply', from: '3055550102', text: 'Miguel ok', extId: 'gr3' });
+  gm = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: g.id } })).body.messages;
+  assert.equal(gm[gm.length - 1].text, 'Miguel ok', 'back to the group');
 });
 
 test('conversations go newest first by the last message in or out; a message logged without a time never sticks to the top', async () => {
