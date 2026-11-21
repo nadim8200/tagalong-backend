@@ -315,7 +315,11 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
     return replies.length;
   }
   if (enabled && ringcentral && env.NODE_ENV !== 'test') {
-    const t = setInterval(() => { pollReplies().catch((e) => console.warn('[comms] replies:', e.message)); sendConfirmations().catch((e) => console.warn('[comms] opt-in:', e.message)); }, 2 * 60000);
+    // incoming texts every 15 s (was 2 min — a text took up to 2½ min to show in the console; Nov 20). One check at a time.
+    let polling = false;
+    const r = setInterval(() => { if (polling) return; polling = true; pollReplies().catch((e) => console.warn('[comms] replies:', e.message)).finally(() => { polling = false; }); }, 15000);
+    const t = setInterval(() => { sendConfirmations().catch((e) => console.warn('[comms] opt-in:', e.message)); }, 2 * 60000);
+    if (r.unref) r.unref();
     if (t.unref) t.unref();
   }
 
