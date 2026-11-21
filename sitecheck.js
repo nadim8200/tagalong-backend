@@ -5,7 +5,7 @@
 // Site 2 (B). A bill in the other site is a mistake: the trip card shows it, and the Wrong TruckMate site email
 // goes once per trip (Employees → Alert emails → "wrong_site").
 // ---------------------------------------------------------------
-import { jarvisEmail, facts, notice, section, esc } from './jarvismail.js';
+import { siteAlertHtml } from './sitemail.js';
 
 export const SITES = { tempest: { site: 'SITE9', letter: 'F', name: 'Tempest Transportation' }, fb: { site: 'SITE2', letter: 'B', name: 'Florida Beauty (FBE / FBF)' } };
 const KEY = (site) => `taSiteWarned:${site}`;
@@ -47,15 +47,8 @@ export function wrongSite(item) {
 // The email to dispatch / billing. Pure.
 export function siteEmail(w, { test = false, now = Date.now() } = {}) {
   const fix = `Move ${w.bills.length === 1 ? `bill ${w.bills[0]}` : `bills ${w.bills.join(', ')}`} to Site ${w.want.site.replace('SITE', '')} (letter ${w.want.letter}).`;
-  const subject = `${test ? '[TEST] ' : ''}Wrong TruckMate site | Trip ${w.trip} | ${w.carrierName.split(' (')[0]} load in Site ${w.have.site.replace('SITE', '')} (${w.have.letter})`;
-  const body = section('THE LOAD', facts([
-    ['Trip', w.trip], ['Bill', w.bills.join(', ')], ['Rate con says', w.carrierName], w.broker ? ['Broker', w.broker] : null, w.loadNumber ? ['Broker load #', w.loadNumber] : null,
-    w.truck ? ['Truck', w.truck] : null, ['Entered in', `Site ${w.have.site.replace('SITE', '')} (letter ${w.have.letter})`], ['Belongs in', { html: `<b>Site ${esc(w.want.site.replace('SITE', ''))} (letter ${esc(w.want.letter)})</b>` }],
-  ])) + notice('The rule (from Ronen, Nov 20)', 'All Tempest loads go in Site 9 (letter F), every OTR freight bill included. Site 2 (letter B) is only FBE and FBF loads. Dispatch and billing both follow it.');
-  const html = jarvisEmail({ test, preheader: `Trip ${w.trip}: ${fix}`, eyebrow: 'Wrong TruckMate site', tone: 'amber', title: fix, subtitle: `The rate con says ${w.carrierName}`,
-    meta: [`Trip ${w.trip}`, new Date(now).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })],
-    lead: `Trip ${w.trip}'s rate con is for ${w.carrierName}, but ${w.bills.length === 1 ? 'its bill is' : 'its bills are'} in Site ${w.have.site.replace('SITE', '')} (${w.have.letter}). ${fix}`,
-    action: { label: 'Open the trip', url: `https://mytagalong.app/truckmate?trip=${encodeURIComponent(w.trip)}` }, body });
+  const subject = `${test ? '[TEST] ' : ''}ACTION REQUIRED: ${w.bills.length === 1 ? 'Bill' : 'Bills'} ${w.bills.join(', ')} in wrong site | Trip ${w.trip}`;
+  const html = siteAlertHtml(w, { test, now, fix });
   const text = [test ? 'TEST · SAMPLE DATA\n' : null, `WRONG TRUCKMATE SITE — Trip ${w.trip}`, `The rate con says ${w.carrierName}; bill ${w.bills.join(', ')} is in Site ${w.have.site.replace('SITE', '')} (${w.have.letter}).`, fix,
     '', 'Rule (Ronen, Nov 20): all Tempest loads go in Site 9 (F); Site 2 (B) is only FBE and FBF loads.', '', 'Jarvis · AI Dispatcher · Florida Beauty Flora'].filter((x) => x != null).join('\n');
   return { subject, html, text };

@@ -38,7 +38,7 @@ test('wrong site: a Tempest rate con on a Site 2 bill, or a Florida Beauty one o
 
 test('the email says what to move where, and the rule', () => {
   const m = siteEmail(wrongSite(item(TEMPEST_RC, [{ billNumber: 'B181090', siteId: 'SITE2', createdTimestamp: '2026-11-21T09:00:00' }])), { test: true });
-  assert.match(m.subject, /^\[TEST\] Wrong TruckMate site \| Trip 627610 \| Tempest Transportation load in Site 2 \(B\)$/);
+  assert.match(m.subject, /^\[TEST\] ACTION REQUIRED: Bill B181090 in wrong site \| Trip 627610$/);
   assert.match(m.html, /Move bill B181090 to Site 9 \(letter F\)\./); assert.match(m.html, /Allen Lund Company/); assert.match(m.text, /Site 2 \(B\) is only FBE and FBF loads/);
 });
 
@@ -51,4 +51,19 @@ test('emailed once per trip and bill; nothing when the board is right', async ()
   await sc.check(); assert.equal(sent.length, 1, 'once');
   trips = [];
   assert.deepEqual(await sc.check(), []);
+});
+
+test('each load supplies its own bills, direction and trip link, including multiple bills', () => {
+  const w = wrongSite(item(FBE_RC, ['F900010','F900011'].map(billNumber=>({billNumber,siteId:'SITE9',createdTimestamp:'2026-11-21T09:00:00'})), '999123'));
+  const m = siteEmail(w);
+  assert.equal(m.subject, 'ACTION REQUIRED: Bills F900010, F900011 in wrong site | Trip 999123');
+  assert.match(m.html, /<h1[^>]*>Bills <span[^>]*>F900010, F900011<\/span> are/);
+  assert.match(m.html, /Move bills F900010, F900011 to Site 2 \(letter B\)/);
+  assert.match(m.html, /href="https:\/\/mytagalong.app\/truckmate\?trip=999123"/);
+  assert.doesNotMatch(m.html, /B181090|627610|NOT A REAL REPORT/);
+  assert.match(m.html, /NEEDS ATTENTION NOW/);
+  assert.match(m.html, /bgcolor="#007aff"/);
+  const hostile=siteEmail({...w,bills:['<img src=x>'],carrierName:'<script>bad</script>'});
+  assert.doesNotMatch(hostile.html, /<img src=x>|<script>bad/);
+  assert.match(hostile.html, /&lt;img src=x&gt;/);
 });
