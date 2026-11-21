@@ -308,5 +308,14 @@ export function initDocuments(app, { requireAuth, db }) {
     return version;
   }
 
-  return { storeDocs, linkDocs, listDocs, markDocs, readDocs, deleteDocs, retypeDocs, enabled };
+  // add trips to documents, keeping the trips they already have (a rate con that came by email before its load existed)
+  async function tagTrips({ site, ids = [], trips = [], docType = null }) {
+    if (!enabled || !ids.length || !trips.length) return;
+    await ensureTable();
+    await pool.query(
+      `UPDATE ta_docs SET trips = ARRAY(SELECT DISTINCT x FROM unnest(trips || $1::text[]) x), doc_type = COALESCE(doc_type, $4)
+        WHERE site = $2 AND id = ANY($3::bigint[])`,
+      [trips.map(String), site, ids.map(Number).filter(Boolean), docType]);
+  }
+  return { storeDocs, linkDocs, listDocs, markDocs, readDocs, deleteDocs, retypeDocs, tagTrips, enabled };
 }

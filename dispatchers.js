@@ -98,6 +98,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
             req.user.companyAdmin = !!d.companyAdmin;
             req.user.staffAdmin = !!(d.staffAdmin && req.user.staffAdmin);
             req.user.phoneManager = !!d.phoneManager;   // a manager sees every dispatcher's calls and can shadow a live call
+            req.user.payroll = !!d.payroll;             // payroll: reviews the drivers' trip logs (homework) and marks what's paid
             if (!d.companyAdmin && dispatcherMayUse(req.method, req.originalUrl || req.path, req.user) === 'settings') return res.status(403).json({ error: 'Only an admin can change settings. Ask an admin.' });
             return next();
           }
@@ -234,7 +235,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
     try { await mail.send({ to: [d.email], ...renderLoginEmail({ name: d.name, email: d.email, tempPassword: temp, url: `${appUrl}/truckmate?admin`, by }) }); return { emailed: true }; } catch (e) { console.warn('[dispatchers] login email:', e.message); return { emailed: false, emailError: 'The email did not go out.' }; }
   }
   // an employee manager only needs to know who has a login: no sign-in history, no IPs
-  const brief = ({ id, email, name, active, mustChange, companyAdmin, staffAdmin, phoneManager }) => ({ id, email, name, active, mustChange, companyAdmin, staffAdmin, phoneManager });
+  const brief = ({ id, email, name, active, mustChange, companyAdmin, staffAdmin, phoneManager, payroll }) => ({ id, email, name, active, mustChange, companyAdmin, staffAdmin, phoneManager, payroll: !!payroll });
   app.get('/admin/dispatchers', requireStaffManager, async (req, res) => {
     try { res.json((await list(true)).filter(inMine(req)).map((d) => (req.staffOnly ? brief(d) : { ...view(d), company: d.company || DEFAULT_COMPANY }))); } catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -265,7 +266,7 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
       let out = null;
       await save((l) => l.map((x) => {
         if (x.id !== req.params.id || !inMine(req)(x)) return x;
-        out = { ...x, ...(b.name ? { name: String(b.name).slice(0, 80) } : {}), ...(b.active != null ? { active: !!b.active } : {}), ...(b.companyAdmin != null ? { companyAdmin: !!b.companyAdmin } : {}), ...(b.staffAdmin != null ? { staffAdmin: !!b.staffAdmin } : {}), ...(b.phoneManager != null ? { phoneManager: !!b.phoneManager } : {}), ...(b.company && isAdmin(req.user) ? { company: String(b.company) } : {}), ...(b.password ? { pass: hashPassword(String(b.password)), mustChange: true, reset: null, passwordChangedAt: new Date().toISOString(), passwordLog: [{ at: new Date().toISOString(), by: who(req), how: 'password set by admin' }, ...(x.passwordLog || [])].slice(0, 30) } : {}), updatedAt: new Date().toISOString(), updatedBy: who(req) };
+        out = { ...x, ...(b.name ? { name: String(b.name).slice(0, 80) } : {}), ...(b.active != null ? { active: !!b.active } : {}), ...(b.companyAdmin != null ? { companyAdmin: !!b.companyAdmin } : {}), ...(b.staffAdmin != null ? { staffAdmin: !!b.staffAdmin } : {}), ...(b.phoneManager != null ? { phoneManager: !!b.phoneManager } : {}), ...(b.payroll != null ? { payroll: !!b.payroll } : {}), ...(b.company && isAdmin(req.user) ? { company: String(b.company) } : {}), ...(b.password ? { pass: hashPassword(String(b.password)), mustChange: true, reset: null, passwordChangedAt: new Date().toISOString(), passwordLog: [{ at: new Date().toISOString(), by: who(req), how: 'password set by admin' }, ...(x.passwordLog || [])].slice(0, 30) } : {}), updatedAt: new Date().toISOString(), updatedBy: who(req) };
         return out;
       }));
       if (!out) return res.status(404).json({ error: 'Not found.' });

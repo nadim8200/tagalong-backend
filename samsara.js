@@ -89,6 +89,19 @@ export async function vehicleFuelHistory(token, vehicleId, startIso, endIso) {
   return out.filter((x) => Number.isFinite(x.t)).sort((a, b) => a.t - b.t);
 }
 
+// A truck's odometer over [startIso, endIso] (Nov 21 — the driver's trip log): the first and last reading, in miles. The dashboard
+// odometer (OBD) when the truck sends it, else Samsara's GPS odometer. → { begin, end, source } | null
+export async function vehicleOdometerRange(token, vehicleId, startIso, endIso) {
+  for (const [type, source] of [['obdOdometerMeters', 'Samsara (dashboard)'], ['gpsOdometerMeters', 'Samsara (GPS)']]) {
+    const data = await sGet(token, `/fleet/vehicles/stats/history?types=${type}&startTime=${encodeURIComponent(startIso)}&endTime=${encodeURIComponent(endIso)}&vehicleIds=${encodeURIComponent(vehicleId)}`, { maxPages: 20 });
+    const pts = [];
+    for (const v of arr(data)) for (const o of arr(v[type])) if (o && o.value != null && o.time) pts.push({ t: Date.parse(o.time), v: o.value });
+    const ok = pts.filter((x) => Number.isFinite(x.t) && x.v > 0).sort((a, b) => a.t - b.t);
+    if (ok.length) return { begin: Math.round(ok[0].v / 1609.344), end: Math.round(ok[ok.length - 1].v / 1609.344), source, from: new Date(ok[0].t).toISOString(), to: new Date(ok[ok.length - 1].t).toISOString() };
+  }
+  return null;
+}
+
 // Drivers' duty-status logs (off duty / sleeper / driving / on duty / yard move / personal
 // conveyance) over [startIso, endIso] → [{ driverId, status, from, to }] (times in ms).
 export async function driverHosLogs(token, driverIds, startIso, endIso) {

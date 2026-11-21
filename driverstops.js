@@ -47,7 +47,7 @@ export function driverStops(item, { geo = {} } = {}) {
       const sp = piecesOf(s.piecesText, s.boxes);
       const fromArtis = s.from === 'ARTIS';
       const sheetN = s.sheetPieces != null ? s.sheetPieces : sp.boxes != null ? sp.boxes : sp.pallets != null ? 0 : null;   // pallets only: no loose boxes
-      return { key: label && cityCount.get(label) === 1 ? label : s.key, number: i + 1, name: s.customer || (mine[0] && cleanName(mine[0].billToName)) || null, place, address: s.address || null,
+      return { key: label && cityCount.get(label) === 1 ? label : s.key, number: i + 1, name: s.customer || (mine[0] && cleanName(mine[0].billToName)) || null, place, address: s.address || null, zip: s.zip || zipOf(label) || zipOf(s.address) || null,
         appt: s.appt || null, receivingHours: s.receivingHours || null, callAhead: s.callAhead || [], instructions: s.instructions || [], references: s.references || [],
         boxes: sheetN != null ? sheetN : billBoxes, pallets: sp.pallets, boxesFrom: sheetN != null || sp.pallets != null ? (fromArtis ? 'ARTIS' : 'trip sheet') : 'TruckMate', billBoxes, sheetBoxes: s.boxes, bills: mine.map(billRow), delivered: done(mine), source: 'trip sheet', zip: s.zip || zipOf(label) || null, tmPlace: r.tmPlace || null };
     });

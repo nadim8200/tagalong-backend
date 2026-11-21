@@ -11,6 +11,7 @@ import { CHECKINS, validStep } from './checkins.js';
 import { leftCooler, withDetected } from './autodepart.js';
 import { driverStops, cityStep } from './driverstops.js';
 import { roadFacts, truckStopFinder, aheadOf } from './driverroad.js';
+import { initTripLog } from './triplog.js';
 import { KNOWN_YARDS } from './loadsheet.js';
 
 // The driver release a dispatcher submitted on this load (release.js keeps them per trip, newest last) → what the driver
@@ -226,6 +227,8 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       res.json({ name: req.driver.name, driverId: req.driver.code, ...loads, jarvisPhone: process.env.RETELL_FROM_NUMBER || null });
     } catch (e) { res.status(502).json({ error: 'Could not load your loads. Try again.' }); }
   });
+  // the driver's homework: the weekly "On the Road Trip Log" for payroll (triplog.js)
+  initTripLog(app, { db, requireDriver, requireAuth, board, sheets, loadsFor, tripsOf: (code) => db.get(tripsKey(code), []), now });
   // truck parking near the driver's truck (ahead of it when it's moving)
   const truckStops = truckStopFinder({ db });
   app.get('/driver/me/loads/:trip/truckstops', requireDriver, async (req, res) => {

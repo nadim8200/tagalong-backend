@@ -216,6 +216,8 @@ export function initRateConFlow({ db, docs = null, sendMail, recipients, saveOnL
       if (!mine) continue;
       try {
         if (saveOnLoad) await saveOnLoad(site, tripNo(it), entry); // eslint-disable-line no-await-in-loop
+        // the rate con's files are kept on the trip (payroll and the trip's history open them from there)
+        if (docs && docs.tagTrips && (entry.docIds || []).length) await docs.tagTrips({ site, ids: entry.docIds, trips: [tripNo(it)], docType: 'rate_confirmation' }).catch(() => {}); // eslint-disable-line no-await-in-loop
         await toBilling(site, { ...entry, matchedBy: found.by }, it, null); // eslint-disable-line no-await-in-loop
         await patch(site, entry.id, { status: 'sent', sentAt: new Date(now()).toISOString(), foundTrip: tripNo(it), matchedBy: found.by }); // eslint-disable-line no-await-in-loop
       } catch (e) {
