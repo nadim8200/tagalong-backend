@@ -47,7 +47,7 @@ export function wrongSite(item) {
 // The email to dispatch / billing. Pure.
 export function siteEmail(w, { test = false, now = Date.now() } = {}) {
   const fix = `Move ${w.bills.length === 1 ? `bill ${w.bills[0]}` : `bills ${w.bills.join(', ')}`} to Site ${w.want.site.replace('SITE', '')} (letter ${w.want.letter}).`;
-  const subject = `${test ? '[TEST] ' : ''}ACTION REQUIRED: ${w.bills.length === 1 ? 'Bill' : 'Bills'} ${w.bills.join(', ')} in wrong site | Trip ${w.trip}`;
+  const subject = `${test ? '[TEST] ' : ''}WRONG SITE ${w.bills.length === 1 ? 'Bill' : 'Bills'} ${w.bills.join(', ')} Trip ${w.trip}`;
   const html = siteAlertHtml(w, { test, now, fix });
   const text = [test ? 'TEST · SAMPLE DATA\n' : null, `WRONG TRUCKMATE SITE — Trip ${w.trip}`, `The rate con says ${w.carrierName}; bill ${w.bills.join(', ')} is in Site ${w.have.site.replace('SITE', '')} (${w.have.letter}).`, fix,
     '', 'Rule (Ronen, Nov 20): all Tempest loads go in Site 9 (F); Site 2 (B) is only FBE and FBF loads.', '', 'Jarvis · AI Dispatcher · Florida Beauty Flora'].filter((x) => x != null).join('\n');
