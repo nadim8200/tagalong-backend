@@ -48,7 +48,7 @@ export function cleanStopReport(b = {}) {
     if (Number.isNaN(pallets)) return { error: 'Pallets has to be a whole number.' };
     if (Number.isNaN(missing)) return { error: 'Missing boxes has to be a whole number.' };
     if (b.reportMissing && !missing) return { error: 'Enter how many boxes are missing.' };
-    Object.assign(r, { boxes, pallets, missing: b.reportMissing ? missing : null, expected: count(b.expected) || null });
+    Object.assign(r, { boxes, pallets, missing: b.reportMissing ? missing : null, expected: count(b.expected) || null, ...(b.noPaperwork ? { noPaperwork: true } : {}) });   // "No paperwork at this stop" when finishing it
   }
   if (kind === 'problem') {
     if (!WHY.includes(b.why)) return { error: 'Pick what happened.' };
@@ -178,7 +178,19 @@ export function initStopReports(app, { db, secret, requireDriver, requireAuth = 
       return res.json({ reports: (await listOf(m.trip)).map(({ clientId, driverCode, ...r }) => ({ ...r, photos: (r.files || []).length, files: undefined })) });
     });
   }
-  if (app && requireAuth) app.get('/truckmate/stopreports/:trip', requireAuth, async (req, res) => res.json({ reports: (await listOf(String(req.params.trip))).map((r) => ({ ...r, links: (r.files || []).map((f) => ({ name: f.name, url: link(f) })) })) }));
+  // paperwork the driver sent from the Paperwork tab (bill, boxes, scan) goes on its bill's stop too — as a scan line (Nov 21)
+  async function paperworkAsReports(trip) {
+    const list = ((await db.get(`taDriverPaperwork:${SITE}`, [])) || []).filter((p) => String(p.trip) === trip);
+    if (!list.length) return [];
+    const it = getBoard ? (((await getBoard(SITE).catch(() => ({}))) || {}).trips || []).find((x) => String(((x && x.trip) || x || {}).tripNumber || '') === trip) : null;
+    const bills = (it && (it.freightBills || it.orders)) || [];
+    return list.map((p, i) => {
+      const b = bills.find((x) => String(x.billNumber || '') === String(p.bill || ''));
+      const stop = b ? String(b.endZoneDescription || '').replace(/,\s*\d{5}(-\d{4})?\s*$/, '') : null;
+      return stop ? { id: `pw-${trip}-${i}`, kind: 'scan', stop, stopName: b.billToName || null, paper: p.kind || null, bill: p.bill || null, boxes: p.boxes != null ? p.boxes : null, confirmation: p.confirmation || null, at: p.at, by: p.by || null, from: 'Paperwork tab' } : null;
+    }).filter(Boolean);
+  }
+  if (app && requireAuth) app.get('/truckmate/stopreports/:trip', requireAuth, async (req, res) => { const trip = String(req.params.trip); const own = (await listOf(trip)).map((r) => ({ ...r, links: (r.files || []).map((f) => ({ name: f.name, url: link(f) })) })); const pw = await paperworkAsReports(trip).catch(() => []); res.json({ reports: [...own, ...pw.filter((p) => !own.some((r) => r.kind === 'scan' && r.confirmation && r.confirmation === p.confirmation))] }); });
   if (app) {
     app.get('/sr/f/:token', async (req, res) => {
       const p = readToken(req.params.token, secret, now(), PURPOSE);

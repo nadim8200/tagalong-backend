@@ -97,4 +97,13 @@ test('stop reports from the app: only the driver\'s load, once per key, photo on
   assert.deepEqual(mine.body.reports.map((r) => r.kind), ['scan', 'photo', 'boxes']); assert.equal(mine.body.reports[1].photos, 1);
   const con = await call('GET /truckmate/stopreports/:trip', { params: P });
   assert.match(con.body.reports[1].links[0].url, /\/sr\/f\//);
+  // paperwork from the Paperwork tab lands on its bill's stop (a scan line with its boxes); one already on the stop isn't repeated
+  board.trips[0].freightBills = [{ billNumber: 'M5064641', billToName: 'EAST COAST WHOLESALE FLORIST', endZoneDescription: 'NORWALK, CT, 06851' }];
+  kv['taDriverPaperwork:florida-beauty'] = [
+    { at: '2026-11-21T08:01:00Z', trip: '627549', kind: 'pod', bill: 'M5064641', boxes: 62, confirmation: 'FB-482150', by: 'Wilber Echeverri' },
+    { at: '2026-11-21T08:02:00Z', trip: '627549', kind: 'pod', bill: 'X0000000', boxes: 1, confirmation: 'FB-1', by: 'Wilber Echeverri' },
+    { at: '2026-11-21T08:03:00Z', trip: '600000', kind: 'pod', bill: 'M5064641', boxes: 9, confirmation: 'FB-2', by: 'Someone' },
+  ];
+  const withPw = (await call('GET /truckmate/stopreports/:trip', { params: P })).body.reports.filter((r) => r.from === 'Paperwork tab');
+  assert.deepEqual(withPw.map((r) => [r.kind, r.stop, r.bill, r.boxes, r.confirmation]), [['scan', 'NORWALK, CT', 'M5064641', 62, 'FB-482150']], 'only this trip\'s, only bills on the load');
 });
