@@ -55,7 +55,9 @@ export function initCallAhead({ db, stopDone = async () => ({}), etasFor = async
       const trip = String(tripOf(item).tripNumber);
       if (!ltlStops(item)) continue;
       const due = dueCallAheads(item, { etas: await etasFor(trip), done: await stopDone(trip), sent, now: now() }); // eslint-disable-line no-await-in-loop
+      const pushedTo = Object.entries((await db.get('taCallPush:florida-beauty', {}).catch(() => ({}))) || {}).filter(([k]) => k.startsWith(`${trip}|`)).map(([, v]) => up(v && v.city)); // eslint-disable-line no-await-in-loop
       for (const d of due) {
+        if (d.kind === 'remind' && d.stop.city && pushedTo.some((c) => c.startsWith(up(d.stop.city)))) continue;   // the app push already reminded the driver (callpush.js)
         const k = `${trip}|${d.stop.key}|${d.kind}`;
         const where = `${d.stop.customer}${d.stop.city ? ` (${d.stop.city})` : ''}`;
         let rec = { at: new Date(now()).toISOString() };
