@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { initTraining, redirectEmail, heldCopy, sentByHand, asStatusAsk } from '../training.js';
+import { sender } from '../ringcentral.js';
 
 function memDb() { const m = new Map(); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, JSON.parse(JSON.stringify(v))) }; }
 
@@ -61,7 +62,17 @@ test('training: a dispatcher\'s own texts / app messages go to anyone; what Jarv
   await new Promise((done) => sentByHand({}, {}, async () => {
     assert.equal(await t.hold('text', { to: '+17865682446', text: 'hi' }), null, 'any number, by hand');
     assert.equal(await t.hold('app', { to: 'driver 1344', phones: ['7865682446'], text: 'x' }), null, 'app message by hand');
-    assert.equal((await t.hold('call', { to: '7865682446', text: 'x' })).held, 'call', 'a Jarvis call stays held even from a dispatcher\'s screen');
+    assert.equal(await t.hold('call', { to: '7865682446', text: 'x' }), null, 'a call a dispatcher starts goes out too');
+    done();
+  }));
+  // any screen a signed-in dispatcher uses (the request carries who they are): nothing is held
+  await new Promise((done) => sender.run({ user: { name: 'Giovanni', role: 'dispatcher' } }, async () => {
+    assert.equal(await t.hold('text', { to: '+17863283645', text: 'tracking link' }), null, 'tracking text from the trip card');
+    done();
+  }));
+  // a driver's own app request is not a dispatcher: what it sets off stays Jarvis's
+  await new Promise((done) => sender.run({ user: { name: 'Ferney', role: 'driver' } }, async () => {
+    assert.equal((await t.hold('text', { to: '+17865682446', text: 'x' })).held, 'text');
     done();
   }));
   // Jarvis on its own: only Nadim's cell — not Ferney (still on the email allow list), not anyone else

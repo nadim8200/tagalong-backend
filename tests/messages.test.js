@@ -214,12 +214,15 @@ test('company drivers signed the text agreement at hire: every cell on the drive
   assert.equal(db.s['taSmsConsent:florida-beauty']['9545550404'].name, 'New Hire');
 });
 
-test('a text Jarvis sent that training mode held shows as held in the inbox, not as sent', async () => {
+test('a text Jarvis tried that training mode held never shows in the inbox (it never went out); a sent one does', async () => {
   const h = setup({ live: true });
   await h.inbox.fromSms('7865550199', { type: 'text', to: '7865550199', text: 'HELD reefer photo reminder', at: '2026-11-05T19:00:00Z', by: 'Jarvis (reefer temp photos)' });
   await h.inbox.fromSms('7865550199', { type: 'text', to: '7865550199', text: 'Real text', at: '2026-11-05T19:01:00Z', by: 'Jarvis' });
   const v = await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' } });
-  assert.deepEqual(v.body.messages.map((m) => [m.text, m.status]), [['HELD reefer photo reminder', 'held'], ['Real text', 'sent']]);
+  assert.deepEqual(v.body.messages.map((m) => [m.text, m.status]), [['Real text', 'sent']]);
+  await h.inbox.fromApp('626200', { type: 'text', to: 'driver app', kind: 'app-message', text: 'Held app ask', held: true, by: 'Jarvis' });
+  const after = await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' } });
+  assert.ok(!after.body.messages.some((m) => m.text === 'Held app ask'), 'a held app message is not shown either');
 });
 
 test('group text: once texting is live and everyone agreed to texts, the same text goes to each person from the company number', async () => {

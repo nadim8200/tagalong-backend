@@ -123,6 +123,8 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
   // a text on the company line, either way (comms keeps its own per-phone thread too)
   async function fromSms(phone, e) {
     if (!enabled || last10(phone).length !== 10 || (e.type !== 'text' && e.type !== 'reply')) return;
+    // what Jarvis tried on its own while training holds it never went out: not a conversation message, and replies don't follow it
+    if (e.type === 'text' && (e.held || (ringcentral && ringcentral.wasHeld && ringcentral.wasHeld(phone, e.text)))) return;
     if (e.type === 'text' && !e.group) await noteLastText([phone], null);   // texted one-on-one: their next reply comes back to their own conversation
     if (e.inboxId || e.group) return;   // a group text shows only in its group
     const w = activity && activity.lookup ? await activity.lookup(phone).catch(() => null) : null;
@@ -147,6 +149,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     const app2 = e.kind === 'app-message' || e.to === 'driver app' || e.from === 'driver app';
     if (!app2) return;
     const dir = e.type === 'reply' ? 'in' : 'out';
+    if (dir === 'out' && e.held) return;   // held by training: never reached the driver
     const k = `${trip}|${String(e.text || '').trim()}`;
     if (dir === 'out' && appSending.has(k) && now() - appSending.get(k) < 120000) { appSending.delete(k); return; }
     const t = await threadForLoad(trip);

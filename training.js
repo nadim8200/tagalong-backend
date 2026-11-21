@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { TRAINING_SLOT, trainingRow } from './latemail.js';
+import { sender } from './ringcentral.js';
 
 const KEY = 'taTrainingMode';
 const okEmail = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e || ''));
@@ -54,6 +55,10 @@ export function guardWithAllow(m, to, allow) {
 // Those go out for real to anyone while training is on (Nov 20, Nadim Tellez: "open all numbers so dispatch can work with the
 // text and calling app"). What Jarvis sends on its own is still held — except to AUTO_ALLOW (Nadim's cell only).
 export const byHand = new AsyncLocalStorage();
+// Nov 20 (later): nothing a person does is held any more — anything a signed-in dispatcher / admin triggers goes out, on any screen.
+// Only what Jarvis does on its own (timers, webhooks, inbound mail) stays held.
+const STAFF = (u) => !!(u && (u.admin || u.companyAdmin || ['admin', 'dispatcher'].includes(u.role)));
+export const byPerson = () => { const st = sender.getStore(); return !!(byHand.getStore() || (st && STAFF(st.user))); };
 export const sentByHand = (req, res, next) => byHand.run(true, next);   // Express middleware on the send routes
 export const AUTO_ALLOW = ['3055040711'];
 // Jarvis's status-check pushes in the driver app ("Delivered?", "Loaded & leaving?", "Rolling to your pickup?") stay on for every
@@ -80,7 +85,7 @@ export function initTraining(app, { requireAuth, requireAdmin, db, sendDirect })
   async function hold(kind, info) {
     const c = await active();
     if (!c) return null;
-    if (byHand.getStore() && kind !== 'call') return null;   // a dispatcher's own text / app message
+    if (byPerson()) return null;   // a dispatcher's own text, app message or call
     if (kind === 'app' && statusAsk.getStore()) return null;   // a status-check push to the driver app
     // Jarvis on its own reaches only Nadim (Nov 20: "do not send any automatic communications to anybody … only to me")
     const auto = Array.isArray(c.autoAllow) ? c.autoAllow : AUTO_ALLOW;
