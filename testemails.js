@@ -3,6 +3,7 @@
 // them before real ones go out: the breakdown report, a breakdown update, missing boxes at a stop, and a problem at a stop.
 // Nothing is stored: no report, no road call, no push, no alarm. Admins only.
 //   POST /admin/test-emails/driver-app   → { sent: [subjects] }
+//   POST /admin/test-emails/temp         → a REEFER TEMP ALERT as it goes out: the email to ntellez@ and the text to Nadim's cell
 //   POST /admin/test-emails/wrong-site   → a Wrong TruckMate site email (sample Tempest rate con on a Site 2 bill)
 //   POST /admin/test-emails/callback     → a callback request email (sample driver on load 627549), same template as the live ones
 // ---------------------------------------------------------------
@@ -11,6 +12,7 @@ import { cleanReport, breakdownEmail } from './driverbreakdown.js';
 import { cleanStopReport, stopEmail } from './stopreports.js';
 import { helpEmail } from './helpdesk.js';
 import { wrongSite, siteEmail } from './sitecheck.js';
+import { tempMessage, tempSms } from './tempalert.js';
 
 const TO = 'ntellez@floridabeauty.us';
 
@@ -64,7 +66,25 @@ export function wrongSiteTestEmail() {
   return siteEmail(w, { test: true });
 }
 
-export function initTestEmails(app, { requireAdmin, sendMail }) {
+const NADIM_CELL = '3055040711';
+// A reefer temperature alert with sample readings (trailer 7387 on load 627491, 20.7°F above its -11°F set point for 10 h). Pure.
+export function tempTestAlert(now = Date.now()) {
+  const x = { kind: 'reading', trip: '627491', trailer: '7387', truck: '4562', readingF: 9.7, setF: -11, offF: 20.7, vs: 'set point', refText: 'set point -11.0°F', at: now, source: 'Samsara return air' };
+  const t = { setF: -11, lastAt: now, lastF: 9.7, above: { dir: 1, since: now - (10 * 60 + 11) * 60000, n: 40, atLeast: false } };
+  const m = tempMessage(x);
+  return { subject: `[TEST] ${m.subject}`, html: `<p style="font-family:Arial,sans-serif;font-size:12px;color:#8a6d00"><b>TEST · SAMPLE DATA · NOT A REAL ALERT</b></p>${m.html}`, sms: `[TEST]\n${tempSms(x, t, { kind: 'alert' })}` };
+}
+
+export function initTestEmails(app, { requireAdmin, sendMail, sendSms = null }) {
+  app.post('/admin/test-emails/temp', requireAdmin, async (req, res) => {
+    try {
+      const m = tempTestAlert();
+      await sendMail({ to: [TO], subject: m.subject, html: m.html });
+      let text = 'not sent (texting not wired)';
+      if (sendSms) { const r = await sendSms(NADIM_CELL, m.sms); text = r && r.id === 'training' ? 'held by training mode' : `sent to ${NADIM_CELL}`; }
+      return res.json({ ok: true, to: TO, sent: [m.subject], text });
+    } catch (e) { return res.status(502).json({ error: e.message }); }
+  });
   app.post('/admin/test-emails/wrong-site', requireAdmin, async (req, res) => {
     try { const m = wrongSiteTestEmail(); await sendMail({ to: [TO], ...m }); return res.json({ ok: true, to: TO, sent: [m.subject] }); }
     catch (e) { return res.status(502).json({ error: e.message }); }

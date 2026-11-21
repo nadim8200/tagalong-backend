@@ -37,3 +37,10 @@ test('the wrong-site test email: a sample Tempest load on a Site 2 bill, marked 
   const m = wrongSiteTestEmail();
   assert.match(m.subject, /^\[TEST\] WRONG SITE Bill B181090 Trip 627610$/); assert.match(m.html, /Move bill B181090 to Site 9 \(letter F\)/);
 });
+
+test('the temp alert test: the real email and text builders with sample readings, marked TEST', async () => {
+  const { tempTestAlert } = await import('../testemails.js');
+  const m = tempTestAlert(Date.parse('2026-11-21T02:14:00Z'));
+  assert.match(m.subject, /^\[TEST\] LTL reefer 20\.7°F above the set point: trip 627491 · trailer 7387/);
+  assert.match(m.sms, /^\[TEST\]\nREEFER TEMP ALERT\nTrailer 7387 \| Trip 627491\nReading: 9\.7°F\nSet point: -11\.0°F\nAbove set point: \+20\.7°F\nAbove set point for: 10 hr 11 min/);
+});

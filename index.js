@@ -1493,7 +1493,7 @@ initDriverBreakdowns(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.re
 // at a stop on a load without a trip sheet: boxes / pallets / missing, a problem, photos, the scanned papers (driver app)
 initStopReports(app, { db, secret: JWT_SECRET, requireDriver: driverAuth.requireDriver, requireAuth: requireDispatch, getBoard: (site) => truckmate.buildBoard(site), docs, sendMail: (m) => sendMail(m, { env: process.env }), recipients: { shortage: () => alertRecipients.resolve('stop_shortage'), issue: () => alertRecipients.resolve('stop_issue') }, log: (...a) => comms.log(...a) });
 // sample copies of the driver-app emails, to ntellez@ only (admin button / test)
-initTestEmails(app, { requireAdmin: requireCompanyAdmin, sendMail: (m) => sendMail(m, { env: process.env }) });
+initTestEmails(app, { requireAdmin: requireCompanyAdmin, sendMail: (m) => sendMail(m, { env: process.env }), sendSms: (to, text) => rc.sendSms('__shared', { to, text, by: 'Jarvis (AI)' }) });
 // Thermo King TracKing (read only, every 15 min): live reefer readings for the cards and temp alerts — THERMOKING_* in Render
 thermoKing = initThermoKing({ app, requireAuth: requireDispatch, requireAdmin, db, env: process.env });
 // yard report: trailers at each hub yard (Thermo King GPS) + what's coming down to Florida
