@@ -1,8 +1,8 @@
 // Weather on the road (Nov 21, 2026). Every hour, for each truck that is rolling, we look where it is now and where it is going
 // next (its next stop's ZIP):
 //   - official warnings from the US National Weather Service (api.weather.gov, free): winter storm, ice, flood, tornado, high wind…
-//   - Google's hourly forecast (Weather API, $0.15 per 1,000 after the first 10,000 a month): rain, heavy rain / storms, snow, ice
-//     in the next 12 hours.
+//   - the hourly forecast: the National Weather Service's own (free, api.weather.gov gridpoints) first; Google's Weather API
+//     ($0.15 per 1,000 after 10,000 free a month) only when the NWS doesn't answer (Nov 21: the user's call, to keep it ~free).
 // The driver hears about it once, when it starts (both drivers on a team); after that only when it changes: a new official
 // warning, the forecast getting worse, or it getting better / clearing (after two checks in a row, so a borderline forecast
 // doesn't flip back and forth). Weather pushes go out for real even in training mode (Nov 21: the user's call).
@@ -29,6 +29,7 @@ const OFF_ROAD = /marine|small craft|gale|coastal|lakeshore|beach|rip current|su
 export function hazardOf(type, { percent = 0, tempF = null } = {}) {
   const t = String(type || '').toUpperCase();
   if (!t) return null;
+  if (/FREEZING|SLEET|ICE_PELLETS|WINTRY/.test(t) && percent >= 40) return 'ice';
   if (/SNOW|BLIZZARD|HAIL/.test(t) && percent >= 40) return 'snow';
   if (/RAIN|SHOWER|THUNDER|DRIZZLE/.test(t) && tempF != null && tempF <= 32 && percent >= 40) return 'ice';
   if (/THUNDER|HEAVY_RAIN|MODERATE_TO_HEAVY|PERIODICALLY_HEAVY|WIND_AND_RAIN/.test(t) && percent >= 50) return 'storm';
@@ -56,6 +57,31 @@ export function worstHour(forecast, { hours = 12 } = {}) {
   return best;
 }
 
+// The NWS hourly forecast in the same shape as Google's (so every rule above works on either). NWS says it in words
+// ("Rain And Snow Likely", "Mostly Sunny"); this turns the words into a condition type. Pure.
+export function nwsType(text = '') {
+  const t = String(text);
+  const heavy = /heavy/i.test(t);
+  if (/thunder|t-storm/i.test(t)) return 'THUNDERSTORM';
+  if (/blizzard/i.test(t)) return 'BLIZZARD';
+  if (/freezing|sleet|ice pellets|wintry/i.test(t)) return 'FREEZING_RAIN';
+  if (/snow|flurr/i.test(t)) return /rain/i.test(t) ? 'RAIN_AND_SNOW' : heavy ? 'HEAVY_SNOW' : 'SNOW';
+  if (/rain|shower|drizzle/i.test(t)) return heavy ? 'HEAVY_RAIN' : 'RAIN';
+  if (/fog|haze|smoke|mist/i.test(t)) return 'FOG';
+  if (/wind|breezy|blustery|gust/i.test(t)) return 'WINDY';
+  if (/mostly cloudy|cloudy|overcast/i.test(t) && !/partly/i.test(t)) return 'CLOUDY';
+  if (/sunny|clear|partly cloudy/i.test(t)) return 'CLEAR';
+  return null;
+}
+export function fromNws(json) {
+  const periods = ((json && json.properties && json.properties.periods) || []);
+  if (!periods.length) return null;
+  return { source: 'NWS', forecastHours: periods.map((x) => ({ interval: { startTime: x.startTime }, isDaytime: x.isDaytime !== false,
+    temperature: { degrees: x.temperatureUnit === 'C' ? Math.round(x.temperature * 9 / 5 + 32) : x.temperature },
+    precipitation: { probability: { percent: Number((x.probabilityOfPrecipitation || {}).value) || 0 } },
+    weatherCondition: { type: nwsType(x.shortForecast), description: { text: x.shortForecast || null } } })) };
+}
+
 // NWS active alerts at a point → the ones a driver should hear about. Pure.
 export function roadAlerts(geo) {
   return ((geo && geo.features) || []).map((f) => f.properties || {})
@@ -77,16 +103,64 @@ export function lookPoints(item, { geo = {}, steps = {}, now = Date.now() } = {}
   if (g) pts.push({ role: 'next', lat: g.lat, lng: g.lng, place: next.place || next.name || null, stop: next.key });
   return pts;
 }
+// every stop not delivered yet that we can place on the map (for the weather picture on each stop card). Pure.
+export function stopPoints(item, { geo = {}, steps = {}, etas = {} } = {}) {
+  const bills = (item && (item.freightBills || item.orders)) || [];
+  const zipOf = (x) => (String(x || '').match(/\b(\d{5})\b/) || [])[1] || null;
+  return driverStops(item, { geo }).filter((x) => !x.delivered && !steps[`delivered:${x.key}`]).map((x) => {
+    const bill = bills.find((b) => (x.bills || []).some((y) => y.bill === b.billNumber));
+    const g = [x.zip, bill && zipOf(bill.endZone), placeKey(x.place || x.key)].map((k) => (k ? geo[k] : null)).find((v) => v && v.lat != null);
+    const log = etas[placeKey(x.place || x.key)]; const last = log && (log.ours || []).slice(-1)[0];
+    return g ? { role: 'stop', stop: x.key, lat: g.lat, lng: g.lng, place: x.place || x.name || null, eta: last && last.etaMs ? last.etaMs : null } : null;
+  }).filter(Boolean);
+}
+
+// the picture for one stop when the truck gets there (our ETA): an official warning still on then, else the worst forecast
+// within 2 hours of the ETA, else sun / clouds. No ETA yet: the next 24 hours. Pure.
+const SKY_OF_TYPE = (t) => (/CLEAR|SUNNY|PARTLY_CLOUDY/.test(t) ? 'sun' : /CLOUDY|OVERCAST/.test(t) ? 'cloud' : /WIND/.test(t) ? 'wind' : /FOG|HAZE|MIST/.test(t) ? 'fog' : null);
+export function stopSky(w, { eta = null, now = Date.now() } = {}) {
+  if (!w) return null;
+  // our ETA for the stop (etareport.js log): the weather around when the truck gets there; a warning only if it still runs then
+  const at = eta && eta > now ? eta : null;
+  const al = roadAlerts(w.nws).find((a) => !at || !a.until || Date.parse(a.until) >= at - HOUR);
+  if (al) {
+    const e = al.event || '';
+    const scene = /flood/i.test(e) ? 'flood' : /ice|freezing|sleet/i.test(e) ? 'ice' : /snow|winter|blizzard|cold|chill/i.test(e) ? 'snow' : /wind|dust/i.test(e) ? 'wind' : /fog/i.test(e) ? 'fog' : 'storm';
+    return { scene, event: e, until: al.until || null, ...(at ? { eta: at } : {}) };
+  }
+  const all = (w.forecast && w.forecast.forecastHours) || [];
+  const near = at ? all.filter((x) => Math.abs(Date.parse(((x.interval || {}).startTime) || 0) - at) <= 2 * HOUR) : all.slice(0, 24);
+  if (at && !near.length) return null;   // arriving past what the forecast covers: no guess
+  const h = worstHour({ forecastHours: near }, { hours: near.length });
+  if (h) return { scene: h.kind, at: h.at, percent: h.percent, ...(at ? { eta: at } : {}) };
+  const hours = at ? near : near.slice(0, 12);
+  const day = hours.filter((x) => x.isDaytime !== false);
+  const count = {};
+  (day.length ? day : hours).forEach((x) => { const k = SKY_OF_TYPE(String((x.weatherCondition || {}).type || '').toUpperCase()); if (k && !(k === 'sun' && x.isDaytime === false)) count[k] = (count[k] || 0) + 1; });   // no sun at night
+  const top = Object.entries(count).sort((a, b) => b[1] - a[1])[0];
+  return top ? { scene: top[0], ...(at ? { eta: at } : {}) } : null;
+}
+
 const cell = (p) => `${(Math.round(p.lat * 4) / 4).toFixed(2)},${(Math.round(p.lng * 4) / 4).toFixed(2)}`;   // ~15 miles
 
 const hm = (iso) => { const d = new Date(iso || ''); return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }); };
+
+// official warnings arrive in English: the common ones in Spanish for the push title (same names as the driver app). Pure.
+const EVENT_ES = [[/flash flood warning/i, 'Aviso de inundación repentina'], [/flash flood watch/i, 'Vigilancia de inundación repentina'], [/flood warning/i, 'Aviso de inundación'], [/flood watch/i, 'Vigilancia de inundación'], [/flood advisory/i, 'Advertencia de inundación'],
+  [/winter storm warning/i, 'Aviso de tormenta invernal'], [/winter storm watch/i, 'Vigilancia de tormenta invernal'], [/winter weather advisory/i, 'Advertencia de clima invernal'], [/blizzard warning/i, 'Aviso de ventisca'], [/ice storm warning/i, 'Aviso de tormenta de hielo'],
+  [/freezing rain/i, 'Lluvia helada'], [/freezing fog/i, 'Niebla helada'], [/snow squall warning/i, 'Aviso de ráfagas de nieve'], [/lake effect snow/i, 'Nieve por efecto lago'], [/heavy snow/i, 'Nevada fuerte'],
+  [/tornado warning/i, 'Aviso de tornado'], [/tornado watch/i, 'Vigilancia de tornado'], [/severe thunderstorm warning/i, 'Aviso de tormenta severa'], [/severe thunderstorm watch/i, 'Vigilancia de tormenta severa'],
+  [/hurricane warning/i, 'Aviso de huracán'], [/hurricane watch/i, 'Vigilancia de huracán'], [/tropical storm warning/i, 'Aviso de tormenta tropical'], [/tropical storm watch/i, 'Vigilancia de tormenta tropical'],
+  [/high wind warning/i, 'Aviso de vientos fuertes'], [/high wind watch/i, 'Vigilancia de vientos fuertes'], [/wind advisory/i, 'Advertencia de viento'], [/dust storm warning/i, 'Aviso de tormenta de polvo'],
+  [/dense fog advisory/i, 'Advertencia de niebla densa'], [/extreme cold warning/i, 'Aviso de frío extremo'], [/cold weather advisory|wind chill/i, 'Advertencia de frío']];
+export const eventEs = (e) => { const hit = EVENT_ES.find(([re]) => re.test(String(e || ''))); return hit ? hit[1] : e; };
 
 // the push the driver gets (Spanish first, English under it — the phone's language isn't known here). Pure.
 export function pushFor(a) {
   if (a.kind === 'clear') return { title: '✅ El clima mejoró en su ruta', body: 'Ya no hay avisos de clima en su ruta. Buen viaje. · Weather cleared on your route.' };
   if (a.kind === 'better') return { title: `🌤️ Mejora: ahora ${ES[a.now].toLowerCase()}${a.place ? ` ${a.role === 'next' ? 'en su próxima parada' : 'cerca de'} ${a.place}` : ''}`, body: `Lo peor ya pasó. ${TIP_ES[a.now]} · Improving: now ${EN[a.now].toLowerCase()}${a.place ? ` ${a.role === 'next' ? 'at your next stop' : 'near'} ${a.place}` : ''}.` };
   if (a.kind === 'alert') {
-    return { title: `⚠️ ${a.event}${a.place ? ` · ${a.place}` : ''}`, body: `Aviso oficial del clima en su ruta${a.until ? ` hasta ${hm(a.until)}` : ''}. Maneje con cuidado. · Official weather warning on your route${a.until ? ` until ${hm(a.until)}` : ''}.` };
+    return { title: `⚠️ ${eventEs(a.event)}${a.place ? ` · ${a.place}` : ''}`, body: `Aviso oficial del clima en su ruta${a.until ? ` hasta ${hm(a.until)}` : ''}. Maneje con cuidado. · ${a.event} on your route${a.until ? ` until ${hm(a.until)}` : ''}.` };
   }
   const where = a.place ? ` ${a.role === 'next' ? 'en su próxima parada' : 'cerca de'} ${a.place}` : '';
   const whereEn = a.place ? ` ${a.role === 'next' ? 'at your next stop' : 'near'} ${a.place}` : '';
@@ -121,15 +195,29 @@ export function decide(prev, alerts = [], { failed = false } = {}) {
 export function initWeather(app, { db, board, notify, requireAuth = null, requireDriver = null, loadsFor = null, env = process.env, fetchFn = (...a) => fetch(...a), now = () => Date.now() }) {
   const gKey = () => env.GOOGLE_WEATHER_KEY || env.GOOGLE_PLACES_KEY || env.GOOGLE_MAPS_KEY || '';
   const cache = new Map();   // grid cell → { at, nws, forecast }
+  const grid = new Map();    // grid cell → its NWS hourly-forecast address (doesn't change)
+  let googleCalls = 0;       // the backup's calls (the only ones that cost)
   const getJson = async (url, headers = {}) => { const r = await fetchFn(url, { headers }); if (!r.ok) throw new Error(`${r.status}`); return r.json(); };
 
-  async function look(p) {
+  // every look is good for an hour (trucks, next stops and every stop — the NWS forecast is free)
+  async function look(p, maxAgeMin = 55) {
     const c = cell(p); const had = cache.get(c);
-    if (had && now() - had.at < 55 * 60000) return had;
+    if (had && now() - had.at < maxAgeMin * 60000) return had;
     const lat = p.lat.toFixed(4); const lng = p.lng.toFixed(4);
     const nws = await getJson(`https://api.weather.gov/alerts/active?point=${lat},${lng}`, { 'User-Agent': UA, Accept: 'application/geo+json' }).catch(() => null);
+    // the NWS forecast for this square: its grid address once (kept), then the hourly periods; Google only if that fails
+    const nwsHeaders = { 'User-Agent': UA, Accept: 'application/geo+json' };
+    let forecast = null;
+    try {
+      let url = grid.get(c);
+      if (!url) { const pt = await getJson(`https://api.weather.gov/points/${lat},${lng}`, nwsHeaders); url = pt && pt.properties && pt.properties.forecastHourly; if (url) grid.set(c, url); }
+      if (url) forecast = fromNws(await getJson(url, nwsHeaders));
+    } catch { forecast = null; }
     const k = gKey();
-    const forecast = k ? await getJson(`https://weather.googleapis.com/v1/forecast/hours:lookup?key=${encodeURIComponent(k)}&location.latitude=${lat}&location.longitude=${lng}&hours=12&unitsSystem=IMPERIAL`).catch(() => null) : null;
+    if (!forecast && k) {
+      forecast = await getJson(`https://weather.googleapis.com/v1/forecast/hours:lookup?key=${encodeURIComponent(k)}&location.latitude=${lat}&location.longitude=${lng}&hours=48&unitsSystem=IMPERIAL`).then((g) => ({ ...g, source: 'Google' })).catch(() => null);
+      if (forecast) googleCalls += 1;
+    }
     const v = { at: now(), nws, forecast };
     cache.set(c, v);
     return v;
@@ -140,6 +228,7 @@ export function initWeather(app, { db, board, notify, requireAuth = null, requir
     const items = (await board()).filter((it) => ROLLING.test(String(tripOf(it).status || '')));
     const geo = (await db.get('taGeoZip', {}).catch(() => ({}))) || {};
     const checkins = (await db.get(CHECKINS(SITE), {}).catch(() => ({}))) || {};
+    const etaLog = (await db.get(`taEtaLog:${SITE}`, {}).catch(() => ({}))) || {};   // our ETA per stop (etareport.js)
     const state = (await db.get(KEY, {})) || {};
     const told = { ...(state.told || {}) };   // trip → what the driver was last told (decide)
     const trips = {};
@@ -156,7 +245,13 @@ export function initWeather(app, { db, board, notify, requireAuth = null, requir
         const h = worstHour(w.forecast);
         if (h) alerts.push({ kind: h.kind, id: `${h.kind}|${p.role}|${p.place || cell(p)}`, at: h.at, percent: h.percent, tempF: h.tempF, text: h.text, role: p.role, place: p.place });
       }
-      trips[trip] = { alerts, checkedAt: new Date(now()).toISOString(), truck: tripOf(it).powerUnit || null };
+      const stops = {};
+      for (const sp of stopPoints(it, { geo, steps: (checkins[trip] || {}).steps || {}, etas: etaLog[trip] || {} })) {
+        const w = await look(sp, 55).catch(() => null); // eslint-disable-line no-await-in-loop   // hourly: the NWS is free
+        const sky = stopSky(w, { eta: sp.eta, now: now() });
+        if (sky) stops[sp.stop] = sky;
+      }
+      trips[trip] = { alerts, stops, checkedAt: new Date(now()).toISOString(), truck: tripOf(it).powerUnit || null };
       const t = tripOf(it); const codes = [t.driver, t.driver2].map((x) => String(x || '').trim()).filter(Boolean);
       const { say, next } = decide(told[trip], alerts, { failed });
       told[trip] = next;
@@ -170,7 +265,7 @@ export function initWeather(app, { db, board, notify, requireAuth = null, requir
     }
     for (const k of Object.keys(told)) if (!trips[k]) delete told[k];   // loads that left the road
     await db.set(KEY, { trips, told, checkedAt: new Date(now()).toISOString() });
-    return { trips: Object.keys(trips).length, pushed, looks: cache.size };
+    return { trips: Object.keys(trips).length, pushed, looks: cache.size, googleCalls };
   }
 
   if (app && requireAuth) {
@@ -186,7 +281,7 @@ export function initWeather(app, { db, board, notify, requireAuth = null, requir
     });
   }
   if (env.WEATHER_OFF !== '1' && env.NODE_ENV !== 'test' && !process.env.NODE_TEST_CONTEXT) {
-    const run = () => { sweep().catch((e) => console.warn('[weather]', e.message)); };
+    const run = () => { sweep().then((r) => console.log('[weather]', JSON.stringify(r))).catch((e) => console.warn('[weather]', e.message)); };
     const first = setTimeout(run, 3 * 60000); if (first.unref) first.unref();
     const t = setInterval(run, HOUR); if (t.unref) t.unref();
   }
