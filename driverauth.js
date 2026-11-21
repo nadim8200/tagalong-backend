@@ -228,7 +228,7 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     } catch (e) { res.status(502).json({ error: 'Could not load your loads. Try again.' }); }
   });
   // the driver's homework: the weekly "On the Road Trip Log" for payroll (triplog.js)
-  initTripLog(app, { db, requireDriver, requireAuth, nameOf: async (c) => ((await byCode(c)) || {}).name || '', board, sheets, loadsFor, tripsOf: (code) => db.get(tripsKey(code), []), now });
+  initTripLog(app, { db, requireDriver, requireAuth, notify: (code, msg) => notify(code, msg), nameOf: async (c) => ((await byCode(c)) || {}).name || '', board, sheets, loadsFor, tripsOf: (code) => db.get(tripsKey(code), []), now });
   // truck parking near the driver's truck (ahead of it when it's moving)
   const truckStops = truckStopFinder({ db });
   app.get('/driver/me/loads/:trip/truckstops', requireDriver, async (req, res) => {

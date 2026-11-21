@@ -112,6 +112,7 @@ export async function tripLogPdf(log, { signature = null, coSignature = null } =
       const lw = font.widthOfTextAtSize(label, 8.5) + 4;
       if (kind === 'sig' && sigImg) { const d = sigImg.scaleToFit(w - lw, rh - 3); pg.drawImage(sigImg, { x: x + lw, y: y - 4, width: d.width, height: d.height }); }
       else if (kind === 'co' && coImg) { const d = coImg.scaleToFit(w - lw, rh - 3); pg.drawImage(coImg, { x: x + lw, y: y - 4, width: d.width, height: d.height }); }
+      else if (kind === 'co' && log.coSignMissing) fit(pg, `Did not sign (push sent ${new Date(log.coSignMissing.pushedAt).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' })})`, x + lw, y, w - lw, { f: font, size: 8, color: RED });
       else if (val) fit(pg, val, x + lw, y, w - lw, { size: 10.5 });
     }));
     // the FBE mark and the title band

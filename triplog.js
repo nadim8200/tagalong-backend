@@ -5,8 +5,9 @@
 //   · one sheet per trip, like the paper (Nov 21 — Ferney's sheet: out of Miami on 627549, the load home on 627656, empty back
 //     to the yard, "this trip ended the 22 of November"): the open sheet holds every trip with check-ins in the last 30 days that
 //     isn't on a sheet already turned in (by the driver, or by their team partner for both); turning it in closes it
-//   · a team turns in one sheet: the co-driver from TruckMate is on it, both can sign, and the partner's open sheet leaves out
-//     the trips already turned in for both
+//   · a team turns in one sheet: the co-driver from TruckMate is on it, and the partner's open sheet leaves out the trips already
+//     turned in for both. When it's turned in, the co-driver gets a push ("your signature is needed"); the app opens on the
+//     signature, and once they sign it both signatures are on the homework (sent live even in training mode: a driver asked)
 //   · filled in from what we already have: the week's trips (board, or the past-loads record), the driver's check-ins (dates,
 //     arrival and departure at each stop), the trip sheet stops (zip, customer, bills, boxes), the load sheet dispatch sent or the rate con
 //     (pickups and deliveries with their ZIPs), and a bonus / extra pay dispatch wrote on the load. A pickup counts as arriving
@@ -32,11 +33,14 @@ import { samsaraTokenFrom, listVehicles, vehicleOdometerRange, vehicleGpsHistory
 import { sendMail } from './mailer.js';
 import { readableFile } from './heic.js';
 import { tripLogPdf, pdfName } from './triplogpdf.js';
+import { asLive } from './training.js';
 import { createHash } from 'node:crypto';
 
 const SITE = 'florida-beauty';
 const LOGS = (code) => `taTripLog:${SITE}:${code}`;   // week (YYYY-MM-DD, the Sunday) → log
-const INDEX = `taTripLogIndex:${SITE}`;               // `${driver}|${week}` → { name, week, submittedAt, reviewedAt } — payroll's list
+const INDEX = `taTripLogIndex:${SITE}`;
+const COSIGN = `taTripLogCosign:${SITE}`;
+const COSIGN_WAIT_MS = 15 * 60000;                     // how long payroll waits for the co-driver's signature           // co-driver signatures asked for: [{ owner, ownerName, id, co, coName, trips, at, signedAt }]               // `${driver}|${week}` → { name, week, submittedAt, reviewedAt } — payroll's list
 const KEEP_WEEKS = 150;   // about two years of trip sheets on each driver's profile
 const OPEN = 'open';      // the sheet being filled in
 const LOOKBACK_DAYS = 30;
@@ -230,6 +234,7 @@ export function payrollEmail(log, { week, miles = [], odometer = null, docs = []
 ${exps.length ? `<h3 style="margin:14px 0 4px">Expenses paid by the driver (with receipts)</h3><table style="border-collapse:collapse;font-size:12px"><tr><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">Date</th><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">What</th><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">Trip #</th><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">Note</th><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">Amount</th><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">Receipt</th></tr>${expRows}<tr><td colspan="4" style="border:1px solid #cfd7e3;padding:4px 6px;text-align:right;font-weight:700">Expenses total</td><td style="border:1px solid #cfd7e3;padding:4px 6px;font-weight:700">${money(expTotal)}</td><td style="border:1px solid #cfd7e3"></td></tr></table>` : ''}
 <p style="font-size:14px"><b>To reimburse: ${money(reimb + expTotal)}</b> (sheet ${money(reimb)} + expenses ${money(expTotal)})</p>
 ${docs.length ? `<h3 style="margin:14px 0 4px">Paperwork and photos from this trip (${docs.length})</h3><ul style="font-size:13px;margin:0">${docList}</ul>` : ''}
+${log.coSignMissing ? `<p style="font-size:13px;color:#b45309;font-weight:700">Co-driver ${esc(log.coSignMissing.name || '')} did not sign within 15 minutes (the app sent them a push at ${esc(new Date(log.coSignMissing.pushedAt).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}).</p>` : log.coSignedBy ? `<p style="font-size:13px">Co-driver ${esc(log.coSignedBy)} signed it in the app.</p>` : ''}
 ${log.signature ? '<p style="font-size:13px">Driver\'s signature:<br><img src="cid:signature" alt="signature" style="height:60px;border-bottom:1px solid #14213d"></p>' : ''}
 <p style="font-size:12px;color:#6b7a8f">Signed in the driver app ${esc(log.submittedAt || '')}.</p></div>`;
   return { subject: `Trip Log · ${h.name || 'Driver'} (${h.id || ''}) · Week of ${week.start}`, html, totals: { loaded: lo, empty: em, wait, reimb, bonuses, expenses: expTotal } };
@@ -320,7 +325,7 @@ export function reviewTotals(log, pay = {}, miles = null) {
 }
 
 // ---------- the routes ----------
-export function initTripLog(app, { db, requireDriver, requireAuth = null, board, tripsOf, sheets = null, loadsFor, nameOf = null, env = process.env, now = () => Date.now(), mail = sendMail, fetchFn = globalThis.fetch }) {
+export function initTripLog(app, { db, requireDriver, requireAuth = null, board, tripsOf, sheets = null, loadsFor, nameOf = null, notify = null, env = process.env, now = () => Date.now(), mail = sendMail, fetchFn = globalThis.fetch }) {
   const miles = initMiles({ db, env, fetchFn });
   const pool = db && db.enabled && db.pool;
   const DOC_LABEL = { pod: 'POD', bol: 'BOL', receipt: 'Receipt', lumper: 'Lumper receipt', scale: 'Scale ticket' };
@@ -565,21 +570,84 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
     const legMiles = (Array.isArray(b.miles) ? b.miles : []).slice(0, MAX_LINES).map((m) => (m != null && Number.isFinite(Number(m)) ? Math.round(Number(m)) : null));
     const stored = { ...log, signature: sigId ? undefined : sig, signatureId: sigId, coSignatureId: coSigId, miles: legMiles };
     await db.update(LOGS(req.driver.code), (cur) => { const prev = (cur || {})[id] || {}; const next = keep(cur, id, { ...stored, submissions: [...(prev.submissions || []), stored.submittedAt].slice(-20), reviews: prev.reviews || [] }); return again ? next : keep(next, OPEN, null); }, {});
-    // payroll's list: turned in again after a review → back to be reviewed. The team partner is on it (one sheet for both)
-    await db.update(INDEX, (cur) => ({ ...(cur || {}), [`${req.driver.code}|${id}`]: { code: String(req.driver.code), name: req.driver.name || head.name || '', week: id, id, start: log.period.start, end: log.period.end, submittedAt: stored.submittedAt, truck: head.truck || '', trips: tripsOfLog(lines), co: head.coid || null, coName: head.co || null, reviewedAt: null, reviewedBy: null } }), {}).catch(() => {});
+    // a team sheet: the co-driver signs it on their own phone (a push takes them to the signature). Payroll gets it once they
+    // sign, or after 15 minutes either way, marked "the co-driver didn't sign" (Nadim, Nov 21)
+    if (head.coid && !coSig && codeOf(head.coid) !== codeOf(req.driver.code)) {
+      const ask = { owner: String(req.driver.code), ownerName: req.driver.name || head.name || '', id, co: codeOf(head.coid), coName: head.co || '', trips: tripsOfLog(lines), start: log.period.start, end: log.period.end, at: new Date(now()).toISOString(), signedAt: null, finalizedAt: null };
+      await db.update(COSIGN, (cur) => [ask, ...((cur || []).filter((x) => !(x.owner === ask.owner && x.id === id)))].slice(0, 300), []).catch(() => {});
+      // on the list now (so the partner's own sheet leaves these trips out), held from payroll until it's ready
+      await db.update(INDEX, (cur) => ({ ...(cur || {}), [`${req.driver.code}|${id}`]: { code: String(req.driver.code), name: req.driver.name || head.name || '', week: id, id, start: log.period.start, end: log.period.end, submittedAt: log.submittedAt, truck: head.truck || '', trips: tripsOfLog(lines), co: head.coid || null, coName: head.co || null, held: true, reviewedAt: null, reviewedBy: null } }), {}).catch(() => {});
+      if (notify) {
+        const first = String(ask.ownerName || 'Your partner').split(' ')[0];
+        Promise.resolve(asLive(() => notify(ask.co, { title: 'Homework: your signature', body: `${first} turned in the homework for trip ${ask.trips.join(', ')}. Tap to sign it as co-driver. / ${first} entregó el homework: toque para firmarlo.`, data: { tab: 'log', cosign: `${ask.owner}|${id}` } })))
+          .then((r) => db.update(COSIGN, (cur) => (cur || []).map((x) => (x.owner === ask.owner && x.id === id ? { ...x, pushed: r && r.sent ? 'sent' : r && r.held ? 'held' : (r && r.skipped) || 'not sent' } : x)), [])).catch(() => {});
+      }
+      return res.json({ ok: true, id, submittedAt: log.submittedAt, waitingForCoDriver: ask.coName || ask.co, sendsBy: new Date(now() + COSIGN_WAIT_MS).toISOString() });
+    }
+    const sent = await toPayroll(req.driver.code, req.driver.name, id);
+    return res.json({ ok: true, id, submittedAt: log.submittedAt, emailed: !!sent });
+  });
+  // the turned-in sheet goes to payroll: on payroll's list (the team partner on it) and the email with the PDF and every paper
+  async function toPayroll(ownerCode, ownerName, id) {
+    const log = (await store(ownerCode))[id]; if (!log) return false;
+    const head = log.head || {};
+    await db.update(INDEX, (cur) => ({ ...(cur || {}), [`${ownerCode}|${id}`]: { code: String(ownerCode), name: ownerName || head.name || '', week: id, id, start: log.period.start, end: log.period.end, submittedAt: log.submittedAt, truck: head.truck || '', trips: tripsOfLog(log.lines), co: head.coid || null, coName: head.co || null, coSignedAt: log.coSignedAt || null, coSignMissing: log.coSignMissing || null, held: false, reviewedAt: null, reviewedBy: null } }), {}).catch(() => {});
+    const [sig, coSig] = await Promise.all([signatureOf(log).then((x) => x || (sigOk(log.signature) ? log.signature : null)), imageOf(log.coSignatureId).then((x) => x || (sigOk(log.coSignature) ? log.coSignature : null))]);
     const docs = await docsFor(log, { bytes: true });
     let room = MAX_ATTACH_BYTES;
     const files = docs.map((d) => { const fits = d.data && d.bytes <= room; if (fits) room -= d.bytes; return { ...d, attached: !!fits }; });
-    const e = payrollEmail(log, { week: log.period, miles: legMiles, odometer: log.odometer, docs: files });
+    const e = payrollEmail({ ...log, signature: sig }, { week: log.period, miles: log.miles || [], odometer: log.odometer, docs: files });
     const to = String(env.PAYROLL_EMAILS || 'ntellez@floridabeauty.us').split(',').map((x) => x.trim()).filter(Boolean);
-    let pdf = null; try { pdf = await tripLogPdf({ ...log, miles: legMiles }, { signature: sig, coSignature: coSig }); } catch (err) { console.warn('[triplog] pdf:', err.message); }
+    let pdf = null; try { pdf = await tripLogPdf(log, { signature: sig, coSignature: coSig }); } catch (err) { console.warn('[triplog] pdf:', err.message); }
     try {
-      await mail({ to, subject: e.subject, html: e.html, attachments: [{ name: 'signature.png', contentType: 'image/png', bytes: Buffer.from(sig.split(',')[1], 'base64'), cid: 'signature' },
+      await mail({ to, subject: e.subject, html: e.html, attachments: [...(sig ? [{ name: 'signature.png', contentType: 'image/png', bytes: Buffer.from(sig.split(',')[1], 'base64'), cid: 'signature' }] : []),
         ...(pdf ? [{ name: pdfName(log), contentType: 'application/pdf', bytes: Buffer.from(pdf) }] : []),
         ...files.filter((d) => d.attached).map((d) => ({ name: `${d.label.replace(/\s+/g, '-')}-${d.trip || 'trip'}-${d.filename || d.id}`.slice(0, 120), contentType: d.mediaType, bytes: Buffer.from(d.data) }))] }, { env });
-      await db.update(LOGS(req.driver.code), (cur) => keep(cur, id, { ...((cur || {})[id] || stored), emailedAt: new Date(now()).toISOString() }), {});
-      return res.json({ ok: true, id, submittedAt: log.submittedAt, emailed: true });
-    } catch (err) { console.warn('[triplog] email:', err.message); return res.json({ ok: true, id, submittedAt: log.submittedAt, emailed: false }); }
+      await db.update(LOGS(ownerCode), (cur) => keep(cur, id, { ...((cur || {})[id] || log), emailedAt: new Date(now()).toISOString() }), {});
+      return true;
+    } catch (err) { console.warn('[triplog] email:', err.message); return false; }
+  }
+  // team sheets still waiting for the co-driver after 15 minutes: to payroll either way, "the co-driver didn't sign"
+  async function sweepCosign() {
+    const due = ((await db.get(COSIGN, [])) || []).filter((x) => !x.signedAt && !x.finalizedAt && now() - Date.parse(x.at) >= COSIGN_WAIT_MS);
+    for (const x of due) {
+      const at = new Date(now()).toISOString();
+      await db.update(LOGS(x.owner), (cur) => { const c = { ...(cur || {}) }; if (c[x.id]) c[x.id] = { ...c[x.id], coSignMissing: { name: x.coName || x.co, pushedAt: x.at, pushed: x.pushed || null, sentAt: at } }; return c; }, {}); // eslint-disable-line no-await-in-loop
+      await db.update(COSIGN, (cur) => (cur || []).map((y) => (y.owner === x.owner && y.id === x.id ? { ...y, finalizedAt: at } : y)), []); // eslint-disable-line no-await-in-loop
+      await toPayroll(x.owner, x.ownerName, x.id).catch((e) => console.warn('[triplog] cosign sweep:', e.message)); // eslint-disable-line no-await-in-loop
+    }
+    return due.length;
+  }
+  if (env.NODE_ENV !== 'test' && !process.env.NODE_TEST_CONTEXT) { const t = setInterval(() => { sweepCosign().catch(() => {}); }, 60000); if (t.unref) t.unref(); }
+  // the co-driver: homework their partner turned in that's waiting for their signature (with the sheet to look at)
+  app.get('/driver/me/log/cosign', requireDriver, async (req, res) => {
+    const mine = ((await db.get(COSIGN, [])) || []).filter((x) => codeOf(x.co) === codeOf(req.driver.code) && !x.signedAt);
+    const out = [];
+    for (const x of mine.slice(0, 5)) {
+      const l = (await store(x.owner))[x.id]; // eslint-disable-line no-await-in-loop
+      if (l && !l.coSignatureId) out.push({ owner: x.owner, ownerName: x.ownerName, id: x.id, trips: x.trips, start: x.start, end: x.end, at: x.at, head: l.head, lines: l.lines, expenses: l.expenses || [], miles: l.miles || [] });
+    }
+    return res.json({ waiting: out });
+  });
+  app.post('/driver/me/log/cosign', requireDriver, async (req, res) => {
+    const b = req.body || {}; const sig = String(b.signature || '');
+    if (!sigOk(sig)) return res.status(400).json({ error: 'Sign before sending.' });
+    const asks = (await db.get(COSIGN, [])) || [];
+    const ask = asks.find((x) => x.owner === String(b.owner) && x.id === String(b.id) && codeOf(x.co) === codeOf(req.driver.code));
+    if (!ask) return res.status(404).json({ error: 'That homework is not waiting for your signature.' });
+    const sigId = await saveSignature(sig, req.driver, ask.id);
+    const at = new Date(now()).toISOString();
+    let done = false;
+    await db.update(LOGS(ask.owner), (cur) => { const c = { ...(cur || {}) }; const l = c[ask.id]; if (!l) return c; c[ask.id] = { ...l, coSignatureId: sigId, coSignature: sigId ? undefined : sig, coSignedAt: at, coSignedBy: req.driver.name || '' }; done = true; return c; }, {});
+    if (!done) return res.status(404).json({ error: 'That homework is not here any more.' });
+    await db.update(COSIGN, (cur) => (cur || []).map((x) => (x === ask || (x.owner === ask.owner && x.id === ask.id) ? { ...x, signedAt: at } : x)), []);
+    await db.update(INDEX, (cur) => { const c = { ...(cur || {}) }; const k = `${ask.owner}|${ask.id}`; if (c[k]) c[k] = { ...c[k], coSignedAt: at }; return c; }, {}).catch(() => {});
+    // signed within the 15 minutes: now it goes to payroll, with both signatures
+    if (!ask.finalizedAt) {
+      await db.update(COSIGN, (cur) => (cur || []).map((x) => (x.owner === ask.owner && x.id === ask.id ? { ...x, finalizedAt: at } : x)), []);
+      await toPayroll(ask.owner, ask.ownerName, ask.id).catch((e) => console.warn('[triplog] cosign:', e.message));
+    }
+    return res.json({ ok: true, signedAt: at });
   });
   // the sheet as a PDF that looks like the paper "On the Road Trip Log" (the driver's own)
   app.get('/driver/me/log/pdf', requireDriver, async (req, res) => {
@@ -590,7 +658,7 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
   async function sendPdf(res, log) {
     try {
       const [sig, coSig] = await Promise.all([signatureOf(log), imageOf(log.coSignatureId)]);
-      const bytes = await tripLogPdf(log, { signature: sig || (sigOk(log.signature) ? log.signature : null), coSignature: coSig });
+      const bytes = await tripLogPdf(log, { signature: sig || (sigOk(log.signature) ? log.signature : null), coSignature: coSig || (sigOk(log.coSignature) ? log.coSignature : null) });
       res.set('Content-Type', 'application/pdf'); res.set('Content-Disposition', `inline; filename="${pdfName(log)}"`);
       return res.send(Buffer.from(bytes));
     } catch (e) { console.warn('[triplog] pdf:', e.message); return res.status(502).json({ error: 'Could not make the PDF. Try again.' }); }
@@ -611,7 +679,7 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       const week = { ...(log.period || periodOf(log.lines)), id: wk };
       const docs = (await docsFor({ ...log, period: week })).map(({ data, ...d }) => d);
       const { signature, ...rest } = log;
-      return res.json({ week, id: wk, ...rest, signature: (await signatureOf(log)) || signature || null, coSignature: await imageOf(log.coSignatureId), docs });
+      return res.json({ week, id: wk, ...rest, signature: (await signatureOf(log)) || signature || null, coSignature: (await imageOf(log.coSignatureId)) || rest.coSignature || null, docs });
     });
   }
   // ---------- payroll ----------
@@ -639,7 +707,7 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
     app.get('/truckmate/payroll/logs', requireAuth, async (req, res) => {
       if (!gate(req, res)) return undefined;
       const idx = (await db.get(INDEX, {})) || {};
-      return res.json({ logs: Object.values(idx).sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt))).slice(0, 500) });
+      return res.json({ logs: Object.values(idx).filter((x) => !x.held).sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt))).slice(0, 500) });
     });
     app.get('/truckmate/payroll/logs/:code/:week', requireAuth, async (req, res) => {
       if (!gate(req, res)) return undefined;
@@ -660,7 +728,7 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
         }
       }
       const { signature, ...rest } = log;
-      return res.json({ week, id: wk, code, ...rest, miles, signature: (await signatureOf(log)) || signature || null, coSignature: await imageOf(log.coSignatureId), docs });
+      return res.json({ week, id: wk, code, ...rest, miles, signature: (await signatureOf(log)) || signature || null, coSignature: (await imageOf(log.coSignatureId)) || rest.coSignature || null, docs });
     });
     // payroll works on the sheet itself: changes lines, adds or deletes them, adds or takes away a bonus, fixes the header.
     // The driver's own lines are kept (driverLines, the first time), and who changed it and when
@@ -739,5 +807,5 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
         docs });
     });
   }
-  return { prefill };
+  return { prefill, sweepCosign };
 }

@@ -296,3 +296,53 @@ test('the open sheet route: a saved, edited sheet still gets the new stop; a del
   const third = (await h.call('GET /driver/me/log', { driver: me, query: {} })).body;
   assert.ok(third.lines.some((l) => l.zip === '06851' && l.added));
 });
+
+test('a team sheet: turned in → the co-driver gets a push (sent even in training mode), signs on their phone, and both signatures are on it', async () => {
+  const { initTripLog } = await import('../triplog.js');
+  const h = harness(); const pushes = [];
+  const items = [{ trip: { tripNumber: 627549, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G1', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }] }];
+  h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' } } } };
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => items, tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }),
+    nameOf: async (c) => (c === '2473' ? 'Wilber Echeverri' : 'Ferney Urrego'), notify: async (code, msg) => { pushes.push({ code, msg }); return { sent: 1 }; }, env: {}, now: () => Date.parse('2026-11-22T23:00:00Z'), mail: async () => {} });
+  const ferney = { code: '986', name: 'Ferney Urrego' }; const wilber = { code: '2473', name: 'Wilber Echeverri' };
+  const open = (await h.call('GET /driver/me/log', { driver: ferney, query: {} })).body;
+  const sig = `data:image/png;base64,${'A'.repeat(200)}`;
+  const r = await h.call('POST /driver/me/log/submit', { driver: ferney, body: { head: open.head, lines: open.lines, expenses: [], signature: sig, miles: [] } });
+  await new Promise((res) => setTimeout(res, 10));
+  assert.equal(pushes.length, 1); assert.equal(pushes[0].code, '2473'); assert.equal(pushes[0].msg.data.tab, 'log'); assert.match(pushes[0].msg.body, /Ferney turned in the homework for trip 627549/);
+  const waiting = (await h.call('GET /driver/me/log/cosign', { driver: wilber })).body.waiting;
+  assert.equal(waiting.length, 1); assert.equal(waiting[0].ownerName, 'Ferney Urrego'); assert.ok(waiting[0].lines.length > 0);
+  assert.equal((await h.call('POST /driver/me/log/cosign', { driver: { code: '777', name: 'X' }, body: { owner: '986', id: r.body.id, signature: sig } })).status, 404);
+  const ok = await h.call('POST /driver/me/log/cosign', { driver: wilber, body: { owner: '986', id: r.body.id, signature: sig } });
+  assert.equal(ok.body.ok, true);
+  const log = h.kv['taTripLog:florida-beauty:986'][r.body.id];
+  assert.equal(log.coSignedBy, 'Wilber Echeverri'); assert.equal(log.coSignature, sig);
+  assert.equal((await h.call('GET /driver/me/log/cosign', { driver: wilber })).body.waiting.length, 0);
+  assert.ok(h.kv['taTripLogIndex:florida-beauty'][`986|${r.body.id}`].coSignedAt);
+});
+
+test('payroll waits for the co-driver: signed in time → sent with both signatures; 15 minutes without → sent anyway, "didn\'t sign"', async () => {
+  const { initTripLog } = await import('../triplog.js');
+  const h = harness(); const mails = []; let clock = Date.parse('2026-11-22T23:00:00Z');
+  const items = [{ trip: { tripNumber: 627549, driver: '986', driver2: '2473', powerUnit: '4504', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G1', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }] }];
+  h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' } } } };
+  const tl = initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => items, tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }),
+    nameOf: async (c) => (c === '2473' ? 'Wilber Echeverri' : 'Ferney Urrego'), notify: async () => ({ sent: 1 }), env: { NODE_ENV: 'test' }, now: () => clock, mail: async (m) => { mails.push(m); } });
+  const ferney = { code: '986', name: 'Ferney Urrego' }; const wilber = { code: '2473', name: 'Wilber Echeverri' };
+  const sig = `data:image/png;base64,${'A'.repeat(200)}`;
+  const open = (await h.call('GET /driver/me/log', { driver: ferney, query: {} })).body;
+  const r = await h.call('POST /driver/me/log/submit', { driver: ferney, body: { head: open.head, lines: open.lines, expenses: [], signature: sig } });
+  assert.equal(r.body.waitingForCoDriver, 'Wilber Echeverri');
+  assert.equal(mails.length, 0);                                                         // held for the co-driver
+  assert.equal((await h.call('GET /truckmate/payroll/logs', { user: { admin: true } })).body.logs.length, 0);
+  assert.equal((await h.call('GET /driver/me/log', { driver: wilber, query: {} })).body.lines.length, 0);   // his sheet leaves the trips out already
+  clock += 10 * 60000; assert.equal(await tl.sweepCosign(), 0);                         // 10 minutes: still waiting
+  clock += 6 * 60000; assert.equal(await tl.sweepCosign(), 1);                          // 16 minutes: sent either way
+  assert.equal(mails.length, 1); assert.match(mails[0].html, /did not sign within 15 minutes/);
+  assert.ok(mails[0].attachments.some((a) => a.contentType === 'application/pdf'));
+  assert.equal((await h.call('GET /truckmate/payroll/logs', { user: { admin: true } })).body.logs.length, 1);
+  // signing late still puts the signature on, without a second email
+  await h.call('POST /driver/me/log/cosign', { driver: wilber, body: { owner: '986', id: r.body.id, signature: sig } });
+  assert.equal(mails.length, 1);
+  assert.equal(h.kv['taTripLog:florida-beauty:986'][r.body.id].coSignedBy, 'Wilber Echeverri');
+});
