@@ -44,7 +44,7 @@ export function initSmsHook(app, { db, ringcentral, onText, requireAuth = null, 
   });
 
   async function create() {
-    const token = randomBytes(24).toString('hex');
+    const token = randomBytes(16).toString('hex');   // 32 characters: RingCentral refused 48 ("verificationToken value is invalid")
     await db.update(KEY, (cur) => ({ ...(cur || {}), token }), {});   // stored first: events can arrive as soon as it exists
     const s = await ringcentral.api(owner, '/restapi/v1.0/subscription', { method: 'POST', body: JSON.stringify({
       eventFilters: [FILTER], deliveryMode: { transportType: 'WebHook', address, verificationToken: token }, expiresIn: 30 * 86400 }) });
