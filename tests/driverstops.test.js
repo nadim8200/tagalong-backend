@@ -76,3 +76,28 @@ test('no trip sheet: stops follow ARTIS\'s delivery order (Truck Builder lists t
   const s = driverStops({ trip: { tripNumber: '627549' }, freightBills: bills, _tb }, { geo });
   assert.deepEqual(s.map((x) => [x.number, x.place, x.orderFrom]), [[1, 'PISCATAWAY, NJ', 'ARTIS'], [2, 'CLIFTON, NJ', 'ARTIS'], [3, 'SOUTH WINDSOR, CT', 'ARTIS'], [4, 'WALTHAM, MA', 'distance']]);
 });
+
+test('the trip sheet gives boxes AND pallets as printed ("68 BOXES + 1 PALLET"); pallets only → 0 boxes', async () => {
+  const { piecesOf, driverStops } = await import('../driverstops.js');
+  assert.deepEqual(piecesOf('68 BOXES + 1 PALLET FLORIDESIGN', 68), { boxes: 68, pallets: 1 });
+  assert.deepEqual(piecesOf('40 BXS + 2 PLTS', 40), { boxes: 40, pallets: 2 });
+  assert.deepEqual(piecesOf('2 PALLETS', 2), { boxes: null, pallets: 2 });
+  assert.deepEqual(piecesOf(null, 90), { boxes: 90, pallets: null });
+  const _manifest = { stops: [{ action: 'DELIVER', key: 's1', customer: 'FLORIDESIGN', city: 'CLIFTON', state: 'NJ', pieces: 68, piecesText: '68 BOXES + 1 PALLET' },
+    { action: 'DELIVER', key: 's2', customer: 'PALLET ONLY CO', city: 'NEWARK', state: 'NJ', pieces: 2, piecesText: '2 PALLETS' }] };
+  const bills = [{ billNumber: 'P1', billToName: 'PALLET ONLY CO', endZoneDescription: 'NEWARK, NJ, 07105', pieces: 2 }];
+  const s = driverStops({ trip: { tripNumber: '1' }, freightBills: bills, _manifest });
+  assert.deepEqual([s[0].boxes, s[0].pallets, s[0].boxesFrom], [68, 1, 'trip sheet']);
+  assert.deepEqual([s[1].boxes, s[1].pallets, s[1].boxesFrom], [0, 2, 'trip sheet']);
+});
+
+test('a stop only ARTIS\'s Truck Builder listed counts as ARTIS; when the printed sheet and ARTIS differ, the sheet\'s number wins', async () => {
+  const { driverStops } = await import('../driverstops.js');
+  const _manifest = { stops: [
+    { action: 'DELIVER', key: 'a1', stopNumber: 1, customer: 'ARTIS ONLY', city: 'CLIFTON', state: 'NJ', pieces: 62, piecesText: '62 BOXES + 2 PALLETS', from: 'ARTIS' },
+    { action: 'DELIVER', key: 'a2', stopNumber: 2, customer: 'BOTH', city: 'NEWARK', state: 'NJ', pieces: 40, piecesText: '40 BOXES', from: 'ARTIS + trip sheet', sheetPieces: 44 },
+  ] };
+  const s = driverStops({ trip: { tripNumber: '1' }, freightBills: [], _manifest });
+  assert.deepEqual([s[0].boxes, s[0].pallets, s[0].boxesFrom], [62, 2, 'ARTIS']);
+  assert.deepEqual([s[1].boxes, s[1].boxesFrom], [44, 'trip sheet']);
+});

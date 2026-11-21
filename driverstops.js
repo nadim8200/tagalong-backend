@@ -42,10 +42,14 @@ export function driverStops(item, { geo = {} } = {}) {
       const place = label ? label.replace(/,\s*\d{5}(-\d{4})?\s*$/, '') : [s.city, s.state].filter(Boolean).join(', ');
       // the count the driver checks against: the trip sheet's (Nov 21), else TruckMate's bills
       const billBoxes = mine.length ? mine.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
-      const sheetN = s.boxes != null && Number.isFinite(Number(s.boxes)) ? Number(s.boxes) : null;
+      // the stop's boxes and pallets as printed — the trip sheet's; a stop only ARTIS's Truck Builder listed is ARTIS's count; when
+      // the printed sheet and ARTIS differ, the sheet's number wins (Nov 21)
+      const sp = piecesOf(s.piecesText, s.boxes);
+      const fromArtis = s.from === 'ARTIS';
+      const sheetN = s.sheetPieces != null ? s.sheetPieces : sp.boxes != null ? sp.boxes : sp.pallets != null ? 0 : null;   // pallets only: no loose boxes
       return { key: label && cityCount.get(label) === 1 ? label : s.key, number: i + 1, name: s.customer || (mine[0] && cleanName(mine[0].billToName)) || null, place, address: s.address || null,
         appt: s.appt || null, receivingHours: s.receivingHours || null, callAhead: s.callAhead || [], instructions: s.instructions || [], references: s.references || [],
-        boxes: sheetN != null ? sheetN : billBoxes, boxesFrom: sheetN != null ? 'trip sheet' : 'TruckMate', billBoxes, sheetBoxes: s.boxes, bills: mine.map(billRow), delivered: done(mine), source: 'trip sheet', zip: s.zip || zipOf(label) || null, tmPlace: r.tmPlace || null };
+        boxes: sheetN != null ? sheetN : billBoxes, pallets: sp.pallets, boxesFrom: sheetN != null || sp.pallets != null ? (fromArtis ? 'ARTIS' : 'trip sheet') : 'TruckMate', billBoxes, sheetBoxes: s.boxes, bills: mine.map(billRow), delivered: done(mine), source: 'trip sheet', zip: s.zip || zipOf(label) || null, tmPlace: r.tmPlace || null };
     });
     // a TruckMate stop the trip sheet doesn't list: still the driver's stop
     const left = bills.filter((b) => !taken.has(b));
@@ -92,6 +96,16 @@ function withArtis(stops, item) {
     const n = a ? (a.first && a.first.boxes != null ? a.first.boxes : a.boxes) : null;
     return n != null && Number(n) > 0 ? { ...s, billBoxes: s.boxes, boxes: Number(n), boxesFrom: 'ARTIS', pallets: a.first && a.first.pallets != null ? a.first.pallets : a.pallets } : { ...s, boxesFrom: 'TruckMate' };
   });
+}
+
+// The trip sheet's pieces as printed ("68 BOXES + 1 PALLET", "2 PALLETS", or just a number) → { boxes, pallets }. Pure.
+export function piecesOf(text, pieces = null) {
+  const t = String(text || '').toUpperCase();
+  const pallets = (() => { const all = [...t.matchAll(/(\d+)\s*(?:PALLETS?|PLTS?|SKIDS?)\b/g)].map((m) => Number(m[1])); return all.length ? all.reduce((a, b) => a + b, 0) : null; })();
+  const boxes = (() => { const all = [...t.matchAll(/(\d+)\s*(?:BOXES|BOX|BXS?|CASES?|PCS|PIECES)\b/g)].map((m) => Number(m[1])); return all.length ? all.reduce((a, b) => a + b, 0) : null; })();
+  const num = pieces != null && pieces !== '' && Number.isFinite(Number(pieces)) ? Number(pieces) : null;
+  if (boxes != null || pallets != null) return { boxes: boxes != null ? boxes : (pallets != null && num != null && num !== pallets ? num : null), pallets };
+  return { boxes: num, pallets: null };
 }
 
 // A step on a stop of a city shared by several customers ("arrived:LABEL · NAME") → the city step too, once, so the progress

@@ -31,6 +31,7 @@ export function ltlStops(item) {
       key: String(s.key || `${n != null ? n : 'x'}-${i}`), n: n != null ? Number(n) : null,
       customer: s.customer || null, address: s.address || null, city: s.city || null, state: s.state || null, zip: s.zip || null,
       boxes: s.pieces != null && s.pieces !== '' ? Number(s.pieces) : null, piecesText: s.piecesText || null,
+      from: s.from || null, sheetPieces: s.sheetPieces != null ? Number(s.sheetPieces) : null,   // 'ARTIS' = from Truck Builder only; sheetPieces = the printed sheet's count when ARTIS differs
       appt: [s.apptDate, s.apptTime].filter(Boolean).join(' ') || s.appt || null, receivingHours: s.receivingHours || null,
       callAhead: (Array.isArray(s.callAhead) ? s.callAhead : []).filter((c) => c && (c.phone || c.contact)).map((c) => ({ contact: c.contact || null, phone: c.phone || null, leadMinutes: c.leadMinutes != null ? Number(c.leadMinutes) : null, method: c.method || 'call' })),
       instructions: list(s.instructions), references: list(s.references), handwritten: list(s.handwritten),
