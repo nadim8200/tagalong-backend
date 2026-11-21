@@ -493,7 +493,9 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       const period = log.period || periodOf(log.lines);
       const docs = (await docsFor({ ...log, period })).map(({ data, ...d }) => d);
       const partner = id === OPEN ? partnerNote((await turnedIn(req.driver.code)).byPartner.filter((x) => now() - Date.parse(x.submittedAt) < 14 * DAY)) : null;
-      return res.json({ id, week: { ...period, id }, expenses: [], ...log, period: log.period && saved && id !== OPEN ? log.period : periodOf(log.lines), docs, partner });
+      // a turned-in sheet: the signatures as pictures (the app draws the sheet like the paper)
+      const sigs = saved && id !== OPEN ? { signature: (await signatureOf(saved)) || (sigOk(saved.signature) ? saved.signature : null), coSignature: (await imageOf(saved.coSignatureId)) || (sigOk(saved.coSignature) ? saved.coSignature : null) } : {};
+      return res.json({ id, week: { ...period, id }, expenses: [], ...log, ...sigs, period: log.period && saved && id !== OPEN ? log.period : periodOf(log.lines), docs, partner });
     } catch (e) { console.warn('[triplog]', e.message); return res.status(502).json({ error: 'Could not load your trip log. Try again.' }); }
   });
   // the driver's sheets: the open one, then the ones turned in (newest first)
