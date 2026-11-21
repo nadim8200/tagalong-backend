@@ -16,6 +16,7 @@
 // A request shows in the Jarvis inbox until someone marks it handled.
 // ---------------------------------------------------------------
 import { randomBytes } from 'crypto';
+import { callbackMail } from './callbackmail.js';
 import { reachPlan } from './directory.js';
 import { fmtLocal } from './localtime.js';
 
@@ -87,16 +88,9 @@ export function helpEmail(req, load) {
   const forWho = (req.forStaff || []).map((p) => p.name).join(', ');
   const subject = `${forWho ? `For ${forWho} — ` : ''}${req.urgent ? 'URGENT — ' : ''}Call back ${who}${req.role && req.role !== 'unknown' ? ` (${req.role})` : ''}${req.trip ? ` · load ${req.trip}` : ''}: ${String(req.need).slice(0, 70)}`;
   const via = { call: 'a Jarvis phone call', email: 'an email', text: 'a text message', app: 'the driver app', dispatcher: `${req.by || 'a dispatcher'} (Ask Jarvis)` }[req.source] || req.source;
-  const html = `<div style="font-family:Arial,sans-serif;font-size:14px">
-<p>${req.urgent ? '<b style="color:#b91c1c">URGENT</b> — ' : ''}<b>${esc(who)}</b>${req.role && req.role !== 'unknown' ? ` (${esc(req.role)})` : ''} needs someone to reach out — from ${esc(via)}.</p>
-<p><b>What they need:</b> ${esc(req.need)}</p>
-<p><b>How to reach them:</b> ${esc(reach)}</p>
-${load ? `<p><b>Load ${esc(load.trip)}</b> · truck ${esc(load.truck || '—')} · trailer ${esc(load.trailer || '—')}<br>Now: ${esc(load.location || 'no GPS')}${load.motion ? ` · ${esc(load.motion)}` : ''}${load.next ? `<br>Next stop: ${esc(load.next)}` : ''}</p>` : ''}
-${req.said ? `<p><b>What was said:</b></p><blockquote style="border-left:3px solid #ccc;margin:0;padding-left:10px;color:#333">${esc(String(req.said).slice(0, 2500)).replace(/\n/g, '<br>')}</blockquote>` : ''}
-<p>Mark it handled in the AI Dispatcher (Jarvis inbox → Callback requests) once someone has reached out.</p>
-<p>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>`;
+  const { html, attachments } = callbackMail({ req, load, who, reach, forWho, via });
   const text = `${req.urgent ? 'URGENT: ' : ''}Call back ${who}${req.from.phone ? ` ${prettyPhone(req.from.phone)}` : ''}${req.trip ? ` (load ${req.trip})` : ''}: ${String(req.need).slice(0, 140)} — Jarvis`;
-  return { subject, html, text };
+  return { subject, html, text, attachments };
 }
 
 // A callback task's status, from its real fields (never from the call's age). Pure.
@@ -228,7 +222,7 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
     const msg = helpEmail(req, await loadView(req.trip));
     const sent = { teams: to.groups, email: null, text: null, push: null, call: null };
     if (to.emails.length) {
-      if (mail && mail.ready()) { try { await mail.send({ to: to.emails, subject: msg.subject, html: msg.html }); sent.email = to.emails; } catch (e) { sent.email = `failed: ${e.message}`; } }
+      if (mail && mail.ready()) { try { await mail.send({ to: to.emails, subject: msg.subject, html: msg.html, attachments: msg.attachments }); sent.email = to.emails; } catch (e) { sent.email = `failed: ${e.message}`; } }
       else sent.email = 'waiting for Outlook';
     }
     if (to.phones.length) {
