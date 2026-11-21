@@ -20,6 +20,7 @@ import { readableFile } from './heic.js';
 import { loadsFor } from './driverauth.js';
 import { CHECKINS } from './checkins.js';
 import { driverStops, cityStep } from './driverstops.js';
+import { tapStamp } from './taptime.js';
 import { jarvisEmail, section, quote, facts, metrics, fileBox, etTime, cityState, isSpanish } from './jarvismail.js';
 
 const SITE = 'florida-beauty';
@@ -150,7 +151,7 @@ export function initStopReports(app, { db, secret, requireDriver, requireAuth = 
       if (c.error) return res.status(400).json({ error: c.error });
       const had = (await listOf(m.trip)).find((x) => x.clientId === clientId);
       if (had) return res.json({ ok: true, id: had.id, already: true });
-      const r = { id: `sr${now().toString(36)}${crypto.randomBytes(2).toString('hex')}`, clientId, ...c.report, by: req.driver.name || null, driverCode: String(req.driver.code), at: new Date(now()).toISOString(), files: [], sentAt: null };
+      const r = { id: `sr${now().toString(36)}${crypto.randomBytes(2).toString('hex')}`, clientId, ...c.report, by: req.driver.name || null, driverCode: String(req.driver.code), ...(() => { const t = tapStamp(b, now()); return { at: t.at, ...(t.sentAt ? { arrivedLate: t.sentAt } : {}) }; })(), files: [], sentAt: null };
       await db.update(KEY, (cur) => ({ ...(cur || {}), [m.trip]: [...((cur || {})[m.trip] || []), r].slice(-200) }), {});
       // a box count is the stop delivered, for both drivers of a team — not only when the "delivered" tap after it gets through
       if (r.kind === 'boxes') await markDelivered(m.trip, r).catch((e) => console.warn('[stopreports] delivered:', e.message));

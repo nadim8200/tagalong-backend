@@ -309,6 +309,10 @@ test('driver check-ins: the stops to tap come with the load; a tap is saved once
   assert.equal((await h.call('POST /driver/me/loads/:trip/checkin', { token, params: { trip: '626301' }, body: { step: 'loaded' } })).status, 404, 'not their load');
   const again = await h.call('GET /driver/me', { token });
   assert.deepEqual(Object.keys(again.body.current.find((x) => x.trip === '626265').checkin.steps).sort(), ['arrived:' + key, 'at-shipper'].sort());
+  // pressed without signal 40 minutes ago, sent now: the step keeps the time it was pressed
+  const pressed = new Date(h.now() - 40 * 60000).toISOString();
+  const late = await h.call('POST /driver/me/loads/:trip/checkin', { token, params: { trip: '626265' }, body: { step: 'loaded', tappedAt: pressed } });
+  assert.equal(late.body.steps.loaded.at, pressed); assert.ok(late.body.steps.loaded.sentAt);
 });
 
 test('a submitted driver release shows on the driver\'s load: the hub, the yard address, who / when, the released stops (Nov 19)', async () => {

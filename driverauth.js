@@ -13,6 +13,7 @@ import { driverStops, cityStep, stepsWithReports } from './driverstops.js';
 import { roadFacts, truckStopFinder, aheadOf } from './driverroad.js';
 import { initTripLog } from './triplog.js';
 import { KNOWN_YARDS } from './loadsheet.js';
+import { tapStamp } from './taptime.js';
 
 // The driver release a dispatcher submitted on this load (release.js keeps them per trip, newest last) → what the driver
 // app shows (Nov 19): released at which hub, its yard address + directions, who authorized it and when, and the stops it
@@ -303,12 +304,12 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     const it = (await board()).find((x) => tripNo(x) === trip);
     const stops = driverStops(it, { geo: (await db.get('taGeoZip', {}).catch(() => ({}))) || {} });
     if (!validStep(step, stops.map((x) => x.key))) return res.status(400).json({ error: 'That step is not on this load.' });
-    const at = new Date(now()).toISOString();
+    const stamp = tapStamp(req.body, now()); const { at } = stamp;   // a tap queued without signal keeps the time it was pressed
     // two customers in one city: the city step goes in too (arrived at the first, delivered once all of them are), for the progress emails
     const city = cityStep(step, stops);
     const next = await db.update(CHECKINS(SITE), (cur) => {
       const c = { ...(cur || {}) }; const r = c[trip] || { steps: {} };
-      const steps = { ...r.steps, [step]: (r.steps || {})[step] || { at, by: req.driver.name } };
+      const steps = { ...r.steps, [step]: (r.steps || {})[step] || { ...stamp, by: req.driver.name } };
       if (city && !steps[city]) {
         const label = city.replace(/^(arrived|delivered):/, '');
         const all = stops.filter((x) => x.cityLabel === label);

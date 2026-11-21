@@ -37,6 +37,7 @@ import crypto from 'crypto';
 import { wantsContact } from './helpdesk.js';
 import { scanPdf } from './scanpdf.js';
 import { sentByHand } from './training.js';
+import { tapTime } from './taptime.js';
 
 // What a driver can send as paperwork, like Transflo's document types. Each needs the freight bill number on the paper.
 export const PAPER_KINDS = { pod: { label: 'POD', file: 'POD', docType: 'proof_of_delivery' }, bol: { label: 'BOL', file: 'BOL', docType: 'bill_of_lading' }, lumper: { label: 'lumper receipt', file: 'LUMPER', docType: 'lumper_receipt' }, receipt: { label: 'receipt', file: 'RECEIPT', docType: 'receipt' }, other: { label: 'paperwork', file: 'DOC', docType: 'other_paperwork' } };
@@ -633,7 +634,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       const { link, status } = await activeLink(tok);
       if (!link) return res.status(404).json({ error: 'This tracking link is not valid.' });
       if (!isLive(status)) return res.status(410).json({ active: false, status });
-      const fix = link.lastPing || null; const at = new Date().toISOString(); const by = link.driverName || 'OC driver';
+      const fix = link.lastPing || null; const at = tapTime(req.body, Date.now()); const by = link.driverName || 'OC driver';
       await db.update(linkKey(tok), (cur) => (cur ? { ...cur, deliveredAt: cur.deliveredAt || at } : cur), null);
       if (carriers && carriers.addCheckins) await carriers.addCheckins(link.site, link.trip, [{ at, source: 'driver app', location: fix ? `${fix.lat.toFixed(4)}, ${fix.lng.toFixed(4)}` : null, text: 'Driver confirmed the load is delivered (TagAlong app)', issue: false, by }]);
       const closed = onDelivered ? !!(await Promise.resolve(onDelivered(link.site, link.trip, `${by} (TagAlong app)`)).catch(() => false)) : false;
@@ -666,7 +667,7 @@ export function initDriverLinks(app, { requireAuth, db, training = null, carrier
       const fix = cleanFixes(b.point || [])[0] || link.lastPing || null;
       const note = String(b.note || '').trim().slice(0, 300);
       const entry = {
-        at: new Date().toISOString(), source: 'driver app',
+        at: tapTime(b, Date.now()), source: 'driver app',
         location: fix ? `${fix.lat.toFixed(4)}, ${fix.lng.toFixed(4)}` : null,
         text: note || 'Driver checked in from the TagAlong link',
         issue: !!b.issue, by: link.driverName || 'OC driver',
