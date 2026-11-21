@@ -14,6 +14,7 @@ import { roadFacts, truckStopFinder, aheadOf } from './driverroad.js';
 import { initTripLog } from './triplog.js';
 import { KNOWN_YARDS } from './loadsheet.js';
 import { tapStamp } from './taptime.js';
+import { initWeather } from './weather.js';
 
 // The driver release a dispatcher submitted on this load (release.js keeps them per trip, newest last) → what the driver
 // app shows (Nov 19): released at which hub, its yard address + directions, who authorized it and when, and the stops it
@@ -233,6 +234,8 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
   });
   // the driver's homework: the weekly "On the Road Trip Log" for payroll (triplog.js)
   initTripLog(app, { db, requireDriver, requireAuth, notify: (code, msg) => notify(code, msg), nameOf: async (c) => ((await byCode(c)) || {}).name || '', board, sheets, loadsFor, tripsOf: (code) => db.get(tripsKey(code), []), now });
+  // rain, storms, snow, ice and official weather warnings where each rolling truck is and where it's going next (weather.js)
+  initWeather(app, { db, board, requireAuth, requireDriver, loadsFor, notify: (code, msg) => notify(code, msg), now });
   // truck parking near the driver's truck (ahead of it when it's moving)
   const truckStops = truckStopFinder({ db });
   app.get('/driver/me/loads/:trip/truckstops', requireDriver, async (req, res) => {
