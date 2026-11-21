@@ -459,5 +459,5 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   const setOnCall = (fn) => { onCall = fn; };
 
   const hasOwnConfig = async (owner) => !!((await db.get(cfgKey, {})) || {})[owner];
-  return { mainNumber, hasOwnConfig, mediaBytes, sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, autoFrom, wasHeld, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
+  return { api: (owner, path, init) => rcFetch(owner, path, init), mainNumber, hasOwnConfig, mediaBytes, sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, autoFrom, wasHeld, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
 }

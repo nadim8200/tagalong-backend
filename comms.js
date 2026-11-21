@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------
 import { wantsContact } from './helpdesk.js';
 import { sentByHand } from './training.js';
+import { initSmsHook } from './smshook.js';
 
 const COMPANY = 'Florida Beauty Flora dispatch';
 const last10 = (p) => String(p || '').replace(/\D+/g, '').slice(-10);
@@ -314,10 +315,19 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
     await db.set(cursorKey(site), { since: newest, seen: [...replies.map((r) => r.id), ...seen].slice(0, 300) });
     return replies.length;
   }
+  // one check at a time; a webhook call during a check runs one more right after it (that text may have just missed it)
+  let checking = null; let again = false;
+  async function checkNow() {
+    if (checking) { again = true; return checking; }
+    checking = (async () => { do { again = false; await pollReplies().catch((e) => console.warn('[comms] replies:', e.message)); } while (again); })();
+    try { await checking; } finally { checking = null; }
+    return undefined;
+  }
+  // RingCentral calls us the moment a text comes in (smshook.js)
+  const smsHook = initSmsHook(app, { db, ringcentral, onText: checkNow, requireAuth, env });
   if (enabled && ringcentral && env.NODE_ENV !== 'test') {
-    // incoming texts every 15 s (was 2 min — a text took up to 2½ min to show in the console; Nov 20). One check at a time.
-    let polling = false;
-    const r = setInterval(() => { if (polling) return; polling = true; pollReplies().catch((e) => console.warn('[comms] replies:', e.message)).finally(() => { polling = false; }); }, 15000);
+    // incoming texts every 15 s (was 2 min — a text took up to 2½ min to show in the console; Nov 20), as the backup for the webhook
+    const r = setInterval(() => { checkNow().catch(() => {}); }, 15000);
     const t = setInterval(() => { sendConfirmations().catch((e) => console.warn('[comms] opt-in:', e.message)); }, 2 * 60000);
     if (r.unref) r.unref();
     if (t.unref) t.unref();
@@ -349,5 +359,5 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
   }
 
   console.log(`[comms] driver calls/texts ${enabled ? 'ready' : 'OFF — needs DATABASE_URL'}`);
-  return { overlay, pollReplies, log, sendConfirmations, handleKeyword, textDriverAuto, useOutreach, useInbox: (x) => { inbox = x; } };
+  return { smsHook, checkNow, overlay, pollReplies, log, sendConfirmations, handleKeyword, textDriverAuto, useOutreach, useInbox: (x) => { inbox = x; } };
 }
