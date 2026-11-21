@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hazardOf, worstHour, roadAlerts, pushFor, initWeather } from '../weather.js';
+import { hazardOf, worstHour, roadAlerts, pushFor, initWeather, decide } from '../weather.js';
 
 const mem = () => { const s = {}; return { s, get: async (k, d) => (k in s ? JSON.parse(JSON.stringify(s[k])) : d), set: async (k, v) => { s[k] = JSON.parse(JSON.stringify(v)); }, update: async (k, f, d) => { s[k] = f(k in s ? s[k] : d); return s[k]; } }; };
 const NOW = Date.parse('2026-11-21T18:00:00Z');
@@ -51,4 +51,27 @@ test('the hourly sweep: rolling trucks only, both drivers of a team, each warnin
   pushes.length = 0; clock = NOW + 3600000;
   await w.sweep();
   assert.deepEqual(pushes, [], 'nothing new an hour later: no repeat');
+});
+
+test('tell the driver once; again only when it changes: a new warning, worse, or better / cleared (two checks in a row) (Nov 21)', () => {
+  const rain = { kind: 'rain', id: 'rain|truck|Ocala', role: 'truck', place: 'Ocala, FL', percent: 70 };
+  const snow = { kind: 'snow', id: 'snow|next|Ludlow', role: 'next', place: 'LUDLOW, MA', percent: 80 };
+  const warn = { kind: 'alert', id: 'nws1', event: 'Winter Storm Warning' };
+  let r = decide(null, [rain]);
+  assert.deepEqual(r.say.map((a) => a.kind), ['rain']); assert.equal(r.say[0].worse, false);
+  r = decide(r.next, [rain]); assert.deepEqual(r.say, [], 'same weather next hour: quiet');
+  r = decide(r.next, [rain, snow]); assert.deepEqual(r.say.map((a) => [a.kind, a.worse]), [['snow', true]], 'worse: tell them');
+  assert.match(pushFor(r.say[0]).title, /^❄️ Empeora: Nieve/);
+  r = decide(r.next, [snow, warn]); assert.deepEqual(r.say.map((a) => a.id), ['nws1'], 'a new official warning');
+  r = decide(r.next, [snow, warn]); assert.deepEqual(r.say, []);
+  r = decide(r.next, [rain]); assert.deepEqual(r.say, [], 'better for one hour: wait to be sure');
+  r = decide(r.next, [snow, warn]); assert.deepEqual(r.say, [], 'it came back: nothing new to say');
+  r = decide(r.next, [rain]); r = decide(r.next, [rain]);
+  assert.deepEqual(r.say.map((a) => [a.kind, a.now]), [['better', 'rain']], 'better two hours in a row: tell them once');
+  assert.match(pushFor(r.say[0]).title, /^🌤️ Mejora: ahora lluvia/);
+  r = decide(r.next, [rain]); assert.deepEqual(r.say, []);
+  r = decide(r.next, [], { failed: true }); assert.deepEqual(r.say, [], 'no answer from the weather service is not "cleared"');
+  r = decide(r.next, []); r = decide(r.next, []);
+  assert.deepEqual(r.say.map((a) => a.kind), ['clear']); assert.match(pushFor(r.say[0]).title, /✅/);
+  r = decide(r.next, []); assert.deepEqual(r.say, []);
 });

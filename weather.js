@@ -3,11 +3,14 @@
 //   - official warnings from the US National Weather Service (api.weather.gov, free): winter storm, ice, flood, tornado, high wind…
 //   - Google's hourly forecast (Weather API, $0.15 per 1,000 after the first 10,000 a month): rain, heavy rain / storms, snow, ice
 //     in the next 12 hours.
-// Each warning goes to the driver's phone once (both drivers on a team); in training mode the push is held and copied to Nadim.
+// The driver hears about it once, when it starts (both drivers on a team); after that only when it changes: a new official
+// warning, the forecast getting worse, or it getting better / clearing (after two checks in a row, so a borderline forecast
+// doesn't flip back and forth). Weather pushes go out for real even in training mode (Nov 21: the user's call).
 // Trucks close together share one look (a ~15-mile grid square, kept for the hour), so the cost stays at a few dollars a month.
 import { driverStops } from './driverstops.js';
 import { CHECKINS } from './checkins.js';
 import { placeKey } from './watchtower.js';
+import { asLive } from './training.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taWeather:${SITE}`;
@@ -80,13 +83,39 @@ const hm = (iso) => { const d = new Date(iso || ''); return Number.isNaN(d.getTi
 
 // the push the driver gets (Spanish first, English under it — the phone's language isn't known here). Pure.
 export function pushFor(a) {
+  if (a.kind === 'clear') return { title: '✅ El clima mejoró en su ruta', body: 'Ya no hay avisos de clima en su ruta. Buen viaje. · Weather cleared on your route.' };
+  if (a.kind === 'better') return { title: `🌤️ Mejora: ahora ${ES[a.now].toLowerCase()}${a.place ? ` ${a.role === 'next' ? 'en su próxima parada' : 'cerca de'} ${a.place}` : ''}`, body: `Lo peor ya pasó. ${TIP_ES[a.now]} · Improving: now ${EN[a.now].toLowerCase()}${a.place ? ` ${a.role === 'next' ? 'at your next stop' : 'near'} ${a.place}` : ''}.` };
   if (a.kind === 'alert') {
     return { title: `⚠️ ${a.event}${a.place ? ` · ${a.place}` : ''}`, body: `Aviso oficial del clima en su ruta${a.until ? ` hasta ${hm(a.until)}` : ''}. Maneje con cuidado. · Official weather warning on your route${a.until ? ` until ${hm(a.until)}` : ''}.` };
   }
   const where = a.place ? ` ${a.role === 'next' ? 'en su próxima parada' : 'cerca de'} ${a.place}` : '';
   const whereEn = a.place ? ` ${a.role === 'next' ? 'at your next stop' : 'near'} ${a.place}` : '';
   const when = a.at ? ` ~${hm(a.at)}` : '';
-  return { title: `${ICON[a.kind]} ${ES[a.kind]}${where}${when}`, body: `${TIP_ES[a.kind]} · ${EN[a.kind]}${whereEn}${when} (${a.percent}%).` };
+  return { title: `${ICON[a.kind]} ${a.worse ? 'Empeora: ' : ''}${ES[a.kind]}${where}${when}`, body: `${TIP_ES[a.kind]} · ${EN[a.kind]}${whereEn}${when} (${a.percent}%).` };
+}
+
+// What to tell the driver this hour, given what they were last told. Pure.
+//   prev: { nws: [ids told], fcRank, fcKind, quiet } ; alerts: this hour's list ; failed: a look didn't answer (never read as "cleared")
+//   → { say: [items for pushFor], next }
+export function decide(prev, alerts = [], { failed = false } = {}) {
+  const p = { nws: [], fcRank: 0, fcKind: null, quiet: 0, ...(prev || {}) };
+  const nws = alerts.filter((a) => a.kind === 'alert');
+  const fc = alerts.filter((a) => a.kind !== 'alert').sort((x, y) => RANK[y.kind] - RANK[x.kind])[0] || null;
+  const fcRank = fc ? RANK[fc.kind] : 0;
+  const say = [];
+  for (const a of nws) if (!p.nws.includes(a.id)) say.push(a);                                    // a new official warning
+  if (fc && fcRank > p.fcRank) say.push({ ...fc, worse: p.fcRank > 0 });                           // the first heads-up, or worse
+  const next = { nws: [...new Set([...p.nws, ...nws.map((a) => a.id)])], fcRank: Math.max(p.fcRank, fcRank), fcKind: fcRank > p.fcRank ? fc.kind : p.fcKind, quiet: 0 };
+  const calmer = !failed && ((nws.length === 0 && p.nws.length > 0) || fcRank < p.fcRank) && !say.length;
+  if (calmer) {
+    const quiet = (p.quiet || 0) + 1;
+    if (quiet < 2) return { say, next: { ...p, quiet } };                                            // wait one more hour to be sure
+    const nowNws = nws.map((a) => a.id);
+    if (!nws.length && !fc) say.push({ kind: 'clear' });
+    else if (fc && !nws.length) say.push({ kind: 'better', now: fc.kind, role: fc.role, place: fc.place });
+    return { say, next: { nws: nowNws, fcRank, fcKind: fc ? fc.kind : null, quiet: 0 } };
+  }
+  return { say, next };
 }
 
 export function initWeather(app, { db, board, notify, requireAuth = null, requireDriver = null, loadsFor = null, env = process.env, fetchFn = (...a) => fetch(...a), now = () => Date.now() }) {
@@ -112,40 +141,35 @@ export function initWeather(app, { db, board, notify, requireAuth = null, requir
     const geo = (await db.get('taGeoZip', {}).catch(() => ({}))) || {};
     const checkins = (await db.get(CHECKINS(SITE), {}).catch(() => ({}))) || {};
     const state = (await db.get(KEY, {})) || {};
-    const sent = { ...(state.sent || {}) };
+    const told = { ...(state.told || {}) };   // trip → what the driver was last told (decide)
     const trips = {};
     let pushed = 0;
     for (const it of items) {
       const trip = tripNo(it); if (!trip) continue;
       const pts = lookPoints(it, { geo, steps: (checkins[trip] || {}).steps || {}, now: now() });
-      const alerts = [];
+      const alerts = []; let failed = false;
       for (const p of pts) {
         const w = await look(p).catch(() => null); // eslint-disable-line no-await-in-loop
+        if (!w || !w.nws) failed = true;
         if (!w) continue;
         for (const a of roadAlerts(w.nws)) if (!alerts.some((x) => x.id === a.id)) alerts.push({ kind: 'alert', ...a, role: p.role, place: p.place });
         const h = worstHour(w.forecast);
         if (h) alerts.push({ kind: h.kind, id: `${h.kind}|${p.role}|${p.place || cell(p)}`, at: h.at, percent: h.percent, tempF: h.tempF, text: h.text, role: p.role, place: p.place });
       }
       trips[trip] = { alerts, checkedAt: new Date(now()).toISOString(), truck: tripOf(it).powerUnit || null };
-      // push each one once: an official warning once per warning; a forecast once per kind and place every 6 hours
       const t = tripOf(it); const codes = [t.driver, t.driver2].map((x) => String(x || '').trim()).filter(Boolean);
-      const mine = { ...(sent[trip] || {}) };
-      let forecastPushed = false;   // at most one forecast push per truck per hour (the worst one); official warnings always
-      for (const a of [...alerts].sort((x, y) => (RANK[y.kind] || 9) - (RANK[x.kind] || 9))) {
-        const key = a.kind === 'alert' ? `nws|${a.id}` : `${a.id}|${Math.floor(now() / (6 * HOUR))}`;
-        if (mine[key]) continue;
-        mine[key] = new Date(now()).toISOString();   // a milder forecast skipped this hour counts as covered by the one sent
-        if (a.kind !== 'alert') { if (forecastPushed) continue; forecastPushed = true; }
-        if (notify && codes.length) {
+      const { say, next } = decide(told[trip], alerts, { failed });
+      told[trip] = next;
+      if (notify && codes.length) {
+        for (const a of say) {
           const m = pushFor(a);
-          for (const c of codes) await notify(c, { ...m, data: { tab: 'now', trip } }).catch(() => null); // eslint-disable-line no-await-in-loop
+          for (const c of codes) await asLive(() => notify(c, { ...m, data: { tab: 'now', trip } })).catch(() => null); // eslint-disable-line no-await-in-loop
           pushed += 1;
         }
       }
-      sent[trip] = mine;
     }
-    for (const k of Object.keys(sent)) if (!trips[k]) delete sent[k];   // loads that left the road
-    await db.set(KEY, { trips, sent, checkedAt: new Date(now()).toISOString() });
+    for (const k of Object.keys(told)) if (!trips[k]) delete told[k];   // loads that left the road
+    await db.set(KEY, { trips, told, checkedAt: new Date(now()).toISOString() });
     return { trips: Object.keys(trips).length, pushed, looks: cache.size };
   }
 
