@@ -19,10 +19,11 @@ import { randomBytes, createHash } from 'crypto';
 import { slimItem } from './assistant.js';
 import { driveTimeFor } from './drivetime.js';
 import { apptMs } from './yardreleases.js';
-import { findLoad, customerStops, customerView, isOcLoad, spokenName, nameScore, setStaffBrain } from './voice.js';
+import { findLoad, customerStops, customerView, isOcLoad, spokenName, nameScore, setStaffBrain, atStopNow, arrivedSaid } from './voice.js';
 import { contactsFor } from './statusmail.js';
 import { customerAnswer, loadAnswer } from './dispatchcards.js';
 import { fmtLocal } from './localtime.js';
+import { clientsNear } from './nearclients.js';
 import { normName } from './profiles.js';
 import { instructionsFor, instructionsSms, whichLocation, loadFor } from './instructionstext.js';
 import { staffFacts } from './stafffacts.js';
@@ -207,6 +208,7 @@ export const TOOLS = [
   { name: 'load_details', description: 'Everything about one load: status, truck/trailer/drivers, live location, every stop with ETA (local time), appointments and committed delivery times, ARTIS ETA / miles / delivered time per customer, geofence arrival / departure per stop, ARTIS truck / trailer location, trailer temp at the loading door, ARTIS documents on file (POD / BOL…), rate con, trip sheet, open alerts, to-dos, notes and transfers, holds, emails count.', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
   { name: 'customer_instructions', description: 'STAFF ONLY (every employee). A customer\'s delivery instructions — the Notes in their TruckMate customer profile (receiving hours, check-in, door, lumper, who to call…). By customer name, or the load (trip, trailer or truck number, and the outbound day YYYY-MM-DD when that trailer / truck has more than one load) for its stops — with the customer to narrow it. A customer with several locations (MOBI\'S) needs the load or the city: if the tool says several, ask which before answering. Say when they were read, and if TruckMate has none, say so.', input_schema: { type: 'object', properties: { customer: { type: 'string' }, city: { type: 'string' }, trip: { type: 'string' }, trailer: { type: 'string' }, truck: { type: 'string' }, outbound_day: { type: 'string' } } } },
   { name: 'text_instructions', description: 'STAFF ONLY. Text a customer\'s delivery instructions when an employee asks: to: "me" (the employee asking — their phone on the Employees list) or "driver" (the driver of that trip). Give the customer and / or the load (trip, trailer or truck, outbound day). Then say what the tool says (sent, or why not).', input_schema: { type: 'object', properties: { to: { type: 'string', enum: ['me', 'driver'] }, customer: { type: 'string' }, city: { type: 'string' }, trip: { type: 'string' }, trailer: { type: 'string' }, truck: { type: 'string' }, outbound_day: { type: 'string' } }, required: ['to'] } },
+  { name: 'clients_near', description: 'STAFF ONLY. Our CLIENTS (customers on Florida Beauty\'s client list) near / around a place — a city, ZIP or address — closest first, with about-miles, address, last delivery and any loads they have on the board now. Use for "what customers do we have around Mickleton NJ", "clients near 08056", "who do we deliver to close to this truck\'s stop". Not loads_to_place (that is only today\'s loads going to a city). radius_miles defaults to 30.', input_schema: { type: 'object', properties: { place: { type: 'string' }, radius_miles: { type: 'number' } }, required: ['place'] } },
   { name: 'client_lookup', description: 'Florida Beauty\'s client list (flower + produce customers, synced daily from ARTIS): find a client by name, client ID, phone or email — official name, ARTIS customer ID, address, ZIP, phone / fax, contacts, emails, delivery days, appointment required, warehouse, last delivery, their geofence (location + radius the AI dispatcher uses to see arrivals / departures) — and their loads on the board right now. For our staff only.', input_schema: { type: 'object', properties: { query: { type: 'string', description: 'Name (e.g. "DBEC Wholesale"), 5-digit client ID, phone or email' } }, required: ['query'] } },
   { name: 'cargo_received', description: 'ARTIS (Florida Beauty\'s EDI system): the boxes received / scanned at the terminal for a ship date, per consignee (customer) — boxes and cubes expected vs scanned, missing boxes, farms, products. Optional date (YYYY-MM-DD, default today) and customer name or ARTIS consignee ID. Use for "did all of Kuhn\'s boxes come in today?" or "what\'s still missing for tomorrow?".', input_schema: { type: 'object', properties: { date: { type: 'string' }, customer: { type: 'string' } } } },
   { name: 'day_of_service', description: 'ARTIS: whether a consignee can receive on a ship date (days of service), up to 5 days ahead. consignee_id for one customer, or shipper_id for all consignees a shipper used in the last 30 days.', input_schema: { type: 'object', properties: { consignee_id: { type: 'string' }, shipper_id: { type: 'string' }, date: { type: 'string' } } } },
@@ -237,6 +239,7 @@ export const SYSTEM = (who) => `You are Jarvis, the AI dispatcher for Florida Be
 - Florida Beauty staff: staff_directory gives name, department and extension — that is all you ever share about an employee (never a cell phone or personal email).
 - Be brief and practical (a few lines or a short list). Lead with the answer. Use trip numbers.
 - ETAs and appointments: say them as the tools give them (delivery local time with the zone).
+- Customers / clients NEAR or AROUND a place ("what customers do we have around Mickleton", "clients near 08056") → clients_near (our client list by distance) — not loads_to_place, which only lists today's loads going to that city.
 - A customer / business name ("ETA for Native", "where's Zoom Bloom") → customer_etas — a business name is not a place (loads_to_place is only for a city / state). Answer like Jarvis on the phone: for each load, where the truck is now and "as of" when, then each of their deliveries with city, ETA, boxes loaded, trip and truck. If matchedBy is the closest name, say which customer you found.
 - A customer's trip manifest (what was loaded for them — farms, products, POs, boxes) → trip_manifest — by customer, by trip + stop number, and / or a date (older / delivered trips too); say it's attached.
 - A customer's info (ARTIS customer ID, address, phone / fax, emails, delivery days, appointment required, geofence) → client_lookup.
@@ -633,6 +636,16 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         if (!sms) return { sent: false, why: 'texting not connected' };
         try { const r = await sms(d10(me.phone), text); return { sent: true, to: 'you', held: /training/i.test(String((r && r.messageStatus) || '')) || undefined, text }; } catch (e) { return { sent: false, why: e.message }; }
       }
+      case 'clients_near': {
+        if (ctx.customer) return { error: 'Not available.' };
+        if (!clients) return { error: 'The client list is not loaded.' };
+        if (!miles || !miles.geocode) return { error: 'The map lookup is not set up.' };
+        const fences = geofences ? await geofences.fences().catch(() => ({})) : {};
+        const r = await clientsNear({ place: input.place, radiusMiles: Math.min(Math.max(Number(input.radius_miles) || 30, 1), 150), list: clients.all(), fences, locate: (q) => miles.geocode(q) });
+        if (!r.found) return r;
+        const all = ((await getBoard(SITE)) || {}).trips || [];
+        return { ...r, clients: r.clients.map((c) => { const full = clients.byId(c.id); const loads = full ? clients.loads(all, full) : []; return { ...c, loadsOnBoard: loads.map((it) => ({ trip: tripNo(it), truck: (it.trip || it).powerUnit || null, status: (it.trip || it).status || null })) }; }) };
+      }
       case 'client_lookup': {
         if (!clients) return { error: 'The client list is not loaded.' };
         const q = String(input.query || '').trim();
@@ -682,7 +695,7 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
           if (!hits.length) continue;
           const eta = ((w.etas || {})[n] || {}).stops || [];
           const leg = eta.find((x) => hits.some((h) => String(x.label || '').toUpperCase().split(',')[0] === h.label.toUpperCase().split(',')[0]));
-          out.push({ trip: n, truck: (it.trip || it).powerUnit || null, status: (it.trip || it).status || null, stop: hits[0].label, customers: [...new Set(hits.map((h) => h.customer).filter(Boolean))], delivered: hits.some((h) => h.delivered === true), eta: leg ? new Date(leg.etaMs).toISOString() : null, now: (it._samsara && it._samsara.location) || null });
+          out.push({ trip: n, truck: (it.trip || it).powerUnit || null, status: (it.trip || it).status || null, stop: hits[0].label, customers: [...new Set(hits.map((h) => h.customer).filter(Boolean))], delivered: hits.some((h) => h.delivered === true), ...((() => { const a = !hits.some((h) => h.delivered === true) ? atStopNow(it, leg, eta[0]) : null; return a ? { atThisStopNow: true, ...arrivedSaid(a, leg.label) } : {}; })()), eta: leg ? fmtLocal(leg.etaMs, leg.label) : null, milesLeft: leg ? leg.miles : null, now: (it._samsara && it._samsara.location) || null });
         }
         return out.length ? { place: input.place, loads: out.slice(0, 25) } : { place: input.place, loads: [], note: 'No load on the live board stops there.' };
       }
@@ -736,7 +749,7 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
           // what the load pays (TruckMate Billing total) vs the rate con, reefer temps, Shipper / Consignee boxes, trace numbers
           ...staffFacts(it),
           artisEta: it._artisEta ? { readAt: it._artisEta.at, stops: (it._artisEta.stops || []).map((x) => ({ customer: x.name, clientId: x.clientId, city: x.city, state: x.state, eta: x.etaText, miles: x.miles, location: x.location, delivered: x.delivered, arrivedAt: x.arrivedAt, boxes: x.boxes })) } : null,
-          geofenceVisits: Object.values((((await db.get(`taStopVisits:${SITE}`, {})) || {})[n]) || {}).map((v) => ({ stop: v.stopKey, place: v.geofence && v.geofence.name, from: v.geofence && v.geofence.source, state: v.state, arrived: v.enteredAt ? new Date(v.enteredAt).toISOString() : null, left: v.exitedAt ? new Date(v.exitedAt).toISOString() : null, minutesThere: v.dwellMin })),
+          geofenceVisits: Object.values((((await db.get(`taStopVisits:${SITE}`, {})) || {})[n]) || {}).map((v) => ({ stop: v.stopKey, place: v.geofence && v.geofence.name, from: v.geofence && v.geofence.source, state: v.state, arrived: v.enteredAt ? fmtLocal(v.enteredAt, v.stopKey) : null, left: v.exitedAt ? fmtLocal(v.exitedAt, v.stopKey) : null, minutesThere: v.dwellMin })),
           artisLocation: it._artisLoc || null,
           doorTemp: it._artisDoorTemp || null,
           artisDocs: (it._artisDocs || []).map((d) => ({ bill: d.bill, type: d.type, added: d.created })),

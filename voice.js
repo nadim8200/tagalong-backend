@@ -493,7 +493,18 @@ export function arrivedOnly(it) {
   const h = ((it._times && it._times.statusHistory) || []).filter((x) => /^ARRCONS/i.test(String(x.status || '')) && x.at).pop();
   return h ? Date.parse(h.at) : null;
 }
-const arrivedSaid = (ms, label) => ({ arrived_at_receiver: fmtLocal(ms, label), note: 'TruckMate shows the truck arrived at the receiver — most likely delivered; the delivery is not confirmed in the system yet. Offer to have dispatch confirm.' });
+// A load with several stops: TruckMate says the truck arrived at a receiver, the truck is parked, and the board's next stop is
+// within 5 miles → it's at that stop (Nov 21: truck 2604 at Bay State NJ, Mickleton, answered "not yet delivered, ETA …").
+// leg must be the board's NEXT stop (etas.stops[0]). → arrival time (ms) or null. Pure.
+export function atStopNow(it, leg, next) {
+  if (!leg || leg !== next || leg.miles == null || leg.miles > 5) return null;
+  if (!/^ARRCONS/i.test(String(tripOf(it).status || ''))) return null;
+  const s = (it && it._samsara) || {};
+  if (s.speedMph != null && s.speedMph > 5) return null;
+  const h = ((it._times && it._times.statusHistory) || []).filter((x) => /^ARRCONS/i.test(String(x.status || '')) && x.at).pop();
+  return h ? Date.parse(h.at) : null;
+}
+export const arrivedSaid = (ms, label) => ({ arrived_at_receiver: fmtLocal(ms, label), note: 'TruckMate shows the truck arrived at the receiver — most likely delivered; the delivery is not confirmed in the system yet. Offer to have dispatch confirm.' });
 // Every stop on the board whose customer matches the name — with boxes, cubes and ETA for that stop only.
 // near: also half-heard names (nearScore) — for staff, or to ask a customer "Is that …?". Pure.
 export function customerStops(items, name, etasByTrip = {}, { near = false, staff = false } = {}) {
@@ -520,7 +531,7 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
       // this customer's TruckMate bills at the stop (several customers can share a town, e.g. Chelsea Market)
       const named = bills.filter((b) => { const n = (b.consignee && (b.consignee.name || b.consignee.clientName)) || b.billToName || ''; return nameScore(n, st.customer) >= 0.75 || nameScore(st.customer, n) >= 0.75; });
       const billBoxes = named.length ? named.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
-      const arr = !delivered && !passed ? arrivedOnly(it) : null;
+      const arr = !delivered && !passed ? (arrivedOnly(it) || atStopNow(it, leg, eta && eta.stops && eta.stops[0])) : null;
       out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: st.customer, city, ...(arr ? arrivedSaid(arr, city) : {}), boxes: st.piecesText || (st.pieces != null ? `${st.pieces} boxes` : null), cubes: st.cubes != null ? st.cubes : null, appointment: st.apptDate ? `${st.apptDate}${st.apptTime ? ` ${st.apptTime}` : ''}${st.apptSource === 'handwritten' ? ' (handwritten)' : ''}` : null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bills.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && !arr && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'trip sheet', _sheetBoxes: st.pieces != null ? Number(st.pieces) : null, _billBoxes: billBoxes, _tbBoxes: builderBoxes(it, st.customer, st.city), _split: st.splitNote || null });
     }
     // TruckMate bills (no trip sheet, or names the sheet didn't have) — one line per customer and town, bills added up
@@ -542,7 +553,7 @@ export function customerStops(items, name, etasByTrip = {}, { near = false, staf
       const counted = bs.filter((b) => b.pieces != null);
       const pieces = counted.length ? counted.reduce((n, b) => n + (Number(b.pieces) || 0), 0) : null;
       const cubed = bs.filter((b) => b.cubes != null);
-      const arr = !delivered && !passed ? arrivedOnly(it) : null;
+      const arr = !delivered && !passed ? (arrivedOnly(it) || atStopNow(it, leg, eta && eta.stops && eta.stops[0])) : null;
       out.push({ score, trip, truck: t.powerUnit || null, status: String(t.status || ''), customer: nm, city, stop: null, ...(arr ? arrivedSaid(arr, city) : {}), boxes: pieces != null ? `${pieces} boxes` : null, cubes: cubed.length ? Math.round(cubed.reduce((n, b) => n + Number(b.cubes || 0), 0) * 100) / 100 : null, appointment: null, delivered, ...(delivered ? { delivered_at: deliveredWhen(bs.map((b) => b.actualDelivery)) } : {}), ...(passed ? { truck_already_passed: true, note: 'The truck already drove past this stop — it was most likely delivered; the delivery is not confirmed in the system yet.' } : {}), estimated_arrival: !delivered && !passed && !arr && leg ? fmtLocal(leg.etaMs, leg.label) : null, from: 'TruckMate', _sheetBoxes: null, _billBoxes: pieces, _tbBoxes: null, _split: null });
     }
   }
