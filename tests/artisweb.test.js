@@ -19,10 +19,12 @@ test('Trip Status page → ARTIS ETA, miles, location, GPS time — no driver na
 });
 
 test('read twice a day: 10 AM and 4 PM Miami time, once each', () => {
-  assert.equal(etaSlotDue({}, Date.parse('2026-10-22T13:00:00Z')), null);                   // 9 AM ET
-  assert.equal(etaSlotDue({}, Date.parse('2026-10-22T14:05:00Z')), '2026-10-22|am');
-  assert.equal(etaSlotDue({ done: { '2026-10-22|am': 'x' } }, Date.parse('2026-10-22T15:00:00Z')), null);
-  assert.equal(etaSlotDue({ done: { '2026-10-22|am': 'x' } }, Date.parse('2026-10-22T20:10:00Z')), '2026-10-22|pm');
+  // 1 AM and 10 AM Miami time (Nov 21, 2026)
+  assert.equal(etaSlotDue({}, Date.parse('2026-10-22T04:30:00Z')), null);                   // 12:30 AM ET
+  assert.equal(etaSlotDue({}, Date.parse('2026-10-22T05:05:00Z')), '2026-10-22|night');      // 1:05 AM ET
+  assert.equal(etaSlotDue({ done: { '2026-10-22|night': 'x' } }, Date.parse('2026-10-22T13:00:00Z')), null);   // 9 AM ET: already read tonight
+  assert.equal(etaSlotDue({ done: { '2026-10-22|night': 'x' } }, Date.parse('2026-10-22T14:05:00Z')), '2026-10-22|am');
+  assert.equal(etaSlotDue({ done: { '2026-10-22|night': 'x', '2026-10-22|am': 'x' } }, Date.parse('2026-10-22T20:10:00Z')), null, 'no 4 PM read any more');
 });
 
 function memDb() { const m = new Map(); return { enabled: true, m, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } }; }

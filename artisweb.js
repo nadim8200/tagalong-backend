@@ -2,7 +2,7 @@
 // ARTIS (floridabeauty.com) — the customer-facing Trip Status and Trip Manifest pages, read with the same
 // read-only web login as the Truck Builder (ARTIS_WEB_USER / ARTIS_WEB_PASSWORD in Render). Never changes anything.
 //
-//  • ETAs: twice a day (10 AM and 4 PM Miami time) Jarvis reads ARTIS's own ETA, miles to destination, current
+//  • ETAs: twice a day (1 AM and 10 AM Miami time — Nov 21, 2026; was 10 AM and 4 PM) Jarvis reads ARTIS's own ETA, miles to destination, current
 //    location, GPS ping and arrived / delivered for every customer stop on the active ARTIS runs — shown beside
 //    our ETA on each stop so dispatch can verify both.
 //  • Reefer temps: every hour, only for the loads on the board — ARTIS's current temp / set point / read time per trip.
@@ -86,11 +86,11 @@ export function pickConsignee(list, { name, city = '', state = '' }) {
   hits.sort((a, b) => ((town && b.c.city === town ? 1 : 0) + (st && b.c.state === st ? 0.5 : 0) + b.s) - ((town && a.c.city === town ? 1 : 0) + (st && a.c.state === st ? 0.5 : 0) + a.s));
   return hits[0].c.id || null;
 }
-// When the twice-a-day read is due: 10 AM and 4 PM Miami time, once each per day. Pure.
+// When the twice-a-day read is due: 1 AM and 10 AM Miami time, once each per day. Pure.
 export function etaSlotDue(state = {}, now = Date.now()) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(now)).map((x) => [x.type, x.value]));
   const day = `${p.year}-${p.month}-${p.day}`; const h = Number(p.hour);
-  const slot = h >= 16 ? 'pm' : h >= 10 ? 'am' : null;
+  const slot = h >= 10 ? 'am' : h >= 1 ? 'night' : null;
   return slot && !(state.done || {})[`${day}|${slot}`] ? `${day}|${slot}` : null;
 }
 const ymd = (ms) => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -168,7 +168,7 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
   async function clientIdFor({ name, city, state }) { return name ? pickConsignee(await consignees(), { name, city, state }) : null; }
 
   const TEMPS = `taArtisTemps:${SITE}`;
-  // the twice-a-day read (10 AM, 4 PM ET): ARTIS's ETA for every customer stop on the active ARTIS runs. No temperatures from
+  // the twice-a-day read (1 AM, 10 AM ET): ARTIS's ETA for every customer stop on the active ARTIS runs. No temperatures from
   // ARTIS since Nov 16, 2026 — Thermo King's web service has them live (thermoking.js)
   async function readEtas() {
     const board = getBoard ? await getBoard(SITE) : { trips: [] };
@@ -186,7 +186,21 @@ export function initArtisWeb(app, { requireAuth, requireAdmin = null, db, docs =
       await new Promise((r) => setTimeout(r, 300)); // eslint-disable-line no-await-in-loop -- gentle on ARTIS
     }
     const at = new Date(now()).toISOString();
-    await db.update(KEY, (cur) => ({ ...(cur || {}), at, trips: { ...((cur && cur.trips) || {}), ...trips }, last: { at, customers: want.size, read, errors: errors.slice(0, 10) } }), {});
+    // the boxes / pallets / cubes ARTIS showed the FIRST time it listed a customer on a trip are kept for that trip (Nov 21,
+    // Nadim Tellez: read once per trip, so ARTIS isn't asked again; later reads update the ETAs only)
+    await db.update(KEY, (cur) => {
+      const was = (cur && cur.trips) || {};
+      const merged = { ...was };
+      for (const [trip, byClient] of Object.entries(trips)) {
+        merged[trip] = { ...(was[trip] || {}) };
+        for (const [cid, x] of Object.entries(byClient)) {
+          const prev = (was[trip] || {})[cid];
+          const first = prev && prev.first ? prev.first : { boxes: x.boxes, pallets: x.pallets, cubes: x.cubes, at };
+          merged[trip][cid] = { ...x, first };
+        }
+      }
+      return { ...(cur || {}), at, trips: merged, last: { at, customers: want.size, read, errors: errors.slice(0, 10) } };
+    }, {});
     return { customers: want.size, read, trips: Object.keys(trips).length, errors };
   }
   // the temperature read on its own (hourly until Nov 16 — it opened one Trip Status page per customer every hour and

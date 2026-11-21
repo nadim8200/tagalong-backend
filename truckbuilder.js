@@ -392,8 +392,8 @@ export function initTruckBuilder(app, { requireAdmin, db, sendMail = null, recip
     await db.set(KEY, st);
     return { trucks: rows.length };
   }
-  // 9 AM and 3 PM Miami time — just before the ARTIS ETA reads (10 AM / 4 PM). Pure.
-  const refreshSlot = (st) => { const c = hubClock('America/New_York', now()); const slot = c.hour === 15 ? 'pm' : c.hour === 9 ? 'am' : null; /* only in that hour — one try per slot */ const k = slot ? `${c.date}|${slot}` : null; return k && !((st.refresh && st.refresh.done) || {})[k] ? k : null; };
+  // midnight and 9 AM Miami time — an hour before the ARTIS ETA reads (1 AM / 10 AM, Nov 21 2026; was 9 AM / 3 PM). Pure.
+  const refreshSlot = (st) => { const c = hubClock('America/New_York', now()); const slot = c.hour === 0 ? 'night' : c.hour === 9 ? 'am' : null; /* only in that hour — one try per slot */ const k = slot ? `${c.date}|${slot}` : null; return k && !((st.refresh && st.refresh.done) || {})[k] ? k : null; };
 
   async function tick() {
     if (!enabled()) return;
