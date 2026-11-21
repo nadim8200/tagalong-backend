@@ -10,6 +10,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } 
 import { CHECKINS, validStep } from './checkins.js';
 import { leftCooler, withDetected } from './autodepart.js';
 import { driverStops, cityStep } from './driverstops.js';
+import { roadFacts, truckStopFinder, aheadOf } from './driverroad.js';
 import { KNOWN_YARDS } from './loadsheet.js';
 
 // The driver release a dispatcher submitted on this load (release.js keeps them per trip, newest last) → what the driver
@@ -210,6 +211,8 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
           if (!seen) { const d = leftCooler(it, now()); if (d) { seen = d; departed = await db.update(DEP, (cur) => ({ ...Object.fromEntries(Object.entries(cur || {}).slice(-300)), [l.trip]: (cur || {})[l.trip] || d }), {}); } } // eslint-disable-line no-await-in-loop
         }
         l.checkin = { stops: driverStops(it, { geo }).map(({ zip, tmPlace, cityLabel, ...x }) => x), steps: withDetected(steps, seen) };
+        // on the road: each stop's delivery notes, the trailer temp, the truck's position (driverroad.js)
+        l.road = loads.current.includes(l) ? roadFacts(it, { stops: l.checkin.stops, now: now() }) : null;
       }
       // a release the dispatcher submitted: the driver sees which stops are released, and at which hub
       const rels = (await db.get(`taReleases:${SITE}`, {})) || {};
@@ -219,8 +222,20 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       // the last time the driver was in the app (dispatch sees it on the load), written at most every 5 minutes
       const seen = (((await db.get(APP, {})) || {}).seen || {})[norm(req.driver.code)];
       if (!seen || now() - Date.parse(seen) > 5 * MIN) await db.update(APP, (cur) => ({ ...(cur || {}), seen: { ...((cur || {}).seen || {}), [norm(req.driver.code)]: new Date(now()).toISOString() } }), {});
-      res.json({ name: req.driver.name, driverId: req.driver.code, ...loads });
+      // Jarvis's phone line (Retell): one tap to talk, hands-free over the truck's Bluetooth
+      res.json({ name: req.driver.name, driverId: req.driver.code, ...loads, jarvisPhone: process.env.RETELL_FROM_NUMBER || null });
     } catch (e) { res.status(502).json({ error: 'Could not load your loads. Try again.' }); }
+  });
+  // truck parking near the driver's truck (ahead of it when it's moving)
+  const truckStops = truckStopFinder({ db });
+  app.get('/driver/me/loads/:trip/truckstops', requireDriver, async (req, res) => {
+    const trip = String(req.params.trip);
+    const loads = loadsFor(req.driver.code, await board());
+    if (!loads.current.some((l) => l.trip === trip)) return res.status(404).json({ error: 'That load is not yours.' });
+    const it = (await board()).find((x) => tripNo(x) === trip);
+    const pos = (roadFacts(it, { now: now() }) || {}).pos;
+    if (!pos) return res.json({ places: [], note: 'No GPS from the truck right now.' });
+    try { const r = await truckStops(pos); return res.json({ places: aheadOf(pos, r.places), at: pos.at, note: r.why === 'not set up' ? 'Truck parking search is not set up yet.' : null }); } catch (e) { console.warn('[truckstops]', e.message); if (/Places 403/.test(e.message)) return res.json({ places: [], note: 'Truck parking search is not set up yet.' }); return res.status(502).json({ error: 'Could not look up truck stops. Try again.' }); }
   });
   // a load's own driver page (paperwork, messages): only for a load that's theirs
   app.post('/driver/me/loads/:trip/link', requireDriver, async (req, res) => {
