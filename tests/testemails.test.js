@@ -31,3 +31,9 @@ test('the callback test email: the live template, marked [TEST], with the sample
   assert.match(m.html, /A message for Nadim Tellez\./); assert.match(m.html, /LOAD 627549/); assert.match(m.html, /tel:/);
   assert.equal(m.attachments.length, 2);
 });
+
+test('the wrong-site test email: a sample Tempest load on a Site 2 bill, marked [TEST]', async () => {
+  const { wrongSiteTestEmail } = await import('../testemails.js');
+  const m = wrongSiteTestEmail();
+  assert.match(m.subject, /^\[TEST\] Wrong TruckMate site \| Trip 627610/); assert.match(m.html, /Move bill B181090 to Site 9 \(letter F\)/);
+});

@@ -79,6 +79,7 @@ import { nameScore } from './voice.js';
 import { initMilestones } from './milestones.js';
 import { initCommitments, lateMessage } from './commitments.js';
 import { initLtlTempAlert } from './tempalert.js';
+import { initSiteCheck } from './sitecheck.js';
 import { initDvr } from './dvr.js';
 import { initDriverBreakdowns } from './driverbreakdown.js';
 import { initStopReports } from './stopreports.js';
@@ -1145,6 +1146,8 @@ const pastLoads = initPastLoads({ db, etaReport });
 let brokerFollow = null;
 // LTL reefer 5°F off its set point → email the list (inbound@) + text Nadim (Ronen off by request)
 const ltlTemp = initLtlTempAlert({ db, sendMail: (m) => sendMail(m, { env: process.env }), emails: () => alertRecipients.resolve('ltl_temp'), phones: async () => { const p = await alertRecipients.phones('ltl_temp'); return p.length ? p : ['+13055040711']; }, sendSms: (to, text) => rc.sendSms('__shared', { to, text }) });
+// a load whose rate con says Tempest / Florida Beauty but whose bill is in the other TruckMate site (Ronen, Nov 20): emailed once per trip
+initSiteCheck({ db, getBoard: (site) => truckmate.buildBoard(site), sendMail: (m) => sendMail(m, { env: process.env }), emails: () => alertRecipients.resolve('wrong_site') });
 const commitments = initCommitments(app, { requireAuth: requireDispatch, db, sendMail: (m) => sendMail(m, { env: process.env }), emails: () => alertRecipients.resolve('late_commitment'), phones: () => alertRecipients.phones('late_commitment'), sendSms: (to, text) => rc.sendSms('__shared', { to, text }) });
 const artis = initArtis(app, { requireAuth: requireDispatch, requireAdmin: requireCompanyAdmin, db, sendMail: (m) => sendMail(m, { env: process.env }), recipients: (k) => alertRecipients.resolve(k), env: process.env });
 // Missing boxes a customer asked about → email the "Customer asked about a load with missing boxes" list

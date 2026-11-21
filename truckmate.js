@@ -17,6 +17,7 @@ import { applyUnitAliases } from './units.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { loadTarget, checkReading } from './temppolicy.js';
 import { traceCheck } from './tracecheck.js';
+import { wrongSite } from './sitecheck.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -610,6 +611,9 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
           const t = (item && item.trip) || item || {};
           const rc = rcs[String(t.tripNumber)];
           if (rc) item._ratecon = rc;
+          // a Tempest rate con on a Site 2 (B) bill, or a Florida Beauty one on Site 9 (F): entered in the wrong site
+          const ws = rc ? wrongSite(item) : null;
+          if (ws) item._siteWarn = ws;
           // handling-instruction sign-offs (keyed by instruction text)
           const ck = checks[String(t.tripNumber)];
           if (ck) item._rccheck = ck;

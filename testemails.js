@@ -3,12 +3,14 @@
 // them before real ones go out: the breakdown report, a breakdown update, missing boxes at a stop, and a problem at a stop.
 // Nothing is stored: no report, no road call, no push, no alarm. Admins only.
 //   POST /admin/test-emails/driver-app   → { sent: [subjects] }
+//   POST /admin/test-emails/wrong-site   → a Wrong TruckMate site email (sample Tempest rate con on a Site 2 bill)
 //   POST /admin/test-emails/callback     → a callback request email (sample driver on load 627549), same template as the live ones
 // ---------------------------------------------------------------
 import jpeg from 'jpeg-js';
 import { cleanReport, breakdownEmail } from './driverbreakdown.js';
 import { cleanStopReport, stopEmail } from './stopreports.js';
 import { helpEmail } from './helpdesk.js';
+import { wrongSite, siteEmail } from './sitecheck.js';
 
 const TO = 'ntellez@floridabeauty.us';
 
@@ -55,7 +57,18 @@ export function callbackTestEmail() {
   return { ...m, subject: `[TEST] ${m.subject}` };
 }
 
+// A Wrong TruckMate site email with a sample Tempest load (Allen Lund 8702578, truck 4562) on a Site 2 bill. Pure.
+export function wrongSiteTestEmail() {
+  const w = wrongSite({ trip: { tripNumber: '627610', powerUnit: '4562' }, freightBills: [{ billNumber: 'B181090', siteId: 'SITE2', createdTimestamp: '2026-11-21T09:00:00' }],
+    _ratecon: { broker: 'Allen Lund Company', loadNumber: '8702578', summary: 'Tempest Transportation Inc load 8702578 (sample)' } });
+  return siteEmail(w, { test: true });
+}
+
 export function initTestEmails(app, { requireAdmin, sendMail }) {
+  app.post('/admin/test-emails/wrong-site', requireAdmin, async (req, res) => {
+    try { const m = wrongSiteTestEmail(); await sendMail({ to: [TO], ...m }); return res.json({ ok: true, to: TO, sent: [m.subject] }); }
+    catch (e) { return res.status(502).json({ error: e.message }); }
+  });
   app.post('/admin/test-emails/callback', requireAdmin, async (req, res) => {
     try { const m = callbackTestEmail(); await sendMail({ to: [TO], ...m }); return res.json({ ok: true, to: TO, sent: [m.subject] }); }
     catch (e) { return res.status(502).json({ error: e.message }); }
