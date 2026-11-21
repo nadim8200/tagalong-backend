@@ -135,11 +135,11 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
   const puWait = waitAt({ arrivedMs: shipAt, leftMs: loadedAt, appt: pickups[0] ? apptMs({ dateIso: pickups[0].dateIso, text: pickups[0].time, dayMs: shipAt }) : null, clock: clocks[`${trip}:c:at-shipper`] });
   const puExtra = (i) => (i === 0 && puWait.wait ? { wait: puWait.wait, waitAuto: true, waitFrom: puWait.from, appt: puWait.appt } : {});
   if (pickups.length) {
-    pickups.forEach((x, i) => out.push(line({ ms: (i === 0 ? puAt : null) || dayMs(x.dateIso), trip, zip: x.zip || '', place: where(x), act: 'PU', fe: 'E', trl: S(t.trailer, 20), bill: puBill, auto: true, ...puExtra(i),
+    pickups.forEach((x, i) => out.push(line({ key: `${trip}|PU|${x.zip || x.city || i}`, ms: (i === 0 ? puAt : null) || dayMs(x.dateIso), trip, zip: x.zip || '', place: where(x), act: 'PU', fe: 'E', trl: S(t.trailer, 20), bill: puBill, auto: true, ...puExtra(i),
       ...(i === 0 && bonus ? { bonus: 'dispatch', bonusAmt: bonus.amount, bonusFrom: 'dispatch', comment: bonus.text } : {}) })));
   } else {
     const origin = S(t.origZoneDesc || t.origin || 'Miami Terminal', 60);
-    out.push(line({ ms: puAt, trip, zip: isMiami(origin) ? HOME_ZIP : (zipOf(t.origZoneDesc || t.origin) || ''), place: origin.replace(/,?\s*\d{5}(-\d{4})?\s*$/, ''), act: 'PU', fe: 'E', trl: S(t.trailer, 20), bill: puBill, auto: true, ...puExtra(0),
+    out.push(line({ key: `${trip}|PU|origin`, ms: puAt, trip, zip: isMiami(origin) ? HOME_ZIP : (zipOf(t.origZoneDesc || t.origin) || ''), place: origin.replace(/,?\s*\d{5}(-\d{4})?\s*$/, ''), act: 'PU', fe: 'E', trl: S(t.trailer, 20), bill: puBill, auto: true, ...puExtra(0),
       ...(bonus ? { bonus: 'dispatch', bonusAmt: bonus.amount, bonusFrom: 'dispatch', comment: bonus.text } : {}) }));
   }
   let stops = [];
@@ -154,15 +154,15 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
       const wait = w.wait;
       const bills = (st.bills || []).map((b) => b.bill).filter(Boolean);
       const boxes = st.boxes != null ? `${st.boxes}` : '';
-      out.push(line({ ms: del || arr, trip, zip: st.zip || zipOf(st.key) || '', place: [S(st.place, 40), S(st.name, 50)].filter(Boolean).join(' · '), act: 'DEL', pallets: st.pallets || null, fe: 'F', bill: bills.join(' / '), boxes, wait, waitAuto: wait != null, waitFrom: w.from, appt: w.appt, auto: true }));
+      out.push(line({ key: `${trip}|DEL|${st.key}`, ms: del || arr, trip, zip: st.zip || zipOf(st.key) || '', place: [S(st.place, 40), S(st.name, 50)].filter(Boolean).join(' · '), act: 'DEL', pallets: st.pallets || null, fe: 'F', bill: bills.join(' / '), boxes, wait, waitAuto: wait != null, waitFrom: w.from, appt: w.appt, auto: true }));
     }
   } else {
-    for (const x of sheetStops.filter((y) => y.kind === 'delivery')) out.push(line({ ms: dayMs(x.dateIso), trip, zip: x.zip || '', place: where(x), act: 'DEL', fe: 'F', bill: sheet.bill || '', auto: true }));
+    for (const x of sheetStops.filter((y) => y.kind === 'delivery')) out.push(line({ key: `${trip}|DEL|${x.zip || x.city}`, ms: dayMs(x.dateIso), trip, zip: x.zip || '', place: where(x), act: 'DEL', fe: 'F', bill: sheet.bill || '', auto: true }));
   }
   return out;
 }
 function line(x) {
-  return { date: mmdd(x.ms), at: x.ms ? new Date(x.ms).toISOString() : null, _ms: x.ms || null, trip: x.trip || '', zip: x.zip || '', place: x.place || '', act: x.act || '', fe: x.fe || '', boxes: x.boxes || '', so: '', ref: '', trf: '', trl: x.trl || '', bill: x.bill || '',
+  return { key: x.key || null, date: mmdd(x.ms), at: x.ms ? new Date(x.ms).toISOString() : null, _ms: x.ms || null, trip: x.trip || '', zip: x.zip || '', place: x.place || '', act: x.act || '', fe: x.fe || '', boxes: x.boxes || '', so: '', ref: '', trf: '', trl: x.trl || '', bill: x.bill || '',
     pallets: x.pallets || null, reimb: '', wait: x.wait != null ? x.wait : null, waitAuto: !!x.waitAuto, waitFrom: x.waitFrom ? new Date(x.waitFrom).toISOString() : null, appt: x.appt ? new Date(x.appt).toISOString() : null, bonus: x.bonus || 'none', bonusAmt: x.bonusAmt || '', bonusFrom: x.bonusFrom || null, comment: x.comment || '', auto: !!x.auto };
 }
 
@@ -177,6 +177,9 @@ export function cleanLines(lines = []) {
       at: /^\d{4}-\d{2}-\d{2}T/.test(String(r.at || '')) ? S(r.at, 30) : null, pallets: Number(r.pallets) > 0 ? Math.min(Math.round(Number(r.pallets)), 60) : null,
       waitFrom: /^\d{4}-\d{2}-\d{2}T/.test(String(r.waitFrom || '')) ? S(r.waitFrom, 30) : null, appt: /^\d{4}-\d{2}-\d{2}T/.test(String(r.appt || '')) ? S(r.appt, 30) : null,
       bonus: BONUS_KINDS.includes(r.bonus) ? r.bonus : 'none', bonusAmt: S(r.bonusAmt, 12).replace(/[^\d.]/g, ''), bonusFrom: r.bonusFrom === 'dispatch' ? 'dispatch' : null, comment: S(r.comment, 300), auto: !!r.auto, detected: r.detected === 'gps' ? 'gps' : null,
+      key: r.key ? S(r.key, 120) : null, edited: !!r.edited,   // the app's line it came from; the driver changed it
+      // miles payroll typed in for this line (instead of the mile calculator's)
+      miOver: r.miOver != null && r.miOver !== '' && Number.isFinite(Number(r.miOver)) && Number(r.miOver) >= 0 ? Math.min(Math.round(Number(r.miOver)), 5000) : null,
     };
   });
 }
@@ -202,7 +205,7 @@ export function payrollEmail(log, { week, miles = [], odometer = null, docs = []
   const money = (v) => (v ? `$${Number(v).toFixed(2)}` : '');
   let lo = 0; let em = 0; let wait = 0; let reimb = 0; let bonuses = 0;
   const body = rows.map((r, i) => {
-    const m = miles[i]; if (m != null && r.act !== 'CM') { if (r.fe === 'F') lo += m; else em += m; }
+    const m = r.miOver != null ? r.miOver : miles[i]; if (m != null && r.act !== 'CM') { if (r.fe === 'F') lo += m; else em += m; }
     wait += r.wait || 0; reimb += Number(r.reimb) || 0; if (r.bonus && r.bonus !== 'none') bonuses += 1;
     const pu = r.act === 'PU' ? r.place : ''; const dr = r.act && r.act !== 'PU' && r.act !== 'CM' ? r.place : '';
     const bonus = r.bonus && r.bonus !== 'none' ? `${BONUS_LABEL[r.bonus] || 'Bonus'}${r.bonusAmt ? ` $${r.bonusAmt}` : ''}` : '';
@@ -230,6 +233,26 @@ ${docs.length ? `<h3 style="margin:14px 0 4px">Paperwork the driver scanned this
 ${log.signature ? '<p style="font-size:13px">Driver\'s signature:<br><img src="cid:signature" alt="signature" style="height:60px;border-bottom:1px solid #14213d"></p>' : ''}
 <p style="font-size:12px;color:#6b7a8f">Signed in the driver app ${esc(log.submittedAt || '')}.</p></div>`;
   return { subject: `Trip Log · ${h.name || 'Driver'} (${h.id || ''}) · Week of ${week.start}`, html, totals: { loaded: lo, empty: em, wait, reimb, bonuses, expenses: expTotal } };
+}
+
+// ---------- the open sheet keeps filling itself ----------
+// What the driver saved + what the app knows now: a new stop, trip or GPS move is added in time order (marked new); a line the
+// app made that the driver didn't change is brought up to date (a check-in's date, the wait); what the driver changed stays as
+// they left it; what they deleted doesn't come back (dismissed). Pure.
+export function mergeSheet(saved = [], fresh = [], dismissed = []) {
+  const gone = new Set(dismissed);
+  const byKey = new Map(fresh.filter((l) => l.key).map((l) => [l.key, l]));
+  const have = new Set(saved.map((l) => l.key).filter(Boolean));
+  const out = saved.map((l) => (l.key && !l.edited && byKey.has(l.key) ? { ...byKey.get(l.key), edited: false } : l));
+  const t = (l) => { const ms = Date.parse(l.at || ''); return Number.isFinite(ms) ? ms : null; };
+  for (const f of fresh) {
+    if (!f.key || have.has(f.key) || gone.has(f.key)) continue;
+    const ms = t(f); const row = { ...f, added: true };
+    let at = out.length;
+    if (ms != null) { const k = out.findIndex((l) => t(l) != null && t(l) > ms); if (k >= 0) at = k; }
+    out.splice(at, 0, row); have.add(f.key);
+  }
+  return out;
 }
 
 // ---------- moves nobody wrote down (Samsara GPS) ----------
@@ -268,7 +291,7 @@ export function missingMoves(lines = [], stays = [], { near = 12, max = 8 } = {}
     .slice(0, max)
     .map((s) => {
       const hours = Math.round(((s.to - s.from) / 3600000) * 10) / 10;
-      return { ...line({ ms: s.from, zip: s.zip || (isMiami(s.place) ? HOME_ZIP : ''), place: S(String(s.place || '').replace(/,?\s*USA$/i, ''), 90), act: 'EMPTY', fe: 'E' }),
+      return { ...line({ key: `gps|${s.zip || ''}|${new Date(s.from).toISOString().slice(0, 13)}`, ms: s.from, zip: s.zip || (isMiami(s.place) ? HOME_ZIP : ''), place: S(String(s.place || '').replace(/,?\s*USA$/i, ''), 90), act: 'EMPTY', fe: 'E' }),
         detected: 'gps', comment: `GPS: truck stopped here ${hours} h — confirm what you did or delete this line` };
     });
 }
@@ -282,7 +305,7 @@ export function reviewTotals(log, pay = {}, miles = null) {
   const where = (r, i) => `Line ${i + 1}${r.date ? ` (${r.date})` : ''}${r.trip ? ` trip ${r.trip}` : ''}${r.zip ? ` ZIP ${r.zip}` : ''}`;
   let prev = null;
   lines.forEach((r, i) => {
-    const p = pl[i] || {}; const m = Number(mi[i]);
+    const p = pl[i] || {}; const m = Number(r.miOver != null ? r.miOver : mi[i]);
     if (r.act !== 'CM' && Number.isFinite(m) && m > 0) {
       if (p.move) { if (r.fe === 'F') paid.loadedMi += m; else paid.emptyMi += m; } else unpaid.push(`${where(r, i)}: ${m} mi ${r.fe === 'F' ? 'loaded' : 'empty'}${prev ? ` from ${prev}` : ''}`);
     }
@@ -443,11 +466,19 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       const id = String(req.query.id || req.query.week || OPEN);
       const saved = all[id];
       if (id !== OPEN && !saved) return res.status(404).json({ error: 'That sheet is not here.' });
-      const log = saved ? { ...saved, signature: saved.signatureId || saved.signature ? true : undefined, coSignature: saved.coSignatureId ? true : undefined } : await prefill(req.driver);
+      let log = saved ? { ...saved, signature: saved.signatureId || saved.signature ? true : undefined, coSignature: saved.coSignatureId ? true : undefined } : await prefill(req.driver);
+      // the open sheet keeps filling itself, whatever the driver changed (their changes stay)
+      if (saved && id === OPEN) {
+        const fresh = await prefill(req.driver);
+        const auto = saved.autoHead || {};
+        const head = { ...saved.head };
+        for (const k of ['co', 'coid', 'truck', 'trailer', 'bod', 'eod']) if (!head[k] || head[k] === auto[k]) head[k] = fresh.head[k] || head[k];
+        log = { ...log, head, lines: mergeSheet(saved.lines || [], fresh.lines.map(({ _ms, ...x }) => x), saved.dismissed || []), odometer: fresh.odometer || saved.odometer, autoHead: fresh.head };
+      } else if (!saved) log = { ...log, autoHead: log.head };
       const period = log.period || periodOf(log.lines);
       const docs = (await docsFor({ ...log, period })).map(({ data, ...d }) => d);
       const partner = id === OPEN ? partnerNote((await turnedIn(req.driver.code)).byPartner.filter((x) => now() - Date.parse(x.submittedAt) < 14 * DAY)) : null;
-      return res.json({ id, week: { ...period, id }, expenses: [], ...log, period, docs, partner });
+      return res.json({ id, week: { ...period, id }, expenses: [], ...log, period: log.period && saved && id !== OPEN ? log.period : periodOf(log.lines), docs, partner });
     } catch (e) { console.warn('[triplog]', e.message); return res.status(502).json({ error: 'Could not load your trip log. Try again.' }); }
   });
   // the driver's sheets: the open one, then the ones turned in (newest first)
@@ -465,8 +496,16 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
   });
   app.put('/driver/me/log', requireDriver, async (req, res) => {
     const b = req.body || {}; const lines = cleanLines(b.lines);
-    const log = { head: cleanHead(b.head), lines, expenses: cleanExpenses(b.expenses), odometer: odoOf(b.odometer), status: 'draft', savedAt: new Date(now()).toISOString(), period: periodOf(lines) };
-    await db.update(LOGS(req.driver.code), (cur) => keep(cur, OPEN, log), {});
+    const log = { head: cleanHead(b.head), lines, expenses: cleanExpenses(b.expenses), odometer: odoOf(b.odometer), status: 'draft', savedAt: new Date(now()).toISOString(), period: periodOf(lines),
+      autoHead: b.autoHead && typeof b.autoHead === 'object' ? cleanHead(b.autoHead) : null };
+    await db.update(LOGS(req.driver.code), (cur) => {
+      const prev = (cur || {})[OPEN] || {};
+      // a line the app made that the driver deleted: don't put it back
+      const kept = new Set(lines.map((l) => l.key).filter(Boolean));
+      const sent = (Array.isArray(b.dismissed) ? b.dismissed : []).map((k) => S(k, 120)).filter((k) => k && !kept.has(k));
+      const dismissed = [...new Set([...(prev.dismissed || []), ...sent, ...(prev.lines || []).map((l) => l.key).filter((k) => k && !kept.has(k))])].slice(-300);
+      return keep(cur, OPEN, { ...log, autoHead: log.autoHead || prev.autoHead || null, dismissed });
+    }, {});
     return res.json({ ok: true, savedAt: log.savedAt });
   });
   // a receipt photo for an expense (kept with the driver's paperwork) → { id }
@@ -602,6 +641,39 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       }
       const { signature, ...rest } = log;
       return res.json({ week, id: wk, code, ...rest, miles, signature: (await signatureOf(log)) || signature || null, coSignature: await imageOf(log.coSignatureId), docs });
+    });
+    // payroll works on the sheet itself: changes lines, adds or deletes them, adds or takes away a bonus, fixes the header.
+    // The driver's own lines are kept (driverLines, the first time), and who changed it and when
+    app.put('/truckmate/payroll/logs/:code/:week', requireAuth, async (req, res) => {
+      if (!gate(req, res)) return undefined;
+      const code = codeOf(req.params.code); const wk = String(req.params.week); const b = req.body || {};
+      const by = (req.user && (req.user.name || req.user.email)) || 'payroll';
+      const lines = cleanLines(b.lines);
+      if (!lines.length) return res.status(400).json({ error: 'The sheet needs at least one line.' });
+      const miles = Array.isArray(b.miles) ? b.miles.slice(0, MAX_LINES).map((m) => (m != null && Number.isFinite(Number(m)) ? Math.round(Number(m)) : null)) : null;
+      let out = null;
+      await db.update(LOGS(code), (cur) => {
+        const c = { ...(cur || {}) }; const l = c[wk]; if (!l) return c;
+        out = { ...l, lines, ...(b.head ? { head: { ...cleanHead(b.head), note: (l.head || {}).note || '' } } : {}), ...(b.expenses ? { expenses: cleanExpenses(b.expenses) } : {}),
+          miles: miles && miles.length === lines.length ? miles : l.miles, driverLines: l.driverLines || l.lines, driverHead: l.driverHead || l.head,
+          payrollEdits: [...(l.payrollEdits || []), { by, at: new Date(now()).toISOString() }].slice(-50) };
+        c[wk] = out; return c;
+      }, {});
+      if (!out) return res.status(404).json({ error: 'No trip log for that week.' });
+      return res.json({ ok: true, lines: out.lines, miles: out.miles, payrollEdits: out.payrollEdits });
+    });
+    // the miles from each ZIP to the next, for payroll's changes (mile calculator, cached)
+    app.post('/truckmate/payroll/miles', requireAuth, async (req, res) => {
+      if (!gate(req, res)) return undefined;
+      const legs = (Array.isArray((req.body || {}).legs) ? req.body.legs : []).slice(0, 80);
+      const out = [];
+      for (const l of legs) {
+        const [a, b] = (Array.isArray(l) ? l : []).map((z) => (String(z || '').match(/^\d{5}$/) || [null])[0]);
+        if (!a || !b) { out.push(null); continue; }
+        if (a === b) { out.push(0); continue; }
+        try { const [p, q] = await Promise.all([zipPoint(a), zipPoint(b)]); out.push(p && q ? await miles2(p, q) : null); } catch { out.push(null); } // eslint-disable-line no-await-in-loop
+      }
+      return res.json({ miles: out });
     });
     // payroll saves what's paid; anything not checked has to be confirmed as not paid
     app.post('/truckmate/payroll/logs/:code/:week/review', requireAuth, async (req, res) => {

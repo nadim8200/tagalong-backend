@@ -175,7 +175,7 @@ export async function tripLogPdf(log, { signature = null, coSignature = null } =
   let prev = null; let lo = 0; let em = 0; let wait = 0;
   (log.lines || []).forEach((r, i) => {
     if (y < M + 120) return;
-    const m = mi[i]; if (m != null && r.act !== 'CM') { if (r.fe === 'F') lo += m; else em += m; }
+    const m = r.miOver != null ? r.miOver : mi[i]; if (m != null && r.act !== 'CM') { if (r.fe === 'F') lo += m; else em += m; }
     wait += r.wait || 0;
     const p2 = pay ? pay[i] || {} : null;
     const paidBits = p2 ? [m && r.act !== 'CM' ? (p2.move ? 'mi Y' : 'mi N') : '', r.wait ? (p2.wait ? 'wait Y' : 'wait N') : '', r.bonus && r.bonus !== 'none' ? (p2.bonus ? 'bonus Y' : 'bonus N') : ''].filter(Boolean).join(' ') : '';

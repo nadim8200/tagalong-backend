@@ -227,3 +227,72 @@ test('a move nobody wrote down is added while empty — never while loaded, neve
   assert.deepEqual(add.map((a) => [a.zip, a.act, a.fe, a.detected]), [['08876', 'EMPTY', 'E', 'gps'], ['33152', 'EMPTY', 'E', 'gps']]);
   assert.match(add[0].comment, /GPS: truck stopped here 2 h/);
 });
+
+test('payroll changes the sheet itself: lines, a bonus added or taken away; the driver\'s own lines are kept', async () => {
+  const { initTripLog } = await import('../triplog.js');
+  const h = harness();
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [], tripsOf: async () => [], loadsFor: () => ({ current: [], next: [] }), env: {}, now: () => Date.parse('2026-11-23T15:00:00Z'), mail: async () => {} });
+  const driverLines = [{ trip: '1', zip: '33152', act: 'PU', fe: 'E', bonus: 'dispatch', bonusAmt: '70' }, { trip: '1', zip: '07011', act: 'DEL', fe: 'F' }];
+  h.kv['taTripLog:florida-beauty:986'] = { 'x1': { status: 'submitted', head: { name: 'Ferney Urrego', note: 'Thanks' }, lines: driverLines, miles: [null, 1290] } };
+  const darlene = { role: 'dispatcher', payroll: true, name: 'Darlene' };
+  assert.equal((await h.call('PUT /truckmate/payroll/logs/:code/:week', { user: { role: 'dispatcher' }, params: { code: '986', week: 'x1' }, body: { lines: driverLines } })).status, 403);
+  const r = await h.call('PUT /truckmate/payroll/logs/:code/:week', { user: darlene, params: { code: '986', week: 'x1' },
+    body: { lines: [{ ...driverLines[0], bonus: 'none', bonusAmt: '' }, { ...driverLines[1], bonus: 'holiday', bonusAmt: '100' }, { zip: '33152', act: 'EMPTY', fe: 'E' }], miles: [null, 1290, 1280], head: { name: 'Ferney Urrego', truck: '4504', note: 'changed?' } } });
+  assert.equal(r.status, 200);
+  const l = h.kv['taTripLog:florida-beauty:986'].x1;
+  assert.deepEqual(l.lines.map((x) => [x.zip, x.bonus, x.bonusAmt]), [['33152', 'none', ''], ['07011', 'holiday', '100'], ['33152', 'none', '']]);
+  assert.deepEqual(l.miles, [null, 1290, 1280]);
+  assert.equal(l.driverLines[0].bonus, 'dispatch');           // what the driver turned in is kept
+  assert.equal(l.head.note, 'Thanks');                        // the driver's note stays the driver's
+  assert.equal(l.payrollEdits[0].by, 'Darlene');
+});
+
+test('miles payroll types in replace the calculator\'s for pay', async () => {
+  const { reviewTotals, cleanLines } = await import('../triplog.js');
+  const [a, b] = cleanLines([{ zip: '33152', act: 'PU', fe: 'E' }, { zip: '07011', act: 'DEL', fe: 'F', miOver: '1301' }]);
+  assert.equal(b.miOver, 1301); assert.equal(a.miOver, null);
+  assert.equal(reviewTotals({ lines: [a, b], miles: [null, 1290] }, { lines: [{}, { move: true }] }).paid.loadedMi, 1301);
+});
+
+test('the open sheet keeps filling itself: new stops added in order, untouched lines brought up to date, the driver\'s changes and deletions kept', async () => {
+  const { mergeSheet } = await import('../triplog.js');
+  const saved = [
+    { key: '1|PU|origin', at: '2026-11-19T20:00:00Z', zip: '33152', act: 'PU' },
+    { key: '1|DEL|CLIFTON', at: null, zip: '07011', act: 'DEL', wait: null },                       // not changed: will get its check-in
+    { key: '1|DEL|NEWARK', at: '2026-11-20T15:00:00Z', zip: '07105', act: 'DEL', so: 'Short 2', edited: true },   // changed by the driver
+    { key: null, at: '2026-11-20T18:00:00Z', zip: '08505', act: 'EMPTY', comment: 'truck wash' },  // added by hand
+  ];
+  const fresh = [
+    { key: '1|PU|origin', at: '2026-11-19T20:00:00Z', zip: '33152', act: 'PU' },
+    { key: '1|DEL|CLIFTON', at: '2026-11-20T13:00:00Z', zip: '07011', act: 'DEL', wait: 40 },
+    { key: '1|DEL|NEWARK', at: '2026-11-20T15:00:00Z', zip: '07105', act: 'DEL', so: '' },
+    { key: '1|DEL|WINDSOR', at: '2026-11-20T21:00:00Z', zip: '06074', act: 'DEL' },                // new stop
+    { key: 'gps|02110|2026-11-21T01', at: '2026-11-21T01:00:00Z', zip: '02110', act: 'EMPTY' },    // deleted by the driver before
+    { key: '2|PU|02110', at: '2026-11-20T16:00:00Z', zip: '17201', act: 'PU' },                    // new, earlier than the hand-added line
+  ];
+  const m = mergeSheet(saved, fresh, ['gps|02110|2026-11-21T01']);
+  assert.deepEqual(m.map((l) => [l.zip, !!l.added]), [['33152', false], ['07011', false], ['07105', false], ['17201', true], ['08505', false], ['06074', true]]);
+  assert.equal(m[1].wait, 40);             // the check-in came in
+  assert.equal(m[2].so, 'Short 2');         // the driver's change stays
+});
+
+test('the open sheet route: a saved, edited sheet still gets the new stop; a deleted app line stays deleted', async () => {
+  const { initTripLog } = await import('../triplog.js');
+  const h = harness();
+  const items = [{ trip: { tripNumber: 627549, driver: '986', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G1', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }, { billNumber: 'G2', endZoneDescription: 'NEWARK, NJ, 07105', pieces: 64 }] }];
+  h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' }, 'arrived:CLIFTON, NJ, 07011': { at: '2026-11-20T13:00:00Z' } } } };
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => items, tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }), env: {}, now: () => Date.parse('2026-11-20T23:00:00Z'), mail: async () => {} });
+  const me = { code: '986', name: 'Ferney Urrego' };
+  const first = (await h.call('GET /driver/me/log', { driver: me, query: {} })).body;
+  const lines = first.lines.map((l) => (l.zip === '07011' ? { ...l, so: 'Short 1', edited: true } : l)).filter((l) => l.zip !== '07105');   // changed one, deleted one
+  await h.call('PUT /driver/me/log', { driver: me, body: { head: first.head, lines, expenses: [], dismissed: first.lines.filter((l) => l.zip === '07105').map((l) => l.key) } });
+  // a new check-in later: Newark delivered (still deleted by the driver), and Clifton's change stays
+  h.kv['taDriverCheckins:florida-beauty'][627549].steps['delivered:CLIFTON, NJ, 07011'] = { at: '2026-11-20T17:30:00Z' };
+  const again = (await h.call('GET /driver/me/log', { driver: me, query: {} })).body;
+  assert.deepEqual(again.lines.map((l) => l.zip), ['33152', '07011']);
+  assert.equal(again.lines[1].so, 'Short 1');
+  // a stop added to the trip in TruckMate shows up on the saved sheet
+  items[0].freightBills.push({ billNumber: 'G3', endZoneDescription: 'NORWALK, CT, 06851', pieces: 62 });
+  const third = (await h.call('GET /driver/me/log', { driver: me, query: {} })).body;
+  assert.ok(third.lines.some((l) => l.zip === '06851' && l.added));
+});
