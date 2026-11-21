@@ -141,7 +141,7 @@ test('saved on the trip, sent by app and / or text, read from an email, the driv
   const pv = await call('POST /truckmate/loadsheet/preview', { text: THREE });
   assert.equal(pv.body.trip, '626282'); assert.equal(pv.body.onBoard, true); assert.equal(db.s['taLoadSheets:florida-beauty'], undefined, 'preview saves nothing');
   const r = await call('POST /truckmate/loadsheet', { text: THREE, via: ['app', 'text'] });
-  assert.equal(r.body.trip, '626282'); assert.deepEqual(sent, [['app', '626282', '-----']]); assert.equal(r.body.sent.text.skipped, 'texting not live yet');
+  assert.equal(r.body.trip, '626282'); assert.deepEqual(sent, [['app', '626282', '🔁 FR']], 'the release is said first (a push shows only the start)'); assert.equal(r.body.sent.text.skipped, 'texting not live yet');
   assert.equal((await ls.get('626282')).by, 'Haraft');
   assert.equal(await ls.fromEmail('x', { text: 'no', from: {} }), null);
   assert.equal((await ls.fromEmail('x', { text: ONE, from: { name: 'Haraft J Sierra' } })).by, 'Haraft J Sierra (email)');
@@ -231,4 +231,19 @@ test('TruckMate first: the shipper and each consignee (several receivers) when T
   const s = sheetFromRateCon({ loadNumber: 'L1', pickups: [{ name: 'BUDDIG (RATE CON NAME)', city: 'MUNSTER', state: 'IN', instructions: ['Check in at gate 2'] }], deliveries: [] }, { trip: '626282', item });
   assert.equal(s.stops[0].name, 'CARL BUDDIG & CO', 'TruckMate\'s name wins'); assert.deepEqual(s.stops[0].other, ['Check in at gate 2'], 'the rate con\'s instructions still come');
   assert.equal(s.stops.filter((x) => x.kind === 'delivery').length, 2, 'both receivers');
+});
+
+test('what the driver gets starts with the release and the bonus (a push shows only the start); a team gets the text on both phones (Nov 21)', async () => {
+  const { sendHeadline } = await import('../loadsheet.js');
+  const sh = parseDispatchMessage(`TRIP#: 626282\nBONUS: $75 SHORT RUN\n---------------------------------------------\nPICK UP:\nCARL BUDDIG & CO\nMUNSTER, IN 46321\n---------------------------------------------\nDELIVERY #1:\nWALMART DC# 6055\nMONROE, GA 30655\n***PAID RELEASE @ MIAMI YARD***\n---------------------------------------------\nDELIVERY #2:\nWALMART DC# 8851\nCOCOA, FL 32926\n---------------------------------------------`);
+  assert.equal(sendHeadline(sh), '🔁 PAID RELEASE · Miami yard (after delivery #1) · 💵 BONUS $75');
+  assert.equal(sendHeadline(parseDispatchMessage(ONE)), null);
+  const db = mem(); const routes = {}; const texts = [];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put: (p, ...h) => { routes[`PUT ${p}`] = h; } };
+  initLoadSheets(app, { requireAuth: (req, res, next) => next(), db, getBoard: async () => ({ trips: [] }), sendText: async (site, trip, body, by, which) => { texts.push([which, body.split('\n')[0]]); return which === 1 ? { sent: true, to: '3055550101' } : { sent: true, to: '3055550102' }; } });
+  const res = { status(c) { this.c = c; return this; }, json(j) { this.body = j; } };
+  await routes['POST /truckmate/loadsheet'][1]({ body: { text: THREE, trip: '626282', via: ['text'] }, params: {}, user: { name: 'Ana' } }, res);
+  assert.deepEqual(texts.map((x) => x[0]), [1, 2]);
+  assert.match(texts[0][1], /FREE RELEASE · Bartow yard \(after delivery #1\)/);
+  assert.deepEqual(res.body.sent.text.to, ['3055550101', '3055550102']);
 });

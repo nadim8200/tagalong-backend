@@ -114,6 +114,25 @@ export function parseDispatchMessage(text) {
   if (!(sheet.trip || sheet.bill) || !sheet.stops.length) return null;
   return sheet;
 }
+// The first line of what the driver gets (Nov 21, 2026): a push shows only the start of a message, so a release and a bonus
+// written further down are said up top too. "🔁 FREE RELEASE · Bartow yard (after delivery #1) · 💵 BONUS $75". Pure. → string | null
+export function sendHeadline(sheet) {
+  if (!sheet) return null;
+  const bits = [];
+  const r = sheet.release;
+  if (r) {
+    const drops = (sheet.stops || []).map((x, i) => ({ ...x, i })).filter((x) => x.kind === 'delivery');
+    const firstYard = drops.find((x) => (r.stops || []).includes(x.i));
+    const done = firstYard ? drops.filter((x) => x.i < firstYard.i).length : drops.length;
+    bits.push(`🔁 ${r.type === 'paid' ? 'PAID' : 'FREE'} RELEASE · ${yardLabel(r.yard)}${done ? ` (after delivery #${done})` : ' (before the deliveries)'}`);
+  }
+  const notes = [...(sheet.notes || []), ...(sheet.stops || []).flatMap((x) => x.notesAfter || [])];
+  const b = notes.find((n) => /\b(bonus|bono)\b/i.test(n));
+  const amt = b && (b.match(/\$\s*(\d{1,4}(?:\.\d{2})?)/) || [])[1];
+  if (amt) bits.push(`💵 BONUS $${amt}`);
+  return bits.length ? bits.join(' · ') : null;
+}
+
 // "FREE RELEASE BARTOW YARD", "PAID RELEASE @ MIAMI YARD" → { type, yard }. "NO RELEASE" isn't one. Pure.
 export function readRelease(line) {
   const m = clean(line).match(/\b(FREE|PAID)\s+RELEASE\b\s*(?:AT|@|IN|TO|-|:)?\s*(.*)$/i);
@@ -235,6 +254,13 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
 
   // read it first (the console shows what Jarvis understood before saving)
+  // a text goes to driver 1 and, on a team, driver 2 too (each needs their own agreement to texts)
+  const textBoth = async (trip, body, by) => {
+    const one = await sendText(SITE, trip, body, by, 1).catch((e) => ({ skipped: e.message }));
+    const two = await sendText(SITE, trip, body, by, 2).catch((e) => ({ skipped: e.message }));
+    const to = [one, two].filter((r) => r && r.sent).map((r) => r.to).filter(Boolean);
+    return to.length ? { sent: true, to, ...(two && !two.sent && !/no phone/i.test(two.skipped || '') ? { second: two.skipped } : {}) } : one;
+  };
   app.post('/truckmate/loadsheet/preview', requireAuth, async (req, res) => {
     const sheet = parseDispatchMessage((req.body || {}).text);
     if (!sheet) return res.status(400).json({ error: 'That doesn\'t look like a load message. It needs TRIP# or FB#, a PICK UP and a DELIVERY.' });
@@ -253,10 +279,11 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const rec = await save(sheet, b.text, who(req), trip);
     const via = Array.isArray(b.via) ? b.via : [];
     const sent = {};
-    const body = String(b.text).trim();
+    const head = sendHeadline(rec);
+    const body = `${head ? `${head}\n` : ''}${String(b.text).trim()}`;
     if (via.includes('app')) sent.app = sendApp ? await sendApp(SITE, trip, body, who(req)).catch((e) => ({ skipped: e.message })) : { skipped: 'not available' };
-    if (via.includes('text')) sent.text = sendText ? await sendText(SITE, trip, body, who(req)).catch((e) => ({ skipped: e.message })) : { skipped: 'not available' };
-    if (notify && via.includes('app') && !(sent.app && sent.app.sent)) await notify(trip, 'Load info from dispatch', `Trip ${trip}: open TagAlong for the pickup, delivery and instructions.`).catch(() => {});
+    if (via.includes('text')) sent.text = sendText ? await textBoth(trip, body, who(req)) : { skipped: 'not available' };
+    if (notify && via.includes('app') && !(sent.app && sent.app.sent)) await notify(trip, 'Load info from dispatch', `${head ? `${head} · ` : ''}Trip ${trip}: open TagAlong for the pickup, delivery and instructions.`).catch(() => {});
     res.json({ ok: true, trip, sheet: forConsole(rec, await yards()), sent });
   });
   app.get('/truckmate/loadsheet/:trip', requireAuth, async (req, res) => res.json({ sheet: forConsole(await get(req.params.trip), await yards()) }));
@@ -286,7 +313,7 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const body = `New load: trip ${trip}${first ? ` · pick up ${[first.name, first.city].filter(Boolean).join(', ')}${first.dateIso ? ` ${first.date || ''}` : ''}${first.time ? ` ${first.time}` : ''}` : ''}${last && last !== first ? ` · deliver ${[last.name, last.city].filter(Boolean).join(', ')}` : ''}. Open TagAlong for everything.`.replace(/\s+/g, ' ');
     const sent = {};
     if (via.includes('app')) sent.app = sendApp ? await sendApp(SITE, trip, body, who(req)).catch((e) => ({ skipped: e.message })) : { skipped: 'not available' };
-    if (via.includes('text')) sent.text = sendText ? await sendText(SITE, trip, body, who(req)).catch((e) => ({ skipped: e.message })) : { skipped: 'not available' };
+    if (via.includes('text')) sent.text = sendText ? await textBoth(trip, body, who(req)) : { skipped: 'not available' };
     // the driver profile's phones hear it even when the load has no driver link yet (an app message notifies them itself)
     if (notify && !(sent.app && sent.app.sent)) await notify(trip, 'New load from dispatch', body).catch(() => {});
     res.json({ ok: true, trip, sheet: forConsole(rec, await yards()), sent });
