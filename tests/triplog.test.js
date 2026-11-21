@@ -24,7 +24,7 @@ test('one trip → its pickup and each stop, dated and timed by the check-ins', 
   const steps = { loaded: { at: '2026-11-15T20:00:00Z' }, 'arrived:CLIFTON, NJ, 07011': { at: '2026-11-17T13:00:00Z' }, 'delivered:CLIFTON, NJ, 07011': { at: '2026-11-17T17:10:00Z' } };   // 4 h 10 at the stop → 70 min past the 3 free hours
   const ls = tripLines(it, steps, { sheet: { notes: ['$70 extra short run'] } });
   assert.equal(ls.length, 2);
-  assert.deepEqual([ls[0].date, ls[0].trip, ls[0].zip, ls[0].act, ls[0].fe, ls[0].bonus, ls[0].bonusAmt, ls[0].trl], ['11/15', '627549', '33126', 'PU', 'E', 'dispatch', '70.00', '18094']);
+  assert.deepEqual([ls[0].date, ls[0].trip, ls[0].zip, ls[0].act, ls[0].fe, ls[0].bonus, ls[0].bonusAmt, ls[0].trl], ['11/15', '627549', '33152', 'PU', 'E', 'dispatch', '70.00', '18094']);
   assert.deepEqual([ls[1].date, ls[1].zip, ls[1].act, ls[1].bill, ls[1].boxes, ls[1].wait, ls[1].waitAuto], ['11/17', '07011', 'DEL', 'G5065356', '68', 70, true]);
   assert.equal(ls[0].bill, 'G5065356');   // the trip's bills on its pickup line too
 });
@@ -48,7 +48,7 @@ test('a broker load: pickup and delivery ZIPs from the load sheet / rate con', (
   const sheet = { bill: 'B160241', notes: [], stops: [{ kind: 'pickup', name: 'SHIPPER', city: 'Chambersburg', state: 'PA', zip: '17201', dateIso: '2026-11-19' }, { kind: 'delivery', name: 'GROCERY DC', city: 'Lakeland', state: 'FL', zip: '33811', dateIso: '2026-11-20' }] };
   const ls = tripLines(it, {}, { sheet });
   assert.deepEqual(ls.map((l) => [l.date, l.zip, l.act, l.fe, l.bill]), [['11/19', '17201', 'PU', 'E', 'B160241'], ['11/20', '33811', 'DEL', 'F', 'B160241']]);
-  assert.equal(ls[0].place, 'SHIPPER · Chambersburg, PA');
+  assert.equal(ls[0].place, 'Chambersburg, PA · SHIPPER');   // the city first, like the drivers write it
 });
 
 test('expenses the driver paid go to payroll with their receipts', () => {
@@ -76,56 +76,62 @@ function harness() {
   return { app, db, kv, call };
 }
 
-test('each week is kept on the driver\'s profile: the driver sees their weeks, admins see any driver\'s, dispatch logins don\'t', async () => {
+test('one sheet per trip: the open sheet, turned-in sheets on the profile, admins see any driver\'s, dispatch logins don\'t', async () => {
   const { initTripLog } = await import('../triplog.js');
   const h = harness();
-  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [], tripsOf: async () => [], loadsFor: () => ({ current: [], next: [] }), env: {}, now: () => Date.parse('2026-11-21T15:00:00Z'), mail: async () => {} });
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [], tripsOf: async () => [], loadsFor: () => ({ current: [], next: [] }), env: {}, now: () => Date.parse('2026-11-23T15:00:00Z'), mail: async () => {} });
   h.kv['taTripLog:florida-beauty:986'] = {
-    '2026-11-15': { status: 'submitted', submittedAt: '2026-11-21T14:00:00Z', submissions: ['2026-11-21T14:00:00Z'], signature: 'data:image/png;base64,AAAA', lines: [{ trip: '627549', zip: '33126', wait: 70, bonus: 'dispatch', reimb: '75' }], expenses: [{ amount: '54.20' }] },
-    '2026-11-08': { status: 'draft', savedAt: '2026-11-14T10:00:00Z', lines: [] },
+    open: { status: 'draft', savedAt: '2026-11-23T10:00:00Z', lines: [{ trip: '628100', at: '2026-11-23T09:00:00Z' }] },
+    '2026-11-19T20:00': { status: 'submitted', submittedAt: '2026-11-22T23:30:00Z', period: { start: '2026-11-19', end: '2026-11-22' }, signature: 'data:image/png;base64,AAAA', lines: [{ trip: '627549', zip: '33152', wait: 70, bonus: 'dispatch', reimb: '75' }, { trip: '627656' }], expenses: [{ amount: '54.20' }] },
   };
   const mine = await h.call('GET /driver/me/logs', { driver: { code: '986' } });
-  assert.deepEqual(mine.body.weeks.map((w) => [w.week, w.end, w.status]), [['2026-11-15', '2026-11-21', 'submitted'], ['2026-11-08', '2026-11-14', 'draft']]);
-  assert.deepEqual([mine.body.weeks[0].waitMin, mine.body.weeks[0].bonuses, mine.body.weeks[0].reimburse, mine.body.weeks[0].trips], [70, 1, 129.2, ['627549']]);
+  assert.deepEqual(mine.body.weeks.map((w) => [w.id, w.start, w.end, w.status]), [['open', '2026-11-23', '2026-11-23', 'draft'], ['2026-11-19T20:00', '2026-11-19', '2026-11-22', 'submitted']]);
+  assert.deepEqual([mine.body.weeks[1].waitMin, mine.body.weeks[1].bonuses, mine.body.weeks[1].reimburse, mine.body.weeks[1].trips], [70, 1, 129.2, ['627549', '627656']]);
   assert.equal((await h.call('GET /truckmate/driver-profiles/:code/logs', { user: { role: 'dispatcher' }, params: { code: '986' } })).status, 403);
-  const list = await h.call('GET /truckmate/driver-profiles/:code/logs', { user: { admin: true }, params: { code: '0986' } });
-  assert.equal(list.body.weeks.length, 2);
-  const one = await h.call('GET /truckmate/driver-profiles/:code/logs/:week', { user: { admin: true }, params: { code: '986', week: '2026-11-15' } });
-  assert.equal(one.body.status, 'submitted'); assert.equal(one.body.signature, 'data:image/png;base64,AAAA'); assert.equal(one.body.lines[0].trip, '627549');
-  assert.equal((await h.call('GET /truckmate/driver-profiles/:code/logs/:week', { user: { admin: true }, params: { code: '986', week: '2026-10-04' } })).status, 404);
+  const one = await h.call('GET /truckmate/driver-profiles/:code/logs/:week', { user: { admin: true }, params: { code: '986', week: '2026-11-19T20:00' } });
+  assert.equal(one.body.status, 'submitted'); assert.equal(one.body.week.start, '2026-11-19'); assert.equal(one.body.lines[0].trip, '627549');
+  assert.equal((await h.call('GET /truckmate/driver-profiles/:code/logs/:week', { user: { admin: true }, params: { code: '986', week: 'nope' } })).status, 404);
 });
 
-test('an LTL trip sheet stop keeps its own ZIP even when no TruckMate bill matched it', async () => {
-  const { driverStops } = await import('../driverstops.js');
-  const it = { trip: { tripNumber: 627549 }, freightBills: [], _manifest: { stops: [{ action: 'DELIVER', customer: 'TERRA', city: 'SOUTH WINDSOR', state: 'CT', zip: '06074' }] } };
-  const st = driverStops(it);
-  if (st.length) assert.equal(st[0].zip, '06074');
-  const ls = tripLines(it, {});
-  assert.ok(ls.some((l) => l.act === 'DEL' && l.zip === '06074') || !st.length);
+test('turning in: the open sheet closes under its first day, goes to payroll\'s list with the team partner, and the partner\'s sheet leaves those trips out', async () => {
+  const { initTripLog } = await import('../triplog.js');
+  const h = harness(); const sent = [];
+  const items = [{ trip: { tripNumber: 627549, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G5065356', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }] }];
+  h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' }, 'arrived:CLIFTON, NJ, 07011': { at: '2026-11-20T13:00:00Z' }, 'delivered:CLIFTON, NJ, 07011': { at: '2026-11-20T14:00:00Z' } } } };
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => items, tripsOf: async () => ['627549'], loadsFor: (code) => ({ current: [], next: [] }), nameOf: async (c) => (c === '2473' ? 'Wilber Echeverri' : 'Ferney Urrego'), env: {}, now: () => Date.parse('2026-11-22T23:00:00Z'), mail: async (m) => { sent.push(m); } });
+  const ferney = { code: '986', name: 'Ferney Urrego' }; const wilber = { code: '2473', name: 'Wilber Echeverri' };
+  const open = await h.call('GET /driver/me/log', { driver: ferney, query: {} });
+  assert.equal(open.body.id, 'open'); assert.deepEqual([open.body.head.co, open.body.head.coid], ['Wilber Echeverri', '2473']);
+  assert.deepEqual(open.body.lines.map((l) => [l.zip, l.act]), [['33152', 'PU'], ['07011', 'DEL']]);
+  const sig = `data:image/png;base64,${'A'.repeat(200)}`;
+  const r = await h.call('POST /driver/me/log/submit', { driver: ferney, body: { head: { ...open.body.head, note: 'This trip ended the 22 of November. Thank you!' }, lines: open.body.lines, expenses: [], signature: sig, coSignature: sig, miles: [null, 1290] } });
+  assert.equal(r.body.ok, true); assert.equal(r.body.id, '2026-11-19T20:00');
+  assert.equal(h.kv['taTripLog:florida-beauty:986'].open, undefined);
+  assert.equal(h.kv['taTripLog:florida-beauty:986']['2026-11-19T20:00'].head.note, 'This trip ended the 22 of November. Thank you!');
+  const idx = h.kv['taTripLogIndex:florida-beauty']['986|2026-11-19T20:00'];
+  assert.deepEqual([idx.co, idx.coName, idx.trips], ['2473', 'Wilber Echeverri', ['627549']]);
+  assert.ok(sent[0].attachments.some((a) => a.contentType === 'application/pdf'));
+  // Wilber's open sheet: the trip Ferney turned in for both isn't on it, and it says so
+  const w = await h.call('GET /driver/me/log', { driver: wilber, query: {} });
+  assert.equal(w.body.lines.length, 0); assert.equal(w.body.partner.name, 'Ferney Urrego'); assert.deepEqual(w.body.partner.trips, ['627549']);
+  // Ferney's next open sheet starts fresh
+  assert.equal((await h.call('GET /driver/me/log', { driver: ferney, query: {} })).body.lines.length, 0);
 });
 
-test('GPS: where the truck sat 45+ minutes', () => {
-  const p = (min, lat, lng, place = null) => ({ t: new Date(Date.parse('2026-11-21T10:00:00Z') + min * 60000).toISOString(), lat, lng, place });
-  const pts = [p(0, 25.80, -80.30), p(10, 25.95, -80.30), p(20, 25.9501, -80.3001, '2355 NW 70th Ave, Miami, FL 33122'), p(80, 25.9502, -80.3, null), p(90, 26.2, -80.3)];
-  const s = staysOf(pts);
-  assert.equal(s.length, 1); assert.equal(s[0].zip, '33122'); assert.equal((s[0].to - s[0].from) / 60000, 70);
-});
-
-test('a move nobody wrote down is added while empty, never while loaded or near a line', () => {
-  const ms = (d) => Date.parse(d);
-  const lines = [
-    { trip: '1', act: 'PU', _ms: ms('2026-11-15T20:00:00Z'), _pt: { lat: 25.78, lng: -80.32 } },
-    { trip: '1', act: 'DEL', _ms: ms('2026-11-17T14:00:00Z'), _pt: { lat: 40.88, lng: -74.14 } },
-  ];
-  const stays = [
-    { lat: 37.0, lng: -78.0, from: ms('2026-11-16T05:00:00Z'), to: ms('2026-11-16T15:00:00Z'), place: 'Rest area, VA 23950', zip: '23950' },     // loaded: a rest stop
-    { lat: 40.881, lng: -74.141, from: ms('2026-11-17T13:00:00Z'), to: ms('2026-11-17T14:30:00Z'), place: 'Clifton, NJ 07011', zip: '07011' }, // the delivery itself
-    { lat: 40.72, lng: -74.6, from: ms('2026-11-17T18:00:00Z'), to: ms('2026-11-17T20:00:00Z'), place: 'Truck shop, Somerville, NJ 08876, USA', zip: '08876' }, // empty, not on the sheet
-  ];
-  const add = missingMoves(lines, stays);
-  assert.equal(add.length, 1);
-  assert.deepEqual([add[0].zip, add[0].act, add[0].fe, add[0].detected, add[0].date, add[0].place], ['08876', 'EMPTY', 'E', 'gps', '11/17', 'Truck shop, Somerville, NJ 08876']);
-  assert.match(add[0].comment, /GPS: truck stopped here 2 h/);
+test('the PDF: the paper\'s rows (date once a day, ditto marks, "90 B.", LTL bills) and a real PDF', async () => {
+  const { paperRows, boxesCell, billCell, tripLogPdf, plain } = await import('../triplogpdf.js');
+  const rows = paperRows([
+    { at: '2026-11-19T20:00:00Z', trip: '627549', zip: '33152', place: 'Miami, FL', act: 'PU', fe: 'E', trl: '18094', bill: 'G1 / G2 / G3' },
+    { at: '2026-11-20T13:00:00Z', trip: '627549', zip: '08854', place: 'Piscataway, NJ', act: 'DEL', fe: 'F', trl: '18094', boxes: '90' },
+    { at: '2026-11-20T15:00:00Z', trip: '627549', zip: '02453', place: 'Waltham, MA', act: 'DEL', fe: 'F', trl: '18094', pallets: 3 },
+  ]);
+  assert.deepEqual(rows.map((r) => [r.date, r.trip, r.trl, r.fe, r.boxes, r.bill]), [['11-19-26', '627549', '18094', 'Full', 'P/U', 'LTL - 3 bills'], ['11-20-26', '"', '"', 'Full', '90 B.', ''], ['"', '"', '"', 'Full', '3 Pallets', '']]);
+  assert.equal(boxesCell({ boxes: '68', pallets: 1 }), '68 B. + 1 Pallet');
+  assert.equal(billCell({ bill: 'B181095' }), 'B181095');
+  assert.equal(plain('Clifton · NJ → “ok” 📍'), 'Clifton - NJ -> "ok"');
+  const bytes = await tripLogPdf({ head: { name: 'Ferney Urrego', id: '0986', note: 'This trip ended the 22 of November.' }, lines: new Array(20).fill(0).map((_, i) => ({ at: `2026-11-2${i % 3}T1${i % 9}:00:00Z`, trip: '627549', zip: '01107', place: 'Springfield, MA', act: 'DEL', fe: 'F', boxes: '12' })), miles: [], period: { start: '2026-11-19', end: '2026-11-22' } }, {});
+  const { PDFDocument } = await import('pdf-lib');
+  assert.equal((await PDFDocument.load(bytes)).getPageCount(), 3);   // 20 lines → 2 paper pages + the app's page
 });
 
 test('payroll pays only what is checked, and lists what is not', async () => {
@@ -187,4 +193,37 @@ test('a delivery uses the load sheet appointment and dispatch\'s waiting clock w
   assert.equal(del.waitFrom, '2026-11-20T14:00:00.000Z');
   const viaClock = tripLines(it, steps, { sheet, clocks: { '628034:c:arrived:LAKELAND, FL, 33811': { waitedMs: 100 * 60000, startMs: Date.parse('2026-11-20T14:20:00Z') } } }).find((l) => l.act === 'DEL');
   assert.equal(viaClock.wait, 100);
+});
+
+test('an LTL trip sheet stop keeps its own ZIP even when no TruckMate bill matched it', async () => {
+  const { driverStops } = await import('../driverstops.js');
+  const it = { trip: { tripNumber: 627549 }, freightBills: [], _manifest: { stops: [{ action: 'DELIVER', customer: 'TERRA', city: 'SOUTH WINDSOR', state: 'CT', zip: '06074' }] } };
+  const st = driverStops(it);
+  if (st.length) assert.equal(st[0].zip, '06074');
+});
+
+test('GPS: where the truck sat 45+ minutes', () => {
+  const p = (min, lat, lng, place = null) => ({ t: new Date(Date.parse('2026-11-21T10:00:00Z') + min * 60000).toISOString(), lat, lng, place });
+  const s = staysOf([p(0, 25.80, -80.30), p(10, 25.95, -80.30), p(20, 25.9501, -80.3001, '2355 NW 70th Ave, Miami, FL 33122'), p(80, 25.9502, -80.3, null), p(90, 26.2, -80.3)]);
+  assert.equal(s.length, 1); assert.equal(s[0].zip, '33122'); assert.equal((s[0].to - s[0].from) / 60000, 70);
+});
+
+test('a move nobody wrote down is added while empty — never while loaded, never at the stop itself — and the trip back to the yard isn\'t hidden by the yard at the start', () => {
+  const ms = (d) => Date.parse(d);
+  const miami = { lat: 25.82, lng: -80.32 };
+  const lines = [
+    { trip: '1', act: 'PU', _ms: ms('2026-11-19T20:00:00Z'), _pt: miami },
+    { trip: '1', act: 'DEL', _ms: ms('2026-11-20T14:00:00Z'), _pt: { lat: 40.88, lng: -74.14 } },
+    { trip: '2', act: 'PU', _ms: ms('2026-11-21T02:00:00Z'), _pt: { lat: 42.36, lng: -71.06 } },
+    { trip: '2', act: 'DEL', _ms: ms('2026-11-22T20:00:00Z'), _pt: { lat: 28.08, lng: -80.6 } },
+  ];
+  const stays = [
+    { lat: 37.0, lng: -78.0, from: ms('2026-11-20T05:00:00Z'), to: ms('2026-11-20T10:00:00Z'), place: 'Rest area, VA 23950', zip: '23950' },          // loaded: a rest stop
+    { lat: 40.881, lng: -74.141, from: ms('2026-11-20T13:00:00Z'), to: ms('2026-11-20T14:30:00Z'), place: 'Clifton, NJ 07011', zip: '07011' },      // the delivery itself
+    { lat: 40.72, lng: -74.6, from: ms('2026-11-20T18:00:00Z'), to: ms('2026-11-20T20:00:00Z'), place: 'Truck shop, Somerville, NJ 08876, USA', zip: '08876' }, // empty, not on the sheet
+    { lat: 25.821, lng: -80.321, from: ms('2026-11-23T02:00:00Z'), to: ms('2026-11-23T10:00:00Z'), place: 'NW 70th Ave, Miami, FL, USA', zip: null },   // back at the yard
+  ];
+  const add = missingMoves(lines, stays);
+  assert.deepEqual(add.map((a) => [a.zip, a.act, a.fe, a.detected]), [['08876', 'EMPTY', 'E', 'gps'], ['33152', 'EMPTY', 'E', 'gps']]);
+  assert.match(add[0].comment, /GPS: truck stopped here 2 h/);
 });

@@ -1,7 +1,12 @@
 // ---------------------------------------------------------------
 // The driver's homework (Nov 21, 2026): the "On the Road Trip Log" payroll pays from, in the driver app. Same sheet as the paper:
 // one line per ZIP (date, trip #, zip, pick-up / drop-off place, full or empty, boxes, short/over, ref # or lumper, transfer
-// truck, trailer, bill #, reimbursement) — plus wait time and bonus on each line. Sunday to Saturday, like the paper.
+// truck, trailer, bill #, reimbursement) — plus wait time and bonus on each line.
+//   · one sheet per trip, like the paper (Nov 21 — Ferney's sheet: out of Miami on 627549, the load home on 627656, empty back
+//     to the yard, "this trip ended the 22 of November"): the open sheet holds every trip with check-ins in the last 30 days that
+//     isn't on a sheet already turned in (by the driver, or by their team partner for both); turning it in closes it
+//   · a team turns in one sheet: the co-driver from TruckMate is on it, both can sign, and the partner's open sheet leaves out
+//     the trips already turned in for both
 //   · filled in from what we already have: the week's trips (board, or the past-loads record), the driver's check-ins (dates,
 //     arrival and departure at each stop), the trip sheet stops (zip, customer, bills, boxes), the load sheet dispatch sent or the rate con
 //     (pickups and deliveries with their ZIPs), and a bonus / extra pay dispatch wrote on the load. A pickup counts as arriving
@@ -26,12 +31,15 @@ import { initMiles } from './miles.js';
 import { samsaraTokenFrom, listVehicles, vehicleOdometerRange, vehicleGpsHistory } from './samsara.js';
 import { sendMail } from './mailer.js';
 import { readableFile } from './heic.js';
+import { tripLogPdf, pdfName } from './triplogpdf.js';
 import { createHash } from 'node:crypto';
 
 const SITE = 'florida-beauty';
 const LOGS = (code) => `taTripLog:${SITE}:${code}`;   // week (YYYY-MM-DD, the Sunday) → log
 const INDEX = `taTripLogIndex:${SITE}`;               // `${driver}|${week}` → { name, week, submittedAt, reviewedAt } — payroll's list
-const KEEP_WEEKS = 104;   // two years of homework on each driver's profile
+const KEEP_WEEKS = 150;   // about two years of trip sheets on each driver's profile
+const OPEN = 'open';      // the sheet being filled in
+const LOOKBACK_DAYS = 30;
 const MAX_LINES = 80;
 const ACTS = ['PU', 'DEL', 'DROP', 'EMPTY', 'CM'];
 export const BONUS_KINDS = ['none', 'dispatch', 'holiday', 'weekend', 'extraPU', 'extraDel', 'fuelTr', 'other'];
@@ -102,6 +110,10 @@ export function waitAt({ arrivedMs = null, leftMs = null, appt = null, clock = n
   return { wait: leftMs > from ? Math.round((leftMs - from) / 60000) : null, from, appt, by: 'checkins' };
 }
 
+// The Miami terminal / yard's ZIP on the sheets: the one drivers write and payroll pays from (Nov 21: 33152).
+export const HOME_ZIP = process.env.TRIPLOG_HOME_ZIP || '33152';
+const isMiami = (x) => /\bMIAMI\b|\bMIA\b|DORAL|HIALEAH|MEDLEY/i.test(String(x || ''));
+
 // ---------- one trip's lines ----------
 // The pickups (the load sheet dispatch sent or the rate con, else where the trip starts), then each delivery: the trip sheet /
 // TruckMate stops with the driver's check-ins, else the load sheet's deliveries. Dated by the check-ins (else the sheet's date);
@@ -116,7 +128,8 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
   // the trip's bill numbers go on its pickup line too, like the paper
   const tripBills = [...new Set(((item && (item.freightBills || item.orders)) || t.freightBills || []).map((b) => String(b.billNumber || b.bill || '').trim()).filter(Boolean))];
   const puBill = (tripBills.length ? tripBills.join(' / ') : (sheet && sheet.bill) || '').slice(0, 200);
-  const where = (x) => [S(x.name, 50), [S(x.city, 30), x.state].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
+  // the city first, like the drivers write it ("Clifton NJ"), then the customer
+  const where = (x) => [[S(x.city, 30), x.state].filter(Boolean).join(', '), S(x.name, 50)].filter(Boolean).join(' · ');
   const pickups = sheetStops.filter((x) => x.kind === 'pickup');
   const shipAt = atOf(steps['at-shipper']); const loadedAt = atOf(steps.loaded);
   const puWait = waitAt({ arrivedMs: shipAt, leftMs: loadedAt, appt: pickups[0] ? apptMs({ dateIso: pickups[0].dateIso, text: pickups[0].time, dayMs: shipAt }) : null, clock: clocks[`${trip}:c:at-shipper`] });
@@ -126,7 +139,7 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
       ...(i === 0 && bonus ? { bonus: 'dispatch', bonusAmt: bonus.amount, bonusFrom: 'dispatch', comment: bonus.text } : {}) })));
   } else {
     const origin = S(t.origZoneDesc || t.origin || 'Miami Terminal', 60);
-    out.push(line({ ms: puAt, trip, zip: zipOf(t.origZoneDesc || t.origin) || '', place: origin.replace(/,?\s*\d{5}(-\d{4})?\s*$/, ''), act: 'PU', fe: 'E', trl: S(t.trailer, 20), bill: puBill, auto: true, ...puExtra(0),
+    out.push(line({ ms: puAt, trip, zip: isMiami(origin) ? HOME_ZIP : (zipOf(t.origZoneDesc || t.origin) || ''), place: origin.replace(/,?\s*\d{5}(-\d{4})?\s*$/, ''), act: 'PU', fe: 'E', trl: S(t.trailer, 20), bill: puBill, auto: true, ...puExtra(0),
       ...(bonus ? { bonus: 'dispatch', bonusAmt: bonus.amount, bonusFrom: 'dispatch', comment: bonus.text } : {}) }));
   }
   let stops = [];
@@ -140,8 +153,8 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
       const w = waitAt({ arrivedMs: arr, leftMs: del, appt, clock: clocks[`${trip}:c:arrived:${st.key}`] });
       const wait = w.wait;
       const bills = (st.bills || []).map((b) => b.bill).filter(Boolean);
-      const boxes = [st.boxes != null ? `${st.boxes}` : '', st.pallets ? `${st.pallets} pallet${st.pallets === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ');
-      out.push(line({ ms: del || arr, trip, zip: st.zip || zipOf(st.key) || '', place: [S(st.name, 50), S(st.place, 40)].filter(Boolean).join(' · '), act: 'DEL', fe: 'F', bill: bills.join(' / '), boxes, wait, waitAuto: wait != null, waitFrom: w.from, appt: w.appt, auto: true }));
+      const boxes = st.boxes != null ? `${st.boxes}` : '';
+      out.push(line({ ms: del || arr, trip, zip: st.zip || zipOf(st.key) || '', place: [S(st.place, 40), S(st.name, 50)].filter(Boolean).join(' · '), act: 'DEL', pallets: st.pallets || null, fe: 'F', bill: bills.join(' / '), boxes, wait, waitAuto: wait != null, waitFrom: w.from, appt: w.appt, auto: true }));
     }
   } else {
     for (const x of sheetStops.filter((y) => y.kind === 'delivery')) out.push(line({ ms: dayMs(x.dateIso), trip, zip: x.zip || '', place: where(x), act: 'DEL', fe: 'F', bill: sheet.bill || '', auto: true }));
@@ -149,8 +162,8 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
   return out;
 }
 function line(x) {
-  return { date: mmdd(x.ms), _ms: x.ms || null, trip: x.trip || '', zip: x.zip || '', place: x.place || '', act: x.act || '', fe: x.fe || '', boxes: x.boxes || '', so: '', ref: '', trf: '', trl: x.trl || '', bill: x.bill || '',
-    reimb: '', wait: x.wait != null ? x.wait : null, waitAuto: !!x.waitAuto, waitFrom: x.waitFrom ? new Date(x.waitFrom).toISOString() : null, appt: x.appt ? new Date(x.appt).toISOString() : null, bonus: x.bonus || 'none', bonusAmt: x.bonusAmt || '', bonusFrom: x.bonusFrom || null, comment: x.comment || '', auto: !!x.auto };
+  return { date: mmdd(x.ms), at: x.ms ? new Date(x.ms).toISOString() : null, _ms: x.ms || null, trip: x.trip || '', zip: x.zip || '', place: x.place || '', act: x.act || '', fe: x.fe || '', boxes: x.boxes || '', so: '', ref: '', trf: '', trl: x.trl || '', bill: x.bill || '',
+    pallets: x.pallets || null, reimb: '', wait: x.wait != null ? x.wait : null, waitAuto: !!x.waitAuto, waitFrom: x.waitFrom ? new Date(x.waitFrom).toISOString() : null, appt: x.appt ? new Date(x.appt).toISOString() : null, bonus: x.bonus || 'none', bonusAmt: x.bonusAmt || '', bonusFrom: x.bonusFrom || null, comment: x.comment || '', auto: !!x.auto };
 }
 
 // What the driver sends back, kept tidy. Pure.
@@ -161,6 +174,7 @@ export function cleanLines(lines = []) {
       date: S(r.date, 10), trip: S(r.trip, 12), zip: (String(r.zip || '').match(/\d{5}/) || [''])[0], place: S(r.place, 90), act: ACTS.includes(r.act) ? r.act : '',
       fe: r.fe === 'F' || r.fe === 'E' ? r.fe : '', boxes: S(r.boxes, 40), so: S(r.so, 30), ref: S(r.ref, 40), trf: S(r.trf, 12), trl: S(r.trl, 30), bill: S(r.bill, 200).toUpperCase(),
       reimb: S(r.reimb, 12).replace(/[^\d.]/g, ''), wait: Number.isFinite(w) && w > 0 ? Math.min(Math.round(w), 72 * 60) : null, waitAuto: !!r.waitAuto,
+      at: /^\d{4}-\d{2}-\d{2}T/.test(String(r.at || '')) ? S(r.at, 30) : null, pallets: Number(r.pallets) > 0 ? Math.min(Math.round(Number(r.pallets)), 60) : null,
       waitFrom: /^\d{4}-\d{2}-\d{2}T/.test(String(r.waitFrom || '')) ? S(r.waitFrom, 30) : null, appt: /^\d{4}-\d{2}-\d{2}T/.test(String(r.appt || '')) ? S(r.appt, 30) : null,
       bonus: BONUS_KINDS.includes(r.bonus) ? r.bonus : 'none', bonusAmt: S(r.bonusAmt, 12).replace(/[^\d.]/g, ''), bonusFrom: r.bonusFrom === 'dispatch' ? 'dispatch' : null, comment: S(r.comment, 300), auto: !!r.auto, detected: r.detected === 'gps' ? 'gps' : null,
     };
@@ -173,7 +187,9 @@ export function cleanExpenses(list = []) {
   })).filter((x) => x.amount || x.note || x.receipts.length);
 }
 export function cleanHead(h = {}) {
-  const o = {}; for (const k of ['name', 'id', 'co', 'coid', 'truck', 'trailer', 'bod', 'eod']) o[k] = S(h[k], 60); return o;
+  const o = {}; for (const k of ['name', 'id', 'co', 'coid', 'truck', 'trailer', 'bod', 'eod']) o[k] = S(h[k], 60);
+  o.note = S(h.note, 300);   // a note to payroll ("This trip ended the 22 of November. Thank you!")
+  return o;
 }
 
 // ---------- the payroll email: the same sheet ----------
@@ -243,14 +259,16 @@ export function missingMoves(lines = [], stays = [], { near = 12, max = 8 } = {}
   const byTrip = new Map();
   for (const l of lines) { if (!l.trip || !l._ms) continue; const r = byTrip.get(l.trip) || { pu: null, del: null }; if (l.act === 'PU' && (r.pu == null || l._ms < r.pu)) r.pu = l._ms; if (l.act === 'DEL' && (r.del == null || l._ms > r.del)) r.del = l._ms; byTrip.set(l.trip, r); }
   for (const r of byTrip.values()) if (r.pu != null && r.del != null && r.del > r.pu) loaded.push([r.pu, r.del]);
-  const pts = lines.filter((l) => l._pt);
+  // near the line just before or just after it in time (the yard at the start doesn't hide the trip back to the yard at the end)
+  const timed = lines.filter((l) => l._ms).sort((a, b) => a._ms - b._ms);
+  const neighbors = (s) => { const i = timed.findIndex((l) => l._ms > s.from); const before = i < 0 ? timed[timed.length - 1] : timed[i - 1]; const after = i < 0 ? null : timed[i]; return [before, after].filter((l) => l && l._pt); };
   return stays
     .filter((s) => !loaded.some(([a, b]) => s.from > a && s.to < b))
-    .filter((s) => !pts.some((l) => milesApart(s, l._pt) <= near))
+    .filter((s) => !neighbors(s).some((l) => milesApart(s, l._pt) <= near))
     .slice(0, max)
     .map((s) => {
       const hours = Math.round(((s.to - s.from) / 3600000) * 10) / 10;
-      return { ...line({ ms: s.from, zip: s.zip || '', place: S(String(s.place || '').replace(/,?\s*USA$/i, ''), 90), act: 'EMPTY', fe: 'E' }),
+      return { ...line({ ms: s.from, zip: s.zip || (isMiami(s.place) ? HOME_ZIP : ''), place: S(String(s.place || '').replace(/,?\s*USA$/i, ''), 90), act: 'EMPTY', fe: 'E' }),
         detected: 'gps', comment: `GPS: truck stopped here ${hours} h — confirm what you did or delete this line` };
     });
 }
@@ -279,7 +297,7 @@ export function reviewTotals(log, pay = {}, miles = null) {
 }
 
 // ---------- the routes ----------
-export function initTripLog(app, { db, requireDriver, requireAuth = null, board, tripsOf, sheets = null, loadsFor, env = process.env, now = () => Date.now(), mail = sendMail, fetchFn = globalThis.fetch }) {
+export function initTripLog(app, { db, requireDriver, requireAuth = null, board, tripsOf, sheets = null, loadsFor, nameOf = null, env = process.env, now = () => Date.now(), mail = sendMail, fetchFn = globalThis.fetch }) {
   const miles = initMiles({ db, env, fetchFn });
   const pool = db && db.enabled && db.pool;
   const DOC_LABEL = { pod: 'POD', bol: 'BOL', receipt: 'Receipt', lumper: 'Lumper receipt', scale: 'Scale ticket' };
@@ -312,9 +330,9 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       return await vehicleOdometerRange(v.token, v.id, new Date(week.fromMs).toISOString(), new Date(Math.min(week.toMs, now())).toISOString());
     } catch (e) { console.warn('[triplog] odometer:', e.message); return null; }
   }
-  // the truck's stops for the week (kept 30 minutes per truck and week: the sheet opens many times)
+  // the truck's stops over the sheet's dates (kept 30 minutes per truck and start: the sheet opens many times)
   const STAYS = 'taTripLogStays';
-  async function weekStays(truck, week) {
+  async function periodStays(truck, week) {
     const k = `${truck}|${week.start}`;
     const cache = (await db.get(STAYS, {}).catch(() => ({}))) || {};
     if (cache[k] && now() - cache[k].at < 30 * 60000) return cache[k].stays;
@@ -327,89 +345,128 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
     } catch (e) { console.warn('[triplog] gps:', e.message); return []; }
   }
 
-  async function prefill(driver, week) {
+  // the trips already on a turned-in sheet: the driver's own, and the ones their team partner turned in for both
+  async function turnedIn(code) {
+    const mine = Object.entries(await store(code)).filter(([k, l]) => k !== OPEN && l && l.status === 'submitted').flatMap(([, l]) => tripsOfLog(l.lines));
+    const idx = (await db.get(INDEX, {})) || {};
+    const forMe = Object.values(idx).filter((x) => x && codeOf(x.co) === codeOf(code));
+    return { trips: new Set([...mine, ...forMe.flatMap((x) => x.trips || [])]), byPartner: forMe.sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt))) };
+  }
+
+  // the open sheet: every trip with check-ins in the last 30 days (or on now) that isn't turned in yet
+  async function prefill(driver) {
     const code = driver.code;
     const items = await board();
     const known = [...new Set([...(((await loadsFor(code, items)) || {}).current || []).map((l) => l.trip), ...((await tripsOf(code)) || [])])].slice(0, 40);
+    const done = (await turnedIn(code)).trips;
     const book = (await db.get(CHECKINS(SITE), {})) || {};
     const rundowns = (await db.get(`taRundowns:${SITE}`, {}).catch(() => ({}))) || {};
     const geo = (await db.get('taGeoZip', {}).catch(() => ({}))) || {};
     const clocks = (await db.get(`taWaiting:${SITE}`, {}).catch(() => ({}))) || {};   // dispatch's waiting-time clocks, by stay
-    const lines = []; const trucks = []; const trailers = [];
+    const since = now() - LOOKBACK_DAYS * DAY;
+    const lines = []; const trucks = []; const trailers = []; const partners = [];
     for (const trip of known) {
+      if (done.has(String(trip))) continue;
       const it = items.find((x) => tripNo(x) === String(trip)) || (rundowns[trip] && rundowns[trip].rec && rundowns[trip].rec.item) || null;
       if (!it) continue;
       const steps = (book[trip] || {}).steps || {};
       const times = Object.values(steps).map(atOf).filter(Boolean);
-      const inWeek = times.some((ms) => ms >= week.fromMs && ms < week.toMs);
-      const onNow = items.includes(it) && !times.length && now() >= week.fromMs && now() < week.toMs;
-      if (!inWeek && !onNow) continue;
+      const recent = times.some((ms) => ms >= since);
+      const onNow = items.includes(it) && !times.length;
+      if (!recent && !onNow) continue;
       const sh = sheets ? await sheets.get(trip).catch(() => null) : null; // eslint-disable-line no-await-in-loop
       lines.push(...tripLines(it, steps, { sheet: sh, geo, clocks }));
       const t = tripOf(it); if (t.powerUnit) trucks.push(String(t.powerUnit)); if (t.trailer) trailers.push(String(t.trailer));
+      // the team partner on this trip (the other driver TruckMate has on it)
+      const other = codeOf(t.driver) === codeOf(code) ? t.driver2 : codeOf(t.driver2) === codeOf(code) ? t.driver : null;
+      if (other) partners.push(codeOf(other));
     }
     lines.sort((a, b) => (a._ms || Infinity) - (b._ms || Infinity));
+    const period = periodOf(lines);
     const truck = trucks[0] || '';
-    const [odo, stays] = await Promise.all([odometer(truck, week), weekStays(truck, week)]);
+    const [odo, stays] = await Promise.all([odometer(truck, period), periodStays(truck, period)]);
     // moves the sheet doesn't have (only when the lines have times to place them by)
     if (stays.length && lines.filter((l) => l._ms).length >= Math.max(1, lines.length / 2)) {
       for (const l of lines) { if (l.zip) l._pt = await zipPoint(l.zip).catch(() => null); } // eslint-disable-line no-await-in-loop
       lines.push(...missingMoves(lines, stays));
       lines.sort((a, b) => (a._ms || Infinity) - (b._ms || Infinity));
     }
+    const co = partners[0] || '';
+    const coName = co && nameOf ? await nameOf(co).catch(() => '') : '';
     return {
-      head: { name: driver.name || '', id: String(code), co: '', coid: '', truck, trailer: [...new Set(trailers)].join(' - '), bod: odo && odo.begin != null ? String(odo.begin) : '', eod: odo && odo.end != null ? String(odo.end) : '' },
-      lines: lines.map(({ _ms, _pt, ...x }) => x), odometer: odo, status: 'new',
+      head: { name: driver.name || '', id: String(code), co: coName || '', coid: co, truck, trailer: [...new Set(trailers)].join(' - '), bod: odo && odo.begin != null ? String(odo.begin) : '', eod: odo && odo.end != null ? String(odo.end) : '', note: '' },
+      lines: lines.map(({ _ms, _pt, ...x }) => x), odometer: odo, status: 'new', period,
     };
   }
+  // a sheet's dates: its first line to its last (or to now while it's open). Pure.
+  function periodOf(lines = [], endMs = null) {
+    const ts = lines.map((l) => (l._ms != null ? l._ms : Date.parse(l.at || ''))).filter((x) => Number.isFinite(x));
+    const fromMs = ts.length ? Math.min(...ts) : now() - 7 * DAY;
+    const toMs = endMs || (ts.length ? Math.max(Math.max(...ts), now()) : now());
+    return { start: ymdET(fromMs), end: ymdET(endMs || (ts.length ? Math.max(...ts) : now())), fromMs, toMs };
+  }
 
-  // a week's row in the list: when, status, and the totals (no lines)
-  const summary = (week, log) => {
-    const lines = log.lines || []; const ex = log.expenses || [];
-    return { week, end: new Date(Date.parse(`${week}T12:00:00Z`) + 6 * DAY).toISOString().slice(0, 10), status: log.status || 'draft', submittedAt: log.submittedAt || null, savedAt: log.savedAt || null, emailedAt: log.emailedAt || null,
-      trips: tripsOfLog(lines), lines: lines.length, waitMin: lines.reduce((a, r) => a + (r.wait || 0), 0), bonuses: lines.filter((r) => r.bonus && r.bonus !== 'none').length,
+  // a sheet's row in the list: when, status, and the totals (no lines)
+  const summary = (id, log) => {
+    const lines = log.lines || []; const ex = log.expenses || []; const p = log.period || periodOf(lines);
+    return { week: id, id, start: p.start, end: p.end, status: id === OPEN ? (log.status === 'submitted' ? 'submitted' : 'draft') : log.status || 'draft', submittedAt: log.submittedAt || null, savedAt: log.savedAt || null, emailedAt: log.emailedAt || null,
+      trips: tripsOfLog(lines), lines: lines.length, waitMin: lines.reduce((a, r) => a + (r.wait || 0), 0), bonuses: lines.filter((r) => r.bonus && r.bonus !== 'none').length, co: (log.head || {}).co || null,
       reimburse: Math.round((lines.reduce((a, r) => a + (Number(r.reimb) || 0), 0) + ex.reduce((a, x) => a + (Number(x.amount) || 0), 0)) * 100) / 100, submissions: (log.submissions || []).length };
   };
-  // the signature is kept with the driver's paperwork (ta_docs), the sheet keeps its id
-  async function saveSignature(sig, driver, week) {
-    if (!pool) return null;
+  // a signature is kept with the driver's paperwork (ta_docs), the sheet keeps its id
+  async function saveSignature(sig, driver, id) {
+    if (!pool || !sig) return null;
     const buf = Buffer.from(sig.split(',')[1], 'base64');
     const { rows } = await pool.query(
       `INSERT INTO ta_docs (site, kind, trips, filename, media_type, size_bytes, sha256, uploaded_by, data, doc_type, restricted) VALUES ($1, 'driverdoc', '{}', $2, 'image/png', $3, $4, $5, $6, 'signature', true) RETURNING id`,
-      [SITE, `trip-log-signature-${driver.code}-${week}.png`, buf.length, createHash('sha256').update(buf).digest('hex'), `${driver.name} (driver trip log)`, buf]).catch(() => ({ rows: [] }));
+      [SITE, `trip-log-signature-${driver.code}-${String(id).replace(/[^\dT-]/g, '')}.png`, buf.length, createHash('sha256').update(buf).digest('hex'), `${driver.name} (driver trip log)`, buf]).catch(() => ({ rows: [] }));
     return rows[0] ? String(rows[0].id) : null;
   }
-  async function signatureOf(log) {
-    if (!pool || !log || !log.signatureId) return null;
-    const { rows } = await pool.query('SELECT data FROM ta_docs WHERE id = $1 AND site = $2', [Number(log.signatureId), SITE]).catch(() => ({ rows: [] }));
+  async function imageOf(docId) {
+    if (!pool || !docId) return null;
+    const { rows } = await pool.query('SELECT data FROM ta_docs WHERE id = $1 AND site = $2', [Number(docId), SITE]).catch(() => ({ rows: [] }));
     return rows[0] ? `data:image/png;base64,${Buffer.from(rows[0].data).toString('base64')}` : null;
   }
-  const weekParam = (q) => weekOf(/^\d{4}-\d{2}-\d{2}$/.test(String(q || '')) ? String(q) : now());
+  const signatureOf = (log) => imageOf(log && log.signatureId);
   const store = async (code) => (await db.get(LOGS(code), {})) || {};
-  const keep = (cur, wk, log) => Object.fromEntries(Object.entries({ ...(cur || {}), [wk]: log }).sort((a, b) => b[0].localeCompare(a[0])).slice(0, KEEP_WEEKS));
+  const keep = (cur, id, log) => { const all = { ...(cur || {}) }; if (log === null) delete all[id]; else all[id] = log; const open = all[OPEN]; delete all[OPEN];
+    const kept = Object.fromEntries(Object.entries(all).sort((a, b) => b[0].localeCompare(a[0])).slice(0, KEEP_WEEKS)); return open ? { [OPEN]: open, ...kept } : kept; };
+  const sigOk = (x) => /^data:image\/png;base64,[A-Za-z0-9+/=]{100,}$/.test(String(x || '')) && String(x).length <= 300000;
+  const odoOf = (o) => (o && typeof o === 'object' ? { begin: Number(o.begin) || null, end: Number(o.end) || null, source: S(o.source, 40) || null } : null);
+  const docsFor = async (log, { bytes = false } = {}) => weekDocs(tripsOfLog(log.lines), log.period || periodOf(log.lines), (log.expenses || []).flatMap((x) => x.receipts || []), { bytes });
+  const partnerNote = (byPartner) => (byPartner[0] ? { name: byPartner[0].name, code: byPartner[0].code, trips: byPartner[0].trips || [], submittedAt: byPartner[0].submittedAt } : null);
 
+  // the open sheet (saved changes, else filled in now), or a turned-in one (?id=)
   app.get('/driver/me/log', requireDriver, async (req, res) => {
     try {
-      const week = weekParam(req.query.week);
-      const saved = (await store(req.driver.code))[week.start];
-      const log = saved ? { ...saved, signature: saved.signatureId || saved.signature ? true : undefined } : await prefill(req.driver, week);
-      const docs = (await weekDocs(tripsOfLog(log.lines), week, (log.expenses || []).flatMap((x) => x.receipts || []))).map(({ data, ...d }) => d);
-      return res.json({ week, expenses: [], ...log, docs });
+      const all = await store(req.driver.code);
+      const id = String(req.query.id || req.query.week || OPEN);
+      const saved = all[id];
+      if (id !== OPEN && !saved) return res.status(404).json({ error: 'That sheet is not here.' });
+      const log = saved ? { ...saved, signature: saved.signatureId || saved.signature ? true : undefined, coSignature: saved.coSignatureId ? true : undefined } : await prefill(req.driver);
+      const period = log.period || periodOf(log.lines);
+      const docs = (await docsFor({ ...log, period })).map(({ data, ...d }) => d);
+      const partner = id === OPEN ? partnerNote((await turnedIn(req.driver.code)).byPartner.filter((x) => now() - Date.parse(x.submittedAt) < 14 * DAY)) : null;
+      return res.json({ id, week: { ...period, id }, expenses: [], ...log, period, docs, partner });
     } catch (e) { console.warn('[triplog]', e.message); return res.status(502).json({ error: 'Could not load your trip log. Try again.' }); }
   });
-  // the driver's own homework, week by week (newest first)
+  // the driver's sheets: the open one, then the ones turned in (newest first)
   app.get('/driver/me/logs', requireDriver, async (req, res) => {
     const all = await store(req.driver.code);
-    return res.json({ weeks: Object.entries(all).sort((a, b) => b[0].localeCompare(a[0])).map(([wk, log]) => summary(wk, log)) });
+    return res.json({ weeks: Object.entries(all).map(([id, log]) => summary(id, log)) });
   });
-  // start over from what the app knows (the driver's own changes for that week are dropped)
+  // start the open sheet over from what the app knows (the driver's own changes are dropped)
   app.post('/driver/me/log/refill', requireDriver, async (req, res) => {
-    try { const week = weekParam((req.body || {}).week); const log = await prefill(req.driver, week); const docs = (await weekDocs(tripsOfLog(log.lines), week)).map(({ data, ...d }) => d); return res.json({ week, expenses: [], ...log, docs }); } catch (e) { return res.status(502).json({ error: 'Could not load your trip log. Try again.' }); }
+    try {
+      await db.update(LOGS(req.driver.code), (cur) => keep(cur, OPEN, null), {});
+      const log = await prefill(req.driver); const docs = (await docsFor(log)).map(({ data, ...d }) => d);
+      return res.json({ id: OPEN, week: { ...log.period, id: OPEN }, expenses: [], ...log, docs });
+    } catch (e) { return res.status(502).json({ error: 'Could not load your trip log. Try again.' }); }
   });
   app.put('/driver/me/log', requireDriver, async (req, res) => {
-    const b = req.body || {}; const week = weekParam(b.week);
-    const log = { head: cleanHead(b.head), lines: cleanLines(b.lines), expenses: cleanExpenses(b.expenses), odometer: b.odometer && typeof b.odometer === 'object' ? { begin: Number(b.odometer.begin) || null, end: Number(b.odometer.end) || null, source: S(b.odometer.source, 40) || null } : null, status: 'draft', savedAt: new Date(now()).toISOString() };
-    await db.update(LOGS(req.driver.code), (cur) => { const prev = (cur || {})[week.start] || {}; return keep(cur, week.start, { ...log, submissions: prev.submissions || [], signatureId: prev.signatureId || null, lastSubmittedAt: prev.submittedAt || prev.lastSubmittedAt || null }); }, {});
+    const b = req.body || {}; const lines = cleanLines(b.lines);
+    const log = { head: cleanHead(b.head), lines, expenses: cleanExpenses(b.expenses), odometer: odoOf(b.odometer), status: 'draft', savedAt: new Date(now()).toISOString(), period: periodOf(lines) };
+    await db.update(LOGS(req.driver.code), (cur) => keep(cur, OPEN, log), {});
     return res.json({ ok: true, savedAt: log.savedAt });
   });
   // a receipt photo for an expense (kept with the driver's paperwork) → { id }
@@ -441,32 +498,54 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
     }
     return res.json({ miles: out });
   });
+  // turn in the open sheet (or a turned-in one again, ?id): it's closed under its first day, and goes to payroll
   app.post('/driver/me/log/submit', requireDriver, async (req, res) => {
-    const b = req.body || {}; const week = weekParam(b.week);
-    const sig = String(b.signature || '');
-    if (!/^data:image\/png;base64,[A-Za-z0-9+/=]{100,}$/.test(sig) || sig.length > 300000) return res.status(400).json({ error: 'Sign before sending.' });
+    const b = req.body || {};
+    const sig = String(b.signature || ''); const coSig = b.coSignature ? String(b.coSignature) : null;
+    if (!sigOk(sig)) return res.status(400).json({ error: 'Sign before sending.' });
+    if (coSig && !sigOk(coSig)) return res.status(400).json({ error: 'The co-driver signature did not come through. Sign again.' });
     const lines = cleanLines(b.lines);
     if (!lines.length) return res.status(400).json({ error: 'The sheet has no lines.' });
-    const log = { head: cleanHead(b.head), lines, expenses: cleanExpenses(b.expenses), odometer: b.odometer && typeof b.odometer === 'object' ? { begin: Number(b.odometer.begin) || null, end: Number(b.odometer.end) || null, source: S(b.odometer.source, 40) || null } : null,
-      status: 'submitted', submittedAt: new Date(now()).toISOString(), signature: sig };
-    const sigId = await saveSignature(sig, req.driver, week.start);
-    const legMiles = (Array.isArray(b.miles) ? b.miles : []).slice(0, MAX_LINES).map((m) => (Number.isFinite(Number(m)) && m !== null ? Math.round(Number(m)) : null));
-    const stored = { ...log, signature: sigId ? undefined : sig, signatureId: sigId, miles: (Array.isArray(b.miles) ? b.miles : []).slice(0, MAX_LINES).map((m) => (m != null && Number.isFinite(Number(m)) ? Math.round(Number(m)) : null)) };
-    await db.update(LOGS(req.driver.code), (cur) => { const prev = (cur || {})[week.start] || {}; return keep(cur, week.start, { ...stored, submissions: [...(prev.submissions || []), stored.submittedAt].slice(-20), reviews: prev.reviews || [] }); }, {});
-    // payroll's list: turned in again after a review → back to be reviewed
-    await db.update(INDEX, (cur) => ({ ...(cur || {}), [`${req.driver.code}|${week.start}`]: { code: String(req.driver.code), name: req.driver.name || log.head.name || '', week: week.start, end: week.end, submittedAt: stored.submittedAt, truck: log.head.truck || '', reviewedAt: null, reviewedBy: null } }), {}).catch(() => {});
-    const docs = await weekDocs(tripsOfLog(lines), week, log.expenses.flatMap((x) => x.receipts), { bytes: true });
+    const head = cleanHead(b.head);
+    const period = periodOf(lines, now());
+    const all = await store(req.driver.code);
+    const again = b.id && b.id !== OPEN && all[b.id] ? String(b.id) : null;
+    const id = again || `${period.start}T${new Date(period.fromMs).toISOString().slice(11, 16)}`;
+    const log = { head, lines, expenses: cleanExpenses(b.expenses), odometer: odoOf(b.odometer), status: 'submitted', submittedAt: new Date(now()).toISOString(), signature: sig, period: { ...period, end: ymdET(Math.max(...lines.map((l) => Date.parse(l.at || '')).filter(Number.isFinite), period.fromMs)) } };
+    const [sigId, coSigId] = await Promise.all([saveSignature(sig, req.driver, id), coSig ? saveSignature(coSig, { code: head.coid || 'co', name: head.co || 'co-driver' }, id) : null]);
+    const legMiles = (Array.isArray(b.miles) ? b.miles : []).slice(0, MAX_LINES).map((m) => (m != null && Number.isFinite(Number(m)) ? Math.round(Number(m)) : null));
+    const stored = { ...log, signature: sigId ? undefined : sig, signatureId: sigId, coSignatureId: coSigId, miles: legMiles };
+    await db.update(LOGS(req.driver.code), (cur) => { const prev = (cur || {})[id] || {}; const next = keep(cur, id, { ...stored, submissions: [...(prev.submissions || []), stored.submittedAt].slice(-20), reviews: prev.reviews || [] }); return again ? next : keep(next, OPEN, null); }, {});
+    // payroll's list: turned in again after a review → back to be reviewed. The team partner is on it (one sheet for both)
+    await db.update(INDEX, (cur) => ({ ...(cur || {}), [`${req.driver.code}|${id}`]: { code: String(req.driver.code), name: req.driver.name || head.name || '', week: id, id, start: log.period.start, end: log.period.end, submittedAt: stored.submittedAt, truck: head.truck || '', trips: tripsOfLog(lines), co: head.coid || null, coName: head.co || null, reviewedAt: null, reviewedBy: null } }), {}).catch(() => {});
+    const docs = await docsFor(log, { bytes: true });
     let room = MAX_ATTACH_BYTES;
     const files = docs.map((d) => { const fits = d.data && d.bytes <= room; if (fits) room -= d.bytes; return { ...d, attached: !!fits }; });
-    const e = payrollEmail(log, { week, miles: legMiles, odometer: log.odometer, docs: files });
+    const e = payrollEmail(log, { week: log.period, miles: legMiles, odometer: log.odometer, docs: files });
     const to = String(env.PAYROLL_EMAILS || 'ntellez@floridabeauty.us').split(',').map((x) => x.trim()).filter(Boolean);
+    let pdf = null; try { pdf = await tripLogPdf({ ...log, miles: legMiles }, { signature: sig, coSignature: coSig }); } catch (err) { console.warn('[triplog] pdf:', err.message); }
     try {
       await mail({ to, subject: e.subject, html: e.html, attachments: [{ name: 'signature.png', contentType: 'image/png', bytes: Buffer.from(sig.split(',')[1], 'base64'), cid: 'signature' },
+        ...(pdf ? [{ name: pdfName(log), contentType: 'application/pdf', bytes: Buffer.from(pdf) }] : []),
         ...files.filter((d) => d.attached).map((d) => ({ name: `${d.label.replace(/\s+/g, '-')}-${d.trip || 'trip'}-${d.filename || d.id}`.slice(0, 120), contentType: d.mediaType, bytes: Buffer.from(d.data) }))] }, { env });
-      await db.update(LOGS(req.driver.code), (cur) => keep(cur, week.start, { ...((cur || {})[week.start] || log), emailedAt: new Date(now()).toISOString() }), {});
-      return res.json({ ok: true, submittedAt: log.submittedAt, emailed: true });
-    } catch (err) { console.warn('[triplog] email:', err.message); return res.json({ ok: true, submittedAt: log.submittedAt, emailed: false }); }
+      await db.update(LOGS(req.driver.code), (cur) => keep(cur, id, { ...((cur || {})[id] || stored), emailedAt: new Date(now()).toISOString() }), {});
+      return res.json({ ok: true, id, submittedAt: log.submittedAt, emailed: true });
+    } catch (err) { console.warn('[triplog] email:', err.message); return res.json({ ok: true, id, submittedAt: log.submittedAt, emailed: false }); }
   });
+  // the sheet as a PDF that looks like the paper "On the Road Trip Log" (the driver's own)
+  app.get('/driver/me/log/pdf', requireDriver, async (req, res) => {
+    const all = await store(req.driver.code); const id = String(req.query.id || OPEN); const log = all[id];
+    if (!log) return res.status(404).json({ error: 'Save or turn in the sheet first.' });
+    return sendPdf(res, log);
+  });
+  async function sendPdf(res, log) {
+    try {
+      const [sig, coSig] = await Promise.all([signatureOf(log), imageOf(log.coSignatureId)]);
+      const bytes = await tripLogPdf(log, { signature: sig || (sigOk(log.signature) ? log.signature : null), coSignature: coSig });
+      res.set('Content-Type', 'application/pdf'); res.set('Content-Disposition', `inline; filename="${pdfName(log)}"`);
+      return res.send(Buffer.from(bytes));
+    } catch (e) { console.warn('[triplog] pdf:', e.message); return res.status(502).json({ error: 'Could not make the PDF. Try again.' }); }
+  }
   // the office: a driver's homework on their profile — the weeks, and one week's sheet as it was turned in (admins: it's pay)
   const mayRead = (u) => !!(u && (u.admin || u.role === 'admin' || u.companyAdmin || u.payroll));
   const codeOf = (x) => String(x || '').trim().toUpperCase().replace(/^0+(?=\d)/, '');
@@ -480,14 +559,21 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       if (!mayRead(req.user)) return res.status(403).json({ error: 'Payroll and admins only: the trip logs are pay information.' });
       const wk = String(req.params.week); const log = (await store(codeOf(req.params.code)))[wk];
       if (!log) return res.status(404).json({ error: 'No trip log for that week.' });
-      const week = weekOf(wk);
-      const docs = (await weekDocs(tripsOfLog(log.lines), week, (log.expenses || []).flatMap((x) => x.receipts || []))).map(({ data, ...d }) => d);
+      const week = { ...(log.period || periodOf(log.lines)), id: wk };
+      const docs = (await docsFor({ ...log, period: week })).map(({ data, ...d }) => d);
       const { signature, ...rest } = log;
-      return res.json({ week, ...rest, signature: (await signatureOf(log)) || signature || null, docs });
+      return res.json({ week, id: wk, ...rest, signature: (await signatureOf(log)) || signature || null, coSignature: await imageOf(log.coSignatureId), docs });
     });
   }
   // ---------- payroll ----------
   if (requireAuth) {
+    // the sheet as a PDF like the paper, with payroll's checks when it was reviewed
+    app.get('/truckmate/driver-profiles/:code/logs/:week/pdf', requireAuth, async (req, res) => {
+      if (!mayRead(req.user)) return res.status(403).json({ error: 'Payroll and admins only.' });
+      const log = (await store(codeOf(req.params.code)))[String(req.params.week)];
+      if (!log) return res.status(404).json({ error: 'No trip log for that week.' });
+      return sendPdf(res, log);
+    });
     const gate = (req, res) => { if (mayRead(req.user)) return true; res.status(403).json({ error: 'Payroll and admins only.' }); return false; };
     app.get('/truckmate/payroll/me', requireAuth, (req, res) => res.json({ canPay: mayRead(req.user) }));
     // every sheet turned in (newest first), to review or reviewed
@@ -501,8 +587,8 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       const code = codeOf(req.params.code); const wk = String(req.params.week);
       const log = (await store(code))[wk];
       if (!log) return res.status(404).json({ error: 'No trip log for that week.' });
-      const week = weekOf(wk);
-      const docs = (await weekDocs(tripsOfLog(log.lines), week, (log.expenses || []).flatMap((x) => x.receipts || []))).map(({ data, ...d }) => d);
+      const week = { ...(log.period || periodOf(log.lines)), id: wk };
+      const docs = (await docsFor({ ...log, period: week })).map(({ data, ...d }) => d);
       // sheets turned in before the miles were kept: work them out now (mile calculator, cached)
       let miles = log.miles;
       if (!Array.isArray(miles) || miles.length !== (log.lines || []).length) {
@@ -515,7 +601,7 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
         }
       }
       const { signature, ...rest } = log;
-      return res.json({ week, code, ...rest, miles, signature: (await signatureOf(log)) || signature || null, docs });
+      return res.json({ week, id: wk, code, ...rest, miles, signature: (await signatureOf(log)) || signature || null, coSignature: await imageOf(log.coSignatureId), docs });
     });
     // payroll saves what's paid; anything not checked has to be confirmed as not paid
     app.post('/truckmate/payroll/logs/:code/:week/review', requireAuth, async (req, res) => {
