@@ -102,7 +102,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     }, {});
     // an incoming message → every open console hears it at once (their desktop pop-up doesn't wait for a timer)
     if (m.dir === 'in') emit({ thread: thread.id, kind: (saved && saved.kind) || thread.kind || 'person', name: (saved && saved.name) || thread.name || null, phone: (saved && saved.phone) || thread.phone || null,
-      by: m.by || null, text: m.text || '', files: (m.files || []).length, at: m.at });
+      by: m.by || null, text: m.text || '', files: (m.files || []).length, at: m.at, trip: (saved && saved.trip) || thread.trip || null, truck: (saved && saved.truck) || thread.truck || null });
     return m;
   }
   // where a person's text reply goes: the group dispatch last texted them from, else their own conversation
