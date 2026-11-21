@@ -23,3 +23,11 @@ test('test emails: breakdown, accident, breakdown update, missing boxes, problem
   assert.equal(sent.length, 5); assert.ok(sent.every((x) => x.to.length === 1 && x.to[0] === 'ntellez@floridabeauty.us'));
   assert.equal(out.sent.length, 5);
 });
+
+test('the callback test email: the live template, marked [TEST], with the sample driver and load', async () => {
+  const { callbackTestEmail } = await import('../testemails.js');
+  const m = callbackTestEmail();
+  assert.match(m.subject, /^\[TEST\] For Nadim Tellez — URGENT — Call back Ferney Urrego \(test\)/);
+  assert.match(m.html, /A message for Nadim Tellez\./); assert.match(m.html, /LOAD 627549/); assert.match(m.html, /tel:/);
+  assert.equal(m.attachments.length, 2);
+});

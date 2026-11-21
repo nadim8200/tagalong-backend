@@ -17,7 +17,11 @@
 // ---------------------------------------------------------------
 import { randomBytes } from 'crypto';
 import { callbackMail } from './callbackmail.js';
-import { reachPlan } from './directory.js';
+import { asLive } from './training.js';
+
+const CALLBACK_CALLS = false;   // email + text only (Nov 20)
+const FALLBACK_EMAIL = 'dispatches@floridabeauty.us';   // the Dispatch email group
+const FALLBACK_TEXT = '3055040711';                      // Nadim's cell
 import { fmtLocal } from './localtime.js';
 
 const SITE = 'florida-beauty';
@@ -139,7 +143,9 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
   const EMPTY = { emails: [], phones: [] };
   const settings = async () => ({ customerService: EMPTY, dispatch: EMPTY, urgent: EMPTY, ...((enabled && (await db.get(cfgKey, {}))) || {}) });
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
-  // Jarvis reads the request against each team's "when to contact" context
+  // Jarvis reads the request against each team's "when to contact" context — paused while callbacks go only to the named person
+  // or to Dispatch + Nadim (Nov 20); kept for when team routing comes back
+  // eslint-disable-next-line no-unused-vars
   const aiPick = classify || (async (req, teams) => {
     const withContext = teams.filter((t) => t.active !== false && String(t.when || '').trim());
     if (!env.ANTHROPIC_API_KEY || !withContext.length) return [];
@@ -196,25 +202,27 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
     return { ...req, sent };
   }
 
-  async function notify(req) {
-    const cfg = await settings();
-    const teams = teamsOf(cfg);
-    const picked = req.aiTeams || await aiPick(req, teams);
-    req.aiTeams = picked;
-    // a team with no shared email of its own → its email group (Employees → Email groups)
-    let cfgG = cfg;
-    if (directory && directory.groupEmail) { const ts = await Promise.all(teams.map(async (t) => (t && !t.email ? { ...t, email: (await directory.groupEmail(t.name).catch(() => null)) || '' } : t))); cfgG = { ...cfg, teams: ts }; }
-    const to = routeTo(req, cfgG, picked, req.forced || []);
-    // the staff member the message is for: email + text, or a Jarvis call while texting isn't live (cells are system-only)
+  // callback requests are live even in training mode (asLive): the email, texts and calls reach the staff member for real
+  const notify = (req) => asLive(() => notifyNow(req));
+  async function notifyNow(req) {
+    // Who gets a callback (Nov 20, Nadim Tellez): the staff member it's for — and only them — by email and a text to their cell;
+    // when it isn't for anyone we can reach (no one named, or no email / cell on file), an email to Dispatch and a text to Nadim.
+    // No team routing, no Jarvis call.
+    let to = null; let only = null;
     if (directory && (req.forStaff || []).length) {
       const people = await directory.mentioned((req.forStaff || []).map((p) => p.name).join(', '));
-      const live = !!(sms && (await sms.live()));
-      for (const p of people) {
-        const plan = reachPlan(p, { textingLive: live });   // their chosen ways (Employees tab)
-        if (plan.email && !to.emails.includes(p.email)) to.emails.push(p.email);
-        if (plan.text && !to.phones.includes(p.phone)) to.phones.push(p.phone);
-        if (plan.call && !to.calls.some((c) => c.phone === p.phone)) to.calls.push({ phone: p.phone, name: p.name });
+      const reach = people.filter((p) => p.email || p.phone);
+      if (reach.length) {
+        to = { groups: [], emails: [], phones: [], calls: [] }; only = [];
+        for (const p of reach) {
+          if (p.email && !to.emails.includes(p.email)) { to.emails.push(p.email); only.push(p.email); }
+          if (p.phone && !to.phones.includes(p.phone)) to.phones.push(p.phone);
+        }
       }
+    }
+    if (!to) {
+      const dispatch = (directory && directory.groupEmail ? await directory.groupEmail('Dispatch').catch(() => null) : null) || FALLBACK_EMAIL;
+      to = { groups: ['Dispatch'], emails: [dispatch], phones: [FALLBACK_TEXT], calls: [] };
     }
     // never send the request back to the person who asked for it (a staff member calling for someone else)
     const self = String((req.from && req.from.phone) || '').replace(/\D+/g, '').slice(-10);
@@ -232,7 +240,8 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
         sent.text = ok;
       } else sent.text = 'waiting for texting approval';
     }
-    if (to.calls.length) {
+    // Nov 20, Nadim Tellez: callback requests go by email and text only — Jarvis doesn't phone the staff member
+    if (to.calls.length && CALLBACK_CALLS) {
       if (!caller) sent.call = 'Jarvis calls not set up';
       else {
         const out = [];
@@ -240,7 +249,7 @@ export function initHelpdesk(app, { requireAuth, db, getBoard = null, mail = nul
         sent.call = out;
       }
     }
-    const pushTo = pushRules ? await pushRules.emailsFor(req.urgent ? ['callback', 'callback-urgent'] : 'callback') : to.emails;   // who gets which pushes: admin → Push notifications
+    const pushTo = only ? only : pushRules ? await pushRules.emailsFor(req.urgent ? ['callback', 'callback-urgent'] : 'callback') : to.emails;   // a named person: only their phone   // who gets which pushes: admin → Push notifications
     if (push && push.sendToEmails && pushTo.length) { try { sent.push = await push.sendToEmails(pushTo, { title: req.urgent ? '🚨 Call back — urgent' : '📞 Call back needed', body: msg.text.slice(0, 180), data: { path: '/truckmate?tab=calls', type: 'help-request', id: req.id } }); } catch { sent.push = null; } }
     return sent;
   }

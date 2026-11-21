@@ -3,10 +3,12 @@
 // them before real ones go out: the breakdown report, a breakdown update, missing boxes at a stop, and a problem at a stop.
 // Nothing is stored: no report, no road call, no push, no alarm. Admins only.
 //   POST /admin/test-emails/driver-app   → { sent: [subjects] }
+//   POST /admin/test-emails/callback     → a callback request email (sample driver on load 627549), same template as the live ones
 // ---------------------------------------------------------------
 import jpeg from 'jpeg-js';
 import { cleanReport, breakdownEmail } from './driverbreakdown.js';
 import { cleanStopReport, stopEmail } from './stopreports.js';
+import { helpEmail } from './helpdesk.js';
 
 const TO = 'ntellez@floridabeauty.us';
 
@@ -45,7 +47,19 @@ export function testEmails(now = Date.now()) {
   ];
 }
 
+// A callback request as staff get it (helpdesk.js helpEmail), with sample details. Pure.
+export function callbackTestEmail() {
+  const req = { source: 'call', urgent: true, role: 'driver', trip: '627549', need: 'Call me back about the receiver — they won\'t open the door until 6 AM.',
+    said: 'Hola, estoy en el receiver y no me quieren recibir hasta las 6 de la mañana. Llámenme por favor.', from: { name: 'Ferney Urrego (test)', phone: '7863142671' }, forStaff: [{ name: 'Nadim Tellez' }] };
+  const m = helpEmail(req, { trip: '627549', truck: '4504', trailer: '18094', location: 'Fort Pierce, FL (sample)', motion: 'stopped 25 min', next: 'Sample receiver · Newark, NJ' });
+  return { ...m, subject: `[TEST] ${m.subject}` };
+}
+
 export function initTestEmails(app, { requireAdmin, sendMail }) {
+  app.post('/admin/test-emails/callback', requireAdmin, async (req, res) => {
+    try { const m = callbackTestEmail(); await sendMail({ to: [TO], ...m }); return res.json({ ok: true, to: TO, sent: [m.subject] }); }
+    catch (e) { return res.status(502).json({ error: e.message }); }
+  });
   app.post('/admin/test-emails/driver-app', requireAdmin, async (req, res) => {
     const sent = [];
     try {

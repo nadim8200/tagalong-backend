@@ -61,6 +61,10 @@ const STAFF = (u) => !!(u && (u.admin || u.companyAdmin || ['admin', 'dispatcher
 export const byPerson = () => { const st = sender.getStore(); return !!(byHand.getStore() || (st && STAFF(st.user))); };
 export const sentByHand = (req, res, next) => byHand.run(true, next);   // Express middleware on the send routes
 export const AUTO_ALLOW = ['3055040711'];
+// Live on purpose while training is on: callback requests (Nov 20, Nadim Tellez: "call back no need to hold them for anyone, have
+// them live, only this until I say"). Their email, texts and Jarvis calls to the staff member go out for real.
+export const liveNow = new AsyncLocalStorage();
+export const asLive = (fn) => liveNow.run(true, fn);
 // Jarvis's status-check pushes in the driver app ("Delivered?", "Loaded & leaving?", "Rolling to your pickup?") stay on for every
 // driver (Nov 20, Nadim Tellez: "only on push, not text messages") — the text fallback is still held.
 export const statusAsk = new AsyncLocalStorage();
@@ -80,12 +84,12 @@ export function initTraining(app, { requireAuth, requireAdmin, db, sendDirect })
   const active = async () => { const c = await cfg(); return c.on && (c.to || []).length ? c : null; };
 
   // email: redirect (null = not training)
-  async function mailGuard(m) { const c = await active(); return c ? guardWithAllow(m, c.to, c.allow) : m; }
+  async function mailGuard(m) { const c = await active(); return c && !liveNow.getStore() ? guardWithAllow(m, c.to, c.allow) : m; }
   // text / call / app message: hold it and email a copy → returns a stand-in result, or null when live
   async function hold(kind, info) {
     const c = await active();
     if (!c) return null;
-    if (byPerson()) return null;   // a dispatcher's own text, app message or call
+    if (byPerson() || liveNow.getStore()) return null;   // a dispatcher's own text, app message or call; a callback request
     if (kind === 'app' && statusAsk.getStore()) return null;   // a status-check push to the driver app
     // Jarvis on its own reaches only Nadim (Nov 20: "do not send any automatic communications to anybody … only to me")
     const auto = Array.isArray(c.autoAllow) ? c.autoAllow : AUTO_ALLOW;

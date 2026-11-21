@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initTraining, redirectEmail, heldCopy, sentByHand, asStatusAsk } from '../training.js';
+import { initTraining, redirectEmail, heldCopy, sentByHand, asStatusAsk, asLive } from '../training.js';
 import { sender } from '../ringcentral.js';
 
 function memDb() { const m = new Map(); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, JSON.parse(JSON.stringify(v))) }; }
@@ -82,4 +82,14 @@ test('training: a dispatcher\'s own texts / app messages go to anyone; what Jarv
   // Jarvis's status-check pushes ("Delivered?", "Rolling to your pickup?") go to every driver's app; the same ask by text stays held
   assert.equal(await asStatusAsk(() => t.hold('app', { to: 'driver 1344', phones: ['7865682446'], text: 'Is load 627549 delivered?' })), null, 'status push: out');
   assert.equal((await asStatusAsk(() => t.hold('text', { to: '7865682446', text: 'Delivered?' }))).held, 'text', 'status text: held');
+});
+
+test('training: callback requests are live — their email, texts and calls go out for real; other emails stay redirected', async () => {
+  const db = memDb(); const app = { get: () => {}, put: () => {} };
+  await db.set('taTrainingMode', { on: true, to: ['ntellez@floridabeauty.us'], allow: ['ntellez@floridabeauty.us'] });
+  const t = initTraining(app, { requireAuth: (q, s, n) => n(), requireAdmin: (q, s, n) => n(), db, sendDirect: async () => {} });
+  const mail = { to: ['giovanni@floridabeauty.us'], subject: 'Call back Test Driver', html: '<p>x</p>' };
+  const live = await asLive(async () => ({ m: await t.mailGuard(mail), text: await t.hold('text', { to: '3055550100', text: 'Call back' }), call: await t.hold('call', { to: '3055550100' }) }));
+  assert.deepEqual(live.m.to, ['giovanni@floridabeauty.us']); assert.equal(live.text, null); assert.equal(live.call, null);
+  assert.deepEqual((await t.mailGuard(mail)).to, ['ntellez@floridabeauty.us'], 'anything else: still to the test address');
 });

@@ -26,13 +26,14 @@ test('a request is emailed, texted and pushed once; waits when Outlook / texting
     mail: { ready: () => outlook, send: async (m) => mails.push(m) }, sms: { live: async () => texting, send: async (to, t) => texts.push({ to, t }) }, push: { sendToEmails: async (emails, m) => { pushes.push({ emails, m }); return 1; } } });
   const r = await h.raise({ source: 'call', ref: 'call1:need', role: 'driver', from: { name: 'Luis', phone: '3055550117' }, trip: '624268', need: 'Truck broke down on I-75 mile 210' });
   assert.equal(r.urgent, true, 'a breakdown is urgent');
-  assert.deepEqual(mails[0].to, ['dispatch@floridabeauty.us', 'ronen@floridabeauty.us']); assert.match(mails[0].subject, /^URGENT — Call back Luis \(driver\) · load 624268/);
+  // not for anyone named → the Dispatch email group, and a text to Nadim (Nov 20)
+  assert.deepEqual(mails[0].to, ['dispatches@floridabeauty.us']); assert.match(mails[0].subject, /^URGENT — Call back Luis \(driver\) · load 624268/);
   assert.equal(r.sent.text, 'waiting for texting approval');
   assert.equal(pushes[0].m.title, '🚨 Call back — urgent');
   assert.equal(await h.raise({ source: 'call', ref: 'call1:need', role: 'driver', need: 'same again' }), null, 'never twice');
   texting = true; outlook = false;
   const r2 = await h.raise({ source: 'text', ref: 'sms9', role: 'unknown', from: { phone: '+17865550000' }, need: 'call me about the delivery' });
-  assert.equal(r2.sent.email, 'waiting for Outlook'); assert.deepEqual(texts.map((x) => x.to), ['3055551000']);
+  assert.equal(r2.sent.email, 'waiting for Outlook'); assert.deepEqual(texts.map((x) => x.to), ['3055040711']);
 });
 
 import { initInbox } from '../inbox.js';
@@ -68,13 +69,12 @@ test('people choose how Jarvis reaches them: email, text, call — any mix — a
   assert.deepEqual([...urgent.emails].sort(), ['ronen@floridabeauty.us', 'rosa@floridabeauty.us']);
   assert.deepEqual(urgent.phones, ['3055554000'], 'Ronen chose email + call, not text');
   assert.deepEqual(urgent.calls, [{ phone: '3055553000', name: 'Ronen Koubi' }]);
-  // Jarvis calls the GM on an urgent request
+  // callback requests go by email and text only (Nov 20): Jarvis no longer phones the GM, even on an urgent one
   const db = memDb(); await db.set('taHelpCfg', cfg);
   const calls = [];
   const h = initHelpdesk({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: () => {}, db, env: { NODE_ENV: 'test' }, mail: { ready: () => true, send: async () => {} }, sms: { live: async () => true, send: async () => {} }, caller: async (o) => { calls.push(o); return { called: true }; } });
   const r = await h.raise({ source: 'call', ref: 'x1', role: 'driver', from: { name: 'Luis' }, trip: '624268', need: 'Accident on I-75, driver OK' });
-  assert.equal(calls[0].to, '3055553000'); assert.equal(calls[0].name, 'Ronen Koubi'); assert.match(calls[0].message, /^URGENT: Call back Luis/);
-  assert.deepEqual(r.sent.call, ['3055553000']);
+  assert.deepEqual(calls, []); assert.equal(r.sent.call, null);
 });
 
 import { blankTeam, pickTeams } from '../helpdesk.js';
@@ -93,9 +93,10 @@ test('teams with context: Jarvis matches the request to the team whose context f
     classify: async (req, ts) => { asked.push(ts.map((x) => x.id)); return /detention|invoice/i.test(req.need) ? ['acct'] : []; },
     mail: { ready: () => true, send: async (m) => mails.push(m) }, sms: { live: async () => true, send: async (to) => texts.push(to) }, caller: async (o) => { calls.push(o.to); return { called: true }; } });
   const r = await h.raise({ source: 'email', ref: 'e9', role: 'broker', from: { name: 'Kim (RXO)', email: 'ops@rxo.com' }, trip: '623869', need: 'Wants to talk about detention pay on 623869' });
-  assert.deepEqual(r.sent.teams, ['Customer service', 'Accounting']);
-  assert.deepEqual([...mails[0].to].sort(), ['accounting@floridabeauty.us', 'aleon@floridabeauty.us']);
-  assert.deepEqual(texts, ['3055556000']); assert.deepEqual(calls, ['3055556000']);
+  // team routing is paused (Nov 20): a callback for no one named goes to Dispatch by email and to Nadim by text — no call
+  assert.deepEqual(r.sent.teams, ['Dispatch']);
+  assert.deepEqual(mails[0].to, ['dispatches@floridabeauty.us']);
+  assert.deepEqual(texts, ['3055040711']); assert.deepEqual(calls, [], 'email and text only — no Jarvis call');
 });
 
 test('a message for a named staff member goes to that person (cell is system-only)', async () => {
@@ -106,5 +107,31 @@ test('a message for a named staff member goes to that person (cell is system-onl
   const h = initHelpdesk({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: () => {}, db, env: { NODE_ENV: 'test' }, directory, sms: { live: async () => false }, caller: async (o) => { calls.push(o); return { called: true }; } });
   const r = await h.raise({ source: 'call', ref: 'c1', role: 'customer', from: { name: 'Ana', phone: '3055550100' }, need: 'Please have Frank call me about my claim', forPerson: 'Frank' });
   assert.deepEqual(r.forStaff, [{ name: 'Frank Ducassi', department: 'Customer Service', ext: '259' }]);
-  assert.equal(calls[0].to, '3057485611', 'texting not live yet → Jarvis calls Frank with the message');
+  assert.deepEqual(calls, [], 'no Jarvis call (email and text only)');
+  assert.equal(r.sent.text, 'waiting for texting approval', 'a text to Frank\'s cell once texting is live');
+});
+
+test('a callback for a named staff member reaches only them — not their team — by email and text; the push only to them', async () => {
+  const { initHelpdesk } = await import('../helpdesk.js');
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  await db.set('taHelpCfg', { teams: [blankTeam({ id: 'cs', name: 'Customer service', gets: { customers: true }, email: 'cs@floridabeauty.us', channels: { email: true }, members: [{ name: 'Rosa', phone: '3055554000', channels: { text: true } }] })] });
+  const mails = []; const texts = []; const pushes = [];
+  const directory = { mentioned: async (t) => (/giovanni/i.test(t) ? [{ name: 'Giovanni Damelio', phone: '3055557000', email: 'gdamelio@floridabeauty.us' }] : []) };
+  const h = initHelpdesk({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: () => {}, db, env: { NODE_ENV: 'test' }, directory,
+    mail: { ready: () => true, send: async (x) => mails.push(x.to) }, sms: { live: async () => true, send: async (to) => texts.push(to) },
+    push: { sendToEmails: async (to) => { pushes.push(to); return { sent: 1 }; } }, pushRules: { emailsFor: async () => ['everyone@floridabeauty.us'] } });
+  const r = await h.raise({ source: 'call', ref: 'g1', role: 'customer', from: { name: 'Ana', phone: '3055550100' }, need: 'Please have Giovanni call me', forPerson: 'Giovanni' });
+  assert.deepEqual(mails, [['gdamelio@floridabeauty.us']]); assert.deepEqual(texts, ['3055557000']);
+  assert.deepEqual(pushes, [['gdamelio@floridabeauty.us']]); assert.deepEqual(r.sent.teams, []);
+});
+
+test('a callback for someone with no email or cell on file falls back to Dispatch by email and Nadim by text', async () => {
+  const { initHelpdesk } = await import('../helpdesk.js');
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const mails = []; const texts = [];
+  const directory = { mentioned: async () => [{ name: 'Pedro Nocontact', phone: null, email: null }], groupEmail: async (n) => (n === 'Dispatch' ? 'dispatches@floridabeauty.us' : null) };
+  const h = initHelpdesk({ get: () => {}, post: () => {}, put: () => {} }, { requireAuth: () => {}, db, env: { NODE_ENV: 'test' }, directory,
+    mail: { ready: () => true, send: async (x) => mails.push(x.to) }, sms: { live: async () => true, send: async (to) => texts.push(to) } });
+  await h.raise({ source: 'call', ref: 'p1', role: 'customer', from: { name: 'Ana', phone: '3055550100' }, need: 'Have Pedro call me', forPerson: 'Pedro' });
+  assert.deepEqual(mails, [['dispatches@floridabeauty.us']]); assert.deepEqual(texts, ['3055040711']);
 });
