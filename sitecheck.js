@@ -6,6 +6,7 @@
 // goes once per trip (Employees → Alert emails → "wrong_site").
 // ---------------------------------------------------------------
 import { siteAlertHtml } from './sitemail.js';
+import { asLive } from './training.js';
 
 export const SITES = { tempest: { site: 'SITE9', letter: 'F', name: 'Tempest Transportation' }, fb: { site: 'SITE2', letter: 'B', name: 'Florida Beauty (FBE / FBF)' } };
 const KEY = (site) => `taSiteWarned:${site}`;
@@ -68,7 +69,8 @@ export function initSiteCheck({ db, getBoard, sendMail, emails, site = 'florida-
     const to = await emails().catch(() => []);
     const sent = [];
     for (const w of fresh) {
-      if (to.length) { try { await sendMail({ to, ...siteEmail(w, { now: now() }) }); } catch (e) { console.warn('[sitecheck] email:', e.message); continue; } } // eslint-disable-line no-await-in-loop
+      // live even in training mode (Nov 20, Nadim Tellez: "send email to inbound dispatch for wrong site")
+      if (to.length) { try { await asLive(() => sendMail({ to, ...siteEmail(w, { now: now() }) })); } catch (e) { console.warn('[sitecheck] email:', e.message); continue; } } // eslint-disable-line no-await-in-loop
       sent.push(w);
     }
     if (sent.length) await db.update(KEY(site), (cur) => { const a = { ...(cur || {}) }; for (const w of sent) a[`${w.trip}|${w.bills.join(',')}`] = new Date(now()).toISOString(); const k = Object.keys(a); return k.length > 2000 ? Object.fromEntries(k.slice(-1500).map((x) => [x, a[x]])) : a; }, {});

@@ -67,3 +67,12 @@ test('each load supplies its own bills, direction and trip link, including multi
   assert.doesNotMatch(hostile.html, /<img src=x>|<script>bad/);
   assert.match(hostile.html, /&lt;img src=x&gt;/);
 });
+
+test('the wrong-site email is live in training mode (sent inside asLive), so inbound dispatch really gets it', async () => {
+  const { liveNow } = await import('../training.js');
+  const m = new Map(); const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const live = [];
+  const sc = initSiteCheck({ db, getBoard: async () => ({ trips: [item(TEMPEST_RC, [{ billNumber: 'B181090', siteId: 'SITE2', createdTimestamp: '2026-11-21T09:00:00' }])] }), sendMail: async () => live.push(!!liveNow.getStore()), emails: async () => ['inbound-dispatch@floridabeauty.us'], env: { NODE_ENV: 'test' } });
+  await sc.check();
+  assert.deepEqual(live, [true]);
+});
