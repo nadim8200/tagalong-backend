@@ -313,3 +313,22 @@ test('admins move misplaced messages to the right conversation, or take out dupl
   assert.equal(list.find((t) => t.id === 'g:aaaaaaaaaa').last.text, 'Ok');
   assert.equal(h.sent.length, 0, 'nothing sent');
 });
+
+test('live: an open console gets each incoming message the moment it is stored; our own sends are not pushed', async () => {
+  const h = setup({ live: true });
+  const chunks = []; let closeFn = null;
+  const res = { set() { return this; }, flushHeaders() {}, write(x) { chunks.push(x); return true; }, flush() {}, status() { return this; }, json() {} };
+  const req = { user: GEO, on: (ev, fn) => { if (ev === 'close') closeFn = fn; } };
+  h.app.r['GET /truckmate/messages/stream'](req, res);
+  assert.match(chunks[0], /^: live/);
+  await h.inbox.fromSms('7865550199', { type: 'reply', from: '7865550199', text: 'Llegué al receiver', extId: 'live1' });
+  const ev = chunks.find((c) => c.startsWith('event: text'));
+  assert.ok(ev, 'pushed at once');
+  const data = JSON.parse(ev.split('data: ')[1]);
+  assert.deepEqual([data.thread, data.text, data.name], ['p:7865550199', 'Llegué al receiver', 'Ana Diaz']);
+  await h.inbox.fromSms('7865550199', { type: 'text', to: '7865550199', text: 'Ok, thanks', by: 'Geo', extId: 'live2' });
+  assert.equal(chunks.filter((c) => c.startsWith('event: text')).length, 1, 'outgoing messages are not pushed');
+  closeFn();
+  await h.inbox.fromSms('7865550199', { type: 'reply', from: '7865550199', text: 'Again', extId: 'live3' });
+  assert.equal(chunks.filter((c) => c.startsWith('event: text')).length, 1, 'a closed console gets nothing');
+});

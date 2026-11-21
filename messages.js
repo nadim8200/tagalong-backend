@@ -74,6 +74,13 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
   const appSending = new Map();   // trip|text → at: our own app sends, so the load-log echo isn't stored twice
 
   // one message into a conversation (made if new); a repeated provider event or a retried send is stored once
+  // ---- live: consoles keep a stream open (GET /truckmate/messages/stream) and get each incoming message the moment it's stored ----
+  const streams = new Set();
+  function emit(ev) {
+    const line = `event: text\ndata: ${JSON.stringify(ev)}\n\n`;
+    for (const res of streams) { try { res.write(line); if (res.flush) res.flush(); } catch { streams.delete(res); } }
+  }
+
   async function add(thread, msg, dedupe = null) {
     if (dedupe) {
       let dup = false;
@@ -84,14 +91,18 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     const when = msg.at && !Number.isNaN(Date.parse(msg.at)) ? new Date(msg.at).toISOString() : iso();
     const m = { ...msg, id: msg.id || randomBytes(6).toString('hex'), at: when, text: String(msg.text || '').slice(0, 1600) };
     await db.update(logKey(thread.id), (cur) => [...(Array.isArray(cur) ? cur : []).filter((x) => x.id !== m.id), m].sort((a, b) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0)).slice(-500), []);
+    let saved = null;
     await db.update(THREADS, (cur) => {
       const all = { ...(cur || {}) }; const t = { ...(all[thread.id] || thread) };
       for (const k of ['name', 'role', 'trip', 'truck']) if (thread[k] && !t[k]) t[k] = thread[k];
       if (!t.last || Date.parse(m.at) >= (Date.parse(t.last.at) || 0)) t.last = { at: m.at, text: (m.text || ((m.files || []).length ? `📎 ${(m.files || []).length === 1 ? 'Attachment' : `${m.files.length} attachments`}` : '')).slice(0, 140), dir: m.dir, by: m.by || null, via: m.via };
       if (m.dir === 'in') t.inbound = [...(t.inbound || []), m.at].sort().slice(-100);
       if (t.deleted) delete t.deleted;   // someone wrote again: the conversation is back on the list
-      all[thread.id] = t; return all;
+      all[thread.id] = t; saved = t; return all;
     }, {});
+    // an incoming message → every open console hears it at once (their desktop pop-up doesn't wait for a timer)
+    if (m.dir === 'in') emit({ thread: thread.id, kind: (saved && saved.kind) || thread.kind || 'person', name: (saved && saved.name) || thread.name || null, phone: (saved && saved.phone) || thread.phone || null,
+      by: m.by || null, text: m.text || '', files: (m.files || []).length, at: m.at });
     return m;
   }
   // where a person's text reply goes: the group dispatch last texted them from, else their own conversation
@@ -245,6 +256,18 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
   const view = (t, me, reads, pins) => ({ ...t, inbound: undefined, unread: unreadOf(t, (reads[me] || {})[t.id]), pinned: (pins[me] || []).includes(t.id) });
 
   if (app) {
+    app.get('/truckmate/messages/stream', requireAuth, (req, res) => {
+      if (!guard(req, res)) return;
+      if (streams.size >= 200) { res.status(503).json({ error: 'Too many open consoles.' }); return; }
+      res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+      if (res.flushHeaders) res.flushHeaders();
+      res.write(': live\n\n'); if (res.flush) res.flush();   // compression holds output until flushed
+      streams.add(res);
+      const ping = setInterval(() => { try { res.write(': ping\n\n'); if (res.flush) res.flush(); } catch { /* closed */ } }, 25000);
+      if (ping.unref) ping.unref();
+      req.on('close', () => { clearInterval(ping); streams.delete(res); });
+    });
+
     app.get('/truckmate/messages', requireAuth, async (req, res) => {
       if (!guard(req, res)) return;
       const me = userKey(req.user);
