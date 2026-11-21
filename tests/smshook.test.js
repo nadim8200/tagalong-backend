@@ -46,3 +46,15 @@ test('texting not set up on the company line: nothing is registered', async () =
   assert.equal(await hook.ensure(), 'skipped');
   assert.equal(isIncoming({ body: { direction: 'Inbound' } }), true);
 });
+
+test('when RingCentral says no, its answer is kept for the admin view; a later success clears it', async () => {
+  const db = memDb(); const app = fakeApp(); let fail = true;
+  const rc = { configFor: async () => ({ fromNumber: '+17867233912' }), api: async () => { if (fail) throw new Error('RingCentral 403: In order to call this API endpoint, application needs to have [SubscriptionWebhook] permission'); return { id: 'sub-2', status: 'Active', expirationTime: '2026-12-21T03:00:00Z' }; } };
+  const hook = initSmsHook(app, { db, ringcentral: rc, onText: () => {}, requireAuth: (q, s, n) => n(), env: { NODE_ENV: 'test' }, now: () => NOW });
+  assert.equal(await hook.tryEnsure(), 'failed');
+  let st = await call(app.routes['GET /admin/sms-hook']);
+  assert.match(st.body.lastError, /SubscriptionWebhook/);
+  fail = false;
+  const r = await call(app.routes['POST /admin/sms-hook/retry']);
+  assert.equal(r.body.step, 'created'); assert.equal(r.body.id, 'sub-2'); assert.equal(r.body.lastError, undefined);
+});

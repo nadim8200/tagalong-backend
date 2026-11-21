@@ -71,8 +71,13 @@ export function initSmsHook(app, { db, ringcentral, onText, requireAuth = null, 
     }
     return create();
   }
+  // ensure, keeping RingCentral's answer when it says no (shown at GET /admin/sms-hook) → the step or 'failed'
+  async function tryEnsure() {
+    try { const step = await ensure(); if (step !== 'skipped') await db.update(KEY, (cur) => { const a = { ...(cur || {}) }; delete a.lastError; return a; }, {}); return step; }
+    catch (e) { console.warn('[sms-hook]', e.message); if (enabled) await db.update(KEY, (cur) => ({ ...(cur || {}), lastError: String(e.message).slice(0, 300), lastErrorAt: new Date(now()).toISOString() }), {}).catch(() => {}); return 'failed'; }
+  }
   if (enabled && env.NODE_ENV !== 'test' && !process.env.NODE_TEST_CONTEXT) {
-    const run = () => ensure().catch((e) => console.warn('[sms-hook]', e.message));
+    const run = () => tryEnsure();
     setTimeout(run, 45000).unref?.();
     setInterval(run, 6 * 3600000).unref?.();
   }
@@ -82,6 +87,13 @@ export function initSmsHook(app, { db, ringcentral, onText, requireAuth = null, 
       const { token, ...st } = (enabled ? (await db.get(KEY, {})) : {}) || {};   // the secret never leaves the server
       res.json({ ...st, hasToken: !!token, address });
     });
+    // admins: register / renew now instead of waiting for the next 6-hour check
+    app.post('/admin/sms-hook/retry', requireAuth, async (req, res) => {
+      const u = req.user || {}; if (!(u.admin || u.role === 'admin')) return res.status(403).json({ error: 'Admins only.' });
+      const step = await tryEnsure();
+      const { token, ...st } = (enabled ? (await db.get(KEY, {})) : {}) || {};
+      res.json({ step, ...st, hasToken: !!token, address });
+    });
   }
-  return { ensure, address };
+  return { ensure, tryEnsure, address };
 }
