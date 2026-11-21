@@ -229,7 +229,7 @@ export function payrollEmail(log, { week, miles = [], odometer = null, docs = []
 <p style="font-size:13px">Miles from ZIP to ZIP (mile calculator): <b>${lo + em}</b> (${lo} loaded, ${em} empty)${odo != null ? ` · Odometer: <b>${odo}</b> mi` : ''}. Green columns are added by the app; the driver can change them.</p>
 ${exps.length ? `<h3 style="margin:14px 0 4px">Expenses paid by the driver (with receipts)</h3><table style="border-collapse:collapse;font-size:12px"><tr><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">Date</th><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">What</th><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">Trip #</th><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">Note</th><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">Amount</th><th style="border:1px solid #cfd7e3;padding:4px 6px;background:#f1f4f9">Receipt</th></tr>${expRows}<tr><td colspan="4" style="border:1px solid #cfd7e3;padding:4px 6px;text-align:right;font-weight:700">Expenses total</td><td style="border:1px solid #cfd7e3;padding:4px 6px;font-weight:700">${money(expTotal)}</td><td style="border:1px solid #cfd7e3"></td></tr></table>` : ''}
 <p style="font-size:14px"><b>To reimburse: ${money(reimb + expTotal)}</b> (sheet ${money(reimb)} + expenses ${money(expTotal)})</p>
-${docs.length ? `<h3 style="margin:14px 0 4px">Paperwork the driver scanned this week (${docs.length})</h3><ul style="font-size:13px;margin:0">${docList}</ul>` : ''}
+${docs.length ? `<h3 style="margin:14px 0 4px">Paperwork and photos from this trip (${docs.length})</h3><ul style="font-size:13px;margin:0">${docList}</ul>` : ''}
 ${log.signature ? '<p style="font-size:13px">Driver\'s signature:<br><img src="cid:signature" alt="signature" style="height:60px;border-bottom:1px solid #14213d"></p>' : ''}
 <p style="font-size:12px;color:#6b7a8f">Signed in the driver app ${esc(log.submittedAt || '')}.</p></div>`;
   return { subject: `Trip Log · ${h.name || 'Driver'} (${h.id || ''}) · Week of ${week.start}`, html, totals: { loaded: lo, empty: em, wait, reimb, bonuses, expenses: expTotal } };
@@ -334,7 +334,17 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
           AND ((trips && $2::text[] AND uploaded_at >= $3 AND uploaded_at < $4) OR id = ANY($5::bigint[]))
         ORDER BY uploaded_at LIMIT 120`,
       [SITE, trips.map(String), new Date(week.fromMs).toISOString(), new Date(week.toMs + 2 * DAY).toISOString(), extraIds.map(Number).filter(Boolean)]).catch(() => ({ rows: [] }));
-    return rows.map((r) => ({ id: String(r.id), trip: (r.trips || [])[0] || null, filename: r.filename || null, mediaType: r.media_type, bytes: Number(r.size_bytes) || 0, label: labelOf(r), at: r.uploaded_at, data: bytes ? r.data : undefined }));
+    const papers = rows.map((r) => ({ id: String(r.id), kind: 'doc', trip: (r.trips || [])[0] || null, filename: r.filename || null, mediaType: r.media_type, bytes: Number(r.size_bytes) || 0, label: labelOf(r), at: r.uploaded_at, data: bytes ? r.data : undefined }));
+    // the photos the driver took at the stops (with the box count, missing boxes, a problem) — kept apart from the papers
+    let photos = [];
+    if (trips.length) {
+      const q = await pool.query(
+        `SELECT id, trip, filename, media_type, size_bytes, created_at${bytes ? ', data' : ''} FROM ta_stop_files
+          WHERE site = $1 AND trip = ANY($2::text[]) AND created_at >= $3 AND created_at < $4 ORDER BY created_at LIMIT 120`,
+        [SITE, trips.map(String), new Date(week.fromMs - DAY).toISOString(), new Date(week.toMs + 2 * DAY).toISOString()]).catch(() => ({ rows: [] }));
+      photos = q.rows.map((r) => ({ id: `p-${r.id}`, kind: 'photo', trip: r.trip || null, filename: r.filename || null, mediaType: r.media_type, bytes: Number(r.size_bytes) || 0, label: 'Photo', at: r.created_at, data: bytes ? r.data : undefined }));
+    }
+    return [...papers, ...photos];
   }
   const tripsOfLog = (lines) => [...new Set((lines || []).map((l) => l.trip).filter(Boolean))];
   const zipPoint = async (z) => (z ? miles.geocode(`${z}, USA`) : null);
@@ -614,6 +624,16 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       return sendPdf(res, log);
     });
     const gate = (req, res) => { if (mayRead(req.user)) return true; res.status(403).json({ error: 'Payroll and admins only.' }); return false; };
+    // a photo the driver took at a stop (on the homework): payroll and admins only
+    app.get('/truckmate/payroll/photo/:id', requireAuth, async (req, res) => {
+      if (!gate(req, res)) return undefined;
+      if (!pool) return res.status(503).json({ error: 'Not available right now.' });
+      const id = String(req.params.id).replace(/^p-/, '');
+      const { rows } = await pool.query('SELECT filename, media_type, data FROM ta_stop_files WHERE id = $1 AND site = $2', [id, SITE]).catch(() => ({ rows: [] }));
+      if (!rows[0]) return res.status(404).json({ error: 'That photo is not here any more.' });
+      res.set('Content-Type', rows[0].media_type); res.set('Cache-Control', 'private, max-age=3600');
+      return res.end(rows[0].data);
+    });
     app.get('/truckmate/payroll/me', requireAuth, (req, res) => res.json({ canPay: mayRead(req.user) }));
     // every sheet turned in (newest first), to review or reviewed
     app.get('/truckmate/payroll/logs', requireAuth, async (req, res) => {

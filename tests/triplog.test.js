@@ -56,7 +56,7 @@ test('expenses the driver paid go to payroll with their receipts', () => {
   assert.deepEqual(ex, [{ date: '11/18', kind: 'fuel', amount: '54.20', trip: '628011', note: 'DEF', receipts: ['812'] }]);
   const e = payrollEmail({ head: { name: 'A', id: '1' }, lines: [{ zip: '33126', act: 'PU', fe: 'E', reimb: '75' }], expenses: ex }, { week: { start: '2026-11-15', end: '2026-11-21' }, docs: [{ label: 'POD', trip: '627549', filename: 'pod.pdf', attached: true }, { label: 'BOL', trip: '628011', filename: 'big.pdf', attached: false }] });
   assert.match(e.html, /Expenses paid by the driver/); assert.match(e.html, /\$54\.20/); assert.match(e.html, /To reimburse: \$129\.20/);
-  assert.match(e.html, /Paperwork the driver scanned this week \(2\)/); assert.match(e.html, /too big for the email/);
+  assert.match(e.html, /Paperwork and photos from this trip \(2\)/); assert.match(e.html, /too big for the email/);
   assert.equal(e.totals.expenses, 54.2);
 });
 
