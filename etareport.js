@@ -163,6 +163,42 @@ export function stopTimesFrom(visitsByTrip = {}, items = [], have = {}) {
 }
 
 const MAIL_ON = (site) => `taEtaReportMail:${site}`;
+const SCORES = (site) => `taEtaScores:${site}`;   // each arrived stop's ETAs scored against the real arrival, kept 90 days
+
+// ---------- ETA accuracy: ours vs ARTIS (Nov 21, 2026) ----------
+// For a stop the truck arrived at (geofence): the ETA each source had out at fixed times before the arrival (1, 2, 4, 8 and 24 h
+// before), and at the moment ARTIS last read (the fair head-to-head: ours as it stood when ARTIS gave its number). Minutes off:
+// actual − ETA (positive = the truck came later than the ETA). Pure.
+export const CHECKPOINTS = [1, 2, 4, 8, 24];
+const inEffect = (list = [], ms) => { let e = null; for (const x of list) { if (x.at <= ms) e = x; else break; } return e; };
+export function scoreStop(h = {}, arrivedMs) {
+  if (!arrivedMs) return null;
+  const ours = [...(h.ours || [])].sort((a, b) => a.at - b.at).filter((x) => x.at < arrivedMs && x.etaMs);
+  const artis = [...(h.artis || [])].sort((a, b) => a.at - b.at).filter((x) => x.at < arrivedMs && x.etaMs);
+  if (!ours.length && !artis.length) return null;
+  const off = (e) => (e ? Math.round((arrivedMs - e.etaMs) / MIN) : null);
+  const at = (list) => Object.fromEntries(CHECKPOINTS.map((hh) => [`h${hh}`, off(inEffect(list, arrivedMs - hh * 60 * MIN))]));
+  const lastArtis = artis[artis.length - 1] || null;
+  return {
+    ours: { ...at(ours), last: off(ours[ours.length - 1]), atArtisRead: lastArtis ? off(inEffect(ours, lastArtis.at)) : null },
+    artis: { ...at(artis), last: off(lastArtis), readHoursBefore: lastArtis ? Math.round((arrivedMs - lastArtis.at) / (6 * MIN)) / 10 : null },
+  };
+}
+// the summary for a list of scored stops: per checkpoint and source — how many, average minutes off (either way), within 30 / 60
+// min, the lean (late or early), and head to head: where both had an ETA, who was closer. Pure.
+export function accuracySummary(rows = []) {
+  const keys = ['atArtisRead', ...CHECKPOINTS.map((h) => `h${h}`), 'last'];
+  const stat = (vals) => { const v = vals.filter((x) => x != null); if (!v.length) return null; const abs = v.map(Math.abs);
+    return { n: v.length, avgOff: Math.round(abs.reduce((a, b) => a + b, 0) / v.length), within30: Math.round((abs.filter((x) => x <= 30).length / v.length) * 100), within60: Math.round((abs.filter((x) => x <= 60).length / v.length) * 100), lean: Math.round(v.reduce((a, b) => a + b, 0) / v.length) }; };
+  const out = {};
+  for (const k of keys) {
+    const artisKey = k === 'atArtisRead' ? 'last' : k;
+    const pairs = rows.filter((r) => r.ours[k] != null && r.artis[artisKey] != null);
+    out[k] = { ours: stat(rows.map((r) => r.ours[k])), artis: k === 'last' ? stat(rows.map((r) => r.artis.last)) : stat(rows.map((r) => r.artis[artisKey])),
+      both: pairs.length, oursCloser: pairs.filter((r) => Math.abs(r.ours[k]) < Math.abs(r.artis[artisKey])).length, artisCloser: pairs.filter((r) => Math.abs(r.artis[artisKey]) < Math.abs(r.ours[k])).length };
+  }
+  return out;
+}
 export function initEtaReport({ app = null, requireAuth = null, db, sendMail = null, recipients = async () => [], lateRecipients = async () => [], lateCc = async () => [], now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   // after each Watchtower cycle: log this cycle's ETAs
@@ -184,7 +220,25 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
       for (const [k, v] of Object.entries(next)) if (at - (v.leftMs || 0) > 30 * 24 * 60 * MIN) delete next[k];
       return next;
     }, {});
+    await scoreCycle(site).catch((e) => console.warn('[eta-accuracy]', e.message));
     await usualCycle(site, items, etas).catch((e) => console.warn('[usual-arrival]', e.message));
+  }
+  // every stop the truck arrived at (geofence) that has ETAs in the log: scored once, kept 90 days
+  async function scoreCycle(site) {
+    const times = (await db.get(TIMES(site), {})) || {};
+    const log = (await db.get(LOG(site), {})) || {};
+    const have = (await db.get(SCORES(site), {})) || {};
+    const add = {};
+    for (const [k, t] of Object.entries(times)) {
+      if (have[k] || !t || !t.arrivedMs || !t.place) continue;
+      const h = (log[t.trip] || {})[placeKey(t.place)];
+      if (!h) continue;
+      const sc = scoreStop(h, t.arrivedMs);
+      if (sc) add[k] = { trip: t.trip, truck: t.truck || null, customer: t.customer || null, place: t.place, arrivedMs: t.arrivedMs, ...sc };
+    }
+    if (!Object.keys(add).length) return;
+    const at = now();
+    await db.update(SCORES(site), (cur) => { const next = { ...(cur || {}), ...add }; for (const [k, v] of Object.entries(next)) if (at - (v.arrivedMs || 0) > 90 * 24 * 60 * MIN) delete next[k]; return next; }, {});
   }
 
   // ---- usual arrival times (LTL only): learn from the geofence arrivals, alert when an ETA runs past the usual time ----
@@ -317,6 +371,15 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
   }
   // the trip-report email: off by default; dispatch turns it on (or off) here
   if (app && requireAuth) {
+    // ETA accuracy: ours vs ARTIS against the real arrivals (?days=7|30|90, ?truck=)
+    app.get('/truckmate/eta-accuracy', requireAuth, async (req, res) => {
+      if (!enabled) return res.json({ rows: [], summary: {} });
+      const site = String(req.query.site || SITE); const days = Math.min(90, Math.max(1, Number(req.query.days) || 30));
+      await scoreCycle(site).catch(() => {});
+      const since = now() - days * 24 * 60 * MIN; const truck = String(req.query.truck || '').trim();
+      const rows = Object.values((await db.get(SCORES(site), {})) || {}).filter((r) => r.arrivedMs >= since && (!truck || String(r.truck || '') === truck)).sort((a, b) => b.arrivedMs - a.arrivedMs);
+      return res.json({ days, since: new Date(since).toISOString(), stops: rows.length, trips: new Set(rows.map((r) => r.trip)).size, summary: accuracySummary(rows), rows: rows.slice(0, 300) });
+    });
     app.get('/truckmate/eta-report/mail', requireAuth, async (req, res) => res.json(enabled ? ((await db.get(MAIL_ON(String(req.query.site || SITE)), {})) || {}) : {}));
     app.post('/truckmate/eta-report/mail', requireAuth, async (req, res) => {
       if (!enabled) return res.status(503).json({ error: 'no database' });

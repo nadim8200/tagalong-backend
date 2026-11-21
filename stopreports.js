@@ -187,7 +187,7 @@ export function initStopReports(app, { db, secret, requireDriver, requireAuth = 
     return list.map((p, i) => {
       const b = bills.find((x) => String(x.billNumber || '') === String(p.bill || ''));
       const stop = b ? String(b.endZoneDescription || '').replace(/,\s*\d{5}(-\d{4})?\s*$/, '') : null;
-      return stop ? { id: `pw-${trip}-${i}`, kind: 'scan', stop, stopName: b.billToName || null, paper: p.kind || null, bill: p.bill || null, boxes: p.boxes != null ? p.boxes : null, confirmation: p.confirmation || null, at: p.at, by: p.by || null, from: 'Paperwork tab' } : null;
+      return stop ? { id: `pw-${trip}-${i}`, kind: 'scan', stop, stopName: b.billToName || null, paper: p.kind || null, bill: p.bill || null, boxes: p.boxes != null ? p.boxes : null, confirmation: p.confirmation || null, docIds: (p.docIds || []).map(String), at: p.at, by: p.by || null, from: 'Paperwork tab' } : null;
     }).filter(Boolean);
   }
   if (app && requireAuth) app.get('/truckmate/stopreports/:trip', requireAuth, async (req, res) => { const trip = String(req.params.trip); const own = (await listOf(trip)).map((r) => ({ ...r, links: (r.files || []).map((f) => ({ name: f.name, url: link(f) })) })); const pw = await paperworkAsReports(trip).catch(() => []); res.json({ reports: [...own, ...pw.filter((p) => !own.some((r) => r.kind === 'scan' && r.confirmation && r.confirmation === p.confirmation))] }); });
