@@ -117,3 +117,18 @@ export function cityStep(step, stops) {
   if (!s || !s.cityLabel || s.cityLabel === s.key) return null;
   return `${m[1]}:${s.cityLabel}`;
 }
+
+// A team (or a driver whose last tap didn't go through): a stop with a box count sent from the app is delivered, whoever sent
+// it — the box count is the proof, the "delivered" tap only came after it (Nov 21: Wilber's stops showed undelivered on
+// Ferney's phone). steps + the trip's stop reports → steps with those stops delivered (and arrived). Pure.
+export function stepsWithReports(steps = {}, stops = [], reports = []) {
+  const out = { ...steps };
+  for (const st of stops) {
+    if (out[`delivered:${st.key}`]) continue;
+    const r = (reports || []).filter((x) => x && x.kind === 'boxes' && x.stop === st.key && x.at).sort((a, b) => String(a.at).localeCompare(String(b.at)))[0];
+    if (!r) continue;
+    out[`delivered:${st.key}`] = { at: r.at, by: r.by || null, from: 'box count' };
+    if (!out[`arrived:${st.key}`]) out[`arrived:${st.key}`] = { at: r.at, by: r.by || null, from: 'box count' };
+  }
+  return out;
+}

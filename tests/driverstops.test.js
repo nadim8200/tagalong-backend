@@ -101,3 +101,15 @@ test('a stop only ARTIS\'s Truck Builder listed counts as ARTIS; when the printe
   assert.deepEqual([s[0].boxes, s[0].pallets, s[0].boxesFrom], [62, 2, 'ARTIS']);
   assert.deepEqual([s[1].boxes, s[1].boxesFrom], [44, 'trip sheet']);
 });
+
+test('a team sees the same stops done: a box count either driver sent counts as delivered', async () => {
+  const { stepsWithReports } = await import('../driverstops.js');
+  const stops = [{ key: 'LUDLOW, MA, 01056' }, { key: 'WORCESTER, MA, 01604' }];
+  const reports = [{ kind: 'boxes', stop: 'LUDLOW, MA, 01056', at: '2026-11-21T11:40:27Z', by: 'Wilber Echeverri' }, { kind: 'photo', stop: 'WORCESTER, MA, 01604', at: '2026-11-21T12:00:00Z' }];
+  const out = stepsWithReports({ loaded: { at: 'x' } }, stops, reports);
+  assert.deepEqual(out['delivered:LUDLOW, MA, 01056'], { at: '2026-11-21T11:40:27Z', by: 'Wilber Echeverri', from: 'box count' });
+  assert.ok(out['arrived:LUDLOW, MA, 01056']);
+  assert.equal(out['delivered:WORCESTER, MA, 01604'], undefined);              // a photo alone isn't a delivery
+  const tapped = { 'delivered:LUDLOW, MA, 01056': { at: '2026-11-21T11:41:00Z', by: 'Wilber Echeverri' } };
+  assert.equal(stepsWithReports(tapped, stops, reports)['delivered:LUDLOW, MA, 01056'].at, '2026-11-21T11:41:00Z');   // a real tap stays
+});

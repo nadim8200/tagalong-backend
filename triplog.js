@@ -26,7 +26,7 @@
 //   · the driver checks it, adds what's missing (loads home, comments, bonuses, lumper), signs, and it goes to payroll by email
 // Driver words are data: nothing here changes a load.
 // ---------------------------------------------------------------
-import { driverStops } from './driverstops.js';
+import { driverStops, stepsWithReports } from './driverstops.js';
 import { CHECKINS } from './checkins.js';
 import { initMiles } from './miles.js';
 import { samsaraTokenFrom, listVehicles, vehicleOdometerRange, vehicleGpsHistory } from './samsara.js';
@@ -402,12 +402,15 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
     const geo = (await db.get('taGeoZip', {}).catch(() => ({}))) || {};
     const clocks = (await db.get(`taWaiting:${SITE}`, {}).catch(() => ({}))) || {};   // dispatch's waiting-time clocks, by stay
     const since = now() - LOOKBACK_DAYS * DAY;
-    const lines = []; const trucks = []; const trailers = []; const partners = [];
+    const lines = []; const trucks = []; const trailers = []; const partners = []; let reportsAll = null;
     for (const trip of known) {
       if (done.has(String(trip))) continue;
       const it = items.find((x) => tripNo(x) === String(trip)) || (rundowns[trip] && rundowns[trip].rec && rundowns[trip].rec.item) || null;
       if (!it) continue;
-      const steps = (book[trip] || {}).steps || {};
+      // a stop either driver of a team counted the boxes at is delivered (the box count is the proof)
+      if (!reportsAll) reportsAll = (await db.get(`taStopReports:${SITE}`, {}).catch(() => ({}))) || {}; // eslint-disable-line no-await-in-loop
+      let stopsHere = []; try { stopsHere = driverStops(it, { geo }); } catch { stopsHere = []; }
+      const steps = stepsWithReports((book[trip] || {}).steps || {}, stopsHere, reportsAll[trip] || []);
       const times = Object.values(steps).map(atOf).filter(Boolean);
       const recent = times.some((ms) => ms >= since);
       const onNow = items.includes(it) && !times.length;

@@ -9,7 +9,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from 'node:crypto';
 import { CHECKINS, validStep } from './checkins.js';
 import { leftCooler, withDetected } from './autodepart.js';
-import { driverStops, cityStep } from './driverstops.js';
+import { driverStops, cityStep, stepsWithReports } from './driverstops.js';
 import { roadFacts, truckStopFinder, aheadOf } from './driverroad.js';
 import { initTripLog } from './triplog.js';
 import { KNOWN_YARDS } from './loadsheet.js';
@@ -201,7 +201,7 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       const geo = (await db.get('taGeoZip', {}).catch(() => ({}))) || {};
       // loading steps the driver skipped: once Jarvis sees the truck leave the cooler with its trailer (first time kept)
       const DEP = `taAutoDepart:${SITE}`;
-      let departed = null;
+      let departed = null; let reportsAll = null;
       for (const l of [...loads.current, ...loads.next]) {
         const it = items2.find((x) => tripNo(x) === l.trip);
         const steps = (book[l.trip] || {}).steps || {};
@@ -211,7 +211,10 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
           seen = departed[l.trip] || null;
           if (!seen) { const d = leftCooler(it, now()); if (d) { seen = d; departed = await db.update(DEP, (cur) => ({ ...Object.fromEntries(Object.entries(cur || {}).slice(-300)), [l.trip]: (cur || {})[l.trip] || d }), {}); } } // eslint-disable-line no-await-in-loop
         }
-        l.checkin = { stops: driverStops(it, { geo }).map(({ zip, tmPlace, cityLabel, ...x }) => x), steps: withDetected(steps, seen) };
+        // a team sees the same stops done: a box count either driver sent counts as delivered (stopreports)
+        const stopsHere = driverStops(it, { geo });
+        const reports = ((reportsAll || (reportsAll = (await db.get(`taStopReports:${SITE}`, {}).catch(() => ({}))) || {}))[l.trip]) || []; // eslint-disable-line no-await-in-loop
+        l.checkin = { stops: stopsHere.map(({ zip, tmPlace, cityLabel, ...x }) => x), steps: withDetected(stepsWithReports(steps, stopsHere, reports), seen) };
         // on the road: each stop's delivery notes, the trailer temp, the truck's position (driverroad.js)
         l.road = loads.current.includes(l) ? roadFacts(it, { stops: l.checkin.stops, now: now() }) : null;
       }

@@ -107,3 +107,19 @@ test('stop reports from the app: only the driver\'s load, once per key, photo on
   const withPw = (await call('GET /truckmate/stopreports/:trip', { params: P })).body.reports.filter((r) => r.from === 'Paperwork tab');
   assert.deepEqual(withPw.map((r) => [r.kind, r.stop, r.bill, r.boxes, r.confirmation]), [['scan', 'NORWALK, CT', 'M5064641', 62, 'FB-482150']], 'only this trip\'s, only bills on the load');
 });
+
+test('a team: the box count Wilber sends marks the stop delivered for Ferney too (Nov 21)', async () => {
+  const kv = {};
+  const db = { enabled: true, pool: { query: async () => ({ rows: [] }) }, get: async (k, d) => (k in kv ? JSON.parse(JSON.stringify(kv[k])) : d), set: async (k, v) => { kv[k] = v; }, update: async (k, f, d) => { kv[k] = f(k in kv ? JSON.parse(JSON.stringify(kv[k])) : d); return kv[k]; } };
+  const routes = {}; const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const board = { trips: [{ trip: { tripNumber: '627549', driver: '986', driver2: '2473', status: 'DEPSHIP', powerUnit: '4504' }, freightBills: [{ billNumber: 'M5065658', endZoneDescription: 'LUDLOW, MA, 01056', billToName: 'DENEHY', pieces: 32 }] }] };
+  initStopReports(app, { db, secret: 's', requireDriver: (req, res, next) => { req.driver = { code: '2473', name: 'Wilber Echeverri' }; next(); }, getBoard: async () => board, now: () => Date.parse('2026-11-21T11:40:00Z') });
+  let out = {}; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; return this; } };
+  const hs = routes['POST /driver/me/loads/:trip/stopreports']; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); };
+  const req = { body: { clientId: 'b1', kind: 'boxes', stop: 'LUDLOW, MA, 01056', boxes: 32, expected: 32 }, params: { trip: '627549' }, query: {}, headers: {} };
+  await next(); await new Promise((r) => { setTimeout(r, 50); });
+  assert.equal(out.body.ok, true);
+  const steps = kv['taDriverCheckins:florida-beauty']['627549'].steps;
+  assert.equal(steps['delivered:LUDLOW, MA, 01056'].by, 'Wilber Echeverri');
+  assert.ok(steps['arrived:LUDLOW, MA, 01056']);
+});

@@ -18,6 +18,8 @@ import express from 'express';
 import { makeToken, readToken } from './breakdownreport.js';
 import { readableFile } from './heic.js';
 import { loadsFor } from './driverauth.js';
+import { CHECKINS } from './checkins.js';
+import { driverStops, cityStep } from './driverstops.js';
 import { jarvisEmail, section, quote, facts, metrics, fileBox, etTime, cityState, isSpanish } from './jarvismail.js';
 
 const SITE = 'florida-beauty';
@@ -111,6 +113,18 @@ export function initStopReports(app, { db, secret, requireDriver, requireAuth = 
       size_bytes INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), data BYTEA NOT NULL)`).then(() => db.pool.query('CREATE INDEX IF NOT EXISTS ta_stop_files_trip ON ta_stop_files (trip)')).catch((e) => { ready = null; throw e; });
     return ready;
   };
+  async function markDelivered(trip, r) {
+    const it = (await items()).find((x) => String(((x && x.trip) || x || {}).tripNumber || '') === String(trip));
+    if (!it) return;
+    const stops = driverStops(it, { geo: (await db.get('taGeoZip', {}).catch(() => ({}))) || {} });
+    if (!stops.some((x) => x.key === r.stop)) return;
+    const mark = { at: r.at, by: r.by || null, from: 'box count' };
+    await db.update(CHECKINS(SITE), (cur) => {
+      const c = { ...(cur || {}) }; const rec = c[trip] || { steps: {} }; const st = { ...(rec.steps || {}) };
+      for (const k of [`arrived:${r.stop}`, `delivered:${r.stop}`]) { if (!st[k]) st[k] = mark; const city = cityStep(k, stops); if (city && !st[city] && (/^arrived:/.test(city) || stops.filter((x) => x.cityLabel === city.replace(/^delivered:/, '')).every((x) => st[`delivered:${x.key}`]))) st[city] = mark; }
+      c[trip] = { ...rec, steps: st }; return c;
+    }, {});
+  }
   const listOf = async (trip) => (((await db.get(KEY, {})) || {})[String(trip)] || []);
   const patch = (trip, id, fn) => db.update(KEY, (cur) => { const c = { ...(cur || {}) }; c[trip] = (c[trip] || []).map((x) => (x.id === id ? fn(x) : x)); return c; }, {});
   const items = async () => (getBoard ? (((await getBoard(SITE).catch(() => null)) || {}).trips || []) : []);
@@ -138,6 +152,8 @@ export function initStopReports(app, { db, secret, requireDriver, requireAuth = 
       if (had) return res.json({ ok: true, id: had.id, already: true });
       const r = { id: `sr${now().toString(36)}${crypto.randomBytes(2).toString('hex')}`, clientId, ...c.report, by: req.driver.name || null, driverCode: String(req.driver.code), at: new Date(now()).toISOString(), files: [], sentAt: null };
       await db.update(KEY, (cur) => ({ ...(cur || {}), [m.trip]: [...((cur || {})[m.trip] || []), r].slice(-200) }), {});
+      // a box count is the stop delivered, for both drivers of a team — not only when the "delivered" tap after it gets through
+      if (r.kind === 'boxes') await markDelivered(m.trip, r).catch((e) => console.warn('[stopreports] delivered:', e.message));
       if (log) await log(SITE, m.trip, { type: 'note', kind: 'stopreport', text: logLine(r, r.by), by: r.by || 'driver app' }).catch(() => {});
       return res.json({ ok: true, id: r.id, needsSend: (r.kind === 'boxes' && !!r.missing) || r.kind === 'problem' });
     });
