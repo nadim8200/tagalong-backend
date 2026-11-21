@@ -10,6 +10,7 @@
 import { localToUtcMs } from './watchtower.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 import { outboundDate, nameScore } from './voice.js';
+import { initRunReport, renderRunReport, mergeRules, DEFAULT_RULES } from './runreport.js';
 import { learn, lateCheck, dueByTrip, lateEmail, usualView, usualFor as usualOf, parseClock, parseWeekday, learnedDays, stopKey, hubKey, hubOf } from './usualarrival.js';
 
 const SITE = 'florida-beauty';
@@ -201,11 +202,15 @@ export function accuracySummary(rows = []) {
 }
 export function initEtaReport({ app = null, requireAuth = null, db, sendMail = null, recipients = async () => [], lateRecipients = async () => [], lateCc = async () => [], now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
+  // the whole run + the driver's grade, when an LTL or team run finishes (runreport.js)
+  const runReport = initRunReport({ db, sendMail, now });
+  let lastItems = [];   // the board from the latest cycle (the run-report preview looks trips up here)
   // after each Watchtower cycle: log this cycle's ETAs
   async function process(site, board) {
     if (!enabled) return;
     const etas = ((await db.get(`taWatch:${site}`, {})) || {}).etas || {};
     const items = (board && board.trips) || [];
+    lastItems = items;
     const at = now();
     await db.update(LOG(site), (cur) => {
       const next = foldLog(cur || {}, items, etas, at);
@@ -371,6 +376,31 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
   }
   // the trip-report email: off by default; dispatch turns it on (or off) here
   if (app && requireAuth) {
+    // the run report for any trip on the board or finished (?trip) — to look at it before a run finishes; and the drivers' grades
+    const isAdmin = (u) => !!(u && (u.admin || u.role === 'admin' || u.companyAdmin));
+    app.get('/truckmate/run-report/:trip', requireAuth, async (req, res) => {
+      if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admins only.' });
+      const n = String(req.params.trip).replace(/\D/g, ''); const site = String(req.query.site || SITE);
+      const rundowns = (await db.get(`taRundowns:${site}`, {})) || {};
+      const item = lastItems.find((x) => tripNo(x) === n) || (rundowns[n] && rundowns[n].rec && rundowns[n].rec.item) || null;
+      if (!item) return res.status(404).json({ error: 'That trip is not on the board or in the finished loads.' });
+      const run = await runReport.build(site, item, 'preview');
+      if (req.query.format === 'json') return res.json(run);
+      res.set('Content-Type', 'text/html; charset=utf-8'); return res.send(renderRunReport(run).html);
+    });
+    app.get('/truckmate/driver-grades', requireAuth, async (req, res) => {
+      if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admins only.' });
+      return res.json({ grades: await runReport.grades(), rules: await runReport.rules() });
+    });
+    // the grading rules: turn one off or change its points (admins)
+    app.put('/truckmate/driver-grades/rules', requireAuth, async (req, res) => {
+      if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admins only.' });
+      const b = req.body || {}; const cur = (await db.get('taDriverGradeRules', {})) || {};
+      const next = { ...cur };
+      for (const [k, v] of Object.entries(b)) if (DEFAULT_RULES[k] && v && typeof v === 'object') next[k] = { ...(cur[k] || {}), ...Object.fromEntries(Object.entries(v).filter(([f]) => f !== 'label')) };
+      await db.set('taDriverGradeRules', next);
+      return res.json({ rules: mergeRules(next) });
+    });
     // ETA accuracy: ours vs ARTIS against the real arrivals (?days=7|30|90, ?truck=)
     app.get('/truckmate/eta-accuracy', requireAuth, async (req, res) => {
       if (!enabled) return res.json({ rows: [], summary: {} });
@@ -401,6 +431,7 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
   }
   // the trip finished → the report (once per trip)
   async function onFinished(site, rec, reason) {
+    runReport.onFinished(site, rec, reason).catch((e) => console.warn('[run-report]', e.message));
     if (!enabled || !rec || !rec.item || !sendMail) return null;
     const n = tripNo(rec.item); if (!n) return null;
     const sent = (await db.get(SENT(site), {})) || {};

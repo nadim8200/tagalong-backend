@@ -34,7 +34,8 @@ test('report: our ETAs along the way, ARTIS\'s, and the actual arrival (geofence
 test('emailed once when the trip finishes', async () => {
   const mm = new Map(); const db = { enabled: true, get: async (k, fb) => (mm.has(k) ? mm.get(k) : fb), set: async (k, v) => mm.set(k, v), update: async (k, fn, fb) => { const v = fn(mm.has(k) ? mm.get(k) : fb); mm.set(k, v); return v; } };
   const sent = [];
-  const r = initEtaReport({ db, sendMail: async (x) => sent.push(x), recipients: async () => ['ntellez@floridabeauty.us'] });
+  // the run report (runreport.js) also goes out when a team / LTL run finishes: this test counts the ETA report only
+  const r = initEtaReport({ db, sendMail: async (x) => { if (/^Trip report/.test(x.subject || '')) sent.push(x); }, recipients: async () => ['ntellez@floridabeauty.us'] });
   const t0 = Date.parse('2026-10-23T12:00:00Z');
   const done = { ...item, freightBills: item.freightBills.map((b) => ({ ...b, actualDelivery: b.actualDelivery || '2026-10-24T08:00:00' })) };
   await db.set('taEtaLog:florida-beauty', foldLog({}, [done], { 625645: { stops: [{ label: 'MOUNT RAINIER, MD, 20712', etaMs: t0 + 4 * H }] } }, t0));
