@@ -40,10 +40,14 @@ export const sender = new AsyncLocalStorage();
 export const JARVIS_SIGNATURE = 'Jarvis (AI)';
 // "<text> — Ronen Koubi, Florida Beauty Dispatch", placed before a closing "Reply STOP to opt out." Pure.
 export function signText(text, by) {
-  const t = String(text || '').trim(); const who = String(by || JARVIS_SIGNATURE).trim();
+  const who = String(by || JARVIS_SIGNATURE).trim();
+  // a text that already ends with Jarvis's own sign-off ("— Jarvis", "Jarvis · Florida Beauty Dispatch") gets the standard one
+  // in its place, never both (Nov 20: "Jarvis · Florida Beauty Dispatch — Jarvis (AI), Florida Beauty Dispatch")
+  const t = String(text || '').trim().replace(/\s*(?:[—-]\s*Jarvis|\n?Jarvis\s*·\s*Florida Beauty (?:Flora )?Dispatch)\s*$/i, '').trim();
   if (!t || t.includes(`— ${who}`)) return t;
   const sig = `— ${who}, Florida Beauty Dispatch`;
   const m = t.match(/^([\s\S]*?)\s*(Reply STOP to opt out\.?)\s*$/i);
+  if (!m && t.includes('\n')) return `${t}\n${who}, Florida Beauty Dispatch`;   // a multi-line text (temp alerts): the sign-off on its own last line
   return m ? `${m[1]} ${sig}. ${m[2]}` : `${t} ${sig}`;
 }
 

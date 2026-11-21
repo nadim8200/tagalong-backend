@@ -44,15 +44,17 @@ test('first text waits until it has been off for 2 hours (by the readings); one 
   await a.process('s', { trips: [ltlAt('2', 41.4, 34.99, 135)] });           // the same reading again (a retry / next cycle)
   await run(41.6, 150);
   assert.equal(texts.length, 1, 'no duplicates');
-  await run(44.6, 165);                                                     // 3°F worse → TEMP UPDATE
-  assert.equal(texts.length, 2); assert.match(texts[1][1], /^TEMP UPDATE\n/); assert.match(texts[1][1], /Above set point for: 2 hr 30 min/);
+  await run(44.6, 165);                                                     // 3°F worse, but 30 min after the alert → waits (no back-to-back texts)
+  assert.equal(texts.length, 1, 'an update waits an hour after the last text');
+  await run(44.6, 195);                                                     // an hour after the alert, still 3°F worse → TEMP UPDATE
+  assert.equal(texts.length, 2); assert.match(texts[1][1], /^TEMP UPDATE\n/); assert.match(texts[1][1], /Above set point for: 3 hr/);
   assert.equal(mails.length, 2);
-  await run(34.5, 180);                                                     // back at the set point → one BACK IN RANGE text, forgotten
+  await run(34.5, 210);                                                     // back at the set point → one BACK IN RANGE text, forgotten
   assert.equal(texts.length, 3);
-  assert.equal(texts[2][1], ['TEMP BACK IN RANGE', 'Trailer 7136 | Trip 2', 'Reading: 34.5°F', 'Set point: 35.0°F', 'Was: 44.6°F at Nov 13, 10:45 AM ET', 'Reading taken: Nov 13, 11:00 AM ET', 'Jarvis · Florida Beauty Dispatch'].join('\n'));
-  await run(34.5, 180);
+  assert.equal(texts[2][1], ['TEMP BACK IN RANGE', 'Trailer 7136 | Trip 2', 'Reading: 34.5°F', 'Set point: 35.0°F', 'Was: 44.6°F at Nov 13, 11:15 AM ET', 'Reading taken: Nov 13, 11:30 AM ET', 'Jarvis · Florida Beauty Dispatch'].join('\n'));
+  await run(34.5, 210);
   assert.equal(texts.length, 3, 'said once');
-  await run(41.2, 195);
+  await run(41.2, 225);
   assert.equal(texts.length, 3, 'off again: waits 2 hours again');
 });
 

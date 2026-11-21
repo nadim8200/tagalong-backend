@@ -167,6 +167,9 @@ export function tempMessage(x, { worse = false } = {}) {
 // wait before the first alert. Pure.
 export const GAP_MIN = 45;
 export const HOLD_MIN = 120;
+// a TEMP UPDATE (same kind, worse) waits at least this long after the last text for the trip, so two never come back to back
+// (Nov 20: an alert at 9:06 and an update at 9:14). A change of kind (warm → freeze) still texts right away.
+export const UPDATE_GAP_MIN = 60;
 export function track(prev, r, { gapMin = GAP_MIN, bad = false, cold = false } = {}) {
   if (!r || r.f == null || r.f === '' || !Number.isFinite(Number(r.f)) || !Number.isFinite(Number(r.at))) return prev || null;
   if (prev && prev.lastAt && r.at <= prev.lastAt) return prev;                        // the same reading again (or an older one)
@@ -282,7 +285,8 @@ export function initLtlTempAlert({ db, sendMail = null, emails = async () => [],
       const k = alertKey(x); const prev = st[k];
       const held = x.kind !== 'setpoint' && (!prev || (x.kind === 'freeze' && prev.kind !== 'freeze')) && holding(x, nextHist[x.trip], { holdMin: cfg.holdMin });
       const rec = { kind: x.kind, offF: x.offF, setF: x.setF, readingF: x.readingF ?? null, readAt: x.at || null, at: new Date(now()).toISOString() };
-      if (!held && shouldAlert(prev, x)) { due.push({ x, worse: !!prev && x.kind !== 'setpoint' && (prev.kind || 'reading') === x.kind }); next[k] = rec; } else if (prev) next[k] = prev;
+      const cooling = !!prev && x.kind !== 'setpoint' && (prev.kind || 'reading') === x.kind && now() - (Date.parse(prev.at) || 0) < UPDATE_GAP_MIN * MIN;
+      if (!held && !cooling && shouldAlert(prev, x)) { due.push({ x, worse: !!prev && x.kind !== 'setpoint' && (prev.kind || 'reading') === x.kind }); next[k] = rec; } else if (prev) next[k] = prev;
     }
     // an alerted reading back in range (the flowers still on the trailer, a fresh reading) → one BACK IN RANGE text;
     // delivered / next load → forgotten quietly. Set point alerts are just forgotten.
