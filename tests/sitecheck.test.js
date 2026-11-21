@@ -62,7 +62,7 @@ test('each load supplies its own bills, direction and trip link, including multi
   assert.match(m.html, /href="https:\/\/mytagalong.app\/truckmate\?trip=999123"/);
   assert.doesNotMatch(m.html, /B181090|627610|NOT A REAL REPORT/);
   assert.match(m.html, /NEEDS ATTENTION NOW/);
-  assert.match(m.html, /bgcolor="#007aff"/);
+  assert.match(m.html, /bgcolor="#0a84ff"/);
   const hostile=siteEmail({...w,bills:['<img src=x>'],carrierName:'<script>bad</script>'});
   assert.doesNotMatch(hostile.html, /<img src=x>|<script>bad/);
   assert.match(hostile.html, /&lt;img src=x&gt;/);
