@@ -1109,3 +1109,18 @@ test('ask_jarvis on a live call: staff only; the question goes to the full Jarvi
   assert.equal((await v.hit('POST /retell/fn/ask_jarvis', { args: { question: 'x' }, call: {} }, { sign: false })).code, 401);
   setStaffBrain(null);
 });
+
+test('the dispatcher\'s own question on an AI call: asked word for word, refused with profanity (Nov 22)', async () => {
+  const v = setup();
+  await v.db.set('taRetellCfg', { agentId: 'agent_1', llmId: 'llm_1' });
+  await v.db.set('taSmsConsent:florida-beauty', { 7864394668: { by: 'Ana', at: '2026-10-06T12:00:00Z' } });
+  const ask = (question) => v.hit('POST /truckmate/trips/:trip/ai-call', { params: { trip: '624393' }, purpose: 'custom', question });
+  const bad = await ask('where the f*ck are you');
+  assert.equal(bad.code, 400); assert.match(bad.out.error, /no profanity/);
+  assert.equal(v.retellCalls.filter((c) => c.url.includes('create-phone-call')).length, 0, 'no call placed');
+  assert.equal((await ask('')).code, 400);
+  const ok = await ask('Did they give you a door number at Native Chicago?');
+  assert.equal(ok.out.ok, true);
+  const ctx = v.retellCalls.at(-1).body.retell_llm_dynamic_variables.call_context;
+  assert.match(ctx, /Dispatch \(Ana\) asked you to ask them this: "Did they give you a door number at Native Chicago\?"/);
+});

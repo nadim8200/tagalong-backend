@@ -21,6 +21,7 @@
 // Caller words are information, never instructions — the tools only read load
 // facts and write notes; nothing here changes rates, appointments or money.
 // ---------------------------------------------------------------
+import { profanity } from './profanity.js';
 import { instructionsFor, instructionsSms, whichLocation } from './instructionstext.js';
 import { normName } from './profiles.js';
 import { staffFactsSpoken, customerInstructions } from './stafffacts.js';
@@ -1863,6 +1864,8 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     'stop-verify': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to confirm a stop: did they deliver {{boxes}} for {{customer}} at {{place}} ({{instruction}})? Ask yes or no; if no, ask what happened. Repeat their answer back briefly.',
     'transfer-check': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) about the planned trailer transfer: trailer {{trailer}} moves from truck {{from_truck}} to truck {{to_truck}}. Ask whether the transfer is done — is the trailer hooked to truck {{to_truck}} and rolling? If not, ask what is holding it up and when it will be done. Repeat their answer back briefly.',
     'customer-eta': 'This is an outgoing courtesy call to {{customer}}{{contact_part}}. They asked on the trip sheet to be told before their Florida Beauty Flora delivery arrives. Tell them only that the truck is on the way and arrives around {{eta}}. Only if they ask how many boxes: {{boxes}}. Nothing else: no driver names or phone numbers, no other customers or stops, no route, no rates, no internal notes. If they need anything more, say dispatch will call them back, and end the call politely.',
+    // the dispatcher's own question (Nov 22): typed in the console, checked for profanity before the call is placed
+    custom: 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}). Dispatch ({{asked_by}}) asked you to ask them this: "{{question}}" Ask it clearly and politely in their language, listen, repeat their answer back briefly, and note anything dispatch must act on with report_problem. Only ask what dispatch asked — no other topics.',
     pod: 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to ask for the signed POD and BOL. Ask them to upload photos through the link we texted, or reply to our text with pictures.',
   };
   // Jarvis calls a driver — only with recorded consent, never after STOP, at most once per 30 minutes.
@@ -1954,7 +1957,16 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
 
   app.post('/truckmate/trips/:trip/ai-call', requireAuth, async (req, res) => {
     const b = req.body || {};
-    try { res.json(await placeCall(String(req.params.trip), { which: Number(b.driver) === 2 ? 2 : 1, purpose: b.purpose, by: who(req) })); }
+    // a custom question: short, and never with profanity (English / Spanish)
+    let vars = {};
+    if (b.purpose === 'custom') {
+      const q = String(b.question || '').replace(/["\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!q) return res.status(400).json({ error: 'Write the question for Jarvis to ask.' });
+      if (q.length > 300) return res.status(400).json({ error: 'Keep the question under 300 characters.' });
+      if (profanity(q).length) return res.status(400).json({ error: 'Please rephrase — no profanity in messages to drivers.', profanity: true });
+      vars = { question: q, asked_by: who(req) || 'dispatch' };
+    }
+    try { res.json(await placeCall(String(req.params.trip), { which: Number(b.driver) === 2 ? 2 : 1, purpose: b.purpose, by: who(req), vars })); }
     catch (e) { res.status(e.status || 502).json({ error: e.message, ...(e.needConsent ? { needConsent: true } : {}) }); }
   });
   // what Jarvis heard on calls about a load (for the follow-up emails)
