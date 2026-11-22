@@ -3,7 +3,7 @@
 // Pure. The list is short on purpose: it catches what a dispatcher might type in anger, not every possible word.
 const WORDS = [
   'fuck', 'fucking', 'fucker', 'fucked', 'motherfucker', 'shit', 'shitty', 'bullshit', 'bitch', 'bitches', 'bastard', 'asshole', 'ass', 'dick', 'dickhead',
-  'cunt', 'pussy', 'cock', 'damn', 'goddamn', 'crap', 'piss', 'pissed', 'slut', 'whore', 'retard', 'retarded', 'idiot', 'stupid', 'moron', 'dumbass', 'jackass',
+  'cunt', 'pussy', 'cock', 'goddamn', 'crap', 'piss', 'pissed', 'slut', 'whore', 'retard', 'retarded', 'idiot', 'stupid', 'moron', 'dumbass', 'jackass',
   'nigger', 'nigga', 'faggot', 'fag', 'spic', 'wetback',
   'mierda', 'puta', 'puto', 'putas', 'putos', 'pendejo', 'pendeja', 'pendejos', 'cabron', 'cabrona', 'cabrones', 'chingar', 'chinga', 'chingada', 'chingado',
   'verga', 'coño', 'cono', 'carajo', 'joder', 'jodido', 'jodete', 'culero', 'culo', 'marica', 'maricon', 'mamon', 'mamaguevo', 'malparido', 'hijueputa', 'gonorrea',

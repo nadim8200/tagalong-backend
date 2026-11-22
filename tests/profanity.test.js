@@ -16,3 +16,8 @@ test('swear words and slurs are caught — English, Spanish, spelled with symbol
   assert.ok(profanity('Hijo de puta').length);
   assert.ok(profanity('CABRÓN contesta').length);
 });
+
+test('"damn" is allowed (Nov 22, Nadim) — "goddamn" is not', () => {
+  assert.deepEqual(profanity('damn traffic, what is your ETA?'), []);
+  assert.ok(profanity('goddamn it').length);
+});
