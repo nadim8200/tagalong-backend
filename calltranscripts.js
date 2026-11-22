@@ -265,6 +265,13 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
     const manager = !!(req.user.admin || req.user.role === 'admin' || req.user.companyAdmin || req.user.phoneManager);
     const getLine = lineOf || lineRef.fn;
     const mine = manager || !getLine ? null : await getLine(String(req.user.id || req.user.email || '')).catch(() => null);
+    // the Dispatch desk asks for one truck's calls (?trip=…&numbers=…): every dispatcher sees all of them — any line, Jarvis's
+    // too — because everything done on a truck is shared (Nov 21, Nadim Tellez). Only that truck's calls come back.
+    const ten = (x) => String(x || '').replace(/\D/g, '').slice(-10);
+    const truckNums = String((req.query || {}).numbers || '').split(',').map(ten).filter((x) => x.length === 10).slice(0, 4);
+    const truckTrip = String((req.query || {}).trip || '').replace(/[^\w-]/g, '').slice(0, 20);
+    const truckScope = !!(truckNums.length || truckTrip);
+    const onTruck = (num, e) => truckNums.includes(ten(num)) || (!!truckTrip && !!e && (String(e.trip || '') === truckTrip || (e.loads || []).some((l) => String((l && l.trip) || '') === truckTrip)));
     const ownCall = (ext, extId) => !!(mine && ((mine.extensionId && extId && String(extId) === String(mine.extensionId)) || (mine.ext && ext && String(ext) === String(mine.ext))));
     const days = Math.min(30, Math.max(1, Number((req.query || {}).days) || 7));
     const t = now(); const since = t - days * 86400000;
@@ -291,7 +298,7 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
           const c = callOf(r); const e = entries.get(`call:rc-${c.id}`); entries.delete(`call:rc-${c.id}`);
           const w = e && e.name ? { name: e.name, role: e.role, detail: e.detail } : await whoIs(c.other); // eslint-disable-line no-await-in-loop
           if (c.recordingId && c.contentUri) keep[c.recordingId] = c.contentUri;
-          if (!manager && !ownCall(c.ourExt, c.ourExtId)) continue;
+          if (truckScope ? !onTruck(c.other, e) : (!manager && !ownCall(c.ourExt, c.ourExtId))) continue;
           rows.push({ id: `rc-${c.id}`, source: 'ringcentral', ext: c.ourExt, at: c.at, direction: c.direction, result: r.result || null, missed: c.direction === 'inbound' && !/connected|accepted/i.test(r.result || ''), seconds: c.seconds,
             number: c.other, name: String((w && w.name) || c.otherName || '').replace(/^inbound call\s*-\s*/i, '') || null, mainLine: c.mainLine && !c.by, role: (w && w.role) || null, detail: (w && w.detail) || null, by: c.by, trip: (e && e.trip) || null, loads: (e && e.loads) || null,
             summary: (e && e.summary) || null, followUp: (e && e.followUp) || null, callId: e ? String(e.id).replace(/^call:/, '') : null, hasTranscript: !!(e && e.transcript),
@@ -304,7 +311,7 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
     // Jarvis's own calls (and any recorded call RingCentral didn't list)
     for (const e of entries.values()) {
       if (Date.parse(e.at) < since) continue;
-      if (!manager) continue;   // Jarvis's calls and unmatched recordings: managers only
+      if (truckScope ? !onTruck(e.direction === 'outbound' ? e.to : e.from, e) : !manager) continue;   // Jarvis's calls and unmatched recordings: managers only (a truck's: everyone on the desk)
       rows.push({ id: String(e.id), source: String(e.id).startsWith('call:rc-') ? 'ringcentral' : 'jarvis', at: e.at, direction: e.direction === 'outbound' ? 'outbound' : 'inbound', result: null, missed: false, seconds: e.minutes != null ? e.minutes * 60 : null,
         number: e.direction === 'outbound' ? e.to : e.from, name: e.name || null, role: e.role || null, detail: e.detail || null, by: e.source === 'ringcentral' ? e.by : 'Jarvis', trip: e.trip || null, loads: e.loads || null,
         summary: e.summary || null, followUp: e.followUp || null, callId: String(e.id).replace(/^call:/, ''), hasTranscript: !!e.transcript,

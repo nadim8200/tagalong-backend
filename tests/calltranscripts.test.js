@@ -179,3 +179,18 @@ test('a main-line (queue) call is credited to the dispatcher who picked it up; n
   const direct = callOf({ ...base, to: { phoneNumber: '+17867233912', name: 'Nadim Tellez', extensionNumber: '101', extensionId: 'e101' }, legs: [] });
   assert.deepEqual([direct.by, direct.mainLine], ['Nadim Tellez', false]);
 });
+
+test('the Dispatch desk: every dispatcher sees all of a truck\'s calls (any line), and only that truck\'s (Nov 21)', async () => {
+  const db = mem(); const routes = {}; const t = Date.parse('2026-11-04T15:00:00Z');
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; } };
+  const geoToDriver = REC('1', { from: { phoneNumber: '+13053955415', name: 'Geo', extensionNumber: '102', extensionId: 'e102' } });              // to +17865550111
+  const jennyToDriver = REC('2', { from: { phoneNumber: '+13053955415', name: 'Jenny', extensionNumber: '103', extensionId: 'e103' } });
+  const jennyOther = REC('3', { from: { phoneNumber: '+13053955415', name: 'Jenny', extensionNumber: '103', extensionId: 'e103' }, to: { phoneNumber: '+13055559999' } });
+  const fetchFn = async (url) => (url.includes('/call-log') ? { ok: true, json: async () => ({ records: [geoToDriver, jennyToDriver, jennyOther] }) } : { ok: true, json: async () => ({}) });
+  const ct = initCallTranscripts(app, { requireAuth: (q, r, n) => n(), db, rc: { configFor: async () => ({}), accessToken: async () => 'tok' }, secret: 's', publicUrl: 'https://api.example', env: { OPENAI_API_KEY: 'x', ANTHROPIC_API_KEY: 'y' }, fetchFn, start: false, now: () => t });
+  ct.useLineOf(async (id) => (id === 'geo' ? { ext: '102', extensionId: 'e102' } : null));
+  const call = async (user, query) => { const out = {}; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; const hs = routes['GET /truckmate/phone/history']; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h({ user, query }, res, next); }; await next(); return out.body; };
+  assert.deepEqual((await call({ id: 'geo', role: 'dispatcher' }, { numbers: '7865550111' })).calls.map((c) => c.id).sort(), ['rc-1', 'rc-2'], 'Geo sees Jenny\'s call to this truck too');
+  assert.deepEqual((await call({ id: 'val', role: 'dispatcher' }, { numbers: '(786) 555-0111' })).calls.map((c) => c.id).sort(), ['rc-1', 'rc-2'], 'even without a phone line');
+  assert.deepEqual((await call({ id: 'geo', role: 'dispatcher' }, {})).calls.map((c) => c.id), ['rc-1'], 'the Phone tab is unchanged: own line');
+});
