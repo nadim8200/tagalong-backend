@@ -1865,9 +1865,12 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     'transfer-check': 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) about the planned trailer transfer: trailer {{trailer}} moves from truck {{from_truck}} to truck {{to_truck}}. Ask whether the transfer is done — is the trailer hooked to truck {{to_truck}} and rolling? If not, ask what is holding it up and when it will be done. Repeat their answer back briefly.',
     'customer-eta': 'This is an outgoing courtesy call to {{customer}}{{contact_part}}. They asked on the trip sheet to be told before their Florida Beauty Flora delivery arrives. Tell them only that the truck is on the way and arrives around {{eta}}. Only if they ask how many boxes: {{boxes}}. Nothing else: no driver names or phone numbers, no other customers or stops, no route, no rates, no internal notes. If they need anything more, say dispatch will call them back, and end the call politely.',
     // the dispatcher's own question (Nov 22): typed in the console, checked for profanity before the call is placed
-    custom: 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}). Dispatch ({{asked_by}}) asked you to ask them this: "{{question}}" Ask it clearly and politely in their language, listen, repeat their answer back briefly, and note anything dispatch must act on with report_problem. Only ask what dispatch asked — no other topics.',
+    custom: 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}). Dispatch ({{asked_by}}) asked you to ask them this: "{{question}}" Ask it clearly and politely in their language, listen, repeat their answer back briefly, and note anything dispatch must act on with report_problem.',
     pod: 'This is an outgoing call to the driver of trip {{trip}} ({{driver_name}}) to ask for the signed POD and BOL. Ask them to upload photos through the link we texted, or reply to our text with pictures.',
   };
+  // every call to a driver ends the same way (Nov 22, Nadim Tellez): their own questions are welcome — anything about their
+  // load — but money is never discussed on these calls
+  const DRIVER_CALL_TAIL = ' When that is done, ask if they have any other questions and help with anything about their load — stops, addresses, ETAs, appointments, delivery instructions, directions, the reefer, paperwork — using your tools, in their language. Never talk about money on this call: no pay, rates, bonuses, settlements, advances, fuel cards, detention or lumper amounts — if they ask, take a message with take_message and say a dispatcher will call them back about it.';
   // Jarvis calls a driver — only with recorded consent, never after STOP, at most once per 30 minutes.
   // Used by the dispatcher's button and by the pickup follow-up. Throws {status, message}.
   async function placeCall(trip, { which = 1, purpose = 'check', by = 'dispatcher', vars: extra = {} } = {}) {
@@ -1890,7 +1893,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     const facts = voiceFacts(it, await etaFor(trip));
     const why = PURPOSE[purpose] ? purpose : 'check';
     const vars = { trip, driver_name: d.name || 'driver', next_stop: facts.next_stop || 'the next stop', ...extra };
-    const context = PURPOSE[why].replace(/\{\{(\w+)\}\}/g, (m, v) => vars[v] || '');
+    const context = PURPOSE[why].replace(/\{\{(\w+)\}\}/g, (m, v) => vars[v] || '') + DRIVER_CALL_TAIL;
     const told = () => (outreach ? Promise.resolve(outreach({ site, trip, channel: 'call', to, text: context, by, kind: why })).catch(() => {}) : null);
     if (training) { const held = await training.hold('call', { to, trip, purpose: `${why} call to ${d.name || 'the driver'}`, text: context }); if (held) { told(); return { ok: true, callId: null, to, ...held }; } }
     const call = await retell('/v2/create-phone-call', { body: {

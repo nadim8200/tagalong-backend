@@ -1123,4 +1123,6 @@ test('the dispatcher\'s own question on an AI call: asked word for word, refused
   assert.equal(ok.out.ok, true);
   const ctx = v.retellCalls.at(-1).body.retell_llm_dynamic_variables.call_context;
   assert.match(ctx, /Dispatch \(Ana\) asked you to ask them this: "Did they give you a door number at Native Chicago\?"/);
+  assert.match(ctx, /ask if they have any other questions/);                 // the driver's own questions are welcome
+  assert.match(ctx, /Never talk about money on this call: no pay, rates/);   // never money
 });
