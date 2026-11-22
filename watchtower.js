@@ -335,6 +335,9 @@ function tripFacts(item, now) {
     broker: brokerLoad(item),
     brokerFollow: (item && item._brokerFollow) || null,
     hasRateCon: !!(item && item._ratecon),
+    // delivered for sure (every stop in TruckMate, or our staff's POD email; the driver's Yes finishes it outright): the trailer is
+    // empty — no reefer alerts (Nov 22: "Reefer OFF on a 38°F load" a day after the POD)
+    delivered: (stops.length > 0 && stops.every((s2) => s2.delivered)) || !!(item && item._staffPod && item._staffPod.whole),
     billNo: String((billsRaw[0] && billsRaw[0].billNumber) || '').trim(),
     tasks: (item && item._tasks) || [],
     instrTotal: instr.length,
@@ -453,6 +456,7 @@ function leavingFlorida(f) {
 // ctx: { now, geo(zip) → {lat,lng}|null|undefined, unitState }
 const RULES = [
   function reeferTemp(f) {
+    if (f.delivered) return null;
     const l = f.live;
     if (!l || l.tempF == null || l.tempStale) return null;
     const target = l.setpointF != null ? l.setpointF : f.reqTemp;
@@ -466,6 +470,7 @@ const RULES = [
     };
   },
   function reeferSetWrong(f) {
+    if (f.delivered) return null;
     const l = f.live;
     if (!l || l.setpointF == null || f.reqTemp == null || l.tempStale) return null;
     if (Math.abs(l.setpointF - f.reqTemp) <= 2) return null;
@@ -476,6 +481,7 @@ const RULES = [
     };
   },
   function reeferOff(f) {
+    if (f.delivered) return null;
     const l = f.live;
     if (!l || f.reqTemp == null || !l.reeferState || l.tempStale) return null;
     if (!/off/i.test(String(l.reeferState))) return null;

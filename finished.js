@@ -5,6 +5,7 @@
 //   3. (suggestion only) the same company truck has since left a shipper on a newer trip
 //   4. A dispatcher clicked "Mark finished" (and can reopen it)
 //   5. The driver tapped "Yes, all delivered" in the app (doneask.js)
+//   6. Our own staff emailed that it's delivered / the POD, filed on the load (staffpod.js, Nov 22)
 // Guesses never finish a load by themselves (Nov 18: four live loads were closed that way): the last stop only, an LTL
 // whose flowers look delivered with its trailer / truck on a newer trip — the load stays on the board with a "Probably
 // finished" line, Jarvis asks the driver in the app, and a Yes (or a dispatcher's Mark finished) closes it.
@@ -15,6 +16,8 @@
 // Finished loads leave the active board, show in Delivered with the reason,
 // and get their rundown. A reopened load is never auto-finished again.
 // ---------------------------------------------------------------
+import { staffPodReason } from './staffpod.js';
+
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || (it && it._id) || '');
 const unitKey = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -68,6 +71,7 @@ export function finishReason(item, items = []) {
   // an OC load Jarvis made from email: its driver confirmed delivery in the TagAlong app (ocloads.js)
   if (item && item._ocEmail && item._ocEmail.deliveredAt) return 'OC driver confirmed delivery (TagAlong app)';
   if (DONE.test(status)) return 'TruckMate: delivered';
+  if (item && item._staffPod && item._staffPod.whole) return staffPodReason(item._staffPod);
   const bills = (item && (item.freightBills || item.orders)) || t.freightBills || [];
   if (bills.length && bills.every((b) => b && b.actualDelivery)) return 'every stop delivered (TruckMate)';
   const sheetStops = ((item && item._manifest && item._manifest.stops) || []).filter((s) => /DELIVER/i.test(s.action || '') && s.key);
@@ -153,6 +157,14 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
   const siteOf = (req) => String((req.query && req.query.site) || (req.body && req.body.site) || 'florida-beauty');
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
 
+  // training: a load Jarvis closed from a staff POD email → a note to Nadim only (POD_CLOSE_NOTIFY to change it)
+  function podNotice(rows) {
+    if (!rows.length || !mailer || !mailer.ready() || env.POD_CLOSE_NOTIFY === 'off') return;
+    const to = String(env.POD_CLOSE_NOTIFY || 'ntellez@floridabeauty.us').split(/[,;\s]+/).filter(Boolean);
+    const h = (x) => String(x || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const li = rows.map(({ n, it, reason }) => `<li><b>Trip ${h(n)}</b> (${h(laneOf(it))}, truck ${h(tripOf(it).powerUnit || '—')}) — ${h(reason)}</li>`).join('');
+    Promise.resolve(mailer.send({ to, subject: rows.length === 1 ? `Jarvis closed load ${rows[0].n} from a POD email` : `Jarvis closed ${rows.length} loads from POD emails`, html: `<div style="font-family:Arial,sans-serif;font-size:14px"><p>A note from Jarvis,</p><p>Our staff emailed that these loads are delivered, so they left the active board and their alerts and went to <b>Delivered</b>:</p><ul>${li}</ul><p>If one isn't really done, open it in Delivered and click <b>Reopen</b> — Jarvis won't close it again. Please also close it in TruckMate.</p><p>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>` })).catch((e) => console.warn('[finished] pod notice:', e.message));
+  }
   // Called while the board is built: takes finished loads out of `items` (in place).
   async function sweep(site, items, recs = {}) {
     if (!enabled || !items.length) return { finished: [], unclosed: [] };
@@ -171,7 +183,8 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
       // an LTL whose flowers look delivered (tempalert.js) and whose trailer / truck is on a newer trip: stays on the board
       // (temperatures still watched) until the driver says Yes in the app or dispatch marks it finished — not "Not closed"
       const fp = it._flowerPhase && it._flowerPhase.phase;
-      const guess = fp === 'next-load' ? `flowers delivered, trailer now on trip ${it._flowerPhase.by}`
+      const pod = it._staffPod && !it._staffPod.whole ? `${staffPodReason(it._staffPod).replace(/ \(staff email\)$/, '')} — other stops still open in TruckMate` : null;
+      const guess = pod || fp === 'next-load' ? `flowers delivered, trailer now on trip ${it._flowerPhase.by}`
         : fp === 'delivered' && mv ? `flowers delivered, ${mv.by} ${mv.unit} now on trip ${mv.newTrip}`
           : !mv && reason ? reason
             : !mv && !NOT_STARTED.test(String(tripOf(it).status || '')) ? leftEveryDelivery(it, milestones) : null;
@@ -188,6 +201,7 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
         if (onFinished) Promise.resolve(onFinished(site, recs[n] || { item: it }, reason)).catch(() => {});
         fin[n] = { at, reason };
       }
+      podNotice(newly.filter((x) => /\(staff email\)$/.test(x.reason)));
     }
     // not closed in TruckMate: remember since when; drop the ones TruckMate has closed since
     const at = new Date(now()).toISOString();

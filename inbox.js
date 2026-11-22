@@ -23,6 +23,7 @@
 // mark emails read). Without Mail.Read the inbox just stays off.
 // ---------------------------------------------------------------
 import { NO_MONEY } from './moneyrule.js';
+import { staffDelivery } from './staffpod.js';
 import { photosOf } from './breakdownphotos.js';
 import { graph, graphRaw, mailConfig, sendMail, mailCopy } from './mailer.js';
 import { mimeFiles } from './mime.js';
@@ -1416,6 +1417,9 @@ ${r.questions.length ? `<p>Questions so I get it right:</p><ul>${r.questions.map
       const t = tripNo(item);
       const mine = list.filter((e) => (e.trips || []).includes(t));
       if (mine.length) item._emails = { count: mine.length, open: mine.filter((e) => e.status === 'new').length, last: mine[0].at };
+      // our staff emailed it's delivered / the POD → a fact that finishes the load (finished.js) and quiets its reefer alerts
+      const pod = mine.length ? staffDelivery(mine, item, (a) => isInternal(a, env)) : null;
+      if (pod) item._staffPod = pod;
     }
   }
 
