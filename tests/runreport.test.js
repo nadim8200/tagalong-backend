@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { gradeRun, mergeRules, otherStops, leftAfterLoaded, runStops, reportsAt, renderRunReport, initRunReport } from '../runreport.js';
+import { gradeRun, mergeRules, otherStops, leftAfterLoaded, runStops, reportsAt, renderRunReport, initRunReport, driversOnApp } from '../runreport.js';
 
 const M = 60000; const H = 60 * M;
 const T0 = Date.parse('2026-11-19T22:30:00Z');
@@ -53,6 +53,7 @@ test('the run\'s stops, the driver\'s reports at each, and the email', () => {
 test('an LTL or team run that finishes: one email to Nadim, the grade kept; a plain one-driver load gets none', async () => {
   const kv = {}; const sent = [];
   const db = { enabled: true, get: async (k, d) => (k in kv ? kv[k] : d), set: async (k, v) => { kv[k] = v; }, update: async (k, fn, d) => { kv[k] = fn(k in kv ? kv[k] : d); return kv[k]; } };
+  kv['taDriverPins:florida-beauty'] = { 986: { setAt: 1 }, 2473: { setAt: 1 } };   // both on the app
   const rr = initRunReport({ db, env: {}, sendMail: async (m) => { sent.push(m); }, now: () => T0 + 40 * H });
   const item = { trip: { tripNumber: 627549, powerUnit: '4504', driver: '986', driver2: '2473' }, freightBills: [{ billNumber: 'M1', endZoneDescription: 'LUDLOW, MA, 01056', pieces: 32 }] };
   await rr.onFinished('florida-beauty', { item }, 'delivered');
@@ -61,4 +62,23 @@ test('an LTL or team run that finishes: one email to Nadim, the grade kept; a pl
   assert.equal(kv['taDriverGrades:florida-beauty'][0].trip, '627549');
   await rr.onFinished('florida-beauty', { item: { trip: { tripNumber: 1, driver: '5' }, freightBills: [] } }, 'delivered');
   assert.equal(sent.length, 1);
+});
+
+test('run reports only for drivers on the app: a solo whose driver signed in, a team only when both did (Nov 21)', async () => {
+  assert.equal(driversOnApp({ driver: '0986', driver2: '2473' }, { 986: {}, 2473: {} }), true);
+  assert.equal(driversOnApp({ driver: '986', driver2: '2473' }, { 986: {} }), false, 'a team needs both');
+  assert.equal(driversOnApp({ driver: '1145' }, { 986: {} }), false);
+  assert.equal(driversOnApp({ driver: '' }, {}), false);
+  const kv = { 'taDriverPins:florida-beauty': { 986: { setAt: 1 } } }; const sent = [];
+  const db = { enabled: true, get: async (k, d) => (k in kv ? kv[k] : d), set: async (k, v) => { kv[k] = v; }, update: async (k, fn, d) => { kv[k] = fn(k in kv ? kv[k] : d); return kv[k]; } };
+  const rr = initRunReport({ db, env: {}, sendMail: async (m) => { sent.push(m); }, now: () => T0 + 40 * H });
+  const team = { trip: { tripNumber: 627549, powerUnit: '4504', driver: '986', driver2: '2473' }, freightBills: [{ billNumber: 'M1', endZoneDescription: 'LUDLOW, MA, 01056', pieces: 32 }] };
+  await rr.onFinished('florida-beauty', { item: team }, 'delivered');
+  assert.equal(sent.length, 0, 'Wilber not on the app yet: no report');
+  kv['taDriverPins:florida-beauty'][2473] = { setAt: 2 };
+  await rr.onFinished('florida-beauty', { item: team }, 'delivered');
+  assert.equal(sent.length, 1, 'both on the app: the report goes out');
+  const soloLtl = { trip: { tripNumber: 627600, powerUnit: '4509', driver: '986' }, _manifest: { stops: [{}] }, freightBills: [{ billNumber: 'M2', endZoneDescription: 'TAMPA, FL, 33601', pieces: 10 }] };
+  await rr.onFinished('florida-beauty', { item: soloLtl }, 'delivered');
+  assert.equal(sent.length, 2, 'a solo LTL whose driver is on the app');
 });

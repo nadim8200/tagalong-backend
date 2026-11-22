@@ -144,6 +144,14 @@ ${run.attachedNote ? `<p style="font-size:12px;color:#596A7F">${esc(run.attached
 }
 
 // ---------- gathering it and sending it ----------
+// Run reports only for drivers on the app (Nov 21, 2026): every driver on the load — the one on a solo, both on a team — has a
+// driver-app account (signed in, a PIN). Today that's Ferney and Wilber; the rest start getting graded as they sign up. Pure.
+const normCode = (x) => String(x || '').trim().toUpperCase().replace(/^0+(?=\d)/, '');
+export function driversOnApp(t, pins = {}) {
+  const codes = [t && t.driver, t && t.driver2].map(normCode).filter(Boolean);
+  return codes.length > 0 && codes.every((c) => !!(pins || {})[c]);
+}
+
 export function initRunReport({ db, sendMail = null, env = process.env, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const pool = enabled && db.pool;
@@ -226,6 +234,7 @@ export function initRunReport({ db, sendMail = null, env = process.env, now = ()
     const item = rec.item; const t = tripOf(item); const n = tripNo(item); if (!n) return null;
     const ltl = !!((item._manifest && (item._manifest.stops || []).length) || /LTL/i.test(String(item._loadLabel || '')));
     if (!ltl && !t.driver2) return null;
+    if (!driversOnApp(t, (await db.get(`taDriverPins:${site}`, {}).catch(() => ({}))) || {})) return null;   // not every driver is on the app yet
     const sent = (await db.get(SENT, {})) || {};
     if (sent[n]) return null;
     const run = await build(site, item, reason);
