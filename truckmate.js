@@ -18,6 +18,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { loadTarget, checkReading } from './temppolicy.js';
 import { traceCheck } from './tracecheck.js';
 import { wrongSite } from './sitecheck.js';
+import { HUBS, haversineMi } from './watchtower.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -510,14 +511,28 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
       }
       store.trips[id] = trackTripTimes(store.trips[id], t, now, store.timesSince || (store.timesSince = now));
     }
+    // a trip TruckMate has been quiet on for 36h+: kept only while Samsara shows its truck still out (quietTripEvidence).
+    // KEEP_QUIET_TRIPS=1 in Render turns it on; until then it only counts what it would keep (taBoardKeepShadow).
+    const keepOn = env.KEEP_QUIET_TRIPS === '1';
+    const anyQuiet = Object.values(store.trips).some((r) => r && now - (r.updatedAt || 0) > ACTIVE_TTL_MS);
+    const samToken = anyQuiet ? samsaraTokenFrom(env) : null;
+    const idx = samToken ? await getLiveIndex(samToken).catch(() => null) : null;
+    const watch = anyQuiet ? ((await db.get(`taWatch:${site}`, {}).catch(() => ({}))) || {}) : {};
+    const shadow = [];
     for (const [id, rec] of Object.entries(store.trips)) {
-      const why = ageOutReason(rec, store.trips, now);
+      let why = ageOutReason(rec, store.trips, now, quietTripEvidence(rec, idx, watch.units || {}, now));
+      if (!why && rec && now - (rec.updatedAt || 0) > ACTIVE_TTL_MS && !keepOn) {
+        const t = (rec.item && rec.item.trip) || rec.item || {};
+        shadow.push({ trip: String(t.tripNumber || id), truck: t.powerUnit || null, status: t.status || null, quietH: Math.round((now - (rec.updatedAt || 0)) / 3600000), lane: [t.origZoneDesc, t.destZoneDesc].filter(Boolean).join(' → '), at: new Date(now).toISOString() });
+        why = 'no TruckMate update for 36h';   // counting only: the old rule still applies
+      }
       if (why) {
         if (rec && onFinished) Promise.resolve(onFinished(site, rec, `left the board — ${why}`)).catch((e) => console.warn('[truckmate] rundown:', e.message));
         delete store.trips[id];
       }
     }
     await db.set(key, store);
+    if (shadow.length) await db.update(`taBoardKeepShadow:${site}`, (cur) => [...shadow, ...(Array.isArray(cur) ? cur : [])].slice(0, 300), []).catch(() => {});
     return Object.keys(store.trips).length;
   }
 
@@ -549,7 +564,7 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
     const store = (db && db.enabled) ? await db.get(`taTruckMateActive:${site}`, { trips: {} }) : { trips: {} };
     mark('TruckMate board (database)');
     const recs = Object.values(store.trips || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    const trips = applyUnitAliases(recs.map((r) => { if (r.item) r.item._times = tripTimes(r); return r.item; }));
+    const trips = applyUnitAliases(recs.map((r) => { if (r.item) { r.item._times = tripTimes(r); r.item._tmQuietH = Date.now() - (r.updatedAt || 0) > ACTIVE_TTL_MS ? Math.round((Date.now() - (r.updatedAt || 0)) / 3600000) : null; } return r.item; }));
     // loads that aren't in TruckMate (OC loads Jarvis made from email, ocloads.js): cards like the rest, every overlay included
     if (extraItems) trips.push(...((await Promise.resolve(extraItems(site, trips)).catch((e) => { console.warn('[truckmate] extra loads:', e.message); return []; })) || []));
     mark('OC loads from email');
@@ -940,7 +955,20 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
 const ACTIVE_TTL_MS = 36 * 60 * 60 * 1000;
 const QUIET_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const DONE_STATUS = /^(DELV|DLVD|DELIVERED|CMPL|COMPLETE|CANC|VOID|BILLED|CLOSED|DONE)/i;
-export function ageOutReason(rec, all = {}, now = Date.now()) {
+// Is a quiet trip's truck still out? From Samsara (where it is now) and Watchtower (when it last moved). Pure.
+// → { known, movedAt, atHub, stoppedSinceMs } (known = Samsara has the truck)
+export function quietTripEvidence(rec, idx, units = {}, now = Date.now()) {
+  const t = (rec && rec.item && rec.item.trip) || (rec && rec.item) || {};
+  const unit = String(t.powerUnit || '').trim().toUpperCase().replace(/^0+(?=\d)/, '');
+  const st = unit && idx && idx.statsByUnit ? idx.statsByUnit[unit] : null;
+  const g = (st && st.gps) || {};
+  const u = units[unit.toLowerCase()] || units[unit] || {};
+  const moving = g.speedMilesPerHour != null && g.speedMilesPerHour > 3;
+  const hub = g.latitude != null ? HUBS.find((h) => haversineMi(g.latitude, g.longitude, h.lat, h.lng) < 3) : null;
+  return { known: !!st, movedAt: moving ? now : (u.lastMovingAt || null), atHub: hub ? hub.name : null, stoppedSinceMs: moving ? null : (u.stoppedSince || null) };
+}
+
+export function ageOutReason(rec, all = {}, now = Date.now(), ev = null) {
   if (!rec) return 'no record';
   const quiet = now - (rec.updatedAt || 0);
   if (quiet <= ACTIVE_TTL_MS) return null;
@@ -956,5 +984,9 @@ export function ageOutReason(rec, all = {}, now = Date.now()) {
   });
   if (newer) { const ot = (newer.item && newer.item.trip) || newer.item || {}; return `truck ${unit} is on trip ${ot.tripNumber} now`; }
   if (quiet > QUIET_MAX_MS) return 'no TruckMate update for 7 days';
-  return null;   // quiet in TruckMate, but nothing says it's over: keep it on the board
+  // kept only with proof the truck is still out: Samsara has it, it moved in the last 24 h, and it isn't parked at a hub
+  if (!ev || !ev.known) return 'no Samsara reading for the truck and no TruckMate update for 36h';
+  if (ev.atHub && (!ev.stoppedSinceMs || now - ev.stoppedSinceMs >= 6 * 60 * 60 * 1000)) return `truck parked at the ${ev.atHub} yard`;
+  if (!ev.movedAt || now - ev.movedAt > 24 * 60 * 60 * 1000) return 'truck hasn\'t moved in 24 h and no TruckMate update for 36h';
+  return null;   // quiet in TruckMate, but the truck is still out on the road: keep it on the board
 }

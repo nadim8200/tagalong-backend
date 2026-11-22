@@ -214,6 +214,11 @@ export function initAssistant(app, { db, env = process.env, buildBoard, voice = 
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // the "keep quiet trips" count (truckmate.js): trips TruckMate went quiet on that the new rule would have kept on the board
+  app.get('/assistant/keep-quiet', guard, async (req, res) => {
+    try { send(res, { on: env.KEEP_QUIET_TRIPS === '1', wouldKeep: (db && db.enabled ? await db.get(`taBoardKeepShadow:${site(req)}`, []) : []) || [] }); } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.get('/assistant/outbox', guard, async (req, res) => {
     try {
       const s = site(req);
