@@ -22,6 +22,7 @@
 //   • Silence is the goal: warnings stay on the board, only criticals push.
 // ---------------------------------------------------------------
 import { CHECKINS } from './checkins.js';
+import { samsaraTokenFrom, getLiveIndex } from './samsara.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 
 const MIN = 60000;
@@ -856,6 +857,54 @@ export function atCustomerEvidence(item, steps = {}, now = Date.now()) {
 }
 
 const TRUCK_CODES = new Set(['hos-low', 'hours-short', 'stopped', 'unscheduled-stop', 'check-engine', 'tracking-lost', 'reefer-off', 'reefer-temp', 'reefer-setpoint']);
+// ---------- a truck rolling on the road with no trip (Nov 22, 2026, Nadim Tellez) ----------
+// Samsara sees every truck; TruckMate only knows the trucks on a trip. A truck out on the road (Massachusetts, Arkansas,
+// California…) moving with no open trip means dispatch hasn't put it on its trip, or the trip's status is wrong — so it's
+// invisible to tracking, ETAs and billing. Not near our hubs (a yard shuttle or local move is fine), not in South / Central
+// Florida, moving for 10+ minutes. → alerts. Pure; `seen` keeps when each truck was first seen rolling with no trip.
+export const HUBS = [
+  { name: 'Miami', lat: 25.7947, lng: -80.3099 }, { name: 'Bartow', lat: 27.873, lng: -81.811 },
+  { name: 'Memphis (Olive Branch)', lat: 34.962, lng: -89.829 }, { name: 'Ventura', lat: 34.274, lng: -119.229 },
+];
+const HUB_MI = 60;
+const inFloridaHome = (lat, lng) => lat < 29.2 && lng > -83.2;   // South / Central Florida: our trucks move around here between loads
+export function rollingNoTrip(fleet = [], board = {}, { now = Date.now(), seen = {}, lastTrips = {}, minMin = 10 } = {}) {
+  const onTrip = new Set();
+  for (const it of board.trips || []) { const t = (it && it.trip) || it || {}; const u = norm(t.powerUnit); if (u && !isDone(t.status || t.statusCode)) onTrip.add(u); }
+  const out = []; const nextSeen = {};
+  for (const v of fleet) {
+    const u = norm(v.unit); if (!u || onTrip.has(u)) continue;
+    const fresh = v.at && now - Date.parse(v.at) < 15 * MIN;
+    if (!fresh || v.speedMph == null || v.speedMph < 25 || v.lat == null) continue;
+    if (inFloridaHome(v.lat, v.lng)) continue;
+    const hub = HUBS.map((h) => ({ ...h, mi: haversineMi(v.lat, v.lng, h.lat, h.lng) })).sort((a, b) => a.mi - b.mi)[0];
+    if (hub && hub.mi < HUB_MI) continue;
+    const since = seen[u] || now;
+    nextSeen[u] = since;
+    if (now - since < minMin * MIN) continue;
+    const last = lastTrips[u];
+    out.push({
+      id: `no-trip:${u}`, code: 'no-trip-rolling', severity: 'critical', trip: '', unit: v.unit, driver: v.driver || '',
+      title: `Truck ${v.unit} rolling with no trip — ${v.location || 'on the road'} (${Math.round(v.speedMph)} mph)`,
+      detail: `Samsara has truck ${v.unit} moving ${Math.round((now - since) / MIN)} min with no open trip in TruckMate${v.driver ? ` (${v.driver} driving)` : ''}, ${Math.round(hub.mi)} mi from the nearest hub (${hub.name}).${last ? ` Last trip on the board: ${last.trip}${last.lane ? ` (${last.lane})` : ''}.` : ''} Put the truck on its trip in TruckMate or fix the trip's status.`,
+      lane: last && last.lane ? last.lane : '', rollingSinceMs: since,
+    });
+  }
+  return { alerts: out, seen: nextSeen };
+}
+// every truck Samsara reports, one row each (unit, position, speed, who's driving it). Pure.
+export function fleetFromIndex(idx) {
+  if (!idx) return [];
+  const rows = new Map();
+  for (const st of Object.values(idx.statsByUnit || {})) {
+    const unit = String(st.name || '').trim(); const g = st.gps || {};
+    if (!unit || rows.has(norm(unit))) continue;
+    const drv = Object.values(idx.hosById || {}).find((h) => norm(h.vehicle) === norm(unit) && /driving|onDuty/i.test(String(h.status || '')));
+    rows.set(norm(unit), { unit, lat: g.latitude ?? null, lng: g.longitude ?? null, speedMph: g.speedMilesPerHour != null ? g.speedMilesPerHour : null, at: g.time || null, location: (g.reverseGeo && g.reverseGeo.formattedLocation) || null, driver: drv ? drv.driverName : null });
+  }
+  return [...rows.values()];
+}
+
 export function evaluateBoard(board, ctxIn) {
   const ctx = { origin: MIAMI_TERMINAL, unitState: () => null, ...ctxIn };
   const out = [];
@@ -1129,6 +1178,10 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
     // reported fixed, not yet seen moving. A truck that lost its load to a transfer isn't on the board, so read its GPS directly
     const fixedTrucks = recovering ? await recovering().catch(() => []) : [];
     const offBoard = {};
+    // the whole fleet from Samsara (cached ≤ 1 min, shared with the board) for the rolling-with-no-trip check
+    const samToken = samsaraTokenFrom(env);
+    const idxNow = samToken ? await getLiveIndex(samToken).catch(() => null) : null;
+    const fleetNow = idxNow ? fleetFromIndex(idxNow) : null;   // Samsara didn't answer: skip this round (the 10-min clocks keep)
     for (const r of fixedTrucks) { const u = norm(r.unit); if (liveFor && !(board.trips || []).some((it) => norm(((it && it.trip) || it || {}).powerUnit) === u)) offBoard[u] = await liveFor(r.unit).catch(() => null); } // eslint-disable-line no-await-in-loop
 
     const archived = [];
@@ -1168,6 +1221,9 @@ export function initWatchtower(app, { requireAuth, db, env = process.env, buildB
       for (const it of board.trips || []) { const n = String(((it && it.trip) || {}).tripNumber || ''); const e = n ? atCustomerEvidence(it, ((taps[n] || {}).steps) || {}, now) : null; if (e) atCustomer[n] = e; }
       const ctx = { now, geo, roadMiles, unitState: (unit) => s.units[norm(unit)], atCustomer };
       const found = evaluateBoard(board, ctx);
+      // trucks Samsara has rolling on the road with no trip (the whole fleet, the same cached Samsara read as the board)
+      for (const it of board.trips || []) { const t = (it && it.trip) || it || {}; const u = norm(t.powerUnit); if (u && !isDone(t.status)) s.lastTrips = { ...(s.lastTrips || {}), [u]: { trip: String(t.tripNumber || ''), lane: [t.origZoneDesc, t.destZoneDesc].filter(Boolean).join(' → '), at: now } }; }
+      if (fleetNow) { const r = rollingNoTrip(fleetNow, board, { now, seen: s.noTripSeen || {}, lastTrips: s.lastTrips || {} }); s.noTripSeen = r.seen; found.push(...r.alerts); }
       s.etas = boardEtas(board, ctx);
       etasNow = s.etas;
       // a later stop somewhere else is a new stop, even if the move between them was never confirmed
