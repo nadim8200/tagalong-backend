@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initJarvisChat, TOOLS } from '../jarvischat.js';
+import { initJarvisChat, TOOLS, billsByStop, loadsByDriver } from '../jarvischat.js';
 
 const LOAD = { trip: { tripNumber: '624399', status: 'DEPSHIP', powerUnit: '724', trailer: '7343', origZoneDesc: 'MIAMI TERMINAL', destZoneDesc: 'BEDFORD, NH, 03110' }, freightBills: [{ billNumber: 'M1', endZoneDescription: 'CLIFTON, NJ, 07011' }], _samsara: { location: 'New Jersey Turnpike, Cranbury, NJ', gpsAt: '2026-10-08T12:00:00Z', speedMph: 64 } };
 function memDb() { const m = new Map(); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } }; }
@@ -350,4 +350,25 @@ test('Ask Jarvis on the Dispatch desk: the open truck is "this truck"; desk note
   assert.equal(live.loggedIn[0].name, 'Jaime Rivera');
   const conv = JSON.parse(h.claude.sent[2].messages.at(-1).content[0].content);
   assert.equal(conv.deskNotes[0].text, 'Relay planned in Jacksonville');
+});
+
+test('a driver by first name finds his load (Nov 22: "how far is ferney" was answered for the open truck)', () => {
+  const items = [
+    { trip: { tripNumber: '627572', powerUnit: '2219', status: 'DEPCONS', destZoneDesc: 'MIAMI, FL' }, _samsara: { driver1: 'Jaime Rivera', driver2: 'Jose Lanuza' } },
+    { trip: { tripNumber: '627656', powerUnit: '4504', status: 'DEPSHIP', destZoneDesc: 'MELBOURNE, FL' }, _samsara: { driver1: 'Ferney Urrego', driver2: 'Wilber Echeverri' } },
+  ];
+  assert.deepEqual(loadsByDriver(items, 'ferney').map((x) => [x.trip, x.truck]), [['627656', '4504']]);
+  assert.deepEqual(loadsByDriver(items, 'how far is Ferney from hes delivery').map((x) => x.trip), []);   // a sentence is not a name
+  assert.deepEqual(loadsByDriver(items, 'Ferney Urrego').map((x) => x.trip), ['627656']);
+  assert.deepEqual(loadsByDriver(items, 'jose').map((x) => x.truck), ['2219']);
+});
+
+test('a long load (66 bills) comes back one line per stop, delivered or not', () => {
+  const bills = [
+    ...Array.from({ length: 5 }, (_, i) => ({ billNumber: `C${i}`, billTo: 'HARRISON WHOLESALE', stop: 'ODESSA, TX, 79761', pieces: 2, deliveredAt: '2026-11-21T02:48:28' })),
+    { billNumber: 'S1', billTo: 'LORISA, INC.', stop: 'MIAMI, FL, 33185', pieces: 1, deliveredAt: null },
+  ];
+  const g = billsByStop(bills);
+  assert.equal(g.length, 2);
+  assert.deepEqual(g.map((x) => [x.stop, x.bills, x.allDelivered]), [['ODESSA, TX, 79761', 5, true], ['MIAMI, FL, 33185', 1, false]]);
 });

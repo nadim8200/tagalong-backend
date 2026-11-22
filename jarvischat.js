@@ -177,11 +177,38 @@ export function crewHours(it) {
   const s = (it && it._samsara) || {};
   return [hosOf(s.hos, s.driver1), s.driver2 || s.hos2 ? hosOf(s.hos2, s.driver2) : null].filter(Boolean);
 }
+// a long load (66 bills on a California run): one line per stop instead of every bill, so the answer that matters
+// (stops left, ETAs, where the truck is) is never cut off by the 6,000-character tool limit. Pure.
+export function billsByStop(bills = []) {
+  const m = new Map();
+  for (const b of bills) {
+    const k = `${b.stop || '?'}|${b.billTo || '?'}`;
+    const g = m.get(k) || { stop: b.stop || null, customer: b.billTo || null, bills: 0, pieces: 0, delivered: 0, deliveredAt: null, deliverBy: b.deliverBy || null, temperature: b.temperature ?? null };
+    g.bills += 1; g.pieces += Number(b.pieces) || 0;
+    if (b.deliveredAt) { g.delivered += 1; if (!g.deliveredAt || String(b.deliveredAt) > String(g.deliveredAt)) g.deliveredAt = b.deliveredAt; }
+    m.set(k, g);
+  }
+  return [...m.values()].map((g) => ({ ...g, allDelivered: g.delivered === g.bills }));
+}
+// a driver by name on the live board ("Ferney", "ferney urrego", "Jaime"): Samsara's logged-in names and TruckMate's names. Pure.
+export function loadsByDriver(items, q) {
+  const words = String(q || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z ]/g, ' ').split(/\s+/).filter((w) => w.length >= 3 && !/^(driver|truck|the|from|his|hes|her|for)$/.test(w));
+  if (!words.length) return [];
+  const fold = (x) => String(x || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const out = [];
+  for (const it of items) {
+    const s2 = it._samsara || {}; const t = tripOf(it);
+    const names = [s2.driver1, s2.driver2, s2.samsaraDriver, t.driverName, t.driver2Name].filter((n) => n && !/^\s*\d+\s*$/.test(String(n)));
+    const hit = names.find((n) => { const toks = fold(n).split(/\s+/); return words.every((w) => toks.some((tk) => tk.startsWith(w) || (w.length >= 5 && nameScore(w, tk) >= 0.8))); });
+    if (hit) out.push({ trip: tripNo(it), truck: t.powerUnit || null, driver: hit, status: t.status || null, to: t.destZoneDesc || null });
+  }
+  return out;
+}
 const clip = (x, n = 6000) => { const s = typeof x === 'string' ? x : JSON.stringify(x); return s.length > n ? `${s.slice(0, n)}…(truncated)` : s; };
 
 export const TOOLS = [
   { name: 'board_summary', description: 'The live board: how many active loads, open alerts by severity, and a one-line list of loads (trip, status, truck, trailer, from → to, where the truck is). Optional filter text (city, customer, truck, status).', input_schema: { type: 'object', properties: { filter: { type: 'string' } } } },
-  { name: 'find_load', description: 'Find a load by trip number, bill number, broker load number, truck, trailer, or a customer name on the trip sheet.', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+  { name: 'find_load', description: 'Find a load by trip number, bill number, broker load number, truck, trailer, a DRIVER\'s name (first name is enough, e.g. "Ferney"), or a customer name on the trip sheet.', input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
   { name: 'customer_etas', description: 'ETA for a CUSTOMER / receiver by business name (e.g. "Native", "Zoom Bloom", "Main Wholesale") — the same answer staff get on the phone: every load with a stop for them, where the truck is now (as of when), and for each of their deliveries the city, ETA (local time), appointment / committed time, boxes loaded, trip + truck + trailer. Half-heard or partial names find the closest customer. Optional city.', input_schema: { type: 'object', properties: { customer: { type: 'string' }, city: { type: 'string' } }, required: ['customer'] } },
   { name: 'follow_up_load', description: 'STAFF ONLY. Staff ask Jarvis to follow up on a BROKER load and make sure it makes delivery. Jarvis then asks them for the delivery date and time if it is not confirmed, watches the ETA, and emails if it will be over an hour late. Without a follow-up and a confirmed time, Jarvis does not call a broker load late. delivery_time: YYYY-MM-DDTHH:MM at the stop, only if the person said it. city: which stop, when there is more than one. Hub outbound loads do not use this.', input_schema: { type: 'object', properties: { trip: { type: 'string' }, delivery_time: { type: 'string' }, city: { type: 'string' } }, required: ['trip'] } },
   { name: 'load_offers', description: 'STAFF ONLY. Loads that brokers / carriers offered us by email (sales emails, not our own loads): who offered, what lanes and when. Search by words (a city, a broker, "reefer") and how many days back (default 7). Use it when staff ask what loads are being offered, e.g. for a truck\'s next load.', input_schema: { type: 'object', properties: { q: { type: 'string' }, days: { type: 'number' } } } },
@@ -330,6 +357,8 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         const qn = q.replace(/^(truck|unit|tk|trailer|trl|tl)\s*#?\s*/i, '').trim();
         const near = /^\d{3,5}$/.test(qn) ? [...new Set(all.map((x) => String(tripOf(x).powerUnit || '')).filter((u) => u.length === qn.length && u !== qn && [...u].filter((ch, i) => ch !== qn[i]).length === 1))].slice(0, 4) : [];
         if (hit) return { found: true, trip: tripNo(hit.item), matchedBy: hit.by, ...(hit.by !== 'truck number' && hit.by !== 'trailer number' && near.length ? { note: `${qn} is not a truck on the board — it matched a ${hit.by} on this load. Trucks it may be: ${near.join(', ')}. Say so before answering.` } : {}) };
+        const byDriver = /[a-z]{3}/i.test(q) ? loadsByDriver(all, q) : [];
+        if (byDriver.length) return { found: true, byDriverName: byDriver, ...(byDriver.length > 1 ? { note: 'More than one load matches that driver name — say which, or ask.' } : {}) };
         if (near.length) return { found: false, note: `No truck or load ${qn} on the board. Did they mean truck ${near.join(' or ')}? Ask — don't answer for another truck.`, didYouMean: near };
         const etas0 = (await watch()).etas || {};
         let names = customerStops(all, q, etas0);
@@ -722,13 +751,17 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         const eta = (w.etas || {})[n];
         const notes = ((await db.get(notesKey, {})) || {})[n] || [];
         if (!ctx.customer) { const d = loadAnswer({ item: it, eta }); if (d) (ctx.dispatch = ctx.dispatch || []).push(d); }
+        const slim = slimItem(it, openAlerts(w).filter((a) => a.trip === n));
+        if ((slim.bills || []).length > 12) { slim.billsByStop = billsByStop(slim.bills); delete slim.bills; }
         return {
-          ...slimItem(it, openAlerts(w).filter((a) => a.trip === n)),
+          // what answers most questions comes first (a long load's details used to cut these off)
+          trip: slim.trip, status: slim.status, statusDesc: slim.statusDesc, truck: slim.truck, trailer: slim.trailer,
           truckNow: truckNow(it, w),
           ...(ctx.customer ? {} : { stopsLeft: stopsLeft(it), brokenDown: !!((it._breakdown && it._breakdown.on) || it._bdOpen) }),
-          crewHours: crewHours(it),
-          ...(ctx.customer || !(it._trailerChanges || []).length ? {} : { trailerChanges: it._trailerChanges.map((c) => ({ from: c.from, to: c.to, at: c.at, why: c.reason, by: c.by || 'Jarvis' })) }),
           etas: eta ? (eta.stops || []).map((s) => ({ stop: s.label, eta: fmtLocal(s.etaMs, s.label), miles: s.miles, appointment: s.apptMs ? fmtLocal(s.apptMs, s.label) : null })) : null,
+          crewHours: crewHours(it),
+          ...slim,
+          ...(ctx.customer || !(it._trailerChanges || []).length ? {} : { trailerChanges: it._trailerChanges.map((c) => ({ from: c.from, to: c.to, at: c.at, why: c.reason, by: c.by || 'Jarvis' })) }),
           stopsAlreadyPassed: eta ? (eta.passed || []).map((s) => s.label) : [],
           hold: it._hold || null, tasks: (it._tasks || []).filter((t) => !t.done).map((t) => t.title),
           ...(ctx.customer ? {} : await (async () => {
@@ -904,7 +937,7 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
     const history = trimHistory(thread.messages);
     const uploadNote = uploads.length ? `\n\n[Uploaded: ${uploads.map((u) => `${u.name} → ${u.result}${u.docId ? ` (docId ${u.docId})` : ''}`).join('; ')}]` : '';
     // asked from the Dispatch desk: the truck the dispatcher has open is "this truck" / "this load" (they may ask about any other)
-    const focusNote = focus && (focus.trip || focus.truck) ? `\n\n[Asked from the Dispatch desk with truck ${focus.truck || '?'}${focus.trip ? ` (trip ${focus.trip})` : ''} open — "this truck", "this load", "the driver(s)" mean that one unless another is named.]` : '';
+    const focusNote = focus && (focus.trip || focus.truck) ? `\n\n[Asked from the Dispatch desk with truck ${focus.truck || '?'}${focus.trip ? ` (trip ${focus.trip})` : ''} open — "this truck", "this load", "the driver(s)" mean that one. If they name another truck, trip, customer or a DRIVER (e.g. "Ferney"), look that one up with find_load first — never assume a named driver is on the open truck.]` : '';
     const messages = [...history, { role: 'user', content: `${text || ''}${uploadNote}${focusNote}`.trim() }];
     const ctx = { user, threadId, uploaded: uploads, proposed: [], did: [], customer, senderClient, source: sms ? 'Text to Jarvis' : 'Ask Jarvis', canAct };
     const pbText = playbook && !customer ? await playbook.text() : '';   // what staff taught Jarvis (internal only)
