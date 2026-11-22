@@ -16,6 +16,8 @@ test('627668: inbound dispatch\'s "Load delivered / Clean bills / POD" email fin
   assert.match(r, /^delivered — POD emailed by Priscyla Dominguez \(from Diego Diaz's email\), Sat, Nov 21, 10:21 AM ET \(staff email\)$/);
   assert.equal(isSure(r), true);
   assert.equal(finishReason({ ...load(), _staffPod: p }), r);
+  assert.ok(staffDelivery([mail(POD, { auto: 'group' })], load(), ours), 'filed as a group email (Inbound - Dispatch)');
+  assert.equal(staffDelivery([mail(POD, { auto: 'out-of-office' })], load(), ours), null);
 });
 
 test('a forwarded header on top is skipped; the "POD FOR B…" subject counts for that bill only', () => {

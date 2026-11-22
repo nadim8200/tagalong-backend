@@ -1,6 +1,7 @@
 // ---------------------------------------------------------------
 // A delivery / POD email from our own staff, filed on a load, is a fact: the load is delivered (Nov 22 — trip 627668
 // stayed on the board as DEPSHIP with "Reefer OFF" a day after inbound dispatch emailed "Load delivered / Clean bills / POD").
+//   - group emails count (dispatch writes to the Inbound group, Jarvis only in the loop); auto-replies / newsletters don't
 //   - only Florida Beauty addresses (isInternal) — a broker's or customer's email never closes a load
 //   - only the email's own words (quoted history cut off), and never "still at the receiver", "unloading", "send the POD"…
 //   - a subject naming another bill (the truck's next load) doesn't count for this one
@@ -35,7 +36,7 @@ export function staffDelivery(emails = [], item = {}, isInternal = () => false) 
   const ours = new Set(bills.map((b) => String((b && b.billNumber) || '').trim().toUpperCase()).filter(Boolean));
   const places = new Set(bills.map((b) => b && (b.endZoneDescription || b.endZone)).filter(Boolean));
   const openStops = places.size > 1 && bills.some((b) => b && !b.actualDelivery);
-  const list = [...emails].filter((e) => e && !e.auto).sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+  const list = [...emails].filter((e) => e && (!e.auto || e.auto === 'group')).sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
   for (const e of list) {
     const addr = String((e.from && e.from.address) || '').toLowerCase();
     if (!addr || !isInternal(addr)) continue;
