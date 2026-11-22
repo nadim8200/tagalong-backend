@@ -332,3 +332,22 @@ test('Jarvis reads the whole Phone & Messages inbox and his own call transcripts
   assert.equal(calls.calls[0].direction, 'Jarvis called'); assert.match(calls.calls[0].transcript, /thirty more minutes/);
   assert.equal((await chat.runTool('text_messages', {}, { ...c, customer: { id: 'x' } })).error, 'Not available.');
 });
+
+test('Ask Jarvis on the Dispatch desk: the open truck is "this truck"; desk notes and any truck from Samsara (Nov 22)', async () => {
+  const idx = {
+    fetchedAt: '2026-11-22T15:00:00Z', driversByCode: {}, reeferByKey: {},
+    vehByUnit: { 2219: { name: '2219' } },
+    statsByUnit: { 2219: { name: '2219', gps: { latitude: 30.28, longitude: -82.12, speedMilesPerHour: 77, reverseGeo: { formattedLocation: 'I 10, Baker County, FL' }, time: new Date().toISOString() } } },
+    hosById: { d1: { vehicle: '2219', driverName: 'Jaime Rivera', status: 'sleeperBed', driveLeftMin: 0, shiftLeftMin: 0, cycleLeftMin: 1200 } },
+  };
+  const h = setup([useTool('truck_live', { truck: '2219' }), useTool('conversations', { trip: '624399' }), say('Truck 2219 is on I-10 in Baker County.')], { liveIndex: async () => idx });
+  await h.db.set('taDeskNotes:florida-beauty', { 624399: [{ id: 'n1', at: '2026-11-22T14:00:00Z', by: 'Rosa', text: 'Relay planned in Jacksonville' }] });
+  const r = await h.call('POST /jarvis/chat', { message: 'How far is this truck from Miami?', focus: { trip: '624399', truck: '724' } });
+  assert.equal(r.status, 200);
+  assert.match(JSON.stringify(h.claude.sent[0].messages.at(-1).content), /Dispatch desk with truck 724 \(trip 624399\) open/);
+  const live = JSON.parse(h.claude.sent[1].messages.at(-1).content[0].content);
+  assert.equal(live.found, true); assert.equal(live.truck, '2219'); assert.equal(live.latLng, '30.28,-82.12');
+  assert.equal(live.loggedIn[0].name, 'Jaime Rivera');
+  const conv = JSON.parse(h.claude.sent[2].messages.at(-1).content[0].content);
+  assert.equal(conv.deskNotes[0].text, 'Relay planned in Jacksonville');
+});

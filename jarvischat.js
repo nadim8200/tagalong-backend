@@ -29,6 +29,8 @@ import { instructionsFor, instructionsSms, whichLocation, loadFor } from './inst
 import { staffFacts } from './stafffacts.js';
 import { realUnit } from './units.js';
 import { maySet } from './usualarrival.js';
+import { samsaraTokenFrom, getLiveIndex, correlate } from './samsara.js';
+import { DESKNOTES } from './desknotes.js';
 
 const SITE = 'florida-beauty';
 const API = 'https://api.anthropic.com/v1/messages';
@@ -202,6 +204,7 @@ export const TOOLS = [
   { name: 'driver_profiles', description: 'STAFF ONLY. The Driver profiles list: a driver\'s name, driver ID, phone numbers (the ones dispatch added and the Samsara one), whether they\'re in a local fleet (Miami yard or Central Florida / Bartow yard), whether they\'ve signed in to the driver app, and the load they\'re on now. Search by name, driver ID or phone; empty → everyone. Use for "what\'s Yordan\'s number", "who are the Miami local drivers", "whose number is 786-474-0992".', input_schema: { type: 'object', properties: { query: { type: 'string', description: 'a name, driver ID, phone number, or "miami" / "bartow" for a local fleet' } } } },
   { name: 'driving_log', description: 'STAFF ONLY. A truck\'s drivers\' last 24 hours of duty status from the Samsara ELD (the card\'s "Driving time"): time off duty / sleeper / driving / on duty, when each driver last drove, and since when they\'re in their current status. Use for "when did 2019 last drive", "how long has he been off duty", "did the team switch". For the clocks left (drive / shift / cycle) use truck_hours.', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck / unit number, or a driver name' } }, required: ['truck'] } },
   { name: 'truck_hours', description: 'Driving hours (hours of service) for a truck or driver: each driver\'s duty status, drive time left, shift (14-hr) left, 70-hr cycle left and when a break is due (Samsara ELD) — plus the truck\'s current load and where it is. Use for "how many hours does 2217 have", "can 2403 make it", "is the team rested".', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck / unit number, or a driver name' } }, required: ['truck'] } },
+  { name: 'truck_live', description: 'ANY truck straight from Samsara (live, about a minute old) — on a load or not, on the board or not: where it is (place + lat/lng), moving or parked and how fast, heading, engine, fuel / DEF, fault codes, the drivers logged into it with drive / shift / cycle time left, and its loads on the board. For the distance between two trucks: get both, then miles from one truck to the other (a truck not on a load: pass its "lat,lng" as the place).', input_schema: { type: 'object', properties: { truck: { type: 'string', description: 'Truck (power unit) number, e.g. 2219' } }, required: ['truck'] } },
   { name: 'loads_to_place', description: 'A PLACE only (never a customer name — use customer_etas for those): every load on the board with a stop in a city / state (e.g. "Lombard, IL", "Chicago", "NJ") — trip, truck, customer at that stop, delivered or not, and the live ETA. Use for questions like "update on deliveries to Lombard IL".', input_schema: { type: 'object', properties: { place: { type: 'string' } }, required: ['place'] } },
   { name: 'update_email', description: 'EMAIL REPLIES ONLY: when the email asks where loads are / their status / ETAs, list the trips that answer it (and dispatch follow-ups). The reply is then built from live data in the standard delivery-update format — do not write the load details yourself.', input_schema: { type: 'object', properties: { customer: { type: 'string', description: 'Customer / receiver name the update is about (as on the loads), or the place' }, destination: { type: 'string', description: 'Delivery city / state if the question was about a place' }, trips: { type: 'array', items: { type: 'string' } }, followUps: { type: 'array', items: { type: 'object', properties: { issue: { type: 'string' }, next: { type: 'string' }, owner: { type: 'string' }, status: { type: 'string', enum: ['Pending', 'Completed'] } } } } }, required: ['trips'] } },
   { name: 'staff_directory', description: 'Florida Beauty employees by name, department or role (billing, payroll, claims, maintenance, sales, IT…): name, department and extension. Cell phones are never available.', input_schema: { type: 'object', properties: { name_or_department: { type: 'string' } }, required: ['name_or_department'] } },
@@ -215,7 +218,7 @@ export const TOOLS = [
   { name: 'truck_plan', description: 'Gus\'s truck planning sheet checked against the live board: each truck\'s region (California / Midwest / Northeast…), flowers or broker, current trip status / lateness / when it will be empty, the NEXT trip (B number, info, pickup) and problems (late, can\'t make the next pickup, sheet vs TruckMate / rate con mismatches). Optional truck or region.', input_schema: { type: 'object', properties: { truck: { type: 'string' }, region: { type: 'string' } } } },
   { name: 'next_loads', description: 'Next loads: trips TruckMate already has assigned to a truck after its current run (nextInTruckMate; the first one has timing: state late/tight/ok/unknown and a summary of whether the truck makes it — empty time, deadhead, HOS drive time vs the pickup / delivery deadline), and rate cons dispatch (Gus, the dispatch GM) sent for trucks to run once they finish their current trip — truck, broker, load number, pickup → delivery, rate, notes, and whether TruckMate / a trip sheet confirms it. Optional truck number. Use for "what does truck 2403 do next?" or "which rate cons came in today?".', input_schema: { type: 'object', properties: { truck: { type: 'string' } } } },
   { name: 'alerts', description: 'Open alerts (late, stopped, reefer, engine, unscheduled stops, holds…). Optional severity: critical | warning.', input_schema: { type: 'object', properties: { severity: { type: 'string' } } } },
-  { name: 'conversations', description: 'What was said with a load\'s driver: texts, replies, app messages and Jarvis phone calls (summaries / transcripts).', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
+  { name: 'conversations', description: 'What was said with a load\'s driver: texts, replies, app messages, Jarvis phone calls (summaries / transcripts) and the Dispatch desk\'s internal notes on the load.', input_schema: { type: 'object', properties: { trip: { type: 'string' } }, required: ['trip'] } },
   { name: 'emails', description: 'Emails in the Jarvis inbox — for one load (trip) or the ones still waiting for a reply.', input_schema: { type: 'object', properties: { trip: { type: 'string' } } } },
   { name: 'callback_requests', description: 'People waiting for us to reach out (from Jarvis calls, emails, texts, the driver app): who, how to reach them, what they need, load, urgent, who was notified.', input_schema: { type: 'object', properties: {} } },
   { name: 'request_callback', description: 'Ask a team (e.g. Accounting, Dispatch, Customer service, Management) to reach out to someone — Jarvis emails / texts / calls that team the way each member chose. Use when the dispatcher asks for someone to be contacted.', input_schema: { type: 'object', properties: { team: { type: 'string', description: 'Team name as set up in the console' }, need: { type: 'string', description: 'What the team should do / talk about' }, trip: { type: 'string' }, contactName: { type: 'string' }, contactPhone: { type: 'string' }, contactEmail: { type: 'string' }, urgent: { type: 'boolean' } }, required: ['team', 'need'] } },
@@ -292,7 +295,7 @@ export function customerSafe(x) {
 // Voice conversation in Ask Jarvis: the answer is read out loud, so keep it short.
 export const SPOKEN = `\n\nThis turn is a SPOKEN conversation (the dispatcher talks, your answer is read aloud): answer in 1-3 short plain sentences, no lists, tables, markdown or emojis. Say truck and trailer numbers as written. If there's more, give the key point and say the full detail is on screen. Anything that needs the dispatcher's Confirm: say it's waiting for their Confirm on screen. What you get is speech-to-text, so numbers can arrive garbled or split across the last few messages ("six two seven four zero five" may come as "627" then "405", "4:05", "11" or "for oh five"): read the last few user messages together, join digit pieces into one number (trip numbers have 6 digits, trucks 3-4, bills start with B), and when you're not sure, say the number you understood back and ask "is that right?" instead of asking them to repeat everything.`;
 
-export function initJarvisChat(app, { trailerChange = null, staffActions = null, requireAuth, db, brokerFollow = null, dispatchLog = null, miles = null, artis = null, artisWeb = null, artisReports = null, synergize = null, clients = null, geofences = null, stopTimes = null, pastLoads = null, planSheet = null, nextLoads = null, playbook = null, directory = null, getBoard, docs = null, packets = null, driver = null, voice = null, sms = null, reports = {}, mail = null, help = null, env = process.env, fetchFn = globalThis.fetch }) {
+export function initJarvisChat(app, { trailerChange = null, staffActions = null, requireAuth, db, brokerFollow = null, dispatchLog = null, miles = null, artis = null, artisWeb = null, artisReports = null, synergize = null, clients = null, geofences = null, stopTimes = null, pastLoads = null, planSheet = null, nextLoads = null, playbook = null, directory = null, getBoard, docs = null, packets = null, driver = null, voice = null, sms = null, reports = {}, mail = null, help = null, liveIndex = null, env = process.env, fetchFn = globalThis.fetch }) {
   const enabled = !!(db && db.enabled);
   const threadsKey = (uid) => `taJarvisChat:${uid}`;
   const actionsKey = `taJarvisActions:${SITE}`;
@@ -765,12 +768,28 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
         const now = Date.now();
         return { total: al.length, alerts: al.slice(0, 150).map((a) => { const it = all.find((x) => tripNo(x) === a.trip); return { trip: a.trip, truck: a.unit, severity: a.severity, title: a.title, detail: clip(a.detail || '', 300), owner: a.owner || undefined, truckNow: it ? truckNow(it, w, now) : undefined }; }) };
       }
+      case 'truck_live': {
+        const unit = realUnit(String(input.truck || '')).trim().toUpperCase().replace(/^0+(?=\d)/, '');
+        if (!unit) return { found: false, note: 'Which truck?' };
+        const token = liveIndex ? 'injected' : samsaraTokenFrom(env);
+        if (!token) return { found: false, note: 'Samsara is not connected on the server.' };
+        const idx = liveIndex ? await liveIndex() : await getLiveIndex(token);
+        if (!(idx.statsByUnit[unit] || idx.vehByUnit[unit])) return { found: false, note: `Samsara has no truck ${unit}.` };
+        const live = correlate({ powerUnit: unit }, idx) || {};
+        const loggedIn = Object.values(idx.hosById || {}).filter((h) => String(h.vehicle || '').toUpperCase().replace(/^0+(?=\d)/, '') === unit)
+          .map((h) => ({ name: h.driverName, status: h.status, driveLeft: h.driveLeftMin != null ? minsText(h.driveLeftMin) : null, shiftLeft: h.shiftLeftMin != null ? minsText(h.shiftLeftMin) : null, cycleLeft: h.cycleLeftMin != null ? minsText(h.cycleLeftMin) : null }));
+        const loads = all.filter((it) => String(tripOf(it).powerUnit || '').toUpperCase().replace(/^0+(?=\d)/, '') === unit).map((it) => { const t = tripOf(it); return { trip: tripNo(it), status: t.status, from: t.origZoneDesc, to: t.destZoneDesc }; });
+        return { found: true, truck: unit, location: live.location || null, latLng: live.lat != null ? `${live.lat},${live.lng}` : null, speedMph: live.speedMph ?? null, moving: live.speedMph != null ? live.speedMph >= 3 : null,
+          gpsMinutesAgo: live.gpsAt ? Math.round((Date.now() - Date.parse(live.gpsAt)) / 60000) : null, heading: live.course ?? null, engine: live.engine || null, fuelPct: live.fuelPct ?? null, defPct: live.defPct ?? null,
+          faultCodes: (live.dtcCodes || []).slice(0, 10), assignedDriver: live.samsaraDriver || null, loggedIn, loads };
+      }
       case 'conversations': {
         const n = String(input.trip || '').replace(/\D/g, '');
         const log = (((await db.get(`taTripComms:${SITE}`, {})) || {})[n] || []).slice(0, 40).map((e) => ({ at: e.at, type: e.type, by: e.by || e.from || null, text: e.text }));
         const calls = voice && voice.callsFor ? (await voice.callsFor(n, 0)).slice(0, 5).map((c) => ({ at: c.at, summary: c.summary, transcript: clip(c.transcript || '', 1500) })) : [];
         const chat = (((await db.get(`taOcChat:${SITE}`, {})) || {})[n] || []).slice(-20).map((m) => ({ at: m.at, from: m.from, text: m.text }));
-        return { texts: log, calls, appMessages: chat };
+        const deskNotes = (((await db.get(DESKNOTES, {})) || {})[n] || []).slice(-20).map((x) => ({ at: x.at, by: x.by, text: x.text }));   // the Dispatch desk's internal notes (team only)
+        return { texts: log, calls, appMessages: chat, deskNotes };
       }
       case 'emails': {
         const list = ((await db.get(`taEmails:${SITE}`, { list: [] })) || {}).list || [];
@@ -874,7 +893,7 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
   }
 
   // ---- one chat turn: Claude + tools until it answers ----
-  async function turn({ user, threadId, text, uploads = [], spoken = false, mode = 'dispatcher', senderClient = null, sms = false }) {
+  async function turn({ user, threadId, text, uploads = [], spoken = false, mode = 'dispatcher', senderClient = null, sms = false, focus = null }) {
     const customer = mode === 'customer';
     const email = customer || mode === 'staff_email';
     const canAct = !customer && (mode !== 'staff_email' || !!sms);   // an email reply has its own path: acting here too would send twice
@@ -884,7 +903,9 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
     const thread = (store.threads || {})[threadId] || { id: threadId, title: String(text || 'Documents').slice(0, 60), messages: [] };
     const history = trimHistory(thread.messages);
     const uploadNote = uploads.length ? `\n\n[Uploaded: ${uploads.map((u) => `${u.name} → ${u.result}${u.docId ? ` (docId ${u.docId})` : ''}`).join('; ')}]` : '';
-    const messages = [...history, { role: 'user', content: `${text || ''}${uploadNote}`.trim() }];
+    // asked from the Dispatch desk: the truck the dispatcher has open is "this truck" / "this load" (they may ask about any other)
+    const focusNote = focus && (focus.trip || focus.truck) ? `\n\n[Asked from the Dispatch desk with truck ${focus.truck || '?'}${focus.trip ? ` (trip ${focus.trip})` : ''} open — "this truck", "this load", "the driver(s)" mean that one unless another is named.]` : '';
+    const messages = [...history, { role: 'user', content: `${text || ''}${uploadNote}${focusNote}`.trim() }];
     const ctx = { user, threadId, uploaded: uploads, proposed: [], did: [], customer, senderClient, source: sms ? 'Text to Jarvis' : 'Ask Jarvis', canAct };
     const pbText = playbook && !customer ? await playbook.text() : '';   // what staff taught Jarvis (internal only)
     let answer = '';
@@ -973,7 +994,8 @@ export function initJarvisChat(app, { trailerChange = null, staffActions = null,
     if (!text.trim() && !files.length) return res.status(400).json({ error: 'Write a message or add a document.' });
     try {
       const uploads = files.length ? await readUploads(files, user.name) : [];
-      res.json({ ...(await turn({ user, threadId: /^[a-f0-9]{12}$/.test(String(b.threadId || '')) ? b.threadId : newId(), text, uploads, spoken: !!b.voice })), uploads });
+      const f = b.focus && typeof b.focus === 'object' ? { trip: String(b.focus.trip || '').replace(/\D/g, '').slice(0, 8) || null, truck: String(b.focus.truck || '').replace(/[^0-9A-Za-z]/g, '').slice(0, 10) || null } : null;
+      res.json({ ...(await turn({ user, threadId: /^[a-f0-9]{12}$/.test(String(b.threadId || '')) ? b.threadId : newId(), text, uploads, spoken: !!b.voice, focus: f })), uploads });
     } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
   });
 
