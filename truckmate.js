@@ -492,7 +492,6 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   }
   const finished = initFinished(app, { requireAuth, db, onFinished, recordFinished, env, mailer: { ready: () => mailConfig(env).ready, send: (m) => sendMail(m, { env }) } });
 
-  const ACTIVE_TTL_MS = 36 * 60 * 60 * 1000;
   async function updateActiveBoard(site, trips) {
     if (!(db && db.enabled)) return 0;
     const key = `taTruckMateActive:${site}`;
@@ -512,8 +511,9 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
       store.trips[id] = trackTripTimes(store.trips[id], t, now, store.timesSince || (store.timesSince = now));
     }
     for (const [id, rec] of Object.entries(store.trips)) {
-      if (!rec || (now - (rec.updatedAt || 0)) > ACTIVE_TTL_MS) {
-        if (rec && onFinished) Promise.resolve(onFinished(site, rec, 'left the board — no TruckMate update for 36h')).catch((e) => console.warn('[truckmate] rundown:', e.message));
+      const why = ageOutReason(rec, store.trips, now);
+      if (why) {
+        if (rec && onFinished) Promise.resolve(onFinished(site, rec, `left the board — ${why}`)).catch((e) => console.warn('[truckmate] rundown:', e.message));
         delete store.trips[id];
       }
     }
@@ -930,4 +930,31 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
   });
 
   return { buildBoard, refreshFleet, finishTrip: (site, n, reason, by) => finished.finishNow(site, String(n), reason, by) };   // refreshFleet: the fleet map's trucks + trailers (the Yards page reads its trailers)
+}
+
+// When a trip leaves the active board (Nov 22, 2026). The connector only sends a trip when it CHANGES in TruckMate, so a long
+// OTR run nobody touches in TruckMate for a day and a half is still on the road (trip 627656, Ferney and Wilber: created Nov 20,
+// rolling, dropped after 36 quiet hours, back only when dispatch changed its status). A quiet trip stays until it's really over:
+// its truck is on a newer trip, its status says done, or 7 quiet days (the safety net). A trip with no truck keeps the 36 hours
+// (an old booking shouldn't linger). → the reason, or null to keep it. Pure.
+const ACTIVE_TTL_MS = 36 * 60 * 60 * 1000;
+const QUIET_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+const DONE_STATUS = /^(DELV|DLVD|DELIVERED|CMPL|COMPLETE|CANC|VOID|BILLED|CLOSED|DONE)/i;
+export function ageOutReason(rec, all = {}, now = Date.now()) {
+  if (!rec) return 'no record';
+  const quiet = now - (rec.updatedAt || 0);
+  if (quiet <= ACTIVE_TTL_MS) return null;
+  const t = (rec.item && rec.item.trip) || rec.item || {};
+  const unit = String(t.powerUnit || '').trim().toUpperCase().replace(/^0+(?=\d)/, '');
+  const num = Number(String(t.tripNumber || '').replace(/\D/g, '')) || 0;
+  if (!unit) return 'no truck and no TruckMate update for 36h';
+  if (DONE_STATUS.test(String(t.status || t.statusCode || ''))) return `status ${t.status} and no TruckMate update for 36h`;
+  const newer = Object.values(all || {}).find((o) => {
+    if (!o || o === rec) return false;
+    const ot = (o.item && o.item.trip) || o.item || {};
+    return String(ot.powerUnit || '').trim().toUpperCase().replace(/^0+(?=\d)/, '') === unit && (Number(String(ot.tripNumber || '').replace(/\D/g, '')) || 0) > num;
+  });
+  if (newer) { const ot = (newer.item && newer.item.trip) || newer.item || {}; return `truck ${unit} is on trip ${ot.tripNumber} now`; }
+  if (quiet > QUIET_MAX_MS) return 'no TruckMate update for 7 days';
+  return null;   // quiet in TruckMate, but nothing says it's over: keep it on the board
 }
