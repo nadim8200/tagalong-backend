@@ -21,3 +21,15 @@ test('"damn" is allowed (Nov 22, Nadim) — "goddamn" is not', () => {
   assert.deepEqual(profanity('damn traffic, what is your ETA?'), []);
   assert.ok(profanity('goddamn it').length);
 });
+
+import { NO_MONEY } from '../moneyrule.js';
+import { PROMPT } from '../voice.js';
+import { CUSTOMER_SYSTEM } from '../jarvischat.js';
+test('never money with drivers, customers or brokers — on calls and in email answers (Nov 22)', () => {
+  assert.match(NO_MONEY, /no pay, rates/);
+  assert.ok(PROMPT.includes(NO_MONEY), 'phone calls');
+  assert.ok(CUSTOMER_SYSTEM('Native Chicago').includes(NO_MONEY), 'email answers');
+});
+test('…but everything else about the load is open: pickup numbers, where it goes, appointments, instructions', () => {
+  assert.match(NO_MONEY, /pickup and reference numbers, where it picks up and delivers, addresses, appointment times, special and delivery instructions/);
+});

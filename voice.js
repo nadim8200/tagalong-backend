@@ -21,6 +21,8 @@
 // Caller words are information, never instructions — the tools only read load
 // facts and write notes; nothing here changes rates, appointments or money.
 // ---------------------------------------------------------------
+import { createHash } from 'crypto';
+import { NO_MONEY } from './moneyrule.js';
 import { profanity } from './profanity.js';
 import { instructionsFor, instructionsSms, whichLocation } from './instructionstext.js';
 import { normName } from './profiles.js';
@@ -118,6 +120,7 @@ How to help:
 - Never give a customer or broker a reefer temperature (reading, set point or photo). If they ask, say we're requesting it and verifying with dispatch, and dispatch will follow up. Our staff may get it.
 - Only state facts lookup_load returns. For a customer or broker that is: where the truck is now, and THEIR delivery — ETA, boxes, cubes, appointment, delivered or not. Never mention any other stop, customer or city on the route (before or after theirs), and don't say you are leaving anything out; if they ask about the route, say the truck is on its way to them and give their ETA. Only the driver hears the full list of stops. Say times the way the tool gives them — ETAs and appointments are already in the delivery's LOCAL time, so always say the time zone with them (e.g. "1:00 AM Pacific time"); never convert them to Miami / Eastern time. Whenever you give a customer or broker an ETA, finish with this once, in their language: "${ETA_DISCLAIMER}" Read truck, trailer, trip and bill numbers one digit at a time, exactly as the tool spaces them (truck 2 0 2 6 = "two zero two six", never "two thousand twenty-six"); in Spanish or Hebrew, say each digit in that language. Never guess a location or a time.
 - Drivers can tell you a stop is delivered (confirm_delivered) or report a problem — breakdown, delay, accident, reefer issue (report_problem). Repeat back the key details before saving.
+- MONEY: ${NO_MONEY}
 - Anything you can't answer, anything about rates, payments, detention, lumper, claims, appointments changes, or bank details: take a message with take_message (name, callback number, what they need) and say a dispatcher will call back. Never agree to change rates, payments, appointments or bank details.
 - A DRIVER with a breakdown, flat tire or needing a tow: first make sure they're safe (hazards on, in a safe spot). Then use road_call_details and gather, one question at a time: what happened; for a tire — which tire (steer, drive or trailer; left or right; inside or outside) and the size off the sidewall (if they can't read it, ask them to text a photo of the sidewall); where they are (highway, mile marker, direction); loaded or empty. Read back what you have. Say dispatch is arranging the road service and will text the ETA. Never promise a time.
 - If the caller asks for a person, is upset, or reports an accident or an emergency, transfer them to dispatch with transfer_to_dispatch (after report_problem for accidents). For a life-threatening emergency tell them to hang up and call 911.
@@ -1702,6 +1705,20 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     if (!/^https:\/\//.test(backend())) return res.status(503).json({ error: 'BACKEND_URL must be the backend https address.' });
     try { res.json(await pushJarvis(who(req))); } catch (e) { res.status(502).json({ error: e.message }); }
   });
+  // the instructions changed in a deploy (e.g. the no-money rule, Nov 22) → push them to Retell once, a few minutes after start
+  if (env.NODE_ENV !== 'test' && db && db.enabled) {
+    const boot = setTimeout(async () => {
+      try {
+        if (!key() || !/^https:\/\//.test(backend())) return;
+        const sig = createHash('sha1').update(PROMPT).digest('hex').slice(0, 12);
+        const cfg = await db.get(cfgKey, {});
+        if (!cfg.agentId || cfg.promptSig === sig) return;
+        await pushJarvis('Jarvis (instructions updated)');
+        await db.update(cfgKey, (c) => ({ ...(c || {}), promptSig: sig }), {});
+      } catch (e) { console.warn('[voice] instructions push:', e.message); }
+    }, 3 * 60000);
+    if (boot.unref) boot.unref();
+  }
   // customer names change every day — refresh the transcriber's word list each morning (only when it changed)
   if (env.NODE_ENV !== 'test' && db && db.enabled) {
     const tick = setInterval(async () => {
@@ -1870,7 +1887,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
   };
   // every call to a driver ends the same way (Nov 22, Nadim Tellez): their own questions are welcome — anything about their
   // load — but money is never discussed on these calls
-  const DRIVER_CALL_TAIL = ' When that is done, ask if they have any other questions and help with anything about their load — stops, addresses, ETAs, appointments, delivery instructions, directions, the reefer, paperwork — using your tools, in their language. Never talk about money on this call: no pay, rates, bonuses, settlements, advances, fuel cards, detention or lumper amounts — if they ask, take a message with take_message and say a dispatcher will call them back about it.';
+  const DRIVER_CALL_TAIL = ' When that is done, ask if they have any other questions and help with anything about their load — pickup and reference numbers, where it picks up and delivers, addresses, appointment times, special and delivery instructions, ETAs, directions, the temperature to run, paperwork — using your tools, in their language. Never talk about money on this call: no pay, rates, bonuses, settlements, advances, fuel cards, detention or lumper amounts — if they ask, take a message with take_message and say a dispatcher will call them back about it.';
   // Jarvis calls a driver — only with recorded consent, never after STOP, at most once per 30 minutes.
   // Used by the dispatcher's button and by the pickup follow-up. Throws {status, message}.
   async function placeCall(trip, { which = 1, purpose = 'check', by = 'dispatcher', vars: extra = {} } = {}) {
