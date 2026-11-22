@@ -15,6 +15,7 @@
 import { timingSafeEqual } from 'crypto';
 import { compareWithTruckMate } from './manifest.js';
 import { findLoad } from './voice.js';
+import { samsaraTokenFrom, getLiveIndex, correlate } from './samsara.js';
 
 const PHONE = /(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
 const EMAIL = /\b([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g;
@@ -66,7 +67,7 @@ export function slimItem(it, alerts = []) {
   };
 }
 
-export function initAssistant(app, { db, env = process.env, buildBoard, voice = null, outbound = null, flowerReport = null, stopTimes = null }) {
+export function initAssistant(app, { db, env = process.env, buildBoard, voice = null, outbound = null, flowerReport = null, stopTimes = null, liveIndex = null }) {
   const secret = () => String(env.ASSISTANT_READ_KEY || '').trim();   // a pasted trailing newline must not break it
   const enabled = () => secret().length >= 24;
   const site = (req) => String(req.query.site || 'florida-beauty');
@@ -182,6 +183,34 @@ export function initAssistant(app, { db, env = process.env, buildBoard, voice = 
       const all = Object.values(w.alerts || {}).sort((a, c) => (c.openedAt || 0) - (a.openedAt || 0));
       const view = (a) => ({ trip: a.trip, unit: a.unit, code: a.code, severity: a.severity, title: a.title, detail: a.detail, openedAt: a.openedAt ? new Date(a.openedAt).toISOString() : null, resolvedAt: a.resolvedAt ? new Date(a.resolvedAt).toISOString() : null, resolvedBy: a.resolvedBy || null, ack: a.ack ? a.ack.by : null, pushes: a.pushes || 0 });
       send(res, { lastRun: w.lastRun ? new Date(w.lastRun).toISOString() : null, roads: w.roads || null, open: all.filter((a) => !a.resolvedAt).map(view), resolved: all.filter((a) => a.resolvedAt).slice(0, 50).map(view) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // One truck straight from Samsara, loaded or not (Nov 21, 2026): where it is, moving or parked, engine, fuel, who is logged
+  // into it and their hours, plus its load if it has one. The same cached Samsara read the board uses (≤ 1 min old).
+  app.get('/assistant/truck/:unit', guard, async (req, res) => {
+    try {
+      const unit = String(req.params.unit || '').trim().toUpperCase().replace(/^0+(?=\d)/, '').slice(0, 12);
+      if (!unit) return res.status(400).json({ error: 'Which truck?' });
+      const token = liveIndex ? 'test' : samsaraTokenFrom(env);
+      if (!token) return res.status(503).json({ error: 'Samsara is not connected on the server.' });
+      const idx = liveIndex ? await liveIndex() : await getLiveIndex(token);
+      const known = !!(idx.statsByUnit[unit] || idx.vehByUnit[unit]);
+      if (!known) return res.status(404).json({ error: `Samsara has no truck ${unit}.` });
+      const live = correlate({ powerUnit: unit }, idx) || {};
+      const onDuty = Object.values(idx.hosById || {}).filter((h) => String(h.vehicle || '').toUpperCase().replace(/^0+(?=\d)/, '') === unit)
+        .map((h) => ({ name: h.driverName, status: h.status, driveLeftMin: h.driveLeftMin, shiftLeftMin: h.shiftLeftMin, cycleLeftMin: h.cycleLeftMin, restSinceMs: h.restSinceMs || null }));
+      const b = await buildBoard(site(req)).catch(() => ({ trips: [] }));
+      const loads = (b.trips || []).filter((it) => String(tripOf(it).powerUnit || '').toUpperCase().replace(/^0+(?=\d)/, '') === unit)
+        .map((it) => { const t = tripOf(it); return { trip: tripNo(it), status: t.status, trailer: t.trailer, from: t.origZoneDesc, to: t.destZoneDesc }; });
+      const ageMin = live.gpsAt ? Math.round((Date.now() - Date.parse(live.gpsAt)) / 60000) : null;
+      send(res, {
+        truck: unit, location: live.location || null, lat: live.lat ?? null, lng: live.lng ?? null, speedMph: live.speedMph ?? null,
+        moving: live.speedMph != null ? live.speedMph >= 3 : null, gpsAt: live.gpsAt || null, gpsMinutesAgo: ageMin, heading: live.course ?? null,
+        engine: live.engine || null, fuelPct: live.fuelPct ?? null, defPct: live.defPct ?? null, odometerMi: live.odometerMi ?? null,
+        faultCodes: (live.dtcCodes || []).slice(0, 10), assignedDriver: live.samsaraDriver || null, loggedIn: onDuty,
+        loads, samsaraReadAt: idx.fetchedAt || null,
+      });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
