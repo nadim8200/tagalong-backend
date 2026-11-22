@@ -103,3 +103,22 @@ test('activity: an employee\'s number is our team, even when the call said a cus
   assert.equal(staffOf('+13055550000', people), null);
   assert.equal(staffOf('', people), null);
 });
+
+test("dispatchers hear and read every Jarvis call, but not another dispatcher's recorded call — managers hear all (Nov 22)", async () => {
+  const db = memDb({});
+  const routes = {};
+  const a = initActivity({ get: (p, ...h) => { routes[p] = h.at(-1); }, put: () => {} }, { requireAuth: () => {}, db });
+  await a.record({ id: 'call:jv1', kind: 'call', direction: 'outbound', to: '+15612255262', at: '2026-11-22T15:00:00Z', transcript: 'Agent: what door? User: 14', recording: 'https://retell/rec1.wav', by: 'Ana' });
+  await a.record({ id: 'call:rc-77', kind: 'call', direction: 'outbound', to: '+15612255262', at: '2026-11-22T15:10:00Z', transcript: 'Rosa: hi Bryan…', recording: 'rc:77', by: 'Rosa' });
+  let out; let code = 200; const res = { json: (j) => { out = j; }, status(c) { code = c; return this; } };
+  const dispatcher = { id: 9, name: 'Ana', role: 'dispatcher' }; const boss = { id: 1, name: 'Nadim', admin: true };
+  await routes['/truckmate/activity']({ query: { date: '2026-11-22' }, user: dispatcher }, res);
+  const byId = Object.fromEntries(out.entries.map((e) => [e.id, e]));
+  assert.ok(byId['call:jv1'].transcript && byId['call:jv1'].recording, 'Jarvis call: open to everyone');
+  assert.equal(byId['call:rc-77'].transcript, null); assert.equal(byId['call:rc-77'].recording, null); assert.equal(byId['call:rc-77'].locked, true);
+  await routes['/truckmate/activity/call/:callId']({ params: { callId: 'rc-77' }, query: { at: '2026-11-22T15:10:00Z' }, user: dispatcher }, res);
+  assert.equal(code, 403);
+  code = 200;
+  await routes['/truckmate/activity/call/:callId']({ params: { callId: 'rc-77' }, query: { at: '2026-11-22T15:10:00Z' }, user: boss }, res);
+  assert.equal(code, 200); assert.equal(out.id, 'call:rc-77');
+});

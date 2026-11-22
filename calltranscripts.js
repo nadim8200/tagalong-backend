@@ -301,8 +301,9 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
           if (truckScope ? !onTruck(c.other, e) : (!manager && !ownCall(c.ourExt, c.ourExtId))) continue;
           rows.push({ id: `rc-${c.id}`, source: 'ringcentral', ext: c.ourExt, at: c.at, direction: c.direction, result: r.result || null, missed: c.direction === 'inbound' && !/connected|accepted/i.test(r.result || ''), seconds: c.seconds,
             number: c.other, name: String((w && w.name) || c.otherName || '').replace(/^inbound call\s*-\s*/i, '') || null, mainLine: c.mainLine && !c.by, role: (w && w.role) || null, detail: (w && w.detail) || null, by: c.by, trip: (e && e.trip) || null, loads: (e && e.loads) || null,
-            summary: (e && e.summary) || null, followUp: (e && e.followUp) || null, callId: e ? String(e.id).replace(/^call:/, '') : null, hasTranscript: !!(e && e.transcript),
-            recording: c.recordingId && c.contentUri ? link(`rc:${c.recordingId}`) : null });
+            summary: (e && e.summary) || null, followUp: (e && e.followUp) || null, callId: e ? String(e.id).replace(/^call:/, '') : null,
+            // a dispatcher hears / reads only Jarvis's calls and their own; managers everyone's (Nov 22, Nadim Tellez)
+            ...(manager || ownCall(c.ourExt, c.ourExtId) ? { hasTranscript: !!(e && e.transcript), recording: c.recordingId && c.contentUri ? link(`rc:${c.recordingId}`) : null } : { hasTranscript: false, recording: null, locked: !!(e && e.transcript) || !!c.recordingId }) });
         }
         // every recording on the list can be played, transcribed or not yet
         if (enabled && Object.keys(keep).length) await db.update(STATE, (cur) => ({ ...(cur || {}), recordings: { ...((cur || {}).recordings || {}), ...keep } }), {});
@@ -314,8 +315,8 @@ export function initCallTranscripts(app, { requireAuth, db, rc = null, autoRecor
       if (truckScope ? !onTruck(e.direction === 'outbound' ? e.to : e.from, e) : !manager) continue;   // Jarvis's calls and unmatched recordings: managers only (a truck's: everyone on the desk)
       rows.push({ id: String(e.id), source: String(e.id).startsWith('call:rc-') ? 'ringcentral' : 'jarvis', at: e.at, direction: e.direction === 'outbound' ? 'outbound' : 'inbound', result: null, missed: false, seconds: e.minutes != null ? e.minutes * 60 : null,
         number: e.direction === 'outbound' ? e.to : e.from, name: e.name || null, role: e.role || null, detail: e.detail || null, by: e.source === 'ringcentral' ? e.by : 'Jarvis', trip: e.trip || null, loads: e.loads || null,
-        summary: e.summary || null, followUp: e.followUp || null, callId: String(e.id).replace(/^call:/, ''), hasTranscript: !!e.transcript,
-        recording: typeof e.recording === 'string' && e.recording.startsWith('rc:') ? link(e.recording) : e.recording || null });
+        summary: e.summary || null, followUp: e.followUp || null, callId: String(e.id).replace(/^call:/, ''), answer: e.answer || null, startedBy: e.by || null, purpose: e.purpose || null,
+        ...(manager || !String(e.id).startsWith('call:rc-') ? { hasTranscript: !!e.transcript, recording: typeof e.recording === 'string' && e.recording.startsWith('rc:') ? link(e.recording) : e.recording || null } : { hasTranscript: false, recording: null, locked: true }) });
     }
     rows.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
     return res.json({ days, calls: rows.slice(0, 600), warning, manager, needsLine: !manager && !mine });

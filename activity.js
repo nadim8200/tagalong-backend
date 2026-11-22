@@ -81,6 +81,11 @@ const fmt = (p) => { const d = last10(p); return d ? `(${d.slice(0, 3)}) ${d.sli
 export function initActivity(app, { requireAuth, db, clients = null, getBoard = null, push = null, pushRules = null, staff = null }) {
   // a RingCentral recording ("rc:<id>") plays through a short-lived signed link (calltranscripts.js)
   let recordingLink = null;
+  // who may hear / read a call (Nov 22, Nadim Tellez): everyone on dispatch hears Jarvis's calls; a dispatcher's own recorded
+  // RingCentral calls ("call:rc-…") only managers (admins, company admins, logins ticked Manager)
+  const manager = (u) => !!(u && (u.admin || u.role === 'admin' || u.companyAdmin || u.phoneManager));
+  const hearable = (e, u) => manager(u) || !(e && e.kind === 'call' && String(e.id || '').startsWith('call:rc-'));
+  const forUser = (e, u) => (hearable(e, u) ? e : { ...e, recording: null, transcript: null, locked: true });
   const playable = (e) => (e && typeof e.recording === 'string' && e.recording.startsWith('rc:') ? { ...e, recording: recordingLink ? recordingLink(e.recording) : null } : e);
   const people = async () => { try { return (staff && (await staff())) || []; } catch { return []; } };
   const enabled = !!(db && db.enabled);
@@ -146,7 +151,7 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
       const w = staffOf(other, team) || (e.role && e.role !== 'unknown' ? { role: e.role, name: e.name || null, detail: e.detail || null } : whoIs(other, ctx));
       const callback = e.kind === 'call' ? callbackOf(String(e.id || '').replace(/^call:/, ''), requests) : null;
       const staffHit = w.role === 'team' && e.role !== 'team';
-      return { ...playable(e), otherPhone: other || null, role: w.role, name: staffHit ? w.name : (e.name || w.name || null), detail: staffHit ? w.detail : (e.detail || w.detail || null), callback };
+      return { ...playable(forUser(e, req.user)), otherPhone: other || null, role: w.role, name: staffHit ? w.name : (e.name || w.name || null), detail: staffHit ? w.detail : (e.detail || w.detail || null), callback };
     }).filter((e) => (type === 'all' || e.role === type || (type === 'callback' && e.callback && e.callback.status === 'open')) && (!q || JSON.stringify([e.name, e.detail, e.otherPhone, e.trip, e.summary, e.text, e.transcript]).toLowerCase().includes(q)));
     res.json({ day, entries: out.sort((a, b) => String(b.at).localeCompare(String(a.at))) });
   });
@@ -161,7 +166,7 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
     const out = [];
     for (const d of days) {
       const list = (await db.get(key(d), [])) || []; // eslint-disable-line no-await-in-loop
-      out.push(...entriesFor(list, { phones, name: p.name }).filter((e) => !staffOf(otherOf(e), team)).map(({ transcript, ...e }) => ({ ...e, transcript: transcript ? 1 : null })));
+      out.push(...entriesFor(list, { phones, name: p.name }).filter((e) => !staffOf(otherOf(e), team)).map((e0) => forUser(e0, req.user)).map(({ transcript, ...e }) => ({ ...e, transcript: transcript ? 1 : null })));
       if (out.length >= 200) break;
     }
     // transcripts stay out of the list (they're up to 60 KB each) — the page loads one when it's opened
@@ -175,6 +180,7 @@ export function initActivity(app, { requireAuth, db, clients = null, getBoard = 
     for (const d of [0, -1, 1]) {
       const list = (await db.get(key(dayOf(new Date(around + d * 86400000).toISOString())), [])) || []; // eslint-disable-line no-await-in-loop
       const e = list.find((x) => x.id === id);
+      if (e && !hearable(e, req.user)) return res.status(403).json({ error: 'Only managers can hear a dispatcher\'s own calls — Jarvis\'s calls are open to everyone.' });
       if (e) return res.json(playable(e));
     }
     res.status(404).json({ error: 'That call is not in the log (calls are logged from Oct 8 on).' });

@@ -1124,5 +1124,11 @@ test('the dispatcher\'s own question on an AI call: asked word for word, refused
   const ctx = v.retellCalls.at(-1).body.retell_llm_dynamic_variables.call_context;
   assert.match(ctx, /Dispatch \(Ana\) asked you to ask them this: "Did they give you a door number at Native Chicago\?"/);
   assert.match(ctx, /ask if they have any other questions/);                 // the driver's own questions are welcome
-  assert.match(ctx, /Never talk about money on this call: no pay, rates/);   // never money
+  assert.match(ctx, /Never talk about money on this call: no pay, rates/);   // never money  assert.equal(v.retellCalls.at(-1).body.metadata.question, 'Did they give you a door number at Native Chicago?');   // read back when the call ends
+});
+
+import { answerFirst } from '../voice.js';
+test("the driver's answer to the dispatcher's question leads the call summary (Nov 22)", () => {
+  assert.equal(answerFirst('What door?', { answer: 'Door 14.', also: null }, 'Jarvis called Bryan.'), 'Answer to "What door?": Door 14. — Jarvis called Bryan.');
+  assert.equal(answerFirst('', null, 'Jarvis called Bryan.'), 'Jarvis called Bryan.');
 });
