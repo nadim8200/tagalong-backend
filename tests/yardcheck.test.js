@@ -81,3 +81,27 @@ test('the calendar: one yard\'s checks in a month, by day, morning first', () =>
   assert.deepEqual(d['2026-11-22'].map((x) => x.shift), ['morning', 'night']);
   assert.equal(d['2026-11-22'][0].here, 3);
 });
+
+test('the summary email: totals, readiness, needs attention, against GPS, every unit; sent on submit and as a mock', async () => {
+  const { yardCheckEmail, mockYardCheck } = await import('../yardcheckemail.js');
+  const m = yardCheckEmail(mockYardCheck(Date.parse('2026-11-23T04:30:00Z')), { dvrUnits: new Set(['trailer:18094']) });
+  assert.equal(m.subject, 'Yard check // Miami yard // night // 5 trucks · 5 trailers · 5 need attention');
+  assert.match(m.html, /Trucks in the yard/); assert.match(m.html, /3 company · 1 local · 1 owner op · 0 OC/);
+  assert.match(m.html, /2 loaded · 2 empty · 1 partial/);
+  assert.match(m.html, /<b>Truck 2405<\/b> · hold, issue found, blocked in/);
+  assert.match(m.html, /<b>Trailer 18094<\/b> · reefer 41°F \/ set 34°F, DVIR open/);
+  assert.ok(!/Against GPS|On GPS, not found/.test(m.html + m.text), 'no Against GPS in the email (Nov 23)');
+  assert.match(m.text, /Every unit:\n- Truck 2405/);
+  assert.ok(!/<script/i.test(yardCheckEmail({ yard: 'MIAMI', shift: 'night', by: '<script>x</script>', checkedAt: new Date().toISOString(), rows: [] }).html), 'typed text is escaped');
+  // sent on submit, and the mock on request
+  const s = {}; const db = { enabled: true, get: async (k, d) => (k in s ? JSON.parse(JSON.stringify(s[k])) : d), set: async (k, v) => { s[k] = v; }, update: async (k, f, d) => (s[k] = f(k in s ? JSON.parse(JSON.stringify(s[k])) : d)) };
+  const routes = {}; const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.pop(); }, post: (p, ...h) => { routes[`POST ${p}`] = h.pop(); } };
+  const sent = [];
+  initYardCheck(app, { requireAuth: () => {}, db, report: async () => REPORT, trucks: async () => TRUCKS, now: () => Date.parse('2026-11-22T13:00:00Z'), env: {}, sendMail: async (x) => sent.push(x) });
+  const call = async (key, body) => { const out = {}; await routes[key]({ body, query: {}, params: {}, user: { name: 'Luis' } }, { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }); return out; };
+  await call('POST /truckmate/yard-checks', { yard: 'MIAMI', rows: [{ unit: '7280', kind: 'trailer', here: true }] });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(sent.length, 1); assert.deepEqual(sent[0].to, ['ntellez@floridabeauty.us']); assert.match(sent[0].subject, /^Yard check \/\/ Miami yard \/\/ morning/);
+  const p = await call('POST /truckmate/yard-checks/email-preview', {});
+  assert.deepEqual(p.body.to, ['ntellez@floridabeauty.us']); assert.match(sent[1].subject, /Luis|5 trucks/);
+});

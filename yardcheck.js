@@ -17,9 +17,13 @@
 //   GET  /truckmate/yard-checks/:id          → one check in full
 //   POST /truckmate/yard-checks/photos       → { dataUrl } a damage photo (JPEG / PNG, ≤ 600 KB) → { id }
 //   GET  /truckmate/yard-checks/photos/:id   → the picture
+//   POST /truckmate/yard-checks/email-preview → a made-up check's email, to see it (to YARD_CHECK_EMAIL)
+// Each submitted check is emailed as its summary (yardcheckemail.js) to YARD_CHECK_EMAIL (Nadim while training).
 // Data: taYardChecks { list } (newest first, 400 kept) · taYardCheckPhoto:<id>
 // ---------------------------------------------------------------
 import { randomBytes } from 'node:crypto';
+import { sendMail as mailerSend } from './mailer.js';
+import { yardCheckEmail, mockYardCheck } from './yardcheckemail.js';
 
 export const CHECK_YARDS = { MIAMI: { name: 'Miami', tz: 'America/New_York' }, VENTURA: { name: 'Ventura', tz: 'America/Los_Angeles' } };
 export const SHIFTS = ['morning', 'night'];
@@ -119,13 +123,23 @@ export const summary = (x) => ({ id: x.id, yard: x.yard, day: x.day, shift: x.sh
   missing: x.result.missing.length, extra: x.result.extra.length, reefer: x.result.reefer.length, damage: x.result.damage.length, unchecked: x.result.unchecked.length,
   observations: (x.result.observations || []).length, readiness: x.result.readiness || null, checkedAt: x.checkedAt || x.at });
 
-export function initYardCheck(app, { requireAuth, db, report, trucks, now = () => Date.now() }) {
+export function initYardCheck(app, { requireAuth, db, report, trucks, now = () => Date.now(), env = process.env, sendMail = (m) => mailerSend(m, { env }) }) {
   const enabled = !!(db && db.enabled);
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatch';
   const yardOf = (v) => { const k = String(v || '').toUpperCase(); return CHECK_YARDS[k] ? k : null; };
   async function expected(yard) {
     const [r, t] = await Promise.all([report().catch(() => ({})), trucks().catch(() => ({}))]);
     return expectedUnits(r, t, yard);
+  }
+  // the summary email: to YARD_CHECK_EMAIL (default Nadim), with the units that have an open DVIR marked
+  const emailTo = () => String(env.YARD_CHECK_EMAIL || 'ntellez@floridabeauty.us').split(/[,;\s]+/).filter(Boolean);
+  async function emailCheck(c) {
+    if (env.YARD_CHECK_EMAIL === 'off') return null;
+    const open = Object.values((await db.get('taDvr:florida-beauty', {}).catch(() => ({}))) || {}).filter((d) => d.status !== 'completed');
+    const dvrUnits = new Set(open.map((d) => (d.part === 'truck' ? `truck:${norm(d.truck)}` : `trailer:${norm(d.trailer)}`)));
+    const m = yardCheckEmail(c, { dvrUnits });
+    await sendMail({ to: emailTo(), subject: m.subject, html: m.html, text: m.text });
+    return emailTo();
   }
   if (!app || !requireAuth) return { expected };
 
@@ -175,7 +189,11 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
         return { list: [saved, ...list.filter((x) => x !== old)].slice(0, 400) };
       }, { list: [] });
       res.json({ ok: true, check: summary(saved), result });
+      emailCheck(saved).catch((e) => console.warn('[yard-check] email:', e.message));
     } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.post('/truckmate/yard-checks/email-preview', requireAuth, async (req, res) => {
+    try { const to = await emailCheck(mockYardCheck(now())); res.json({ ok: true, to }); } catch (e) { res.status(502).json({ error: e.message }); }
   });
   app.post('/truckmate/yard-checks/photos', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
