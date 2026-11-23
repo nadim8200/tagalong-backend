@@ -517,14 +517,14 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
   if (env.NODE_ENV !== 'test' && !process.env.NODE_TEST_CONTEXT) { const t = setInterval(() => { captureIfDue().catch((e) => console.warn('[triplog] capture:', e.message)); }, 5 * 60000); if (t.unref) t.unref(); }
 
   // the open sheet: the driver's completed loads (Monday–Sunday, as they happen) not turned in yet; trips still running stay off
-  async function prefill(driver) {
+  async function prefill(driver, { running = false } = {}) {   // running: a TEST copy may show loads still running (a preview)
     const code = driver.code;
     const items = await board();
     await capture({ items, only: code }).catch((e) => console.warn('[triplog] capture:', e.message));
     const saved = ((await db.get(LIVE, {})) || {})[codeOf(code)] || {};
     const done = (await turnedIn(code)).trips;
     const lines = []; const trucks = []; const trailers = []; const partners = [];
-    const loads = Object.entries(saved).filter(([trip, x]) => x && x.doneAt && !done.has(String(trip))).sort((a, b) => (a[1].start || 0) - (b[1].start || 0));
+    const loads = Object.entries(saved).filter(([trip, x]) => x && (x.doneAt || running) && !done.has(String(trip))).sort((a, b) => (a[1].start || 0) - (b[1].start || 0));
     // the sheet reads like the work went: where he started, the pickup, the deliveries (zip codes), then the next load — whole
     // loads in the order they started. Between two loads, if the truck ran empty from the last delivery to the next pickup,
     // an Empty line: zip to zip, the miles, on the way to pick up that load (its B number).
@@ -832,8 +832,11 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       const code = codeOf(req.params.code);
       try {
         const name = (nameOf ? await nameOf(code).catch(() => '') : '') || `driver ${code}`;
-        const fresh = await prefill({ code, name });
-        const saved = (await store(code))[OPEN];
+        // { running: true } previews loads still running; { fresh: true } leaves the driver's saved open sheet out (only what
+        // the app builds now) — Nov 23: to see the new layout on Ferney's 627700
+        const opt = req.body || {};
+        const fresh = await prefill({ code, name }, { running: !!opt.running });
+        const saved = opt.fresh ? null : (await store(code))[OPEN];
         let lines = cleanLines(saved ? mergeSheet(saved.lines || [], fresh.lines.map(({ _ms, ...x }) => x), saved.dismissed || []) : fresh.lines.map(({ _ms, ...x }) => x));
         // only some trips (Nov 23: test with the finished LTL + the load down to Melbourne, not the trip running now); a line
         // without a trip (a move GPS found) stays when it falls between the kept trips

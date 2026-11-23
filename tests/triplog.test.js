@@ -409,6 +409,12 @@ test('Ferney\'s homework fills as he works: the LTL, then the load down to Melbo
   assert.equal(r.body.lines, 2);
   const log = Object.values(h.kv['taTripLog:florida-beauty:TEST986'])[0];
   assert.deepEqual(log.lines.map((l) => `${l.trip} ${l.act}`), ['627549 PU', '627549 DEL']);
+  // a preview copy can show the load still running, built fresh
+  await h.call('POST /truckmate/payroll/test-copies/delete', { user: { admin: true } });
+  const pv = await h.call('POST /truckmate/driver-profiles/:code/logs/test-submit', { params: { code: '0986' }, user: { admin: true }, body: { running: true, fresh: true } });
+  const pl = Object.values(h.kv['taTripLog:florida-beauty:TEST986']).find((x) => x && x.lines).lines;
+  assert.equal(pv.body.ok, true);
+  assert.deepEqual(pl.filter((l) => l.trip === '627700').map((l) => `${l.act} ${l.zip}`), ['EMPTY 33122', 'PU 33122', 'DEL 01890']);
   // the board can't be read (empty): nothing is marked finished on that
   onBoard = []; assert.equal(await tl.capture(), 0);
   assert.equal(h.kv['taTripLogLive:florida-beauty']['986']['627700'].doneAt, null);
