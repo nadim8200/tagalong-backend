@@ -94,10 +94,12 @@ export function estimateArrival(miles, opts = {}) {
 }
 
 export const TEAM_SWAP_MIN = 15;   // pulling over to change drivers
+export const SPLIT_SLEEPER_H = 7;  // a team's sleeper-berth split: 7 h in the sleeper resets a driver's 11 / 14 (7/3; 8/2 too)
 // A run hour by hour, the way the drivers' clocks actually work. legs: [{ miles, dwellMin }] — drive the leg, arrive
 // (that's the ETA), then unload dwellMin, which is on-duty time: it uses the shift and the 70-hour cycle, and 30+ min
 // of it counts as the 30-minute break. Solo: one driver, rests when out of hours. Team: one drives until out of hours
-// (or due a break), they swap (15 min), the other has been resting in the sleeper meanwhile.
+// (or due a break), they swap (15 min), the other has been resting in the sleeper meanwhile — 7 h there is the split's
+// qualifying rest (SPLIT_SLEEPER_H).
 //   driveLeftMin / shiftLeftMin / cycleLeftMin / breakInMin — the driver's live clocks (Samsara); partner — the
 //   co-driver's; restDoneMin — how long the truck has already been parked (counts toward a rest needed right now).
 // Returns the arrival time (ms) at the end of each leg. Pure.
@@ -119,10 +121,13 @@ export function planArrivals(legs, { team, driveLeftMin, shiftLeftMin, cycleLeft
   // 8-hour stop, they change over when one runs out of hours
   const canDrive = (d) => Math.min(d.drive, d.shift, d.cycle, team ? Infinity : 8 - d.since);
   const outOfHours = (d) => Math.min(d.drive, d.shift, d.cycle) <= 0.01;
+  // a team runs the sleeper-berth split (Nov 22, Nadim: "they do split"): 7 hours in the sleeper (the 7/3 split; 8/2 also
+  // qualifies) while the partner drives gives the driver their 11 hours back; solo drivers keep the full 10-hour break
+  const RESET = team ? SPLIT_SLEEPER_H : 10;
   const rested = (d, h) => {                                   // off duty / sleeper for h hours
     d.rest += h;
     if (d.rest >= 0.5) d.since = 0;
-    if (d.rest >= 34) { d.drive = 11; d.shift = 14; d.cycle = 70; } else if (d.rest >= 10 && d.cycle > 0.01) { d.drive = 11; d.shift = 14; }
+    if (d.rest >= 34) { d.drive = 11; d.shift = 14; d.cycle = 70; } else if (d.rest >= RESET && d.cycle > 0.01) { d.drive = 11; d.shift = 14; }
   };
   const onDuty = (d, h, driving) => { d.shift -= h; d.cycle -= h; d.rest = 0; if (driving) { d.drive -= h; d.since += h; } else if (h >= 0.5) d.since = 0; };
   let t = 0; let drove = false;
@@ -158,7 +163,7 @@ export function planArrivals(legs, { team, driveLeftMin, shiftLeftMin, cycleLeft
       if (can > 0.01) { const d = Math.min(need, can); t += d; need -= d; onDuty(cur, d, true); rested(oth, d); drove = true; continue; }
       if (canDrive(oth) > 0.01) { t += SWAP; rested(oth, SWAP); [cur, oth] = [oth, cur]; cur.rest = 0; rested(oth, 0); continue; }   // swap
       if (cur.cycle <= 0.01 && oth.cycle <= 0.01) { const w = Math.max(0.25, 34 - (drove ? 0 : Math.min(credit, 34))); credit = 0; t += w; cur.rest = 0; oth.rest = 0; rested(cur, 34); rested(oth, 34); continue; }
-      const left = [cur, oth].filter((d) => d.cycle > 0.01).map((d) => 10 - d.rest);
+      const left = [cur, oth].filter((d) => d.cycle > 0.01).map((d) => RESET - d.rest);
       let wait = Math.max(0.25, Math.min(...left));
       if (!drove && credit > 0) { const c = Math.min(credit, wait - 0.25); wait -= c; credit = 0; rested(cur, c); rested(oth, c); }
       t += wait; rested(cur, wait); rested(oth, wait);

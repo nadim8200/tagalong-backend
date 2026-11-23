@@ -20,7 +20,16 @@ test('team: both clocks used — rolling ~nonstop when one is fresh, waits when 
   const fresh = (estimateArrival(796, { team: true, driveLeftMin: 520, shiftLeftMin: 600, partner: { driveLeftMin: 660, shiftLeftMin: 840 }, now: NOW }) - NOW) / H;
   assert.ok(fresh > 13 && fresh < 14.5, `fresh ${fresh}`);           // 13.3 h of driving, no reset
   const bothOut = (estimateArrival(200, { team: true, driveLeftMin: 0, shiftLeftMin: 0, partner: { driveLeftMin: 0, shiftLeftMin: 0 }, now: NOW }) - NOW) / H;
-  assert.ok(bothOut > 13, `bothOut ${bothOut}`);                    // must rest before anyone drives
+  assert.ok(bothOut > 10 && bothOut < 11, `bothOut ${bothOut}`);   // must rest first: 7 h in the sleeper (split), then 3.6 h of driving
+});
+
+test('team on the split sleeper (Nov 22, Ferney 1h31m at the wheel, Wilber 4h07m in the sleeper ~3 h): 7 h in the sleeper gives the 11 back', () => {
+  const restSinceMs = NOW - 3 * H;
+  const t = (estimateArrival(1100, { team: true, driveLeftMin: 91, shiftLeftMin: 91, status: 'driving', partner: { driveLeftMin: 247, shiftLeftMin: 300, status: 'sleeperBed', restSinceMs }, now: NOW }) - NOW) / H;
+  // 20 h of driving + swaps, and a short wait when both are low at once (Ferney's 7 h isn't up yet) — not a 10-hour stop
+  assert.ok(t > 20 && t < 23.5, `team split ${t}`);
+  const solo = (estimateArrival(1100, { team: false, driveLeftMin: 91, shiftLeftMin: 91, now: NOW }) - NOW) / H;
+  assert.ok(solo > t + 15, `solo keeps the 10-hour breaks: ${solo}`);
 });
 
 const geo = (zip) => ({ 60148: { lat: 41.88, lng: -88.0 }, 33178: { lat: 25.83, lng: -80.36 }, 37086: { lat: 36.0, lng: -86.58 }, 33018: { lat: 25.91, lng: -80.33 } }[zip] || null);
