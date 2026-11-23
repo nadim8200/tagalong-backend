@@ -338,3 +338,23 @@ test('broker HTML preserves submitted equipment, drivers, phones, comments and s
   assert.ok(!fallback.includes('DISPATCHER COMMENTS'));
   assert.match(fallback, /A &amp; B/);
 });
+
+test('broker email design from the pop-up\'s fields: a dry load, a trailer with letters, a "34F CONTINUOUS" temp keep the design; the training banner sits inside the card; the preview route', async () => {
+  const { brokerInfoHtml } = await import('../loadsheet.js');
+  const { redirectEmail } = await import('../training.js');
+  const dry = brokerInfoHtml('anything', '', 'Nadim', 'S', { truck: '2614', trailer: 'R7371', temp: '', drivers: [{ name: 'Manuel Rivera', code: '6291', phone: '305-555-0999' }] });
+  assert.ok(dry.includes('DRIVER INFORMATION')); assert.ok(dry.includes('R7371')); assert.ok(!dry.includes('>TEMP<'));
+  assert.ok(dry.includes('MANUEL RIVERA (6291)')); assert.ok(dry.includes('MANUEL RIVERA: 305-555-0999'));   // the phone dispatch fixed for this email
+  for (const temp of ['34F CONTINUOUS', '-10°F']) {
+    const h = brokerInfoHtml(`Good day,\n\nPlease see the driver info below\n\n2614\n7371\n${temp}\nMANUEL RIVERA (6291)`, '', 'N', 'S');
+    assert.ok(h.includes('DRIVER INFORMATION'), temp); assert.ok(h.includes(temp.replace('°', '&deg;')) || h.includes(temp), temp);
+  }
+  // training: the yellow banner replaces the slot inside the card, nothing before <!doctype>
+  const held = redirectEmail({ to: ['ops@rxo.com'], subject: 'S', html: dry, text: 't' }, ['ntellez@floridabeauty.us']);
+  assert.ok(held.html.startsWith('<!doctype html>')); assert.match(held.html, /TRAINING PREVIEW<\/b> — Not sent to customer\. It would have gone to: <b>ops@rxo\.com/);
+  // the pop-up's preview: the same email, nothing sent, no training slot left in it
+  const db = mem(); const routes = {}; const mails = [];
+  initLoadSheets({ get() {}, put() {}, post: (p0, ...h) => { routes[p0] = h; } }, { requireAuth: (q, s, n) => n(), db, sendMail: async (m) => { mails.push(m); } });
+  let out = {}; await routes['/truckmate/loadsheet/:trip/broker-email/preview'][1]({ body: { subject: 'S', fields: { truck: '1', drivers: [{ name: 'A B' }] } }, params: { trip: '1' }, user: { name: 'Nadim Tellez', email: 'ntellez@floridabeauty.us' } }, { json(j) { out = j; } });
+  assert.ok(out.html.includes('DRIVER INFORMATION')); assert.ok(!out.html.includes('jarvis:training-slot')); assert.equal(mails.length, 0);
+});

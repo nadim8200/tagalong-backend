@@ -1,3 +1,4 @@
+import { TRAINING_SLOT } from './latemail.js';
 // ---------------------------------------------------------------
 // Load sheets: the message dispatch sends a driver for a load (FB#, TRIP#, TEMP, PU#, PICK UP, DELIVERY #1…, notes like
 // "*** NO RELEASE ***", "THANKS, HS."). TruckMate only has the towns, so this message is where the driver's full load info lives:
@@ -260,24 +261,49 @@ export function brokerInfoEmail({ rc = {}, bill = '', truck = '', trailer = '', 
 // The whole email as sent: the body, the comments, "Thanks," and the signature. Pure.
 export const brokerInfoText = (body, comments, signature) => [String(body || '').trim(), String(comments || '').trim(), 'Thanks,', '', String(signature || '').trim()].filter(Boolean).join('\n\n').replace(/Thanks,\n\n\n\n/, 'Thanks,\n\n');
 
-// Presentation only: format the submitted text, never re-read or persist driver fields.
-// Unknown/partially filled bodies remain intact instead of guessing which value is which.
-export function brokerInfoHtml(body, comments, signature, subject = '') {
+// The broker email's look (redesign 82c7b35, Nov 23). Built from the driver info FIELDS the pop-up sends (truck, trailer, temp,
+// drivers [{ name, code, phone }]) — what the dispatcher checked or fixed for this email only (never saved). No fields (an older
+// caller): read the plain body when it has the usual layout, else show the text as is. A dry load (no temp) or a trailer with
+// letters keeps the design. The training banner goes in its slot inside the card (TRAINING_SLOT). Pure.
+const cleanFields = (f) => {
+  if (!f || typeof f !== 'object') return null;
+  const s0 = (v, n) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n);
+  const drivers = (Array.isArray(f.drivers) ? f.drivers : []).slice(0, 4).map((d) => ({ name: s0(d && d.name, 60).toUpperCase(), code: s0(d && d.code, 12), phone: s0(d && d.phone, 30) })).filter((d) => d.name || d.code || d.phone);
+  const out = { truck: s0(f.truck, 20), trailer: s0(f.trailer, 20), temp: s0(f.temp, 30), drivers };
+  return out.truck || out.trailer || out.temp || drivers.length ? out : null;
+};
+function fieldsFromBody(raw) {
+  const m = String(raw || '').trim().match(/^Good day,\r?\n\r?\nPlease see the driver info below\r?\n\r?\n([\s\S]*)$/);
+  if (!m) return null;
+  const [top, ...ph] = m[1].split(/\r?\n\r?\nPH#\r?\n/);
+  const rows = top.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  const isDriver = (x) => /^[A-Z][A-Z .'-]+(\s\(\w+\))?$/.test(x) && /\s/.test(x.replace(/\s\(\w+\)$/, ''));
+  const drv = rows.filter(isDriver); const eq = rows.filter((x) => !isDriver(x));
+  if (eq.length > 3) return null;
+  const temp = eq.find((x) => /^-?\d+(\.\d+)?\s*°?\s*[FC]\b/i.test(x)) || '';
+  const rest = eq.filter((x) => x !== temp);
+  const phones = (ph.join('\n').split(/\r?\n/)).map((x) => x.match(/^(.+?):\s*(.+)$/)).filter(Boolean);
+  return cleanFields({ truck: rest[0] || '', trailer: rest[1] || '', temp, drivers: drv.map((x) => { const mm = x.match(/^(.*?)(?:\s\((\w+)\))?$/); const p0 = phones.find((p) => p[1].trim().toUpperCase() === mm[1].trim()); return { name: mm[1], code: mm[2] || '', phone: p0 ? p0[2] : '' }; }) });
+}
+export function brokerInfoHtml(body, comments, signature, subject = '', fields = null) {
   const esc = (v) => String(v || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const lines = (v) => esc(v).replace(/\r?\n/g, '<br>');
   const raw = String(body || '').trim();
-  const match = raw.match(/^Good day,\r?\n\r?\nPlease see the driver info below\r?\n\r?\n(\d+)\r?\n(\d+)\r?\n(-?\d+(?:\.\d+)?[FC])\r?\n([\s\S]*)$/);
   const label = 'font-size:11px;letter-spacing:1px;font-weight:bold;color:#64748b;';
+  const f = cleanFields(fields) || fieldsFromBody(raw);
   let content = `<p style="margin:0;line-height:1.7">${lines(raw)}</p>`;
-  if (match) {
-    const remaining = match[4].split(/\r?\n\r?\nPH#\r?\n/);
-    const driverRows = remaining[0].split(/\r?\n/).filter(Boolean).map((d) => `<tr><td style="padding:13px 16px;border-bottom:1px solid #dce4ee;font-weight:bold;">${esc(d)}</td></tr>`).join('');
+  if (f) {
+    const boxes = [['TRUCK', f.truck], ['TRAILER', f.trailer], ['TEMP', f.temp]].filter(([, v]) => v);
+    const w = boxes.length ? Math.floor(100 / boxes.length) : 100;
+    const equipment = boxes.length ? `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#eaf0f8;border:1px solid #d5dfed;"><tr>${boxes.map(([title, v], i) => `<td width="${w}%" valign="top" style="padding:18px 12px;border-right:${i < boxes.length - 1 ? '1px solid #d5dfed' : '0'}"><div style="${label}">${title}</div><div style="font-size:${String(v).length > 10 ? 18 : 26}px;font-weight:bold;color:#153456;margin-top:6px;word-break:break-word">${esc(v)}</div></td>`).join('')}</tr></table>` : '';
+    const driverRows = f.drivers.map((d) => `<tr><td style="padding:13px 16px;border-bottom:1px solid #dce4ee;font-weight:bold;">${esc(`${d.name}${d.code ? ` (${d.code})` : ''}`)}</td></tr>`).join('');
+    const phones = f.drivers.filter((d) => d.phone).map((d) => `${esc(d.name)}: ${esc(d.phone)}`).join('<br>');
     content = `<p style="margin:0 0 8px">Good day,</p><p style="margin:0 0 24px;color:#475569">Please see the driver info below</p>
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#eaf0f8;border:1px solid #d5dfed;"><tr>${['TRUCK','TRAILER','TEMP'].map((title,i) => `<td width="33%" style="padding:18px 12px;border-right:${i < 2 ? '1px solid #d5dfed' : '0'}"><div style="${label}">${title}</div><div style="font-size:26px;font-weight:bold;color:#153456;margin-top:6px">${esc(match[i+1])}</div></td>`).join('')}</tr></table>
-<p style="${label}margin:26px 0 10px">DRIVER INFORMATION</p><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f5f7fa;border:1px solid #dce4ee">${driverRows}</table>
-${remaining.length > 1 ? `<p style="${label}margin:24px 0 10px">PH#</p><p style="margin:0;line-height:1.9;color:#1558b0;font-weight:bold">${lines(remaining.slice(1).join('\n\nPH#\n'))}</p>` : ''}`;
+${equipment}
+${driverRows ? `<p style="${label}margin:26px 0 10px">DRIVER INFORMATION</p><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f5f7fa;border:1px solid #dce4ee">${driverRows}</table>` : ''}
+${phones ? `<p style="${label}margin:24px 0 10px">PH#</p><p style="margin:0;line-height:1.9;color:#1558b0;font-weight:bold">${phones}</p>` : ''}`;
   }
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;padding:0;background:#e8edf3"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#e8edf3;font-family:Calibri,Arial,sans-serif;color:#172b45;font-size:16px"><tr><td align="center" style="padding:24px 12px"><!--[if mso]><table role="presentation" width="640"><tr><td><![endif]--><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border:1px solid #d4deea"><tr><td style="padding:24px 28px;background:#142e50;border-bottom:4px solid #3978c6;color:#ffffff"><div style="font-size:12px;letter-spacing:2px">FLORIDA BEAUTY EXPRESS</div><div style="font-size:29px;font-weight:bold;margin-top:10px">Driver information</div></td></tr><tr><td style="padding:18px 28px;background:#eff4fa;color:#24486f;font-size:13px;line-height:1.6;font-weight:bold;word-break:break-word">${esc(subject)}</td></tr><tr><td style="padding:28px">${content}${String(comments || '').trim() ? `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:24px;background:#edf4fc;border-left:3px solid #3978c6"><tr><td style="padding:16px"><div style="${label}margin-bottom:8px">DISPATCHER COMMENTS</div><div style="line-height:1.6">${lines(String(comments).trim())}</div></td></tr></table>` : ''}<div style="margin-top:28px;padding-top:22px;border-top:1px solid #dce4ee;line-height:1.7">Thanks,<br><br>${lines(String(signature || '').trim())}</div></td></tr></table><!--[if mso]></td></tr></table><![endif]--></td></tr></table></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;padding:0;background:#e8edf3"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#e8edf3;font-family:Calibri,Arial,sans-serif;color:#172b45;font-size:16px"><tr><td align="center" style="padding:24px 12px"><!--[if mso]><table role="presentation" width="640"><tr><td><![endif]--><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border:1px solid #d4deea"><tr><td style="padding:24px 28px;background:#142e50;border-bottom:4px solid #3978c6;color:#ffffff"><div style="font-size:12px;letter-spacing:2px">FLORIDA BEAUTY EXPRESS</div><div style="font-size:29px;font-weight:bold;margin-top:10px">Driver information</div></td></tr><tr><td style="padding:18px 28px;background:#eff4fa;color:#24486f;font-size:13px;line-height:1.6;font-weight:bold;word-break:break-word">${esc(subject)}</td></tr>${TRAINING_SLOT}<tr><td style="padding:28px">${content}${String(comments || '').trim() ? `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:24px;background:#edf4fc;border-left:3px solid #3978c6"><tr><td style="padding:16px"><div style="${label}margin-bottom:8px">DISPATCHER COMMENTS</div><div style="line-height:1.6">${lines(String(comments).trim())}</div></td></tr></table>` : ''}<div style="margin-top:28px;padding-top:22px;border-top:1px solid #dce4ee;line-height:1.7">Thanks,<br><br>${lines(String(signature || '').trim())}</div></td></tr></table><!--[if mso]></td></tr></table><![endif]--></td></tr></table></body></html>`;
 }
 
 // how dispatch signs: the first name ("THANKS, JEREMY."). "Nadim Tellez" / "ntellez@…" → "NADIM" / "NTELLEZ". Pure.
@@ -430,6 +456,12 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
   });
   // the driver info email to the broker, right after the driver's text (the pop-up's Send). From the Jarvis mailbox; replies go
   // to the dispatcher and the dispatch box. Training mode (the mailer's guard) still holds outside emails.
+  // the pop-up's preview: the email exactly as the broker will see it (nothing sent)
+  app.post('/truckmate/loadsheet/:trip/broker-email/preview', requireAuth, async (req, res) => {
+    const b = req.body || {}; const me = (req.user && req.user.email) || '';
+    const signature = [who(req), 'Florida Beauty Express', me ? `Email: ${me}` : ''].filter(Boolean).join('\n');
+    res.json({ html: brokerInfoHtml(b.body, b.comments, signature, String(b.subject || '').slice(0, 250), b.fields).replace(TRAINING_SLOT, '') });
+  });
   app.post('/truckmate/loadsheet/:trip/broker-email', requireAuth, async (req, res) => {
     const b = req.body || {}; const trip = String(req.params.trip);
     if (!sendMail) return res.status(503).json({ error: 'Email is not set up on the server.' });
@@ -443,7 +475,7 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const signature = b.signature || [who(req), 'Florida Beauty Express', me ? `Email: ${me}` : ''].filter(Boolean).join('\n');
     const text = brokerInfoText(b.body, b.comments, signature);
     try {
-      const r = await sendMail({ to, cc, subject, html: brokerInfoHtml(b.body, b.comments, signature, subject), text, replyTo: [me, ...BROKER_INFO_CC].filter(Boolean) });
+      const r = await sendMail({ to, cc, subject, html: brokerInfoHtml(b.body, b.comments, signature, subject, b.fields), text, replyTo: [me, ...BROKER_INFO_CC].filter(Boolean) });
       if (log) await log(SITE, trip, { type: 'email', kind: 'broker-driver-info', to: to.join(', '), text: subject, by: who(req), noThread: true }).catch(() => {});
       res.json({ ok: true, to, cc, subject, held: !!(r && r.held), sentTo: (r && r.to) || to });
     } catch (e) { res.status(502).json({ error: e.message || 'Could not send the email.' }); }
