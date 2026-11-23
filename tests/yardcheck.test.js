@@ -22,11 +22,12 @@ test('the sheet starts with what GPS says is in the yard; the check flags not fo
   ];
   assert.equal(rows[2].unit, '7366'); assert.deepEqual(rows[2].photos, ['abcdefabcdef']);
   const r = compareCheck(exp, rows);
-  assert.deepEqual(r.missing, [{ unit: '18094', kind: 'trailer', onLoad: null }]);
+  assert.deepEqual(r.missing.map((m) => m.unit), ['18094', '4504']);
   assert.deepEqual(r.extra, [{ unit: '7366', kind: 'trailer' }]);
   assert.deepEqual(r.reefer.map((x) => [x.unit, x.why]), [['7280', 'reading 41°F, set 34°F'], ['7366', 'loaded, reefer off']]);
   assert.deepEqual(r.damage, [{ unit: '7366', kind: 'trailer', note: 'rear door seal torn', photos: 1 }]);
-  assert.deepEqual(r.unchecked, [{ unit: '4504', kind: 'truck' }]);
+  assert.deepEqual(r.unchecked, []);   // the sheet starts empty: a GPS unit nobody added is "on GPS but not added"
+  assert.ok(r.missing.some((m) => m.unit === '4504'));
   assert.equal(r.counts.here, 2); assert.equal(r.counts.loaded, 2);
 });
 
@@ -39,9 +40,9 @@ test('the routes: send a check (sent again → replaced), today\'s morning / nig
   assert.equal((await call('POST /truckmate/yard-checks', { body: { yard: 'X', rows: [] } })).status, 400);
   assert.equal((await call('POST /truckmate/yard-checks', { body: { yard: 'MIAMI', rows: [{ unit: '7280' }] } })).status, 400, 'nothing marked');
   const a = await call('POST /truckmate/yard-checks', { body: { yard: 'MIAMI', rows: [{ unit: '7280', kind: 'trailer', here: true }, { unit: '18094', kind: 'trailer', here: false }] } });
-  assert.equal(a.body.check.shift, 'morning'); assert.equal(a.body.check.missing, 1);
+  assert.equal(a.body.check.shift, 'morning'); assert.equal(a.body.check.missing, 2, '18094 not here + truck 4504 never added');
   await call('POST /truckmate/yard-checks', { body: { yard: 'MIAMI', rows: [{ unit: '7280', kind: 'trailer', here: true }, { unit: '18094', kind: 'trailer', here: true }] } });
-  assert.equal(s.taYardChecks.list.length, 1, 'one per yard, day and shift'); assert.equal(s.taYardChecks.list[0].result.missing.length, 0); assert.ok(s.taYardChecks.list[0].updated);
+  assert.equal(s.taYardChecks.list.length, 1, 'one per yard, day and shift'); assert.deepEqual(s.taYardChecks.list[0].result.missing.map((m) => m.unit), ['4504']); assert.ok(s.taYardChecks.list[0].updated);
   clock = Date.parse('2026-11-23T04:30:00Z');       // 11:30 PM Miami, no night check yet
   const g = await call('GET /truckmate/yard-checks', { query: { yard: 'MIAMI' } });
   assert.equal(g.body.today.morning.by, 'Yard Miami'); assert.equal(g.body.today.night, null); assert.equal(g.body.today.late.night, true);
@@ -57,7 +58,7 @@ test('the design\'s fields (Nov 22): seen, office readiness, partial load, insid
   const rows = [
     cleanRow({ unit: '18094', kind: 'trailer', seen: true, readiness: 'assigned', loaded: 'loaded', inside: 'clean', reeferOn: true, setF: 34, tempF: 35, comments: 'Sealed · Assigned' }),
     cleanRow({ unit: '7304', kind: 'trailer', seen: true, readiness: 'available', loaded: 'empty', inside: 'cleaning' }),
-    cleanRow({ unit: '4504', kind: 'truck', seen: true, readiness: 'hold', loaded: 'partial', condition: 'clear', access: 'blocked', localTruck: true, comments: 'Blocked by 7304' }),
+    cleanRow({ unit: '4504', kind: 'truck', seen: true, readiness: 'hold', loaded: 'partial', condition: 'clear', access: 'blocked', localTruck: true, comments: 'Blocked by 7304', notes: 'PM due Monday' }),
     cleanRow({ unit: '2094', kind: 'truck', seen: true, readiness: 'down', condition: 'issue', ownerOperator: true, inside: 'clean', readinessX: 1 }),
     cleanRow({ unit: '9999', kind: 'truck', seen: false, readiness: 'bogus' }),
   ];
@@ -69,4 +70,6 @@ test('the design\'s fields (Nov 22): seen, office readiness, partial load, insid
   assert.deepEqual(r.damage.map((d) => d.unit), ['2094'], 'a visible issue on a truck');
   assert.deepEqual(r.missing.map((m) => m.unit), ['9999'], 'on GPS, not ticked Seen');
   assert.equal(r.counts.partial, 1);
+  assert.equal(rows[2].notes, 'PM due Monday'); assert.equal(rows[0].notes, null, 'truck comments are for trucks');
+  assert.equal(r.observations[1].comments, 'Blocked by 7304 · PM due Monday');
 });

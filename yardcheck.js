@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------
 // Yard checks (Nov 22, Nadim): twice a day — morning and night — the yard person walks the Miami and Ventura yards with
-// a phone and marks every trailer and truck: here or not, loaded or empty, reefer on with its set point and reading, fuel,
+// a phone and adds every trailer and truck they find (the sheet starts empty; GPS only suggests numbers): here or not, loaded or empty, reefer on with its set point and reading, fuel,
 // and damage (notes + photos). The sheet starts with what GPS says is in the yard (Thermo King / Samsara trailers, Samsara
 // trucks — yardreport.js); anything found that GPS didn't list is added by hand. When it's sent, it's compared: on GPS but
 // not found, found but not on GPS, a loaded trailer with the reefer off or its reading 5°F+ from the set point, damage.
@@ -64,6 +64,7 @@ export function cleanRow(r = {}) {
     access: kind === 'truck' ? pick(r.access, ['clear', 'blocked']) : null,
     localTruck: kind === 'truck' && !!r.localTruck, ownerOperator: kind === 'truck' && !!r.ownerOperator, outsideCarrier: kind === 'truck' && !!r.outsideCarrier,
     comments: String(r.comments || '').trim().slice(0, 1000) || null,
+    notes: kind === 'truck' ? String(r.notes || '').trim().slice(0, 2000) || null : null,   // "Truck comments": repair notes, instructions for dispatch
     reeferOn: kind === 'trailer' && typeof r.reeferOn === 'boolean' ? r.reeferOn : null,
     setF: kind === 'trailer' ? num(r.setF) : null, tempF: kind === 'trailer' ? num(r.tempF) : null,
     fuelPct: num(r.fuelPct) != null ? Math.max(0, Math.min(100, Math.round(num(r.fuelPct)))) : null,
@@ -77,8 +78,9 @@ export function cleanRow(r = {}) {
 export function compareCheck(expected = [], rows = []) {
   const by = new Map(rows.map((r) => [`${r.kind}:${r.unit}`, r]));
   const expKeys = new Set(expected.map((u) => `${u.kind}:${u.unit}`));
-  const missing = expected.filter((u) => (by.get(`${u.kind}:${u.unit}`) || {}).here === false).map((u) => ({ unit: u.unit, kind: u.kind, onLoad: u.onLoad || null }));
-  const unchecked = expected.filter((u) => { const r = by.get(`${u.kind}:${u.unit}`); return !r || r.here == null; }).map((u) => ({ unit: u.unit, kind: u.kind }));
+  // the sheet starts empty and the yard person adds what they find (Nov 22, Nadim): on GPS but not added = not found
+  const missing = expected.filter((u) => !(by.get(`${u.kind}:${u.unit}`) || {}).here).map((u) => ({ unit: u.unit, kind: u.kind, onLoad: u.onLoad || null }));
+  const unchecked = [];
   const extra = rows.filter((r) => r.here && !expKeys.has(`${r.kind}:${r.unit}`)).map((r) => ({ unit: r.unit, kind: r.kind }));
   const reefer = rows.filter((r) => r.here && r.kind === 'trailer' && r.loaded === 'loaded' && (r.reeferOn === false || (r.setF != null && r.tempF != null && Math.abs(r.tempF - r.setF) >= 5)))
     .map((r) => ({ unit: r.unit, why: r.reeferOn === false ? 'loaded, reefer off' : `reading ${r.tempF}°F, set ${r.setF}°F` }));
@@ -86,7 +88,7 @@ export function compareCheck(expected = [], rows = []) {
   const here = rows.filter((r) => r.here);
   // what the yard saw that needs someone: blocked in, needs cleaning, on hold, down
   const why = (r) => [r.access === 'blocked' ? 'blocked in' : null, r.inside === 'cleaning' ? 'needs cleaning' : null, r.readiness === 'hold' ? 'on hold — needs attention' : null, r.readiness === 'down' ? 'down — cannot use' : null].filter(Boolean).join(', ');
-  const observations = here.filter((r) => why(r)).map((r) => ({ unit: r.unit, kind: r.kind, why: why(r), comments: r.comments || null }));
+  const observations = here.filter((r) => why(r)).map((r) => ({ unit: r.unit, kind: r.kind, why: why(r), comments: [r.comments, r.notes].filter(Boolean).join(' · ') || null }));
   const split = (list) => ({ trucks: list.filter((r) => r.kind === 'truck').length, trailers: list.filter((r) => r.kind === 'trailer').length });
   const readiness = Object.fromEntries(READINESS.map((k) => [k, split(here.filter((r) => r.readiness === k))]));
   const trucksHere = here.filter((r) => r.kind === 'truck');
