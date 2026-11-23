@@ -60,3 +60,15 @@ test('a team counts both drivers: one fresh driver covers it', () => {
   const t = load({ hos: { driveLeftMin: 1, shiftLeftMin: 19, status: 'offDuty' }, hos2: { driveLeftMin: 600, shiftLeftMin: 700, status: 'onDuty' }, driver2: '102' });
   assert.equal(short(t).length, 0);
 });
+
+// A team (Nov 22): one at the wheel with 1h31m, the other 9 h into a sleeper rest, ~750 mi of stops left. SYNTHETIC.
+const far = (hos, hos2) => load({ hos, hos2, driver2: '102', speedMph: 60, delivered: true, extra: { freightBills: [...bills(true).slice(0, 1), { billNumber: 'G1', endZoneDescription: 'ATLANTA, GA, 30344', pieces: 10, temperature: 35 }] } });
+test('a team swaps: two short clocks now are not "out of hours" — the sleeper rest resets the other driver', () => {
+  assert.equal(short(far({ driveLeftMin: 91, shiftLeftMin: 158, cycleLeftMin: 2000, status: 'driving' }, { driveLeftMin: 247, shiftLeftMin: 300, cycleLeftMin: 2000, status: 'sleeperBed', restSinceMs: NOW - 9 * 3600000 })).length, 0);
+});
+test('a team that both run out at once (70-hour cycles used up) must park — that is raised', () => {
+  const [a] = short(far({ driveLeftMin: 91, shiftLeftMin: 158, cycleLeftMin: 100, status: 'driving' }, { driveLeftMin: 247, shiftLeftMin: 300, cycleLeftMin: 120, status: 'sleeperBed' }));
+  assert.ok(a, 'raised');
+  assert.match(a.title, /^Team out of hours before the load is done — must park ~/);
+  assert.match(a.detail, /Even swapping drivers, both run out of hours together/);
+});

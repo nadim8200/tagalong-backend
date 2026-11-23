@@ -634,7 +634,7 @@ const RULES = [
   // pickup). Raised as soon as the clock can't cover the stops left — while there's time to plan a relay, swap the order or warn
   // the customer — with the earliest restart, the new ETA for the last delivery and the next load it pushes back. Unlike hos-low
   // it stays open while the truck sits on its break, until it's rolling again with the hours to finish. Only when the shortfall
-  // is under 5 h: a long haul with resets ahead is normal, not news. Teams count both drivers' drive time.
+  // is under 5 h: a long haul with resets ahead is normal, not news. Teams: see below — they swap.
   function hoursShort(f, ctx) {
     if (f.oc) return null;
     const l = f.live; const h = l && l.hos;
@@ -644,7 +644,26 @@ const RULES = [
     const last = route[route.length - 1];
     const needMin = Math.round((last.miles / CRUISE_MPH) * 60);
     if (needMin < 5) return null;                                  // at the last stop already
-    const left = Math.max(0, h.driveLeftMin) + (f.team && l.hos2 && l.hos2.driveLeftMin != null ? Math.max(0, l.hos2.driveLeftMin) : 0);
+    // a team swaps: one drives while the other's sleeper time resets their clock, so adding up the two clocks left now is
+    // wrong (Nov 22: truck 2401, Angel 1h31m + Marcos 4h07m vs 7 stops — flagged though Marcos is fresh after his rest).
+    // The ETA planner already runs the swaps (planArrivals); a team is only short when both are out at once and the truck
+    // has to park — the planned arrival is later than driving + unloading + changeovers.
+    if (f.team) {
+      const startMs = last.leavesAt || ctx.now;
+      const unload = route.slice(0, -1).reduce((n, r) => n + stopDwellMin(r.stop), 0);
+      const swaps = Math.ceil(needMin / (11 * 60)) * TEAM_SWAP_MIN + 30;
+      const parkMin = Math.round((last.etaMs - startMs) / MIN - needMin - unload - swaps);
+      if (parkMin <= 60) return null;
+      const hos2 = l.hos2 || {};
+      const flowersT = !f.broker && f.reqTemp != null && f.reqTemp >= 33;
+      const nameT = (r) => ((r.stop.customers && r.stop.customers[0]) ? `${r.stop.customers[0]} (${r.stop.label.replace(/, \d{5}$/, '')})` : r.stop.label.replace(/, \d{5}$/, ''));
+      return {
+        code: 'hours-short', severity: flowersT ? 'critical' : 'warning', key: last.stop.key,
+        title: `Team out of hours before the load is done — must park ~${fmtMin(parkMin)}${flowersT ? ' (flowers)' : ''}`,
+        detail: `Even swapping drivers, both run out of hours together before ${nameT(last)}: drive left ${fmtMin(h.driveLeftMin)} and ${fmtMin(hos2.driveLeftMin)}${hos2.cycleLeftMin != null || h.cycleLeftMin != null ? ` (70-hr cycle ${fmtMin(h.cycleLeftMin)} / ${fmtMin(hos2.cycleLeftMin)})` : ''}; ${Math.round(last.miles)} mi left. The truck has to park ~${fmtMin(parkMin)}. New ETA for the last delivery: ${fmtLocalShort(last.etaMs, last.stop.label)}. Plan a relay or warn the customer.`,
+      };
+    }
+    const left = Math.max(0, h.driveLeftMin);
     const dwell = route.reduce((n, r, i) => n + (i < route.length - 1 ? 30 : 0), 0);
     const shift = !f.team && h.shiftLeftMin != null ? Math.max(0, h.shiftLeftMin) : null;
     const shortDrive = needMin - left;
