@@ -2,13 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { weekOf, bonusFromSheet, tripLines, cleanLines, cleanExpenses, payrollEmail, staysOf, missingMoves, apptMs, waitAt } from '../triplog.js';
 
-test('the week runs Sunday to Saturday in Miami time', () => {
+test('the week runs Monday to Sunday in Miami time', () => {
   const w = weekOf(Date.parse('2026-11-21T15:00:00Z'));          // Saturday
-  assert.equal(w.start, '2026-11-15'); assert.equal(w.end, '2026-11-21');
-  assert.equal(new Date(w.fromMs).toISOString(), '2026-11-15T05:00:00.000Z');
-  assert.equal(weekOf('2026-11-22').start, '2026-11-22');         // Sunday starts a new week
-  assert.equal(weekOf(Date.parse('2026-11-22T03:00:00Z')).start, '2026-11-15');   // still Saturday night in Miami
-  assert.equal(new Date(weekOf('2026-07-15').fromMs).toISOString(), '2026-07-12T04:00:00.000Z');   // summer time
+  assert.equal(w.start, '2026-11-16'); assert.equal(w.end, '2026-11-22');
+  assert.equal(new Date(w.fromMs).toISOString(), '2026-11-16T05:00:00.000Z');
+  assert.equal(weekOf('2026-11-22').start, '2026-11-16');         // Sunday ends the week
+  assert.equal(weekOf('2026-11-23').start, '2026-11-23');         // Monday starts a new one
+  assert.equal(weekOf(Date.parse('2026-11-23T03:00:00Z')).start, '2026-11-16');   // still Sunday night in Miami
+  assert.equal(new Date(weekOf('2026-07-15').fromMs).toISOString(), '2026-07-13T04:00:00.000Z');   // summer time
 });
 
 test('a bonus dispatch wrote on the load', () => {
@@ -280,15 +281,13 @@ test('the open sheet route: a saved, edited sheet still gets the new stop; a del
   const { initTripLog } = await import('../triplog.js');
   const h = harness();
   const items = [{ trip: { tripNumber: 627549, driver: '986', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G1', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }, { billNumber: 'G2', endZoneDescription: 'NEWARK, NJ, 07105', pieces: 64 }] }];
-  h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' }, 'arrived:CLIFTON, NJ, 07011': { at: '2026-11-20T13:00:00Z' } } } };
-  h.kv['taRundowns:florida-beauty'] = { 627549: { rec: { item: items[0] } } };   // a finished load (trips still running stay off the sheet)
-  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [], tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }), env: {}, now: () => Date.parse('2026-11-20T23:00:00Z'), mail: async () => {} });
+  h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' }, 'arrived:CLIFTON, NJ, 07011': { at: '2026-11-20T13:00:00Z' }, 'delivered:NEWARK, NJ, 07105': { at: '2026-11-20T10:00:00Z' } } } };
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => items, tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }), env: {}, now: () => Date.parse('2026-11-20T23:00:00Z'), mail: async () => {} });
   const me = { code: '986', name: 'Ferney Urrego' };
+  h.kv['taDriverCheckins:florida-beauty'][627549].steps['delivered:CLIFTON, NJ, 07011'] = { at: '2026-11-20T17:30:00Z' };   // every stop delivered → completed
   const first = (await h.call('GET /driver/me/log', { driver: me, query: {} })).body;
   const lines = first.lines.map((l) => (l.zip === '07011' ? { ...l, so: 'Short 1', edited: true } : l)).filter((l) => l.zip !== '07105');   // changed one, deleted one
   await h.call('PUT /driver/me/log', { driver: me, body: { head: first.head, lines, expenses: [], dismissed: first.lines.filter((l) => l.zip === '07105').map((l) => l.key) } });
-  // a new check-in later: Newark delivered (still deleted by the driver), and Clifton's change stays
-  h.kv['taDriverCheckins:florida-beauty'][627549].steps['delivered:CLIFTON, NJ, 07011'] = { at: '2026-11-20T17:30:00Z' };
   const again = (await h.call('GET /driver/me/log', { driver: me, query: {} })).body;
   assert.deepEqual(again.lines.map((l) => l.zip), ['33152', '07011']);
   assert.equal(again.lines[1].so, 'Short 1');
@@ -303,9 +302,10 @@ test('a team sheet: turned in → the co-driver gets a push (sent even in traini
   const h = harness(); const pushes = [];
   const items = [{ trip: { tripNumber: 627549, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G1', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }] }];
   h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' } } } };
-  h.kv['taRundowns:florida-beauty'] = { 627549: { rec: { item: items[0] } } };   // a finished load (trips still running stay off the sheet)
-  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [], tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }),
+  let onBoard = items;   // on the board while it runs, then it leaves (completed)
+  const tl = initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => onBoard, tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }),
     nameOf: async (c) => (c === '2473' ? 'Wilber Echeverri' : 'Ferney Urrego'), notify: async (code, msg) => { pushes.push({ code, msg }); return { sent: 1 }; }, env: {}, now: () => Date.parse('2026-11-22T23:00:00Z'), mail: async () => {} });
+  await tl.capture(); onBoard = [{ trip: { tripNumber: 1 } }];
   const ferney = { code: '986', name: 'Ferney Urrego' }; const wilber = { code: '2473', name: 'Wilber Echeverri' };
   const open = (await h.call('GET /driver/me/log', { driver: ferney, query: {} })).body;
   const sig = `data:image/png;base64,${'A'.repeat(200)}`;
@@ -328,9 +328,10 @@ test('payroll waits for the co-driver: signed in time → sent with both signatu
   const h = harness(); const mails = []; let clock = Date.parse('2026-11-22T23:00:00Z');
   const items = [{ trip: { tripNumber: 627549, driver: '986', driver2: '2473', powerUnit: '4504', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G1', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }] }];
   h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' } } } };
-  h.kv['taRundowns:florida-beauty'] = { 627549: { rec: { item: items[0] } } };   // a finished load (trips still running stay off the sheet)
-  const tl = initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [], tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }),
+  let onBoard = items;   // on the board while it runs, then it leaves (completed)
+  const tl = initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => onBoard, tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }),
     nameOf: async (c) => (c === '2473' ? 'Wilber Echeverri' : 'Ferney Urrego'), notify: async () => ({ sent: 1 }), env: { NODE_ENV: 'test' }, now: () => clock, mail: async (m) => { mails.push(m); } });
+  await tl.capture(); onBoard = [{ trip: { tripNumber: 1 } }];
   const ferney = { code: '986', name: 'Ferney Urrego' }; const wilber = { code: '2473', name: 'Wilber Echeverri' };
   const sig = `data:image/png;base64,${'A'.repeat(200)}`;
   const open = (await h.call('GET /driver/me/log', { driver: ferney, query: {} })).body;
@@ -376,30 +377,41 @@ test('TEST homework (admin): a copy of Ferney\'s open sheet goes to payroll unde
   assert.deepEqual(h.kv['taTripLog:florida-beauty:TEST986'], {});
 });
 
-test('Ferney\'s sheet reads like the trips went: LTL out of Miami → the load down to Melbourne → empty from Melbourne, pickup in Miami, stops; a test can take only some trips', async () => {
+test('Ferney\'s homework fills as he works: the LTL, then the load down to Melbourne, saved while they ran; the trip running now stays off; a test can take only some trips', async () => {
   const { initTripLog, realPickup } = await import('../triplog.js');
-  const h = harness(); const sent = [];
+  const h = harness(); const sent = []; let clock = Date.parse('2026-11-18T15:00:00Z');
   const bill = (n, from, to, pu, del) => ({ billNumber: n, startZone: from.slice(-5), startZoneDescription: from, endZoneDescription: to, pieces: 10, actualPickup: pu, actualDelivery: del });
-  const done = {
-    627549: { rec: { item: { trip: { tripNumber: 627549, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [bill('G1', 'MIAMI, FL, 33122', 'CLIFTON, NJ, 07011', '2026-11-17T20:00:00', '2026-11-19T09:00:00')] } } },
-    627656: { rec: { item: { trip: { tripNumber: 627656, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'WALTHAM, MA, 02451' }, freightBills: [bill('G2', 'WALTHAM, MA, 02451', 'MELBOURNE, FL, 32934', '2026-11-20T10:00:00', '2026-11-22T08:00:00')] } } },
-  };
-  const now = { trip: { tripNumber: 627700, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '7280', origZoneDesc: 'MELBOURNE, FL, 32934' }, _manifest: { stops: [{ action: 'LOAD', customer: 'MIAMI TERMINAL' }] },
+  const ltl = { trip: { tripNumber: 627549, driver: '0986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [bill('G1', 'MIAMI, FL, 33122', 'CLIFTON, NJ, 07011', '2026-11-17T20:00:00', null)] };
+  const down = { trip: { tripNumber: 627656, driver: '0986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'WALTHAM, MA, 02451' }, freightBills: [bill('G2', 'WALTHAM, MA, 02451', 'MELBOURNE, FL, 32934', '2026-11-20T10:00:00', null)] };
+  const now = { trip: { tripNumber: 627700, driver: '0986', driver2: '2473', powerUnit: '4504', trailer: '7280', origZoneDesc: 'MELBOURNE, FL, 32934' }, _manifest: { stops: [{ action: 'LOAD', customer: 'MIAMI TERMINAL' }] },
     freightBills: [bill('G3', 'MIAMI, FL, 33122', 'WINCHESTER, MA, 01890', '2026-11-23T01:59:50', null)] };
+  const other = { trip: { tripNumber: 1, driver: '5' } };
   assert.equal(realPickup(now).zip, '33122'); assert.match(realPickup(now).place, /MIAMI TERMINAL/);
-  done[625799] = { rec: { item: { trip: { tripNumber: 625799, driver: '986', powerUnit: '4504', origZoneDesc: 'MIAMI TERMINAL' }, freightBills: [bill('G0', 'MIAMI, FL, 33122', 'ATLANTA, GA, 30344', '2026-10-25T20:00:00', '2026-10-27T09:00:00')] } } };   // October: too old
-  h.kv['taRundowns:florida-beauty'] = done;
-  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [now], tripsOf: async () => ['627700'], loadsFor: () => ({ current: [{ trip: '627700' }], next: [] }), nameOf: async () => 'Ferney Urrego', env: {}, now: () => Date.parse('2026-11-23T15:00:00Z'), mail: async (m) => { sent.push(m); } });
-  const open = (await h.call('GET /driver/me/log', { driver: { code: '986', name: 'Ferney Urrego' }, query: {} })).body;
-  // 627700 is the trip he's running now: not on the sheet until it's delivered or dropped at a yard
-  assert.deepEqual(open.lines.map((l) => `${l.trip} ${l.act}`), ['627549 PU', '627549 DEL', '627656 PU', '627656 DEL']);
-  const { tripLines } = await import('../triplog.js');
+  let onBoard = [ltl, other];
+  h.kv.taMilesCache = { geo: { '07011, USA': { lat: 40.88, lng: -74.14 }, '02451, USA': { lat: 42.39, lng: -71.24 } }, road: {} };   // no network in tests: miles estimated from the points
+  const tl = initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => onBoard, tripsOf: async () => [], loadsFor: () => ({ current: [], next: [] }), nameOf: async () => 'Ferney Urrego', env: {}, now: () => clock, mail: async (m) => { sent.push(m); }, fetchFn: async () => ({ ok: false, json: async () => ({}) }) });
+  const me = { code: '986', name: 'Ferney Urrego' };
+  const open = async () => (await h.call('GET /driver/me/log', { driver: me, query: {} })).body.lines.map((l) => `${l.trip} ${l.act}`);
+  await tl.capture();
+  assert.deepEqual(await open(), []);                                       // the LTL is running: not on the sheet yet
+  clock = Date.parse('2026-11-19T15:00:00Z'); ltl.freightBills[0].actualDelivery = '2026-11-19T09:00:00';
+  await tl.capture(); onBoard = [down, other]; clock = Date.parse('2026-11-20T15:00:00Z'); await tl.capture();   // delivered, off the board
+  assert.deepEqual(await open(), ['627549 PU', '627549 DEL']);
+  clock = Date.parse('2026-11-23T03:00:00Z'); onBoard = [now, other]; await tl.capture();                         // down to Melbourne done; 627700 running
+  // Clifton (last LTL delivery) → Waltham (the broker pickup): empty miles, zip to zip, on the way to pick up the load
+  const sheet = (await h.call('GET /driver/me/log', { driver: me, query: {} })).body.lines;
+  assert.deepEqual(sheet.map((l) => `${l.trip} ${l.act}`), ['627549 PU', '627549 DEL', '627656 EMPTY', '627656 PU', '627656 DEL']);
+  assert.equal(sheet[2].zip, '02451'); assert.equal(sheet[2].fe, 'E');
+  assert.match(sheet[2].comment, /^Empty 07011 → 02451, \d+ mi, on the way to pick up load G2$/);
   const ls = tripLines(now, {});
   assert.deepEqual(ls.map((l) => l.act), ['EMPTY', 'PU', 'DEL']); assert.match(ls[0].place, /MELBOURNE/); assert.equal(ls[1].zip, '33122');
-  const r = await h.call('POST /truckmate/driver-profiles/:code/logs/test-submit', { params: { code: '0986' }, user: { admin: true }, body: { trips: ['627549', '627656'] } });
-  assert.equal(r.body.lines, 4);
+  const r = await h.call('POST /truckmate/driver-profiles/:code/logs/test-submit', { params: { code: '0986' }, user: { admin: true }, body: { trips: ['627549'] } });   // only the LTL
+  assert.equal(r.body.lines, 2);
   const log = Object.values(h.kv['taTripLog:florida-beauty:TEST986'])[0];
-  assert.deepEqual(log.lines.map((l) => `${l.trip} ${l.act}`), ['627549 PU', '627549 DEL', '627656 PU', '627656 DEL']);
+  assert.deepEqual(log.lines.map((l) => `${l.trip} ${l.act}`), ['627549 PU', '627549 DEL']);
+  // the board can't be read (empty): nothing is marked finished on that
+  onBoard = []; assert.equal(await tl.capture(), 0);
+  assert.equal(h.kv['taTripLogLive:florida-beauty']['986']['627700'].doneAt, null);
 });
 
 test('a trip still on the board goes on the sheet once it\'s delivered or dropped at a yard, not before', async () => {
@@ -414,4 +426,39 @@ test('a trip still on the board goes on the sheet once it\'s delivered or droppe
   assert.equal((await h.call('GET /driver/me/log', { driver: me, query: {} })).body.lines.length, 2);          // dropped at a yard
   sheet.dropped = null; h.kv['taDriverCheckins:florida-beauty'][627700].steps['delivered:CLIFTON, NJ, 07011'] = { at: '2026-11-23T12:00:00Z' };
   assert.equal((await h.call('GET /driver/me/log', { driver: me, query: {} })).body.lines.length, 2);          // delivered
+});
+
+test('a broker load: pickup and delivery from the rate con with zip codes, the broker\'s load number as Ref, the B number', () => {
+  const it = { trip: { tripNumber: 627800, origZoneDesc: 'WALTHAM, MA, 02451', trailer: '18094' }, freightBills: [{ billNumber: 'B180354' }] };
+  const rc = { broker: 'TQL', loadNumber: '44817722', fbfBillNumber: 'B180354', pickups: [{ name: 'BOSTON PRODUCE', city: 'Chelsea', state: 'MA', zip: '02150', date: '2026-11-24' }], deliveries: [{ name: 'PUBLIX DC', city: 'Lakeland', state: 'FL', zip: '33801', date: '2026-11-26' }] };
+  const ls = tripLines(it, {}, { rc });
+  assert.deepEqual(ls.map((l) => [l.act, l.zip, l.ref, l.bill]), [['PU', '02150', '44817722', 'B180354'], ['DEL', '33801', '44817722', 'B180354']]);
+  assert.match(ls[0].place, /Chelsea, MA · BOSTON PRODUCE/); assert.equal(ls[0].comment, 'Broker load · TQL #44817722');
+});
+
+test('saved 4 times a day: midnight, 6 AM, noon, 6 PM Miami time', async () => {
+  const { initTripLog } = await import('../triplog.js');
+  const h = harness(); let clock = Date.parse('2026-11-23T11:05:00Z');   // 6:05 AM in Miami
+  const tl = initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [{ trip: { tripNumber: 1, driver: '5' } }], tripsOf: async () => [], loadsFor: () => ({ current: [], next: [] }), env: {}, now: () => clock, mail: async () => {} });
+  assert.equal(await tl.captureIfDue(), true);
+  clock += 3 * 3600000; assert.equal(await tl.captureIfDue(), false);   // 9 AM: same slot
+  clock += 3 * 3600000; assert.equal(await tl.captureIfDue(), true);    // noon
+});
+
+test('from dispatch\'s message: bonus or "No bonus", a paid / free release with the Drop line at the yard (its zip), the yard\'s stops left off; a POD email dates the deliveries', () => {
+  const it = { trip: { tripNumber: 627900, origZoneDesc: 'MIAMI, FL, 33126', trailer: '18094' },
+    freightBills: [{ billNumber: 'G1', endZoneDescription: 'ORLANDO, FL, 32809', pieces: 20 }, { billNumber: 'G2', endZoneDescription: 'TAMPA, FL, 33619', pieces: 30 }] };
+  const sheet = { stops: [{ kind: 'delivery', city: 'Orlando', zip: '32809' }, { kind: 'delivery', city: 'Tampa', zip: '33619' }], notes: [],
+    release: { type: 'paid', yard: 'BARTOW', stops: [1] }, dropped: { at: '2026-11-24T18:00:00Z', by: 'Ferney Urrego', yard: 'Bartow yard', type: 'paid', pickedUp: '7304' } };
+  const ls = tripLines(it, { 'delivered:ORLANDO, FL, 32809': { at: '2026-11-24T14:00:00Z' } }, { sheet });
+  assert.deepEqual(ls.map((l) => [l.act, l.zip]), [['PU', '33152'], ['DEL', '32809'], ['DROP', '33830']]);   // Tampa goes from the yard
+  assert.equal(ls[0].comment, 'No bonus');
+  assert.equal(ls[2].comment, 'PAID RELEASE — trailer dropped at Bartow yard (1 stop delivered from the yard) · picked up trailer 7304');
+  assert.equal(ls[2].date, '11/24');
+  const free = tripLines(it, {}, { sheet: { ...sheet, notes: ['BONUS $75'], release: { type: 'free', yard: 'Miami', stops: [] }, dropped: null } });
+  assert.equal(free[0].bonus, 'dispatch'); assert.equal(free[0].bonusAmt, '75.00');
+  assert.match(free.find((l) => l.act === 'DROP').comment, /^FREE RELEASE — trailer dropped at Miami yard$/);
+  // a staff POD email for the whole load
+  const podded = tripLines({ ...it, _staffPod: { at: '2026-11-25T15:00:00Z', by: 'Saray', whole: true } }, {}, {});
+  assert.deepEqual(podded.filter((l) => l.act === 'DEL').map((l) => [l.date, l.comment]), [['11/25', 'Delivered — POD email from Saray'], ['11/25', 'Delivered — POD email from Saray']]);
 });

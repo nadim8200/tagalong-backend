@@ -35,6 +35,7 @@ import { readableFile } from './heic.js';
 import { tripLogPdf, pdfName } from './triplogpdf.js';
 import { asLive } from './training.js';
 import { localToUtcMs } from './watchtower.js';
+import { KNOWN_YARDS, yardLabel } from './loadsheet.js';
 import { createHash } from 'node:crypto';
 
 const SITE = 'florida-beauty';
@@ -44,8 +45,6 @@ const COSIGN = `taTripLogCosign:${SITE}`;
 const COSIGN_WAIT_MS = 15 * 60000;                     // how long payroll waits for the co-driver's signature           // co-driver signatures asked for: [{ owner, ownerName, id, co, coName, trips, at, signedAt }]               // `${driver}|${week}` → { name, week, submittedAt, reviewedAt } — payroll's list
 const KEEP_WEEKS = 150;   // about two years of trip sheets on each driver's profile
 const OPEN = 'open';      // the sheet being filled in
-const LOOKBACK_DAYS = 30;
-const RAN_DAYS = 14;   // finished loads found only in TruckMate's records (never opened in the app): the last two weeks
 const MAX_LINES = 80;
 const ACTS = ['PU', 'DEL', 'DROP', 'EMPTY', 'CM'];
 export const BONUS_KINDS = ['none', 'dispatch', 'holiday', 'weekend', 'extraPU', 'extraDel', 'fuelTr', 'other'];
@@ -66,11 +65,11 @@ export function etMidnight(ymd) {
   for (const h of [4, 5]) { const ms = Date.parse(`${ymd}T0${h}:00:00Z`); if (Number(new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' })) === 0) return ms; }
   return Date.parse(`${ymd}T05:00:00Z`);
 }
-// → { start: 'YYYY-MM-DD' (Sunday), end: 'YYYY-MM-DD' (Saturday), fromMs, toMs }. Pure.
+// the pay week runs Monday to Sunday (Nov 23, Nadim) → { start: 'YYYY-MM-DD' (Monday), end: 'YYYY-MM-DD' (Sunday), fromMs, toMs }. Pure.
 export function weekOf(at = Date.now()) {
   const d = typeof at === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(at) ? at : ymdET(at);
   const dow = new Date(`${d}T12:00:00Z`).getUTCDay();
-  const start = new Date(Date.parse(`${d}T12:00:00Z`) - dow * DAY).toISOString().slice(0, 10);
+  const start = new Date(Date.parse(`${d}T12:00:00Z`) - ((dow + 6) % 7) * DAY).toISOString().slice(0, 10);
   const end = new Date(Date.parse(`${start}T12:00:00Z`) + 6 * DAY).toISOString().slice(0, 10);
   return { start, end, fromMs: etMidnight(start), toMs: etMidnight(new Date(Date.parse(`${end}T12:00:00Z`) + DAY).toISOString().slice(0, 10)) };
 }
@@ -142,17 +141,25 @@ export function realPickup(item) {
   return { place, zip: zipOf(zone) || (load && load.zip) || '', city: cityKey(zone) || cityKey(load && (load.city || load.customer)), ms: Number.isFinite(ms) ? ms : null };
 }
 
-export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {} } = {}) {
+// A broker load (rate con on file): its pickups and deliveries with zip codes, the broker's load number on every line (Ref) and
+// the broker in the comment, the FBF B number as on the paper.
+// From dispatch's message (the load sheet): the bonus — or "No bonus" said plainly — and a yard drop: the stops going to the yard
+// aren't this driver's, a Drop line at the yard (its zip) says PAID or FREE release. A staff POD email for the whole load
+// dates deliveries the driver didn't check in.
+export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {}, rc = null, yards = KNOWN_YARDS } = {}) {
   const t = tripOf(item); const trip = tripNo(item);
   const out = [];
+  const rcRef = rc && rc.loadNumber ? S(rc.loadNumber, 40) : '';
+  const rcStops = (kind) => ((rc && rc[kind]) || []).filter((x) => x && (x.zip || x.city)).map((x) => ({ kind: kind === 'pickups' ? 'pickup' : 'delivery', zip: (String(x.zip || '').match(/\d{5}/) || [''])[0], city: x.city || '', state: x.state || '', name: x.name || '', dateIso: /^\d{4}-\d{2}-\d{2}$/.test(String(x.date || '')) ? x.date : null, time: x.time || x.appointment || '' }));
   const real = realPickup(item);
   const puAt = atOf(steps.loaded) || atOf(steps['at-shipper']) || (real && real.ms) || null;
   const bonus = bonusFromSheet(sheet);
   const dayMs = (iso) => { const ms = Date.parse(`${iso || ''}T16:00:00Z`); return Number.isNaN(ms) ? null : ms; };
-  const sheetStops = ((sheet && sheet.stops) || []).filter((x) => x && (x.zip || x.city));
+  const sheetStops0 = ((sheet && sheet.stops) || []).filter((x) => x && (x.zip || x.city));
+  const sheetStops = sheetStops0.length ? sheetStops0 : [...rcStops('pickups'), ...rcStops('deliveries')];
   // the trip's bill numbers go on its pickup line too, like the paper
   const tripBills = [...new Set(((item && (item.freightBills || item.orders)) || t.freightBills || []).map((b) => String(b.billNumber || b.bill || '').trim()).filter(Boolean))];
-  const puBill = (tripBills.length ? tripBills.join(' / ') : (sheet && sheet.bill) || '').slice(0, 200);
+  const puBill = (tripBills.length ? tripBills.join(' / ') : (sheet && sheet.bill) || (rc && rc.fbfBillNumber) || '').slice(0, 200);
   // the city first, like the drivers write it ("Clifton NJ"), then the customer
   const where = (x) => [[S(x.city, 30), x.state].filter(Boolean).join(', '), S(x.name, 50)].filter(Boolean).join(' · ');
   const pickups = sheetStops.filter((x) => x.kind === 'pickup');
@@ -175,12 +182,18 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
   }
   let stops = [];
   try { stops = driverStops(item, { geo }); } catch { stops = []; }
+  const release = sheet && sheet.release ? sheet.release : null;
+  const toYard = release ? (release.stops || []).map((i) => (sheet.stops || [])[i]).filter(Boolean) : [];
+  const yardStop = (st) => toYard.some((y) => (y.zip && st.zip && y.zip === st.zip) || (y.city && String(st.place || '').toUpperCase().startsWith(String(y.city).toUpperCase())));
+  if (toYard.length) stops = stops.filter((st) => !yardStop(st));
+  const pod = item && item._staffPod && item._staffPod.whole ? item._staffPod : null;
+  const podMs = pod ? Date.parse(pod.at) || null : null;
   if (stops.length) {
     for (const st of stops) {
       const arr = atOf(steps[`arrived:${st.key}`]);
       // delivered: the driver's check-in, else TruckMate's own delivery time on the stop's bills (loads run without check-ins)
       const billsHere = ((item && (item.freightBills || item.orders)) || []).filter((b) => (st.bills || []).some((x) => x.bill === b.billNumber));
-      const del = atOf(steps[`delivered:${st.key}`]) || (billsHere.length && billsHere.every((b) => b.actualDelivery) ? Math.max(...billsHere.map((b) => billMs(b.actualDelivery) || 0)) || null : null);
+      const del = atOf(steps[`delivered:${st.key}`]) || (billsHere.length && billsHere.every((b) => b.actualDelivery) ? Math.max(...billsHere.map((b) => billMs(b.actualDelivery) || 0)) || null : null) || (arr ? null : podMs);
       // the appointment: the trip sheet's, else the load sheet's stop with the same ZIP / city
       const ss = sheetStops.find((x) => x.kind === 'delivery' && ((st.zip && x.zip === st.zip) || (x.city && String(st.place || '').toUpperCase().startsWith(String(x.city).toUpperCase()))));
       const appt = apptMs({ text: st.appt || '', dayMs: arr }) || (ss ? apptMs({ dateIso: ss.dateIso, text: ss.time, dayMs: arr }) : null);
@@ -191,8 +204,21 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
       out.push(line({ key: `${trip}|DEL|${st.key}`, ms: del || arr, trip, zip: st.zip || zipOf(st.key) || '', place: [S(st.place, 40), S(st.name, 50)].filter(Boolean).join(' · '), act: 'DEL', pallets: st.pallets || null, fe: 'F', bill: bills.join(' / '), boxes, wait, waitAuto: wait != null, waitFrom: w.from, appt: w.appt, auto: true }));
     }
   } else {
-    for (const x of sheetStops.filter((y) => y.kind === 'delivery')) out.push(line({ key: `${trip}|DEL|${x.zip || x.city}`, ms: dayMs(x.dateIso), trip, zip: x.zip || '', place: where(x), act: 'DEL', fe: 'F', bill: sheet.bill || '', auto: true }));
+    for (const x of sheetStops.filter((y) => y.kind === 'delivery')) out.push(line({ key: `${trip}|DEL|${x.zip || x.city}`, ms: dayMs(x.dateIso), trip, zip: x.zip || '', place: where(x), act: 'DEL', fe: 'F', bill: (sheet && sheet.bill) || puBill, auto: true }));
   }
+  if (release) {
+    const key = String(release.yard || '').replace(/\*+/g, ' ').trim().toUpperCase().replace(/\s+YARD$/, '');
+    const y = (yards || {})[key] || KNOWN_YARDS[key] || null;
+    const dropped = sheet.dropped || null;
+    const paid = release.type === 'paid';
+    const yname = (y && y.name) || yardLabel(release.yard);
+    out.push(line({ key: `${trip}|DROP`, ms: dropped ? Date.parse(dropped.at) || null : null, trip, zip: (String((y && y.address) || '').match(/\b(\d{5})(?:-\d{4})?\s*$/) || [])[1] || '', place: yname, act: 'DROP', fe: 'F', trl: S(t.trailer, 20), bill: puBill,
+      comment: `${paid ? 'PAID' : 'FREE'} RELEASE — trailer dropped at ${yname}${toYard.length ? ` (${toYard.length} stop${toYard.length === 1 ? '' : 's'} delivered from the yard)` : ''}${dropped && dropped.pickedUp ? ` · picked up trailer ${dropped.pickedUp}` : ''}`, auto: true }));
+  }
+  const puLine = out.find((l) => l.act === 'PU');
+  if (puLine && !bonus && sheet) puLine.comment = puLine.comment ? `${puLine.comment} · No bonus` : 'No bonus';
+  if (pod) for (const l of out) if (l.act === 'DEL' && !l.comment) l.comment = `Delivered — POD email${pod.by ? ` from ${S(pod.by, 40)}` : ''}`;
+  if (rc) for (const l of out) { if (l.act === 'PU' || l.act === 'DEL') { l.ref = l.ref || rcRef; if (l.act === 'PU' && rc.broker && !/Broker load/.test(l.comment || '')) l.comment = [`Broker load · ${S(rc.broker, 60)}${rcRef ? ` #${rcRef}` : ''}`, l.comment].filter(Boolean).join(' · '); } }
   return out;
 }
 function line(x) {
@@ -421,67 +447,105 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
     return { trips: new Set([...mine, ...forMe.flatMap((x) => x.trips || [])]), byPartner: forMe.sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt))) };
   }
 
-  // the open sheet: every trip with check-ins in the last 30 days (or on now) that isn't turned in yet
+  // ---------- the homework fills itself as the driver works (Nov 23, Nadim) ----------
+  // No looking back: every load a driver is on is saved for payroll WHILE it runs (its lines kept up to date from the board,
+  // the check-ins and the trip sheet), so nothing depends on finished-load records later. A load goes on the sheet once it's
+  // completed (every stop delivered, dropped at a yard, or it left the board finished) and stays until the sheet is turned in.
+  const LIVE = `taTripLogLive:${SITE}`;   // { [driverCode]: { [trip]: { lines, truck, trailer, partner, start, doneAt, how, onBoard, seenAt } } }
+  const driversOf = (it) => { const t = tripOf(it); return [t.driver, t.driver2].map(codeOf).filter(Boolean); };
+  async function ctxOf() {
+    const [book, reports, geo, clocks, rcs, yardsSaved] = await Promise.all([db.get(CHECKINS(SITE), {}), db.get(`taStopReports:${SITE}`, {}).catch(() => ({})), db.get('taGeoZip', {}).catch(() => ({})), db.get(`taWaiting:${SITE}`, {}).catch(() => ({})), db.get(`taTruckMateRateCon:${SITE}`, {}).catch(() => ({})), db.get(`taYards:${SITE}`, {}).catch(() => ({}))]);
+    return { book: book || {}, reports: reports || {}, geo: geo || {}, clocks: clocks || {}, rcs: rcs || {}, yards: { ...KNOWN_YARDS, ...(yardsSaved || {}) } };
+  }
+  // one load → its lines now, and whether it's completed. → entry
+  async function entryOf(it, ctx) {
+    const trip = tripNo(it);
+    let stopsHere = []; try { stopsHere = driverStops(it, { geo: ctx.geo }); } catch { stopsHere = []; }
+    const steps = stepsWithReports((ctx.book[trip] || {}).steps || {}, stopsHere, ctx.reports[trip] || []);
+    const sh = sheets ? await sheets.get(trip).catch(() => null) : null;
+    const tl = tripLines(it, steps, { sheet: sh, geo: ctx.geo, clocks: ctx.clocks, rc: ctx.rcs[trip] || null, yards: ctx.yards });
+    const times = [...Object.values(steps).map(atOf), ...tl.map((l) => l._ms)].filter(Boolean);
+    const bills = (it.freightBills || it.orders || []);
+    // delivered: every stop checked in delivered, or TruckMate has a delivery time on every bill
+    const allDelivered = (stopsHere.length > 0 && stopsHere.every((st) => atOf(steps[`delivered:${st.key}`]))) || (bills.length > 0 && bills.every((b) => b.actualDelivery)) || !!(it._staffPod && it._staffPod.whole);
+    const t = tripOf(it);
+    return { lines: tl, truck: t.powerUnit ? String(t.powerUnit) : '', trailer: t.trailer ? String(t.trailer) : '', drivers: driversOf(it),
+      start: times.length ? Math.min(...times) : null, how: allDelivered ? 'delivered' : sh && sh.dropped ? 'dropped at a yard' : null };
+  }
+  // save the board's loads into each driver's homework; a load that left the board is completed. `only` = one driver.
+  async function capture({ items = null, only = null } = {}) {
+    const list = items || (await board()) || [];
+    if (!list.length) return 0;                      // no board (an outage): never mark anything finished on that
+    const ctx = await ctxOf();
+    const mine = list.filter((it) => tripNo(it) && driversOf(it).length && (!only || driversOf(it).includes(codeOf(only))));
+    const fresh = [];
+    for (const it of mine) fresh.push(await entryOf(it, ctx).catch(() => null)); // eslint-disable-line no-await-in-loop
+    const onBoard = new Set(list.map(tripNo).map(String));
+    const at = now();
+    await db.update(LIVE, (cur) => {
+      const all = { ...(cur || {}) };
+      fresh.forEach((e, i) => {
+        if (!e) return; const trip = tripNo(mine[i]);
+        for (const d of e.drivers) {
+          const old = (all[d] || {})[trip] || {};
+          const partner = e.drivers.find((x) => x !== d) || '';
+          all[d] = { ...(all[d] || {}), [trip]: { lines: e.lines, truck: e.truck, trailer: e.trailer, partner, start: old.start || e.start || at,
+            doneAt: old.doneAt || (e.how ? at : null), how: old.how || e.how, onBoard: true, seenAt: at } };
+        }
+      });
+      // left the board → completed (the finish sweep, a delivered status, or TruckMate closing it)
+      for (const [d, trips] of Object.entries(all)) {
+        if (only && d !== codeOf(only)) continue;
+        for (const [trip, x] of Object.entries(trips)) if (x && x.onBoard && !onBoard.has(String(trip))) trips[trip] = { ...x, onBoard: false, doneAt: x.doneAt || at, how: x.how || 'finished' };
+        // keep it small: three weeks after a load is completed
+        for (const [trip, x] of Object.entries(trips)) if (x && x.doneAt && at - x.doneAt > 21 * DAY) delete trips[trip];
+      }
+      return all;
+    }, {});
+    return fresh.filter(Boolean).length;
+  }
+  // 4 times a day — midnight, 6 AM, noon, 6 PM Miami time — whatever was done since (and whenever a driver opens the sheet)
+  const SLOT = 'taTripLogCaptureSlot';
+  async function captureIfDue() {
+    const h = Number(new Date(now()).toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hourCycle: 'h23' }));
+    const slot = `${ymdET(now())}T${String(h - (h % 6)).padStart(2, '0')}`;
+    if ((await db.get(SLOT, null)) === slot) return false;
+    await db.set(SLOT, slot);
+    await capture();
+    return true;
+  }
+  if (env.NODE_ENV !== 'test' && !process.env.NODE_TEST_CONTEXT) { const t = setInterval(() => { captureIfDue().catch((e) => console.warn('[triplog] capture:', e.message)); }, 5 * 60000); if (t.unref) t.unref(); }
+
+  // the open sheet: the driver's completed loads (Monday–Sunday, as they happen) not turned in yet; trips still running stay off
   async function prefill(driver) {
     const code = driver.code;
     const items = await board();
-    const rundowns = (await db.get(`taRundowns:${SITE}`, {}).catch(() => ({}))) || {};
-    // finished loads TruckMate had this driver on (driver or co-driver), even ones never opened in the app (Nov 23: Ferney's
-    // 627549 and 627656 ran before he used the app, so they weren't in his app trips)
-    // only the last two weeks of those, newest first (Nov 23: a month of October loads came in and pushed the newest ones out)
-    const lastMs = (it) => Math.max(0, ...((it && (it.freightBills || it.orders)) || []).flatMap((b) => [billMs(b.actualPickup), billMs(b.actualDelivery)]).filter(Boolean));
-    const ran = Object.entries(rundowns).map(([k, r]) => [String(k), (r && r.rec && r.rec.item) || {}, r || {}])
-      .filter(([, it]) => { const t = tripOf(it); return codeOf(t.driver) === codeOf(code) || codeOf(t.driver2) === codeOf(code); })
-      .map(([k, it, r]) => [k, lastMs(it) || Date.parse(r.finishedAt) || 0]).filter(([, ms]) => ms >= now() - RAN_DAYS * DAY).sort((a, b) => b[1] - a[1]).map(([k]) => k);
-    const known = [...new Set([...(((await loadsFor(code, items)) || {}).current || []).map((l) => l.trip), ...ran, ...((await tripsOf(code)) || [])])].slice(0, 60);
+    await capture({ items, only: code }).catch((e) => console.warn('[triplog] capture:', e.message));
+    const saved = ((await db.get(LIVE, {})) || {})[codeOf(code)] || {};
     const done = (await turnedIn(code)).trips;
-    const book = (await db.get(CHECKINS(SITE), {})) || {};
-    const geo = (await db.get('taGeoZip', {}).catch(() => ({}))) || {};
-    const clocks = (await db.get(`taWaiting:${SITE}`, {}).catch(() => ({}))) || {};   // dispatch's waiting-time clocks, by stay
-    const since = now() - LOOKBACK_DAYS * DAY;
-    const lines = []; const trucks = []; const trailers = []; const partners = []; let reportsAll = null;
-    for (const trip of known) {
-      if (done.has(String(trip))) continue;
-      const it = items.find((x) => tripNo(x) === String(trip)) || (rundowns[trip] && rundowns[trip].rec && rundowns[trip].rec.item) || null;
-      if (!it) continue;
-      // a stop either driver of a team counted the boxes at is delivered (the box count is the proof)
-      if (!reportsAll) reportsAll = (await db.get(`taStopReports:${SITE}`, {}).catch(() => ({}))) || {}; // eslint-disable-line no-await-in-loop
-      let stopsHere = []; try { stopsHere = driverStops(it, { geo }); } catch { stopsHere = []; }
-      const steps = stepsWithReports((book[trip] || {}).steps || {}, stopsHere, reportsAll[trip] || []);
-      const times = Object.values(steps).map(atOf).filter(Boolean);
-      // a load run without check-ins counts too, by TruckMate's own pickup / delivery times (Nov 23: Ferney's 627549 and 627656)
-      const billTimes = ((it.freightBills || it.orders || [])).flatMap((b) => [billMs(b.actualPickup), billMs(b.actualDelivery)]).filter(Boolean);
-      const recent = times.some((ms) => ms >= since) || billTimes.some((ms) => ms >= since);
-      if (!recent) continue;
-      const sh = sheets ? await sheets.get(trip).catch(() => null) : null; // eslint-disable-line no-await-in-loop
-      // a trip the driver is still running stays off the sheet (Nov 23, Nadim): only loads delivered, or dropped at a yard
-      if (items.includes(it)) {
-        const allDelivered = stopsHere.length > 0 && stopsHere.every((st) => atOf(steps[`delivered:${st.key}`]));
-        if (!allDelivered && !(sh && sh.dropped)) continue;
+    const lines = []; const trucks = []; const trailers = []; const partners = [];
+    const loads = Object.entries(saved).filter(([trip, x]) => x && x.doneAt && !done.has(String(trip))).sort((a, b) => (a[1].start || 0) - (b[1].start || 0));
+    // the sheet reads like the work went: where he started, the pickup, the deliveries (zip codes), then the next load — whole
+    // loads in the order they started. Between two loads, if the truck ran empty from the last delivery to the next pickup,
+    // an Empty line: zip to zip, the miles, on the way to pick up that load (its B number).
+    for (const [trip, x] of loads) {
+      let tl = (x.lines || []).map((l) => ({ ...l }));
+      const prev = [...lines].reverse().find((l) => l.zip);
+      if (prev) tl = tl.filter((l) => !/\|START$/.test(String(l.key || '')));   // after a load: the empty run comes from its last delivery
+      const pu = tl.find((l) => l.act === 'PU');
+      if (prev && pu && pu.zip && prev.zip !== pu.zip) {
+        let mi = null;
+        try { const [p, q] = await Promise.all([zipPoint(prev.zip), zipPoint(pu.zip)]); mi = p && q ? Math.round(await miles2(p, q)) : null; } catch { mi = null; } // eslint-disable-line no-await-in-loop
+        const ms = pu._ms ? pu._ms - 60000 : null;
+        tl.unshift(line({ key: `${trip}|EMPTYTO`, ms, trip, zip: pu.zip, place: `${prev.zip} → ${pu.zip}`, act: 'EMPTY', fe: 'E', trl: pu.trl, bill: pu.bill,
+          comment: `Empty ${prev.zip} → ${pu.zip}${mi != null ? `, ${mi} mi` : ''}, on the way to pick up load${pu.bill ? ` ${pu.bill}` : ` ${trip}`}`, auto: true }));
       }
-      // the sheet reads like the trip went: whole trips in the order they started, each in its own order (start → pickup →
-      // stops), a line without a time kept right after the one before it
-      const tl = tripLines(it, steps, { sheet: sh, geo, clocks });
-      const first = Math.min(...tl.map((l) => l._ms).filter(Boolean), ...times, ...billTimes);
-      let last = Number.isFinite(first) ? first : now();
-      tl.forEach((l, i) => { last = l._ms && l._ms >= last ? l._ms : last + 1; l._sk = last + i * 0.001; });
       lines.push(...tl);
-      const t = tripOf(it); if (t.powerUnit) trucks.push(String(t.powerUnit)); if (t.trailer) trailers.push(String(t.trailer));
-      // the team partner on this trip (the other driver TruckMate has on it)
-      const other = codeOf(t.driver) === codeOf(code) ? t.driver2 : codeOf(t.driver2) === codeOf(code) ? t.driver : null;
-      if (other) partners.push(codeOf(other));
+      if (x.truck) trucks.push(x.truck); if (x.trailer) trailers.push(x.trailer); if (x.partner) partners.push(x.partner);
     }
-    const sk = (l) => (l._sk != null ? l._sk : l._ms || Infinity);
-    lines.sort((a, b) => sk(a) - sk(b));
     const period = periodOf(lines);
     const truck = trucks[0] || '';
-    const [odo, stays] = await Promise.all([odometer(truck, period), periodStays(truck, period)]);
-    // moves the sheet doesn't have (only when the lines have times to place them by)
-    if (stays.length && lines.filter((l) => l._ms).length >= Math.max(1, lines.length / 2)) {
-      for (const l of lines) { if (l.zip) l._pt = await zipPoint(l.zip).catch(() => null); } // eslint-disable-line no-await-in-loop
-      lines.push(...missingMoves(lines, stays));
-      lines.sort((a, b) => sk(a) - sk(b));
-    }
+    const odo = await odometer(truck, period);
     const co = partners[0] || '';
     const coName = co && nameOf ? await nameOf(co).catch(() => '') : '';
     return {
@@ -905,5 +969,5 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
         docs });
     });
   }
-  return { prefill, sweepCosign };
+  return { prefill, sweepCosign, capture, captureIfDue };
 }
