@@ -387,6 +387,7 @@ test('Ferney\'s sheet reads like the trips went: LTL out of Miami → the load d
   const now = { trip: { tripNumber: 627700, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '7280', origZoneDesc: 'MELBOURNE, FL, 32934' }, _manifest: { stops: [{ action: 'LOAD', customer: 'MIAMI TERMINAL' }] },
     freightBills: [bill('G3', 'MIAMI, FL, 33122', 'WINCHESTER, MA, 01890', '2026-11-23T01:59:50', null)] };
   assert.equal(realPickup(now).zip, '33122'); assert.match(realPickup(now).place, /MIAMI TERMINAL/);
+  done[625799] = { rec: { item: { trip: { tripNumber: 625799, driver: '986', powerUnit: '4504', origZoneDesc: 'MIAMI TERMINAL' }, freightBills: [bill('G0', 'MIAMI, FL, 33122', 'ATLANTA, GA, 30344', '2026-10-25T20:00:00', '2026-10-27T09:00:00')] } } };   // October: too old
   h.kv['taRundowns:florida-beauty'] = done;
   initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [now], tripsOf: async () => ['627700'], loadsFor: () => ({ current: [{ trip: '627700' }], next: [] }), nameOf: async () => 'Ferney Urrego', env: {}, now: () => Date.parse('2026-11-23T15:00:00Z'), mail: async (m) => { sent.push(m); } });
   const open = (await h.call('GET /driver/me/log', { driver: { code: '986', name: 'Ferney Urrego' }, query: {} })).body;

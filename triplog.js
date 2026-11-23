@@ -45,6 +45,7 @@ const COSIGN_WAIT_MS = 15 * 60000;                     // how long payroll waits
 const KEEP_WEEKS = 150;   // about two years of trip sheets on each driver's profile
 const OPEN = 'open';      // the sheet being filled in
 const LOOKBACK_DAYS = 30;
+const RAN_DAYS = 14;   // finished loads found only in TruckMate's records (never opened in the app): the last two weeks
 const MAX_LINES = 80;
 const ACTS = ['PU', 'DEL', 'DROP', 'EMPTY', 'CM'];
 export const BONUS_KINDS = ['none', 'dispatch', 'holiday', 'weekend', 'extraPU', 'extraDel', 'fuelTr', 'other'];
@@ -161,7 +162,7 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
   if (pickups.length) {
     pickups.forEach((x, i) => out.push(line({ key: `${trip}|PU|${x.zip || x.city || i}`, ms: (i === 0 ? puAt : null) || dayMs(x.dateIso), trip, zip: x.zip || '', place: where(x), act: 'PU', fe: 'E', trl: S(t.trailer, 20), bill: puBill, auto: true, ...puExtra(i),
       ...(i === 0 && bonus ? { bonus: 'dispatch', bonusAmt: bonus.amount, bonusFrom: 'dispatch', comment: bonus.text } : {}) })));
-  } else if (real && real.place && cityKey(t.origZoneDesc || t.origin) && cityKey(t.origZoneDesc || t.origin) !== real.city) {
+  } else if (real && real.place && cityKey(t.origZoneDesc || t.origin) && cityKey(t.origZoneDesc || t.origin) !== real.city && !(isMiami(t.origZoneDesc || t.origin) && isMiami(real.place))) {
     // the trip starts where the truck was (empty), then the real pickup
     const origin = S(t.origZoneDesc || t.origin, 60);
     out.push(line({ key: `${trip}|START`, ms: puAt ? puAt - 60000 : null, trip, zip: isMiami(origin) ? HOME_ZIP : (zipOf(origin) || ''), place: origin.replace(/,?\s*\d{5}(-\d{4})?\s*$/, ''), act: 'EMPTY', fe: 'E', trl: S(t.trailer, 20), comment: 'Started here, empty to the pickup', auto: true }));
@@ -427,8 +428,12 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
     const rundowns = (await db.get(`taRundowns:${SITE}`, {}).catch(() => ({}))) || {};
     // finished loads TruckMate had this driver on (driver or co-driver), even ones never opened in the app (Nov 23: Ferney's
     // 627549 and 627656 ran before he used the app, so they weren't in his app trips)
-    const ran = Object.entries(rundowns).filter(([, r]) => { const t = tripOf((r && r.rec && r.rec.item) || {}); return codeOf(t.driver) === codeOf(code) || codeOf(t.driver2) === codeOf(code); }).map(([k]) => String(k));
-    const known = [...new Set([...(((await loadsFor(code, items)) || {}).current || []).map((l) => l.trip), ...((await tripsOf(code)) || []), ...ran])].slice(0, 60);
+    // only the last two weeks of those, newest first (Nov 23: a month of October loads came in and pushed the newest ones out)
+    const lastMs = (it) => Math.max(0, ...((it && (it.freightBills || it.orders)) || []).flatMap((b) => [billMs(b.actualPickup), billMs(b.actualDelivery)]).filter(Boolean));
+    const ran = Object.entries(rundowns).map(([k, r]) => [String(k), (r && r.rec && r.rec.item) || {}, r || {}])
+      .filter(([, it]) => { const t = tripOf(it); return codeOf(t.driver) === codeOf(code) || codeOf(t.driver2) === codeOf(code); })
+      .map(([k, it, r]) => [k, lastMs(it) || Date.parse(r.finishedAt) || 0]).filter(([, ms]) => ms >= now() - RAN_DAYS * DAY).sort((a, b) => b[1] - a[1]).map(([k]) => k);
+    const known = [...new Set([...(((await loadsFor(code, items)) || {}).current || []).map((l) => l.trip), ...ran, ...((await tripsOf(code)) || [])])].slice(0, 60);
     const done = (await turnedIn(code)).trips;
     const book = (await db.get(CHECKINS(SITE), {})) || {};
     const geo = (await db.get('taGeoZip', {}).catch(() => ({}))) || {};
