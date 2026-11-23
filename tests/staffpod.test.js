@@ -6,7 +6,7 @@ import { evaluateBoard } from '../watchtower.js';
 
 const ours = (a) => /@floridabeauty\.us$/.test(a);
 const load = (bills = [{ billNumber: 'B181099', endZoneDescription: 'NEW STANTON, PA, 15672', temperature: 38 }]) => ({ trip: { tripNumber: '627668', status: 'DEPSHIP', powerUnit: '4564', trailer: '18096' }, freightBills: bills });
-const mail = (text, extra = {}) => ({ at: '2026-11-21T15:21:24Z', from: { name: 'Diego Diaz', address: 'ddiaz@floridabeauty.us' }, subject: 'Re: MEGACORP Load 2821479 MD TO PA TR 4564 TL 18096', text, ...extra });
+const mail = (text, extra = {}) => ({ at: '2026-11-21T15:21:24Z', from: { name: 'Diego Diaz', address: 'ddiaz@floridabeauty.us' }, subject: 'Re: MEGACORP B181099 MD TO PA TR 4564 TL 18096', text, ...extra });
 const POD = 'Load delivered\nNo lumper\nClean bills\nPlease see below POD:\nThanks,\nPriscyla Dominguez 🎅🏻 | Inbound Dispatcher 🎄\nFlorida Beauty Express';
 
 test('627668: inbound dispatch\'s "Load delivered / Clean bills / POD" email finishes the load', () => {
@@ -37,10 +37,10 @@ test('never: brokers / customers, not-yet wording, POD requests, quoted history'
 });
 
 test('multi-stop with stops open: only whole-load words close it; otherwise a "Probably finished" hint', () => {
-  const two = load([{ billNumber: 'B1', endZoneDescription: 'MACON, GA', actualDelivery: 'x' }, { billNumber: 'B2', endZoneDescription: 'ROCK HILL, SC' }]);
-  const p = staffDelivery([mail('Delivered\nPOD attached\nThanks,\nLiz Benitez')], two, ours);
+  const two = { ...load([{ billNumber: 'B180001', endZoneDescription: 'MACON, GA', actualDelivery: 'x' }, { billNumber: 'B180002', endZoneDescription: 'ROCK HILL, SC' }]), _subj: 1 };
+  const p = staffDelivery([mail('Delivered\nPOD attached\nThanks,\nLiz Benitez', { subject: 'Re: B180001 B180002' })], two, ours);
   assert.equal(p.whole, false); assert.equal(finishReason({ ...two, _staffPod: p }), null);
-  assert.equal(staffDelivery([mail('All delivered, truck empty')], two, ours).whole, true);
+  assert.equal(staffDelivery([mail('All delivered, truck empty', { subject: 'Re: B180002' })], two, ours).whole, true);
 });
 
 test('no reefer alerts on a load our staff said is delivered', () => {
@@ -50,4 +50,17 @@ test('no reefer alerts on a load our staff said is delivered', () => {
   const before = reefer(it);
   assert.ok(before.length, `expected reefer alerts before, got ${before}`);
   assert.deepEqual(reefer({ ...it, _staffPod: { whole: true } }), []);
+});
+
+test('the subject must name the load; sent after pickup; never a load not picked up (Nov 22: a Penang Nursery POD closed 627656)', () => {
+  const rex = { trip: { tripNumber: '627656', status: 'ARRCONS', powerUnit: '4504', trailer: '18094' }, freightBills: [{ billNumber: 'B181095', endZoneDescription: 'MELBOURNE, FL, 32934' }], _times: { statusHistory: [{ status: 'ARRSHIP', at: '2026-11-22T14:28:15Z' }] } };
+  const penang = mail('Good day,\nLoad completed\nClean bills\nNo lumper\nPlease see the POD below', { at: '2026-11-22T03:02:54Z', subject: 'RE: PENANG NURSERY FL TO FL 276061-111926 / TK# 2214 / TL# 18094 ' });
+  assert.equal(staffDelivery([penang], rex, ours), null, 'another load on the same trailer');
+  assert.equal(staffDelivery([{ ...penang, subject: 'RE: POD B181095' }], rex, ours), null, 'before this load was picked up');
+  const real = mail(POD, { at: '2026-11-22T22:15:21Z', subject: 'Re: REX LOAD # XB-99 MA TO FL - TK 4504 - TL 18094 - B181095' });
+  assert.equal(staffDelivery([penang, real], rex, ours).at, '2026-11-22T22:15:21Z');
+  assert.ok(staffDelivery([mail(POD, { at: '2026-11-22T22:15:21Z', subject: 'Delivered trip 627656' })], rex, ours), 'the trip number');
+  assert.ok(staffDelivery([mail(POD, { at: '2026-11-22T22:15:21Z', subject: 'REX LOAD XB-99 delivered' })], { ...rex, _ratecon: { data: { loadNumber: 'XB-99' } } }, ours), 'the broker\'s load number');
+  const notYet = { trip: { tripNumber: '627606', status: 'DISP', powerUnit: '2018' }, freightBills: [{ billNumber: 'B181111', endZoneDescription: 'ATLANTA, GA, 30336' }] };
+  assert.equal(staffDelivery([mail(POD, { subject: 'POD B181111' })], notYet, ours), null, 'not picked up yet');
 });

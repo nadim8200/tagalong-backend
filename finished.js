@@ -165,9 +165,28 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
     const li = rows.map(({ n, it, reason }) => `<li><b>Trip ${h(n)}</b> (${h(laneOf(it))}, truck ${h(tripOf(it).powerUnit || '—')}) — ${h(reason)}</li>`).join('');
     Promise.resolve(mailer.send({ to, subject: rows.length === 1 ? `Jarvis closed load ${rows[0].n} from a POD email` : `Jarvis closed ${rows.length} loads from POD emails`, html: `<div style="font-family:Arial,sans-serif;font-size:14px"><p>A note from Jarvis,</p><p>Our staff emailed that these loads are delivered, so they left the active board and their alerts and went to <b>Delivered</b>:</p><ul>${li}</ul><p>If one isn't really done, open it in Delivered and click <b>Reopen</b> — Jarvis won't close it again. Please also close it in TruckMate.</p><p>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>` })).catch((e) => console.warn('[finished] pod notice:', e.message));
   }
+  // one time (Nov 22): the first staff-POD rule matched emails to loads by truck / trailer and closed wrong loads (627606 before
+  // pickup, 627445, 627569…). Take back every load that rule closed — off Delivered, back on the board — so the stricter rule
+  // (subject names the load, sent after pickup) decides again. Real ones close again on the next board build.
+  const POD_FIX = 'taFinishedPodFix1';
+  let podFixed = null;
+  async function undoFirstPodRule(site) {
+    if (podFixed) return podFixed;
+    podFixed = (async () => {
+      if ((await db.get(POD_FIX, null))) return;
+      const isPod = (r) => /\(staff email\)$/.test(String(r || ''));
+      const undone = [];
+      await db.update(key(site), (cur) => { const a = { ...(cur || {}) }; for (const [n, v] of Object.entries(a)) if (v && v.auto && isPod(v.reason)) { delete a[n]; undone.push(n); } return a; }, {});
+      await db.update(`taTruckMateDelivered:${site}`, (cur) => ({ ...(cur || {}), items: ((cur && cur.items) || []).filter((x) => !isPod(x.reason)) }), { items: [] });
+      await db.set(POD_FIX, { at: new Date(now()).toISOString(), undone });
+      if (undone.length) console.log(`[finished] took back ${undone.length} load(s) the first POD-email rule closed: ${undone.join(', ')}`);
+    })();
+    return podFixed;
+  }
   // Called while the board is built: takes finished loads out of `items` (in place).
   async function sweep(site, items, recs = {}) {
     if (!enabled || !items.length) return { finished: [], unclosed: [] };
+    await undoFirstPodRule(site);
     const fin = await db.get(key(site), {});
     const asks = ((await db.get(`taDoneAsk:${site}`, {})) || {}).asks || {};
     const milestones = (await db.get(`taMilestones:${site}`, {})) || {};
@@ -184,10 +203,10 @@ export function initFinished(app, { requireAuth, db, onFinished = null, recordFi
       // (temperatures still watched) until the driver says Yes in the app or dispatch marks it finished — not "Not closed"
       const fp = it._flowerPhase && it._flowerPhase.phase;
       const pod = it._staffPod && !it._staffPod.whole ? `${staffPodReason(it._staffPod).replace(/ \(staff email\)$/, '')} — other stops still open in TruckMate` : null;
-      const guess = pod || fp === 'next-load' ? `flowers delivered, trailer now on trip ${it._flowerPhase.by}`
+      const guess = pod || (fp === 'next-load' ? `flowers delivered, trailer now on trip ${it._flowerPhase.by}`
         : fp === 'delivered' && mv ? `flowers delivered, ${mv.by} ${mv.unit} now on trip ${mv.newTrip}`
           : !mv && reason ? reason
-            : !mv && !NOT_STARTED.test(String(tripOf(it).status || '')) ? leftEveryDelivery(it, milestones) : null;
+            : !mv && !NOT_STARTED.test(String(tripOf(it).status || '')) ? leftEveryDelivery(it, milestones) : null);
       const quiet = quietDone(it, recs[n], guess, asks[n], now());
       if (quiet) { newly.push({ n, it, reason: quiet }); continue; }
       if (guess) { it._finishGuess = guess; it._finishHint = `Probably finished — ${guess}${askLine(asks[n])}`; continue; }

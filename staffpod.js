@@ -4,7 +4,10 @@
 //   - group emails count (dispatch writes to the Inbound group, Jarvis only in the loop); auto-replies / newsletters don't
 //   - only Florida Beauty addresses (isInternal) — a broker's or customer's email never closes a load
 //   - only the email's own words (quoted history cut off), and never "still at the receiver", "unloading", "send the POD"…
-//   - a subject naming another bill (the truck's next load) doesn't count for this one
+//   - the SUBJECT names this load (Nov 22, Nadim: "POD emails state what load it's from with the subject line"): its bill
+//     (B181095), its trip number, or the broker's load number from the rate con. Matching by truck / trailer alone closed the
+//     wrong loads (a Penang Nursery POD on trailer 18094 closed trip 627656 before it was picked up)
+//   - sent after the load was picked up (never a load that hasn't started)
 //   - a multi-stop load with stops still open in TruckMate closes only on whole-load words ("load delivered", "all
 //     delivered", "empty"); otherwise it is a hint on the card (the driver is asked, as for other guesses)
 // Pure. → { at, by, signer, subject, whole } | null (the newest qualifying email)
@@ -37,11 +40,23 @@ export function staffDelivery(emails = [], item = {}, isInternal = () => false) 
   const places = new Set(bills.map((b) => b && (b.endZoneDescription || b.endZone)).filter(Boolean));
   const openStops = places.size > 1 && bills.some((b) => b && !b.actualDelivery);
   const list = [...emails].filter((e) => e && (!e.auto || e.auto === 'group')).sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+  const hist = ((item && item._times && item._times.statusHistory) || []).find((x) => /^(ARRSHIP|DEPSHIP)/i.test(String(x.status || '')));
+  const pickedMs = hist ? Date.parse(hist.at) : null;
+  if (!pickedMs && /^(DISP|ASSGN|ASSIGNED|AVAIL|AVBL|NEW|PLAN|PEND|PRINTED)/i.test(String(t.status || ''))) return null;   // not picked up yet
+  const tripN = String(t.tripNumber || '');
+  const rc = (item && item._ratecon && (item._ratecon.data || item._ratecon)) || {};
+  const brokerNo = String(rc.loadNumber || rc.load_number || '').trim().toUpperCase();
+  const namesThis = (subj) => {
+    const u = String(subj || '').toUpperCase();
+    return [...ours].some((b) => new RegExp(`\\b${b}\\b`).test(u)) || (tripN.length >= 6 && new RegExp(`\\b${tripN}\\b`).test(u))
+      || (brokerNo.length >= 4 && u.includes(brokerNo));
+  };
   for (const e of list) {
     const addr = String((e.from && e.from.address) || '').toLowerCase();
     if (!addr || !isInternal(addr)) continue;
+    if (!namesThis(e.subject)) continue;                                                // the subject doesn't say it's this load
+    if (pickedMs && (Date.parse(e.at) || 0) < pickedMs) continue;                        // before this load was picked up
     const named = (String(e.subject || '').match(BILL) || []).map((x) => x.toUpperCase());
-    if (named.length && ours.size && !named.some((x) => ours.has(x))) continue;          // another load's thread
     const words = ownWords(e.text);
     const subj = /^\s*POD\b/i.test(String(e.subject || '')) && named.some((x) => ours.has(x));   // "POD FOR B181099"
     if (NOT_YET.test(words) || !(DELIVERED.test(words) || subj)) continue;

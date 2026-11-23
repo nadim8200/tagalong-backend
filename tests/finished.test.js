@@ -180,3 +180,28 @@ test('dispatcher closes a load by hand: completed → Delivered + rundown; taken
   assert.deepEqual(rundowns, ['marked finished by Ana — POD in'], 'no rundown for a load taken off the board');
   assert.equal(m.get('taFinished:fb')['625241'].removed, true);
 });
+
+test('a load with a staff POD email for only some stops never breaks the sweep (Nov 22: the board kept finished loads)', async () => {
+  const store = {}; const db = { enabled: true, get: async (k, d) => store[k] ?? d, set: async (k, v) => { store[k] = v; }, update: async (k, fn, d) => (store[k] = fn(store[k] ?? d)) };
+  const f = initFinished({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db });
+  const items = [
+    { trip: { tripNumber: '627587', status: 'DEPCONS', powerUnit: '2302' }, freightBills: [{ endZoneDescription: 'A, TN', actualDelivery: 'x' }, { endZoneDescription: 'MEMPHIS, TN' }], _staffPod: { at: '2026-11-23T00:37:01Z', by: 'Liz', whole: false } },
+    { trip: { tripNumber: '627656', status: 'ARRCONS', powerUnit: '4504' }, freightBills: [{ endZoneDescription: 'MELBOURNE, FL' }], _staffPod: { at: '2026-11-22T22:15:21Z', by: 'Diego Diaz', whole: true } },
+  ];
+  await f.sweep('florida-beauty', items, {});
+  assert.deepEqual(items.map((x) => x.trip.tripNumber), ['627587']);
+  assert.match(items[0]._finishHint, /^Probably finished — delivered — POD emailed by Liz/);
+});
+
+test('one time: loads the first POD-email rule closed come back to the board and off Delivered', async () => {
+  const store = { 'taFinished:florida-beauty': { 627606: { at: 'x', reason: 'delivered — POD emailed by Diego Diaz, Sun (staff email)', by: 'AI Dispatcher', auto: true }, 627001: { at: 'x', reason: 'TruckMate: delivered', auto: true } },
+    'taTruckMateDelivered:florida-beauty': { items: [{ tripNumber: '627606', reason: 'delivered — POD emailed by Diego Diaz, Sun (staff email)' }, { tripNumber: '627001', reason: 'TruckMate: delivered' }] } };
+  const db = { enabled: true, get: async (k, d) => store[k] ?? d, set: async (k, v) => { store[k] = v; }, update: async (k, fn, d) => (store[k] = fn(store[k] ?? d)) };
+  const f = initFinished({ get() {}, put() {}, post() {} }, { requireAuth: () => {}, db });
+  const items = [{ trip: { tripNumber: '627606', status: 'DISP', powerUnit: '2018' }, freightBills: [{ endZoneDescription: 'ATLANTA, GA' }] }];
+  await f.sweep('florida-beauty', items, {});
+  assert.equal(items.length, 1, 'back on the board');
+  assert.deepEqual(Object.keys(store['taFinished:florida-beauty']), ['627001']);
+  assert.deepEqual(store['taTruckMateDelivered:florida-beauty'].items.map((x) => x.tripNumber), ['627001']);
+  assert.deepEqual(store.taFinishedPodFix1.undone, ['627606']);
+});
