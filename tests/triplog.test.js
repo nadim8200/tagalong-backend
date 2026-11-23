@@ -372,3 +372,25 @@ test('TEST homework (admin): a copy of Ferney\'s open sheet goes to payroll unde
   assert.deepEqual(Object.keys(h.kv['taTripLogIndex:florida-beauty']), []);
   assert.deepEqual(h.kv['taTripLog:florida-beauty:TEST986'], {});
 });
+
+test('Ferney\'s sheet reads like the trips went: LTL out of Miami → the load down to Melbourne → empty from Melbourne, pickup in Miami, stops; a test can take only some trips', async () => {
+  const { initTripLog, realPickup } = await import('../triplog.js');
+  const h = harness(); const sent = [];
+  const bill = (n, from, to, pu, del) => ({ billNumber: n, startZone: from.slice(-5), startZoneDescription: from, endZoneDescription: to, pieces: 10, actualPickup: pu, actualDelivery: del });
+  const done = {
+    627549: { rec: { item: { trip: { tripNumber: 627549, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [bill('G1', 'MIAMI, FL, 33122', 'CLIFTON, NJ, 07011', '2026-11-17T20:00:00', '2026-11-19T09:00:00')] } } },
+    627656: { rec: { item: { trip: { tripNumber: 627656, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'WALTHAM, MA, 02451' }, freightBills: [bill('G2', 'WALTHAM, MA, 02451', 'MELBOURNE, FL, 32934', '2026-11-20T10:00:00', '2026-11-22T08:00:00')] } } },
+  };
+  const now = { trip: { tripNumber: 627700, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '7280', origZoneDesc: 'MELBOURNE, FL, 32934' }, _manifest: { stops: [{ action: 'LOAD', customer: 'MIAMI TERMINAL' }] },
+    freightBills: [bill('G3', 'MIAMI, FL, 33122', 'WINCHESTER, MA, 01890', '2026-11-23T01:59:50', null)] };
+  assert.equal(realPickup(now).zip, '33122'); assert.match(realPickup(now).place, /MIAMI TERMINAL/);
+  h.kv['taRundowns:florida-beauty'] = done;
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [now], tripsOf: async () => ['627700', '627656', '627549'], loadsFor: () => ({ current: [{ trip: '627700' }], next: [] }), nameOf: async () => 'Ferney Urrego', env: {}, now: () => Date.parse('2026-11-23T15:00:00Z'), mail: async (m) => { sent.push(m); } });
+  const open = (await h.call('GET /driver/me/log', { driver: { code: '986', name: 'Ferney Urrego' }, query: {} })).body;
+  assert.deepEqual(open.lines.map((l) => `${l.trip} ${l.act}`), ['627549 PU', '627549 DEL', '627656 PU', '627656 DEL', '627700 EMPTY', '627700 PU', '627700 DEL']);
+  assert.match(open.lines[4].place, /MELBOURNE/); assert.equal(open.lines[5].zip, '33122');
+  const r = await h.call('POST /truckmate/driver-profiles/:code/logs/test-submit', { params: { code: '0986' }, user: { admin: true }, body: { trips: ['627549', '627656'] } });
+  assert.equal(r.body.lines, 4);
+  const log = Object.values(h.kv['taTripLog:florida-beauty:TEST986'])[0];
+  assert.deepEqual(log.lines.map((l) => `${l.trip} ${l.act}`), ['627549 PU', '627549 DEL', '627656 PU', '627656 DEL']);
+});

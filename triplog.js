@@ -34,6 +34,7 @@ import { sendMail } from './mailer.js';
 import { readableFile } from './heic.js';
 import { tripLogPdf, pdfName } from './triplogpdf.js';
 import { asLive } from './training.js';
+import { localToUtcMs } from './watchtower.js';
 import { createHash } from 'node:crypto';
 
 const SITE = 'florida-beauty';
@@ -122,10 +123,29 @@ const isMiami = (x) => /\bMIAMI\b|\bMIA\b|DORAL|HIALEAH|MEDLEY/i.test(String(x |
 // The pickups (the load sheet dispatch sent or the rate con, else where the trip starts), then each delivery: the trip sheet /
 // TruckMate stops with the driver's check-ins, else the load sheet's deliveries. Dated by the check-ins (else the sheet's date);
 // time at a stop = check-in "arrived" → "delivered". A pickup is reached empty, a delivery loaded. Pure.
+// TruckMate's bill times ("2026-11-23T01:59:50", Miami time) → ms. Pure.
+export const billMs = (v) => { const ms = v ? localToUtcMs(String(v).slice(0, 16), 'America/New_York') : NaN; return Number.isFinite(ms) ? ms : null; };
+const cityKey = (z) => String(z || '').split(',')[0].trim().toUpperCase();
+// Where the load is really picked up: the bills' start zone (most of them), else the trip sheet's LOAD stop. TruckMate's trip
+// origin can be where the truck STARTED instead (Nov 23: trip 627700 "MELBOURNE → WINCHESTER" — the truck came from delivering
+// 627656 in Melbourne and loaded at the Miami terminal). Pure. → { place, zip, ms } | null
+export function realPickup(item) {
+  const bills = (item && (item.freightBills || item.orders)) || [];
+  const count = {}; for (const b of bills) { const z = String(b.startZoneDescription || '').trim(); if (z) count[z] = (count[z] || 0) + 1; }
+  const top = Object.entries(count).sort((a, b) => b[1] - a[1])[0];
+  const load = ((item && item._manifest && item._manifest.stops) || []).find((x) => /^LOAD/i.test(String(x.action || '')));
+  const ms = Math.min(...bills.map((b) => billMs(b.actualPickup)).filter(Boolean));
+  if (!top && !load) return null;
+  const zone = top ? top[0] : '';
+  const place = load && load.customer && /TERMINAL|COOLER|YARD/i.test(load.customer) ? `${cityKey(zone) || 'MIAMI'}, ${(zone.match(/,\s*([A-Z]{2})\b/) || [])[1] || 'FL'} · ${load.customer}` : zone.replace(/,?\s*\d{5}(-\d{4})?\s*$/, '');
+  return { place, zip: zipOf(zone) || (load && load.zip) || '', city: cityKey(zone) || cityKey(load && (load.city || load.customer)), ms: Number.isFinite(ms) ? ms : null };
+}
+
 export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {} } = {}) {
   const t = tripOf(item); const trip = tripNo(item);
   const out = [];
-  const puAt = atOf(steps.loaded) || atOf(steps['at-shipper']);
+  const real = realPickup(item);
+  const puAt = atOf(steps.loaded) || atOf(steps['at-shipper']) || (real && real.ms) || null;
   const bonus = bonusFromSheet(sheet);
   const dayMs = (iso) => { const ms = Date.parse(`${iso || ''}T16:00:00Z`); return Number.isNaN(ms) ? null : ms; };
   const sheetStops = ((sheet && sheet.stops) || []).filter((x) => x && (x.zip || x.city));
@@ -141,6 +161,12 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
   if (pickups.length) {
     pickups.forEach((x, i) => out.push(line({ key: `${trip}|PU|${x.zip || x.city || i}`, ms: (i === 0 ? puAt : null) || dayMs(x.dateIso), trip, zip: x.zip || '', place: where(x), act: 'PU', fe: 'E', trl: S(t.trailer, 20), bill: puBill, auto: true, ...puExtra(i),
       ...(i === 0 && bonus ? { bonus: 'dispatch', bonusAmt: bonus.amount, bonusFrom: 'dispatch', comment: bonus.text } : {}) })));
+  } else if (real && real.place && cityKey(t.origZoneDesc || t.origin) && cityKey(t.origZoneDesc || t.origin) !== real.city) {
+    // the trip starts where the truck was (empty), then the real pickup
+    const origin = S(t.origZoneDesc || t.origin, 60);
+    out.push(line({ key: `${trip}|START`, ms: puAt ? puAt - 60000 : null, trip, zip: isMiami(origin) ? HOME_ZIP : (zipOf(origin) || ''), place: origin.replace(/,?\s*\d{5}(-\d{4})?\s*$/, ''), act: 'EMPTY', fe: 'E', trl: S(t.trailer, 20), comment: 'Started here, empty to the pickup', auto: true }));
+    out.push(line({ key: `${trip}|PU|origin`, ms: puAt, trip, zip: real.zip || (isMiami(real.place) ? HOME_ZIP : ''), place: real.place, act: 'PU', fe: 'E', trl: S(t.trailer, 20), bill: puBill, auto: true, ...puExtra(0),
+      ...(bonus ? { bonus: 'dispatch', bonusAmt: bonus.amount, bonusFrom: 'dispatch', comment: bonus.text } : {}) }));
   } else {
     const origin = S(t.origZoneDesc || t.origin || 'Miami Terminal', 60);
     out.push(line({ key: `${trip}|PU|origin`, ms: puAt, trip, zip: isMiami(origin) ? HOME_ZIP : (zipOf(t.origZoneDesc || t.origin) || ''), place: origin.replace(/,?\s*\d{5}(-\d{4})?\s*$/, ''), act: 'PU', fe: 'E', trl: S(t.trailer, 20), bill: puBill, auto: true, ...puExtra(0),
@@ -150,7 +176,10 @@ export function tripLines(item, steps = {}, { sheet = null, geo = {}, clocks = {
   try { stops = driverStops(item, { geo }); } catch { stops = []; }
   if (stops.length) {
     for (const st of stops) {
-      const arr = atOf(steps[`arrived:${st.key}`]); const del = atOf(steps[`delivered:${st.key}`]);
+      const arr = atOf(steps[`arrived:${st.key}`]);
+      // delivered: the driver's check-in, else TruckMate's own delivery time on the stop's bills (loads run without check-ins)
+      const billsHere = ((item && (item.freightBills || item.orders)) || []).filter((b) => (st.bills || []).some((x) => x.bill === b.billNumber));
+      const del = atOf(steps[`delivered:${st.key}`]) || (billsHere.length && billsHere.every((b) => b.actualDelivery) ? Math.max(...billsHere.map((b) => billMs(b.actualDelivery) || 0)) || null : null);
       // the appointment: the trip sheet's, else the load sheet's stop with the same ZIP / city
       const ss = sheetStops.find((x) => x.kind === 'delivery' && ((st.zip && x.zip === st.zip) || (x.city && String(st.place || '').toUpperCase().startsWith(String(x.city).toUpperCase()))));
       const appt = apptMs({ text: st.appt || '', dayMs: arr }) || (ss ? apptMs({ dateIso: ss.dateIso, text: ss.time, dayMs: arr }) : null);
@@ -412,17 +441,26 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       let stopsHere = []; try { stopsHere = driverStops(it, { geo }); } catch { stopsHere = []; }
       const steps = stepsWithReports((book[trip] || {}).steps || {}, stopsHere, reportsAll[trip] || []);
       const times = Object.values(steps).map(atOf).filter(Boolean);
-      const recent = times.some((ms) => ms >= since);
+      // a load run without check-ins counts too, by TruckMate's own pickup / delivery times (Nov 23: Ferney's 627549 and 627656)
+      const billTimes = ((it.freightBills || it.orders || [])).flatMap((b) => [billMs(b.actualPickup), billMs(b.actualDelivery)]).filter(Boolean);
+      const recent = times.some((ms) => ms >= since) || billTimes.some((ms) => ms >= since);
       const onNow = items.includes(it) && !times.length;
       if (!recent && !onNow) continue;
       const sh = sheets ? await sheets.get(trip).catch(() => null) : null; // eslint-disable-line no-await-in-loop
-      lines.push(...tripLines(it, steps, { sheet: sh, geo, clocks }));
+      // the sheet reads like the trip went: whole trips in the order they started, each in its own order (start → pickup →
+      // stops), a line without a time kept right after the one before it
+      const tl = tripLines(it, steps, { sheet: sh, geo, clocks });
+      const first = Math.min(...tl.map((l) => l._ms).filter(Boolean), ...times, ...billTimes);
+      let last = Number.isFinite(first) ? first : now();
+      tl.forEach((l, i) => { last = l._ms && l._ms >= last ? l._ms : last + 1; l._sk = last + i * 0.001; });
+      lines.push(...tl);
       const t = tripOf(it); if (t.powerUnit) trucks.push(String(t.powerUnit)); if (t.trailer) trailers.push(String(t.trailer));
       // the team partner on this trip (the other driver TruckMate has on it)
       const other = codeOf(t.driver) === codeOf(code) ? t.driver2 : codeOf(t.driver2) === codeOf(code) ? t.driver : null;
       if (other) partners.push(codeOf(other));
     }
-    lines.sort((a, b) => (a._ms || Infinity) - (b._ms || Infinity));
+    const sk = (l) => (l._sk != null ? l._sk : l._ms || Infinity);
+    lines.sort((a, b) => sk(a) - sk(b));
     const period = periodOf(lines);
     const truck = trucks[0] || '';
     const [odo, stays] = await Promise.all([odometer(truck, period), periodStays(truck, period)]);
@@ -430,13 +468,13 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
     if (stays.length && lines.filter((l) => l._ms).length >= Math.max(1, lines.length / 2)) {
       for (const l of lines) { if (l.zip) l._pt = await zipPoint(l.zip).catch(() => null); } // eslint-disable-line no-await-in-loop
       lines.push(...missingMoves(lines, stays));
-      lines.sort((a, b) => (a._ms || Infinity) - (b._ms || Infinity));
+      lines.sort((a, b) => sk(a) - sk(b));
     }
     const co = partners[0] || '';
     const coName = co && nameOf ? await nameOf(co).catch(() => '') : '';
     return {
       head: { name: driver.name || '', id: String(code), co: coName || '', coid: co, truck, trailer: [...new Set(trailers)].join(' - '), bod: odo && odo.begin != null ? String(odo.begin) : '', eod: odo && odo.end != null ? String(odo.end) : '', note: '' },
-      lines: lines.map(({ _ms, _pt, ...x }) => x), odometer: odo, status: 'new', period,
+      lines: lines.map(({ _ms, _pt, _sk, ...x }) => x), odometer: odo, status: 'new', period,
     };
   }
   // a sheet's dates: its first line to its last (or to now while it's open). Pure.
@@ -720,8 +758,17 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
         const name = (nameOf ? await nameOf(code).catch(() => '') : '') || `driver ${code}`;
         const fresh = await prefill({ code, name });
         const saved = (await store(code))[OPEN];
-        const lines = cleanLines(saved ? mergeSheet(saved.lines || [], fresh.lines.map(({ _ms, ...x }) => x), saved.dismissed || []) : fresh.lines.map(({ _ms, ...x }) => x));
-        if (!lines.length) return res.status(409).json({ error: `${name} has no lines on the open sheet to test with.` });
+        let lines = cleanLines(saved ? mergeSheet(saved.lines || [], fresh.lines.map(({ _ms, ...x }) => x), saved.dismissed || []) : fresh.lines.map(({ _ms, ...x }) => x));
+        // only some trips (Nov 23: test with the finished LTL + the load down to Melbourne, not the trip running now); a line
+        // without a trip (a move GPS found) stays when it falls between the kept trips
+        const pick = [].concat((req.body && req.body.trips) || []).map(String).filter(Boolean);
+        if (pick.length) {
+          const kept = lines.filter((l) => pick.includes(String(l.trip || '')));
+          const ts = kept.map((l) => Date.parse(l.at)).filter(Number.isFinite);
+          const lo = Math.min(...ts); const hi = Math.max(...ts);
+          lines = lines.filter((l) => (l.trip ? pick.includes(String(l.trip)) : Date.parse(l.at) >= lo && Date.parse(l.at) <= hi));
+        }
+        if (!lines.length) return res.status(409).json({ error: pick.length ? `No lines for trip ${pick.join(', ')} on ${name}'s sheet.` : `${name} has no lines on the open sheet to test with.` });
         const real = cleanHead({ ...fresh.head, ...((saved && saved.head) || {}) });
         const head = { ...real, name: `TEST — ${real.name || name}`, id: testCode(code), co: real.co ? `${real.co} (test)` : '', coid: real.coid ? testCode(real.coid) : '' };
         const period = periodOf(lines, now());
