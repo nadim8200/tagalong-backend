@@ -98,8 +98,9 @@ export async function sendMail(message, { env = process.env, fetchFn = globalThi
   // with a plain-text twin (and no files): send MIME multipart/alternative so every mail app has a readable version
   if (text && !attachments.length) {
     const b64 = (x) => Buffer.from(String(x), 'utf8').toString('base64').replace(/.{76}/g, '$&\r\n');
+    const replyTo = (Array.isArray(guarded.replyTo) ? guarded.replyTo : []).map(String).filter((x) => /^[^@\s<>]+@[^@\s<>]+$/.test(x));
     const boundary = `jv_${Date.now().toString(36)}`;
-    const mime = [`From: ${cfg.from}`, `To: ${list.join(', ')}`, ...(ccList.length ? [`Cc: ${ccList.join(', ')}`] : []), ...(bcc.length ? [`Bcc: ${bcc.map((x) => x.emailAddress.address).join(', ')}`] : []), `Subject: =?UTF-8?B?${Buffer.from(String(subject || ''), 'utf8').toString('base64')}?=`, 'MIME-Version: 1.0', `Content-Type: multipart/alternative; boundary="${boundary}"`, '',
+    const mime = [...(replyTo.length ? [`Reply-To: ${replyTo.join(', ')}`] : []), `From: ${cfg.from}`, `To: ${list.join(', ')}`, ...(ccList.length ? [`Cc: ${ccList.join(', ')}`] : []), ...(bcc.length ? [`Bcc: ${bcc.map((x) => x.emailAddress.address).join(', ')}`] : []), `Subject: =?UTF-8?B?${Buffer.from(String(subject || ''), 'utf8').toString('base64')}?=`, 'MIME-Version: 1.0', `Content-Type: multipart/alternative; boundary="${boundary}"`, '',
       `--${boundary}`, 'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', b64(text),
       `--${boundary}`, 'Content-Type: text/html; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', b64(html), `--${boundary}--`, ''].join('\r\n');
     const r = await fetchFn(`${GRAPH}/users/${encodeURIComponent(cfg.from)}/sendMail`, { method: 'POST', headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'text/plain' }, body: Buffer.from(mime, 'utf8').toString('base64') });

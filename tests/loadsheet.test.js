@@ -322,5 +322,19 @@ test('the broker email route: sent with the dispatch box CC\'d and replies to th
   assert.equal(r.body.ok, true);
   assert.deepEqual(mails[0].to, ['ops@echo.com', 'team@echo.com']); assert.deepEqual(mails[0].cc, ['inbound-dispatch@floridabeauty.us']);
   assert.deepEqual(mails[0].replyTo, ['jospino@floridabeauty.us', 'Inbound-Dispatch@floridabeauty.us']);
-  assert.match(mails[0].html, /Driver is OTP tomorrow\.\n\nThanks,\n\nJeremy Ospino\nFlorida Beauty Express\nEmail: jospino@floridabeauty\.us/);
+  assert.match(mails[0].text, /Driver is OTP tomorrow\.\n\nThanks,\n\nJeremy Ospino\nFlorida Beauty Express\nEmail: jospino@floridabeauty\.us/);
+});
+
+test('broker HTML preserves submitted equipment, drivers, phones, comments and signature; safely falls back for incomplete bodies', async () => {
+  const { brokerInfoHtml, brokerInfoEmail } = await import('../loadsheet.js');
+  const e = brokerInfoEmail({ truck:'2614', trailer:'7371', bill:'B181051', rc:{tempSetting:'36'}, drivers:[{name:'Manuel Rivera',code:'6291',phone:'7866917947'},{name:'Angel Rivera',code:'6689',phone:'7866917830'}] });
+  const h = brokerInfoHtml(e.body, 'Call <dispatch> & confirm\nReady tomorrow.', 'Nadim\nFlorida Beauty Express\nEmail: nadim@example.com', e.subject);
+  for (const v of ['2614','7371','36F','MANUEL RIVERA (6291)','ANGEL RIVERA (6689)','MANUEL RIVERA: 786-691-7947','ANGEL RIVERA: 786-691-7830','PH#','Good day,','Please see the driver info below','Thanks,','B181051']) assert.ok(h.includes(v), v);
+  assert.match(h, /Call &lt;dispatch&gt; &amp; confirm<br>Ready tomorrow\./);
+  assert.ok(!/<script|<style|https?:\/\/|display:grid/.test(h));
+  assert.match(h, /role="presentation"/);
+  const fallback = brokerInfoHtml('Good day,\n\nEdited custom body <test>', '', 'A & B');
+  assert.match(fallback, /Edited custom body &lt;test&gt;/);
+  assert.ok(!fallback.includes('DISPATCHER COMMENTS'));
+  assert.match(fallback, /A &amp; B/);
 });

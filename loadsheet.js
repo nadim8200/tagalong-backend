@@ -260,6 +260,26 @@ export function brokerInfoEmail({ rc = {}, bill = '', truck = '', trailer = '', 
 // The whole email as sent: the body, the comments, "Thanks," and the signature. Pure.
 export const brokerInfoText = (body, comments, signature) => [String(body || '').trim(), String(comments || '').trim(), 'Thanks,', '', String(signature || '').trim()].filter(Boolean).join('\n\n').replace(/Thanks,\n\n\n\n/, 'Thanks,\n\n');
 
+// Presentation only: format the submitted text, never re-read or persist driver fields.
+// Unknown/partially filled bodies remain intact instead of guessing which value is which.
+export function brokerInfoHtml(body, comments, signature, subject = '') {
+  const esc = (v) => String(v || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const lines = (v) => esc(v).replace(/\r?\n/g, '<br>');
+  const raw = String(body || '').trim();
+  const match = raw.match(/^Good day,\r?\n\r?\nPlease see the driver info below\r?\n\r?\n(\d+)\r?\n(\d+)\r?\n(-?\d+(?:\.\d+)?[FC])\r?\n([\s\S]*)$/);
+  const label = 'font-size:11px;letter-spacing:1px;font-weight:bold;color:#64748b;';
+  let content = `<p style="margin:0;line-height:1.7">${lines(raw)}</p>`;
+  if (match) {
+    const remaining = match[4].split(/\r?\n\r?\nPH#\r?\n/);
+    const driverRows = remaining[0].split(/\r?\n/).filter(Boolean).map((d) => `<tr><td style="padding:13px 16px;border-bottom:1px solid #dce4ee;font-weight:bold;">${esc(d)}</td></tr>`).join('');
+    content = `<p style="margin:0 0 8px">Good day,</p><p style="margin:0 0 24px;color:#475569">Please see the driver info below</p>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#eaf0f8;border:1px solid #d5dfed;"><tr>${['TRUCK','TRAILER','TEMP'].map((title,i) => `<td width="33%" style="padding:18px 12px;border-right:${i < 2 ? '1px solid #d5dfed' : '0'}"><div style="${label}">${title}</div><div style="font-size:26px;font-weight:bold;color:#153456;margin-top:6px">${esc(match[i+1])}</div></td>`).join('')}</tr></table>
+<p style="${label}margin:26px 0 10px">DRIVER INFORMATION</p><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f5f7fa;border:1px solid #dce4ee">${driverRows}</table>
+${remaining.length > 1 ? `<p style="${label}margin:24px 0 10px">PH#</p><p style="margin:0;line-height:1.9;color:#1558b0;font-weight:bold">${lines(remaining.slice(1).join('\n\nPH#\n'))}</p>` : ''}`;
+  }
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;padding:0;background:#e8edf3"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#e8edf3;font-family:Calibri,Arial,sans-serif;color:#172b45;font-size:16px"><tr><td align="center" style="padding:24px 12px"><!--[if mso]><table role="presentation" width="640"><tr><td><![endif]--><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border:1px solid #d4deea"><tr><td style="padding:24px 28px;background:#142e50;border-bottom:4px solid #3978c6;color:#ffffff"><div style="font-size:12px;letter-spacing:2px">FLORIDA BEAUTY EXPRESS</div><div style="font-size:29px;font-weight:bold;margin-top:10px">Driver information</div></td></tr><tr><td style="padding:18px 28px;background:#eff4fa;color:#24486f;font-size:13px;line-height:1.6;font-weight:bold;word-break:break-word">${esc(subject)}</td></tr><tr><td style="padding:28px">${content}${String(comments || '').trim() ? `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:24px;background:#edf4fc;border-left:3px solid #3978c6"><tr><td style="padding:16px"><div style="${label}margin-bottom:8px">DISPATCHER COMMENTS</div><div style="line-height:1.6">${lines(String(comments).trim())}</div></td></tr></table>` : ''}<div style="margin-top:28px;padding-top:22px;border-top:1px solid #dce4ee;line-height:1.7">Thanks,<br><br>${lines(String(signature || '').trim())}</div></td></tr></table><!--[if mso]></td></tr></table><![endif]--></td></tr></table></body></html>`;
+}
+
 // how dispatch signs: the first name ("THANKS, JEREMY."). "Nadim Tellez" / "ntellez@…" → "NADIM" / "NTELLEZ". Pure.
 export const initialsOf = (name) => (String(name || '').split(/[\s@]+/).find((w) => /^[A-Za-z]/.test(w)) || '').replace(/[^A-Za-z'-]/g, '').toUpperCase();
 
@@ -420,10 +440,10 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const me = (req.user && req.user.email) || '';
     const extraCc = (Array.isArray(b.cc) ? b.cc : []).map((x) => String(x).trim()).filter((x) => /@/.test(x));
     const cc = [...new Set([...BROKER_INFO_CC, ...extraCc].map((x) => x.toLowerCase()))].filter((x) => !to.includes(x));
-    const text = brokerInfoText(b.body, b.comments, b.signature || [who(req), 'Florida Beauty Express', me ? `Email: ${me}` : ''].filter(Boolean).join('\n'));
-    const esc = (x) => String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const signature = b.signature || [who(req), 'Florida Beauty Express', me ? `Email: ${me}` : ''].filter(Boolean).join('\n');
+    const text = brokerInfoText(b.body, b.comments, signature);
     try {
-      const r = await sendMail({ to, cc, subject, html: `<div style="font-family:Calibri,Arial,sans-serif;font-size:14px;white-space:pre-wrap">${esc(text)}</div>`, replyTo: [me, ...BROKER_INFO_CC].filter(Boolean) });
+      const r = await sendMail({ to, cc, subject, html: brokerInfoHtml(b.body, b.comments, signature, subject), text, replyTo: [me, ...BROKER_INFO_CC].filter(Boolean) });
       if (log) await log(SITE, trip, { type: 'email', kind: 'broker-driver-info', to: to.join(', '), text: subject, by: who(req), noThread: true }).catch(() => {});
       res.json({ ok: true, to, cc, subject, held: !!(r && r.held), sentTo: (r && r.to) || to });
     } catch (e) { res.status(502).json({ error: e.message || 'Could not send the email.' }); }

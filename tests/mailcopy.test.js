@@ -39,3 +39,13 @@ test('a reply on a thread is copied too', async () => {
   const patch = c.calls.find((x) => /messages\/d1$/.test(x.url));
   assert.equal(JSON.parse(patch.body).bccRecipients[0].emailAddress.address, 'ntellez@floridabeauty.us');
 });
+
+test('multipart email retains dispatcher reply addresses without header injection', async () => {
+  const c = capture();
+  await sendMail({to:['broker@example.com'],cc:['Inbound-Dispatch@floridabeauty.us'],subject:'Exact subject',html:'<b>Good day</b>',text:'Good day',replyTo:['dispatcher@example.com','Inbound-Dispatch@floridabeauty.us','bad@example.com\r\nBcc: other@example.com']},{env,fetchFn:c.fetchFn,direct:true});
+  const mime = Buffer.from(c.calls.find(x => /\/sendMail$/.test(x.url)).body,'base64').toString();
+  assert.match(mime,/^Reply-To: dispatcher@example.com, Inbound-Dispatch@floridabeauty\.us\r$/m);
+  assert.ok(!mime.includes('other@example.com'));
+  assert.match(mime,/Content-Type: text\/plain/);
+  assert.match(mime,/Content-Type: text\/html/);
+});
