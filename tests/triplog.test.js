@@ -281,7 +281,8 @@ test('the open sheet route: a saved, edited sheet still gets the new stop; a del
   const h = harness();
   const items = [{ trip: { tripNumber: 627549, driver: '986', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G1', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }, { billNumber: 'G2', endZoneDescription: 'NEWARK, NJ, 07105', pieces: 64 }] }];
   h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' }, 'arrived:CLIFTON, NJ, 07011': { at: '2026-11-20T13:00:00Z' } } } };
-  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => items, tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }), env: {}, now: () => Date.parse('2026-11-20T23:00:00Z'), mail: async () => {} });
+  h.kv['taRundowns:florida-beauty'] = { 627549: { rec: { item: items[0] } } };   // a finished load (trips still running stay off the sheet)
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [], tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }), env: {}, now: () => Date.parse('2026-11-20T23:00:00Z'), mail: async () => {} });
   const me = { code: '986', name: 'Ferney Urrego' };
   const first = (await h.call('GET /driver/me/log', { driver: me, query: {} })).body;
   const lines = first.lines.map((l) => (l.zip === '07011' ? { ...l, so: 'Short 1', edited: true } : l)).filter((l) => l.zip !== '07105');   // changed one, deleted one
@@ -302,7 +303,8 @@ test('a team sheet: turned in → the co-driver gets a push (sent even in traini
   const h = harness(); const pushes = [];
   const items = [{ trip: { tripNumber: 627549, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G1', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }] }];
   h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' } } } };
-  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => items, tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }),
+  h.kv['taRundowns:florida-beauty'] = { 627549: { rec: { item: items[0] } } };   // a finished load (trips still running stay off the sheet)
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [], tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }),
     nameOf: async (c) => (c === '2473' ? 'Wilber Echeverri' : 'Ferney Urrego'), notify: async (code, msg) => { pushes.push({ code, msg }); return { sent: 1 }; }, env: {}, now: () => Date.parse('2026-11-22T23:00:00Z'), mail: async () => {} });
   const ferney = { code: '986', name: 'Ferney Urrego' }; const wilber = { code: '2473', name: 'Wilber Echeverri' };
   const open = (await h.call('GET /driver/me/log', { driver: ferney, query: {} })).body;
@@ -326,7 +328,8 @@ test('payroll waits for the co-driver: signed in time → sent with both signatu
   const h = harness(); const mails = []; let clock = Date.parse('2026-11-22T23:00:00Z');
   const items = [{ trip: { tripNumber: 627549, driver: '986', driver2: '2473', powerUnit: '4504', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G1', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }] }];
   h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' } } } };
-  const tl = initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => items, tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }),
+  h.kv['taRundowns:florida-beauty'] = { 627549: { rec: { item: items[0] } } };   // a finished load (trips still running stay off the sheet)
+  const tl = initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [], tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }),
     nameOf: async (c) => (c === '2473' ? 'Wilber Echeverri' : 'Ferney Urrego'), notify: async () => ({ sent: 1 }), env: { NODE_ENV: 'test' }, now: () => clock, mail: async (m) => { mails.push(m); } });
   const ferney = { code: '986', name: 'Ferney Urrego' }; const wilber = { code: '2473', name: 'Wilber Echeverri' };
   const sig = `data:image/png;base64,${'A'.repeat(200)}`;
@@ -387,10 +390,27 @@ test('Ferney\'s sheet reads like the trips went: LTL out of Miami → the load d
   h.kv['taRundowns:florida-beauty'] = done;
   initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => [now], tripsOf: async () => ['627700'], loadsFor: () => ({ current: [{ trip: '627700' }], next: [] }), nameOf: async () => 'Ferney Urrego', env: {}, now: () => Date.parse('2026-11-23T15:00:00Z'), mail: async (m) => { sent.push(m); } });
   const open = (await h.call('GET /driver/me/log', { driver: { code: '986', name: 'Ferney Urrego' }, query: {} })).body;
-  assert.deepEqual(open.lines.map((l) => `${l.trip} ${l.act}`), ['627549 PU', '627549 DEL', '627656 PU', '627656 DEL', '627700 EMPTY', '627700 PU', '627700 DEL']);
-  assert.match(open.lines[4].place, /MELBOURNE/); assert.equal(open.lines[5].zip, '33122');
+  // 627700 is the trip he's running now: not on the sheet until it's delivered or dropped at a yard
+  assert.deepEqual(open.lines.map((l) => `${l.trip} ${l.act}`), ['627549 PU', '627549 DEL', '627656 PU', '627656 DEL']);
+  const { tripLines } = await import('../triplog.js');
+  const ls = tripLines(now, {});
+  assert.deepEqual(ls.map((l) => l.act), ['EMPTY', 'PU', 'DEL']); assert.match(ls[0].place, /MELBOURNE/); assert.equal(ls[1].zip, '33122');
   const r = await h.call('POST /truckmate/driver-profiles/:code/logs/test-submit', { params: { code: '0986' }, user: { admin: true }, body: { trips: ['627549', '627656'] } });
   assert.equal(r.body.lines, 4);
   const log = Object.values(h.kv['taTripLog:florida-beauty:TEST986'])[0];
   assert.deepEqual(log.lines.map((l) => `${l.trip} ${l.act}`), ['627549 PU', '627549 DEL', '627656 PU', '627656 DEL']);
+});
+
+test('a trip still on the board goes on the sheet once it\'s delivered or dropped at a yard, not before', async () => {
+  const { initTripLog } = await import('../triplog.js');
+  const h = harness(); const sheet = { dropped: null };
+  const items = [{ trip: { tripNumber: 627700, driver: '986', powerUnit: '4504', trailer: '7280', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G1', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }] }];
+  h.kv['taDriverCheckins:florida-beauty'] = { 627700: { steps: { loaded: { at: '2026-11-22T20:00:00Z' } } } };
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => items, tripsOf: async () => ['627700'], loadsFor: () => ({ current: [{ trip: '627700' }], next: [] }), sheets: { get: async () => sheet }, env: {}, now: () => Date.parse('2026-11-23T15:00:00Z'), mail: async () => {} });
+  const me = { code: '986', name: 'Ferney Urrego' };
+  assert.equal((await h.call('GET /driver/me/log', { driver: me, query: {} })).body.lines.length, 0);          // running
+  sheet.dropped = { yard: 'ELKTON', at: '2026-11-23T10:00:00Z' };
+  assert.equal((await h.call('GET /driver/me/log', { driver: me, query: {} })).body.lines.length, 2);          // dropped at a yard
+  sheet.dropped = null; h.kv['taDriverCheckins:florida-beauty'][627700].steps['delivered:CLIFTON, NJ, 07011'] = { at: '2026-11-23T12:00:00Z' };
+  assert.equal((await h.call('GET /driver/me/log', { driver: me, query: {} })).body.lines.length, 2);          // delivered
 });

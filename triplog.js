@@ -447,9 +447,13 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       // a load run without check-ins counts too, by TruckMate's own pickup / delivery times (Nov 23: Ferney's 627549 and 627656)
       const billTimes = ((it.freightBills || it.orders || [])).flatMap((b) => [billMs(b.actualPickup), billMs(b.actualDelivery)]).filter(Boolean);
       const recent = times.some((ms) => ms >= since) || billTimes.some((ms) => ms >= since);
-      const onNow = items.includes(it) && !times.length;
-      if (!recent && !onNow) continue;
+      if (!recent) continue;
       const sh = sheets ? await sheets.get(trip).catch(() => null) : null; // eslint-disable-line no-await-in-loop
+      // a trip the driver is still running stays off the sheet (Nov 23, Nadim): only loads delivered, or dropped at a yard
+      if (items.includes(it)) {
+        const allDelivered = stopsHere.length > 0 && stopsHere.every((st) => atOf(steps[`delivered:${st.key}`]));
+        if (!allDelivered && !(sh && sh.dropped)) continue;
+      }
       // the sheet reads like the trip went: whole trips in the order they started, each in its own order (start → pickup →
       // stops), a line without a time kept right after the one before it
       const tl = tripLines(it, steps, { sheet: sh, geo, clocks });
