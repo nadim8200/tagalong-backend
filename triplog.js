@@ -533,6 +533,13 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       const prev = [...lines].reverse().find((l) => l.zip);
       if (prev) tl = tl.filter((l) => !/\|START$/.test(String(l.key || '')));   // after a load: the empty run comes from its last delivery
       const pu = tl.find((l) => l.act === 'PU');
+      // the week's first load starting somewhere else: that empty run gets its miles too
+      const start = !prev && tl.find((l) => /\|START$/.test(String(l.key || '')));
+      if (start && pu && start.zip && pu.zip && start.zip !== pu.zip) {
+        let mi = null;
+        try { const [p, q] = await Promise.all([zipPoint(start.zip), zipPoint(pu.zip)]); mi = p && q ? Math.round(await miles2(p, q)) : null; } catch { mi = null; } // eslint-disable-line no-await-in-loop
+        start.comment = `Empty ${start.zip} → ${pu.zip}${mi != null ? `, ${mi} mi` : ''}, on the way to pick up load${pu.bill ? ` ${pu.bill}` : ` ${trip}`}`;
+      }
       if (prev && pu && pu.zip && prev.zip !== pu.zip) {
         let mi = null;
         try { const [p, q] = await Promise.all([zipPoint(prev.zip), zipPoint(pu.zip)]); mi = p && q ? Math.round(await miles2(p, q)) : null; } catch { mi = null; } // eslint-disable-line no-await-in-loop

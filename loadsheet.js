@@ -203,7 +203,41 @@ export function sheetFromRateCon(rc, { trip = null, item = null } = {}) {
     instructions: (rc.specialInstructions || []).map((x) => clean(x)).filter(Boolean), stops, from: 'the rate con', release: rel ? { ...rel, stops: [] } : null, fromRateCon: true };
 }
 
-// Google Maps search link for a stop's address. Pure.
+// The driver's text message, written like dispatch writes it (Nov 23, Nadim's examples): the bonus first ("$150 FLAT FEE"), then
+// FB#, TRIP#, TEMP, PU#, each PICK UP and DELIVERY with name, street, city/state/zip, date and time and the stop's notes, the release
+// line ("*** NO RELEASE ***" or "***FREE RELEASE BARTOW YARD***" after the delivery where the trailer goes to the yard), the
+// confirm line signed with the dispatcher's initials. parseDispatchMessage reads it back the same. Pure.
+export function composeDispatchMessage(d = {}, { bonus = '', release = null, initials = '' } = {}) {
+  const RULE_L = '---------------------------------------------';
+  const stops = (d.stops || []).filter((x) => x && (x.city || x.zip || x.name));
+  const pus = stops.filter((x) => x.kind === 'pickup'); const dels = stops.filter((x) => x.kind === 'delivery');
+  const t = d.temp ? (typeof d.temp === 'string' ? d.temp : d.temp.text || `${d.temp.degrees != null ? `${d.temp.degrees}${d.temp.unit || 'F'}` : ''}${d.temp.mode ? `  ***${String(d.temp.mode).toUpperCase()}***` : ''}`) : '';
+  const block = (label, x) => {
+    const csz = [[x.city, x.state].filter(Boolean).join(', '), x.zip].filter(Boolean).join(' ');
+    return [`${label}:`, '', ...[x.name, x.street, csz].filter(Boolean).map((v) => String(v).toUpperCase()), '', `DATE: ${x.date || (x.dateIso ? `${Number(x.dateIso.slice(5, 7))}/${Number(x.dateIso.slice(8, 10))}/${x.dateIso.slice(2, 4)}` : '')}  TIME: ${x.time || ''}`.trimEnd(),
+      ...((x.other || []).map((n) => String(n).toUpperCase()))];
+  };
+  const relLine = release && ['free', 'paid'].includes(release.type) ? `***${release.type.toUpperCase()} RELEASE${release.yard ? ` ${String(release.yard).replace(/\s+yard$/i, '').toUpperCase()} YARD` : ''}***` : '*** NO RELEASE ***';
+  // the release goes after delivery #after (the stops after it are delivered from the yard); none / no number → after the last
+  const after = release && ['free', 'paid'].includes(release.type) ? Math.min(Math.max(Number(release.after) || dels.length, 0), dels.length) : null;
+  const out = [];
+  if (String(bonus || '').trim()) out.push(String(bonus).trim().toUpperCase());
+  out.push('--------------------------------------------', `FB#: ${d.bill || ''}`, `TRIP#: ${d.trip || ''}`, `TEMP: ${t}`, `PU#: ${(d.pickupNumbers || []).join(', ')}`, RULE_L);
+  pus.forEach((x, i) => { out.push(...block(pus.length > 1 ? `PICK UP #${i + 1}` : 'PICK UP', x), RULE_L); });
+  if (after == null || after === 0) out.push(`           ${relLine}`, RULE_L);
+  dels.forEach((x, i) => {
+    out.push(...block(dels.length > 1 ? `DELIVERY #${i + 1}` : 'DELIVERY', x), RULE_L);
+    if (after != null && after > 0 && i + 1 === after && i + 1 < dels.length) out.push(relLine, RULE_L);
+  });
+  if (after != null && after > 0 && after >= dels.length) out.push(relLine, RULE_L);
+  if ((d.instructions || []).length) out.push(...d.instructions.map((n) => `- ${String(n).toUpperCase()}`), RULE_L);
+  out.push('PLEASE CONFIRM WITH "OK" ONCE YOU', `RECEIVE THIS MESSAGE, THANKS, ${String(initials || '').toUpperCase()}.`);
+  return out.join('\n');
+}
+// how dispatch signs: the first name ("THANKS, JEREMY."). "Nadim Tellez" / "ntellez@…" → "NADIM" / "NTELLEZ". Pure.
+export const initialsOf = (name) => (String(name || '').split(/[\s@]+/).find((w) => /^[A-Za-z]/.test(w)) || '').replace(/[^A-Za-z'-]/g, '').toUpperCase();
+
+
 export const mapsLink = (s) => { const q = [s.name, s.street, [s.city, s.state, s.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '); return q ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}` : null; };
 
 // The trip a sheet belongs to: its TRIP#, else the board load with its FB#. Pure.
@@ -296,6 +330,28 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const sheet = rc ? sheetFromRateCon(rc, { trip, item }) : null;
     return sheet ? { sheet, item } : { error: 'No rate con on this load yet.', code: 404 };
   };
+  // "Send load info": the driver's text message written for dispatch to check and edit — from the rate con (TruckMate's stops + the
+  // rate con's names, streets, PU#, notes, temperature), else TruckMate alone; the bonus and the release dispatch picks. POST so
+  // the popup can rewrite it when the bonus / release change.
+  app.post('/truckmate/loadsheet/:trip/compose', requireAuth, async (req, res) => {
+    const trip = String(req.params.trip); const b = req.body || {};
+    const item = (await board()).find((it) => String(tripOf(it).tripNumber) === trip);
+    if (!item) return res.status(404).json({ error: 'That load is not on the board.' });
+    const d = await draftFor(trip);
+    const bills = (item.freightBills || item.orders || []);
+    let draft = d.sheet || null; let source = 'rate con';
+    if (!draft) {
+      const st = truckMateStops(item); let p = 0; let q = 0; for (const x of st) { if (x.kind === 'pickup') { p += 1; x.n = p; } else { q += 1; x.n = q; } }
+      draft = { bill: (bills[0] && bills[0].billNumber) || null, trip, temp: null, pickupNumbers: [], stops: [...st.filter((x) => x.kind === 'pickup'), ...st.filter((x) => x.kind === 'delivery')], instructions: [] };
+      source = 'TruckMate';
+    }
+    if (draft.temp && !draft.temp.text && draft.temp.degrees == null) draft.temp = null;
+    const sent = await get(trip);
+    const release = b.release !== undefined ? b.release : (draft.release ? { ...draft.release, after: null } : null);
+    const initials = b.initials != null ? String(b.initials).slice(0, 20) : initialsOf(who(req));
+    res.json({ text: composeDispatchMessage(draft, { bonus: b.bonus || '', release, initials }), source, initials, release, sentBefore: sent && sent.sent !== false ? { at: sent.at, by: sent.by } : null,
+      deliveries: draft.stops.filter((x) => x.kind === 'delivery').map((x) => [x.name, x.city].filter(Boolean).join(', ')) });
+  });
   app.get('/truckmate/loadsheet/:trip/ratecon-draft', requireAuth, async (req, res) => {
     const d = await draftFor(String(req.params.trip));
     return d.error ? res.status(d.code).json({ error: d.error }) : res.json({ sheet: forConsole(d.sheet, await yards()) });

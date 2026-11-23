@@ -35,6 +35,20 @@ const userKey = (u) => String((u && (u.id || u.email)) || 'unknown');
 const nameOf = (u) => (u && (u.name || u.email)) || 'Dispatch';
 
 // The drivers on each load (board), with their phones. Pure. → [{ trip, truck, trailer, drivers: [{ name, phone }] }]
+// A text is up to 1,000 characters (RingCentral): a longer one goes in parts, cut at a line break, numbered "(1/2)". Pure.
+export function smsParts(text, max = 1000) {
+  const t = String(text || ''); if (t.length <= max) return [t];
+  const room = max - 8; const parts = []; let cur = '';
+  for (const ln of t.split('\n')) {
+    const add = cur ? `${cur}\n${ln}` : ln;
+    if (add.length <= room) { cur = add; continue; }
+    if (cur) parts.push(cur);
+    let rest = ln; while (rest.length > room) { parts.push(rest.slice(0, room)); rest = rest.slice(room); }
+    cur = rest;
+  }
+  if (cur) parts.push(cur);
+  return parts.map((x, i) => `${x}\n(${i + 1}/${parts.length})`);
+}
 export function loadsOf(board) {
   return (board || []).map((it) => {
     const t = tripOf(it); const s = it._samsara || {};
@@ -354,7 +368,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
     app.post('/truckmate/messages/send', requireAuth, sentByHand, async (req, res) => {
       if (!guard(req, res)) return;
       const b = req.body || {};
-      const text = String(b.text || '').trim().slice(0, 1000);
+      const text = String(b.text || '').trim().slice(0, 4000);   // a load message with many stops runs long; texts go in parts (smsParts)
       const upload = (Array.isArray(b.files) ? b.files : []).slice(0, 6);
       if (!text && !upload.length) return res.status(400).json({ error: 'Write a message or attach a file.' });
       const clientId = String(b.clientId || '').replace(/[^\w-]/g, '').slice(0, 40);
@@ -397,7 +411,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
           const l = loads.find((x) => x.trip === t.trip);
           const res2 = [];
           for (const mbr of t.members || []) {
-            try { const r = await ringcentral.sendSms('__shared', { to: mbr.phone, text, by }); res2.push(r && r.id === 'training' ? 'held' : 'sent'); if (comms && comms.log) await comms.log(SITE, l ? l.trip : null, { type: 'text', kind: 'custom', to: mbr.phone, text, by, group: t.id }).catch(() => {}); } // eslint-disable-line no-await-in-loop
+            try { let r = null; for (const part of smsParts(text)) r = await ringcentral.sendSms('__shared', { to: mbr.phone, text: part, by }); res2.push(r && r.id === 'training' ? 'held' : 'sent'); if (comms && comms.log) await comms.log(SITE, l ? l.trip : null, { type: 'text', kind: 'custom', to: mbr.phone, text, by, group: t.id }).catch(() => {}); } // eslint-disable-line no-await-in-loop
             catch (e) { res2.push(`failed for ${mbr.name || mbr.phone}: ${e.message}`); }
           }
           await noteLastText((t.members || []).filter((mbr, i) => !/^failed/.test(res2[i] || '')).map((mbr) => mbr.phone), t.id);
@@ -406,7 +420,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
           status = res2.every((x) => x === 'held') ? 'held' : 'sent';
           note = `texted each person (${res2.length - bad.length} of ${res2.length})${bad.length ? ` · ${bad.join(' · ')}` : ''}`;
         } else {
-          const r = await ringcentral.sendSms('__shared', { to: t.phone, text, by });
+          let r = null; for (const part of smsParts(text)) r = await ringcentral.sendSms('__shared', { to: t.phone, text: part, by }); // eslint-disable-line no-await-in-loop
           status = r && r.id === 'training' ? 'held' : 'sent';
           note = r && r.status ? String(r.status) : null;
           if (comms && comms.log) { const l = loads.find((x) => x.drivers.some((d) => d.phone === t.phone)); await comms.log(SITE, l ? l.trip : null, { type: 'text', kind: 'custom', to: t.phone, text, by, inboxId: clientId }).catch(() => {}); }

@@ -415,6 +415,12 @@ test('Ferney\'s homework fills as he works: the LTL, then the load down to Melbo
   const pl = Object.values(h.kv['taTripLog:florida-beauty:TEST986']).find((x) => x && x.lines).lines;
   assert.equal(pv.body.ok, true);
   assert.deepEqual(pl.filter((l) => l.trip === '627700').map((l) => `${l.act} ${l.zip}`), ['EMPTY 33122', 'PU 33122', 'DEL 01890']);
+  // only the running load: the empty run from where the truck started, with its miles
+  await h.call('POST /truckmate/payroll/test-copies/delete', { user: { admin: true } });
+  h.kv.taMilesCache.geo['32934, USA'] = { lat: 28.13, lng: -80.63 }; h.kv.taMilesCache.geo['33122, USA'] = { lat: 25.8, lng: -80.31 };
+  await h.call('POST /truckmate/driver-profiles/:code/logs/test-submit', { params: { code: '0986' }, user: { admin: true }, body: { running: true, fresh: true, trips: ['627700'] } });
+  const solo = Object.values(h.kv['taTripLog:florida-beauty:TEST986']).find((x) => x && x.lines).lines;
+  assert.match(solo[0].comment, /^Empty 32934 → 33122, \d+ mi, on the way to pick up load G3$/);
   // the board can't be read (empty): nothing is marked finished on that
   onBoard = []; assert.equal(await tl.capture(), 0);
   assert.equal(h.kv['taTripLogLive:florida-beauty']['986']['627700'].doneAt, null);

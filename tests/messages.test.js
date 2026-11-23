@@ -332,3 +332,13 @@ test('live: an open console gets each incoming message the moment it is stored; 
   await h.inbox.fromSms('7865550199', { type: 'reply', from: '7865550199', text: 'Again', extId: 'live3' });
   assert.equal(chunks.filter((c) => c.startsWith('event: text')).length, 1, 'a closed console gets nothing');
 });
+
+test('a long text (a load message with many stops) goes in numbered parts under 1,000 characters, cut at line breaks', async () => {
+  const { smsParts } = await import('../messages.js');
+  assert.deepEqual(smsParts('short'), ['short']);
+  const long = Array.from({ length: 60 }, (_, i) => `DELIVERY #${i}: SOME STORE, 1 MAIN ST, TOWN, FL 33000`).join('\n');
+  const parts = smsParts(long);
+  assert.ok(parts.length >= 3); assert.ok(parts.every((p) => p.length <= 1000));
+  assert.match(parts[0], /\(1\/\d\)$/); assert.ok(parts[0].startsWith('DELIVERY #0:'));
+  assert.equal(parts.map((p) => p.replace(/\n\(\d+\/\d+\)$/, '')).join('\n'), long);
+});

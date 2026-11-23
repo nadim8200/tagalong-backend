@@ -247,3 +247,25 @@ test('what the driver gets starts with the release and the bonus (a push shows o
   assert.match(texts[0][1], /FREE RELEASE · Bartow yard \(after delivery #1\)/);
   assert.deepEqual(res.body.sent.text.to, ['3055550101', '3055550102']);
 });
+
+test('"Send load info" writes the driver\'s text like dispatch does: bonus first, FB#/TRIP#/TEMP/PU#, stops, the release line, signed — and it reads back the same', async () => {
+  const { composeDispatchMessage, initialsOf } = await import('../loadsheet.js');
+  const d = { bill: 'B180938', trip: '627004', temp: { degrees: 15, unit: 'F', mode: 'continuous' }, pickupNumbers: ['360233119'],
+    stops: [{ kind: 'pickup', name: 'Store #0284', street: '750 N University Dr', city: 'Coral Springs', state: 'FL', zip: '33071', dateIso: '2026-11-12', time: '9AM', other: ['P/U loaded trailer'] },
+      { kind: 'delivery', name: 'Walmart DC# 6055', street: '6055 Unisia Drive', city: 'Monroe', state: 'GA', zip: '30655', date: '11/13/26', time: '12:00PM' },
+      { kind: 'delivery', name: 'Walmart DC# 8851', street: '4505 FL-524', city: 'Cocoa', state: 'FL', zip: '32926', date: '11/14/26', time: '1:00PM' }] };
+  const none = composeDispatchMessage(d, { bonus: '$150 flat fee', initials: 'Nadim' });
+  assert.match(none, /^\$150 FLAT FEE\n-{20,}\nFB#: B180938\nTRIP#: 627004\nTEMP: 15F {2}\*\*\*CONTINUOUS\*\*\*\nPU#: 360233119\n/);
+  assert.match(none, /\*\*\* NO RELEASE \*\*\*/); assert.match(none, /RECEIVE THIS MESSAGE, THANKS, NADIM\.$/);
+  assert.match(none, /DATE: 11\/12\/26 {2}TIME: 9AM\nP\/U LOADED TRAILER/);
+  const back = parseDispatchMessage(none);
+  assert.equal(back.bill, 'B180938'); assert.equal(back.trip, '627004'); assert.deepEqual(back.pickupNumbers, ['360233119']);
+  assert.deepEqual(back.stops.map((x) => [x.kind, x.city, x.zip]), [['pickup', 'CORAL SPRINGS', '33071'], ['delivery', 'MONROE', '30655'], ['delivery', 'COCOA', '32926']]);
+  assert.equal(back.release, null); assert.ok(back.notes.includes('$150 FLAT FEE'));
+  // a free release at Bartow after delivery #1: Cocoa goes from the yard
+  const rel = parseDispatchMessage(composeDispatchMessage(d, { release: { type: 'free', yard: 'Bartow', after: 1 }, initials: 'JG' }));
+  assert.deepEqual([rel.release.type, rel.release.yard, rel.release.stops], ['free', 'Bartow', [2]]);
+  const paid = parseDispatchMessage(composeDispatchMessage(d, { release: { type: 'paid', yard: 'Miami yard' } }));
+  assert.deepEqual([paid.release.type, paid.release.yard], ['paid', 'Miami']);
+  assert.equal(initialsOf('Jeremy Lopez'), 'JEREMY'); assert.equal(initialsOf('ntellez@floridabeauty.us'), 'NTELLEZ');
+});
