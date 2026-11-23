@@ -58,14 +58,14 @@ test('the design\'s fields (Nov 22): seen, office readiness, partial load, insid
   const rows = [
     cleanRow({ unit: '18094', kind: 'trailer', seen: true, readiness: 'assigned', loaded: 'loaded', inside: 'clean', reeferOn: true, setF: 34, tempF: 35, comments: 'Sealed · Assigned' }),
     cleanRow({ unit: '7304', kind: 'trailer', seen: true, readiness: 'available', loaded: 'empty', inside: 'cleaning' }),
-    cleanRow({ unit: '4504', kind: 'truck', seen: true, readiness: 'hold', loaded: 'partial', condition: 'clear', access: 'blocked', localTruck: true, comments: 'Blocked by 7304', notes: 'PM due Monday' }),
+    cleanRow({ unit: '4504', kind: 'truck', seen: true, readiness: 'hold', loaded: 'partial', condition: 'clear', access: 'blocked', companyTruck: true, localTruck: true, comments: 'Blocked by 7304', notes: 'PM due Monday' }),
     cleanRow({ unit: '2094', kind: 'truck', seen: true, readiness: 'down', condition: 'issue', ownerOperator: true, inside: 'clean', readinessX: 1 }),
     cleanRow({ unit: '9999', kind: 'truck', seen: false, readiness: 'bogus' }),
   ];
   assert.equal(rows[2].loaded, 'partial'); assert.equal(rows[3].inside, null, 'inside is for trailers'); assert.equal(rows[4].readiness, null);
   const r = compareCheck([{ unit: '9999', kind: 'truck' }], rows);
   assert.deepEqual(r.readiness, { available: { trucks: 0, trailers: 1 }, assigned: { trucks: 0, trailers: 1 }, hold: { trucks: 1, trailers: 0 }, down: { trucks: 1, trailers: 0 } });
-  assert.deepEqual(r.classes, { localTruck: 1, ownerOperator: 1, outsideCarrier: 0 });
+  assert.deepEqual(r.classes, { companyTruck: 1, localTruck: 1, ownerOperator: 1, outsideCarrier: 0 });
   assert.deepEqual(r.observations.map((o) => [o.unit, o.why]), [['7304', 'needs cleaning'], ['4504', 'blocked in, on hold — needs attention'], ['2094', 'down — cannot use']]);
   assert.deepEqual(r.damage.map((d) => d.unit), ['2094'], 'a visible issue on a truck');
   assert.deepEqual(r.missing.map((m) => m.unit), ['9999'], 'on GPS, not ticked Seen');

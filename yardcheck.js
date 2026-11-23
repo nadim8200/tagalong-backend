@@ -7,7 +7,7 @@
 // Shown on the Yard tab only — no texts or emails (Nov 22: the user's call).
 // Nov 22 (2): the sheet from Nadim's design — each unit "Seen", the office's readiness (Available / Assigned and cleared /
 // Hold — needs attention / Down), load (loaded / empty / partial), a trailer's inside (clean / needs cleaning / damaged), a
-// truck's visible condition and access (blocked in), the truck's class (local / owner operator / outside carrier), one
+// truck's visible condition and access (blocked in), the truck's class (company / local / owner operator / outside carrier), one
 // issue / comment box; who checked and when.
 //
 //   GET  /truckmate/yard-checks?yard=MIAMI   → the sheet: who should be there, today's morning / night checks, the last 14
@@ -62,7 +62,7 @@ export function cleanRow(r = {}) {
     inside: kind === 'trailer' ? pick(r.inside, ['clean', 'cleaning', 'damaged']) : null,
     condition: kind === 'truck' ? pick(r.condition, ['clear', 'issue']) : null,
     access: kind === 'truck' ? pick(r.access, ['clear', 'blocked']) : null,
-    localTruck: kind === 'truck' && !!r.localTruck, ownerOperator: kind === 'truck' && !!r.ownerOperator, outsideCarrier: kind === 'truck' && !!r.outsideCarrier,
+    companyTruck: kind === 'truck' && !!r.companyTruck, localTruck: kind === 'truck' && !!r.localTruck, ownerOperator: kind === 'truck' && !!r.ownerOperator, outsideCarrier: kind === 'truck' && !!r.outsideCarrier,
     comments: String(r.comments || '').trim().slice(0, 1000) || null,
     notes: kind === 'truck' ? String(r.notes || '').trim().slice(0, 2000) || null : null,   // "Truck comments": repair notes, instructions for dispatch
     reeferOn: kind === 'trailer' && typeof r.reeferOn === 'boolean' ? r.reeferOn : null,
@@ -93,7 +93,7 @@ export function compareCheck(expected = [], rows = []) {
   const readiness = Object.fromEntries(READINESS.map((k) => [k, split(here.filter((r) => r.readiness === k))]));
   const trucksHere = here.filter((r) => r.kind === 'truck');
   return { missing, extra, reefer, damage, observations, unchecked, readiness,
-    classes: { localTruck: trucksHere.filter((r) => r.localTruck).length, ownerOperator: trucksHere.filter((r) => r.ownerOperator).length, outsideCarrier: trucksHere.filter((r) => r.outsideCarrier).length },
+    classes: { companyTruck: trucksHere.filter((r) => r.companyTruck).length, localTruck: trucksHere.filter((r) => r.localTruck).length, ownerOperator: trucksHere.filter((r) => r.ownerOperator).length, outsideCarrier: trucksHere.filter((r) => r.outsideCarrier).length },
     counts: { here: here.length, trailers: here.filter((r) => r.kind === 'trailer').length, trucks: trucksHere.length, loaded: here.filter((r) => r.loaded === 'loaded').length, empty: here.filter((r) => r.loaded === 'empty').length, partial: here.filter((r) => r.loaded === 'partial').length, expected: expected.length } };
 }
 
