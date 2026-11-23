@@ -234,6 +234,30 @@ export function composeDispatchMessage(d = {}, { bonus = '', release = null, ini
   out.push('PLEASE CONFIRM WITH "OK" ONCE YOU', `RECEIVE THIS MESSAGE, THANKS, ${String(initials || '').toUpperCase()}.`);
   return out.join('\n');
 }
+// The driver info email to the broker, the way dispatch writes it (Nov 23, Nadim's examples, B181051 / B181100 / B181091):
+// subject "RXO LOGISTICS LOAD 24720958 MA TO FL // TK: 2614 TL: 7371 // B181051"; body "Good day, / Please see the driver info
+// below", truck, trailer, temperature, each driver "NAME (ID)", the phones under PH#, then the dispatcher's comments and
+// signature. The company's dispatch box is always CC'd. Pure. → { subject, body, to: [suggested broker emails], cc }
+export const BROKER_INFO_CC = ['Inbound-Dispatch@floridabeauty.us'];
+const ph = (p) => { const d = String(p || '').replace(/\D/g, '').slice(-10); return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}` : ''; };
+export function brokerInfoEmail({ rc = {}, bill = '', truck = '', trailer = '', drivers = [], dispatcher = {} } = {}) {
+  const st = (x) => (x && (x.state || (String(x.city || '').match(/,\s*([A-Z]{2})\b/) || [])[1])) || '';
+  const pu = (rc.pickups || [])[0]; const del = (rc.deliveries || [])[(rc.deliveries || []).length - 1];
+  const lane = [st(pu), st(del)].every(Boolean) ? ` ${String(st(pu)).toUpperCase()} TO ${String(st(del)).toUpperCase()}` : '';
+  const broker = String(rc.broker || '').replace(/,?\s*(inc|llc|corp|co)\.?$/i, '').trim().toUpperCase();
+  const subject = `${broker || 'BROKER'} LOAD ${rc.loadNumber || ''}${lane} // TK: ${truck || ''} TL: ${trailer || ''} // ${bill || rc.fbfBillNumber || ''}`.replace(/\s+/g, ' ').trim();
+  const t = readTemp(String(rc.tempSetting || ''));
+  const temp = t && t.degrees != null ? `${t.degrees}${t.unit || 'F'}` : '';
+  const ds = (drivers || []).filter((d) => d && (d.name || d.code));
+  const body = ['Good day,', '', 'Please see the driver info below', '', truck, trailer, temp, ...ds.map((d) => `${String(d.name || '').toUpperCase()}${d.code ? ` (${String(d.code).replace(/^0+/, '')})` : ''}`), '',
+    'PH#', ...ds.filter((d) => ph(d.phone)).map((d) => `${String(d.name || '').toUpperCase()}: ${ph(d.phone)}`)].filter((x, i, a) => x !== '' || a[i - 1] !== '').join('\n').replace(/\n{3,}/g, '\n\n');
+  const own = /@floridabeauty\.(us|com)$/i;
+  const to = [...new Set([rc.brokerEmail, ...((rc.contacts || []).filter((c) => /broker_rep|tracking|dispatch|after_hours/.test(c.role || '')).map((c) => c.email))].filter((e) => e && /@/.test(e) && !own.test(e)).map((e) => String(e).trim().toLowerCase()))].slice(0, 6);
+  return { subject, body, to, cc: BROKER_INFO_CC, signature: [dispatcher.name || '', 'Florida Beauty Express', dispatcher.email ? `Email: ${dispatcher.email}` : ''].filter(Boolean).join('\n') };
+}
+// The whole email as sent: the body, the comments, "Thanks," and the signature. Pure.
+export const brokerInfoText = (body, comments, signature) => [String(body || '').trim(), String(comments || '').trim(), 'Thanks,', '', String(signature || '').trim()].filter(Boolean).join('\n\n').replace(/Thanks,\n\n\n\n/, 'Thanks,\n\n');
+
 // how dispatch signs: the first name ("THANKS, JEREMY."). "Nadim Tellez" / "ntellez@…" → "NADIM" / "NTELLEZ". Pure.
 export const initialsOf = (name) => (String(name || '').split(/[\s@]+/).find((w) => /^[A-Za-z]/.test(w)) || '').replace(/[^A-Za-z'-]/g, '').toUpperCase();
 
@@ -377,8 +401,30 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
     const sent = trip ? await get(trip) : null;
     const release = b.release !== undefined ? b.release : (draft.release ? { ...draft.release, after: null } : null);
     const initials = b.initials != null ? String(b.initials).slice(0, 20) : initialsOf(who(req));
-    res.json({ text: composeDispatchMessage(draft, { bonus: b.bonus || '', release, initials }), source: item ? 'rate con' : 'rate con only', trip, broker: rc.broker || null, loadNumber: rc.loadNumber || null, initials, release,
+    const t0 = item ? tripOf(item) : {};
+    const email = brokerInfoEmail({ rc, bill: draft.bill, truck: String(t0.powerUnit || b.truck || ''), trailer: String(t0.trailer || b.trailer || ''), drivers: Array.isArray(b.drivers) ? b.drivers.slice(0, 2) : [], dispatcher: { name: who(req), email: (req.user && req.user.email) || '' } });
+    res.json({ email, text: composeDispatchMessage(draft, { bonus: b.bonus || '', release, initials }), source: item ? 'rate con' : 'rate con only', trip, broker: rc.broker || null, loadNumber: rc.loadNumber || null, initials, release,
       sentBefore: sent && sent.sent !== false ? { at: sent.at, by: sent.by } : null, deliveries: draft.stops.filter((x) => x.kind === 'delivery').map((x) => [x.name, x.city].filter(Boolean).join(', ')) });
+  });
+  // the driver info email to the broker, right after the driver's text (the pop-up's Send). From the Jarvis mailbox; replies go
+  // to the dispatcher and the dispatch box. Training mode (the mailer's guard) still holds outside emails.
+  app.post('/truckmate/loadsheet/:trip/broker-email', requireAuth, async (req, res) => {
+    const b = req.body || {}; const trip = String(req.params.trip);
+    if (!sendMail) return res.status(503).json({ error: 'Email is not set up on the server.' });
+    const to = [...new Set((Array.isArray(b.to) ? b.to : String(b.to || '').split(/[,;\s]+/)).map((x) => String(x).trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(x)))].slice(0, 10);
+    if (!to.length) return res.status(400).json({ error: 'Add the broker\'s email.' });
+    const subject = String(b.subject || '').trim().slice(0, 250);
+    if (!subject) return res.status(400).json({ error: 'The email needs a subject.' });
+    const me = (req.user && req.user.email) || '';
+    const extraCc = (Array.isArray(b.cc) ? b.cc : []).map((x) => String(x).trim()).filter((x) => /@/.test(x));
+    const cc = [...new Set([...BROKER_INFO_CC, ...extraCc].map((x) => x.toLowerCase()))].filter((x) => !to.includes(x));
+    const text = brokerInfoText(b.body, b.comments, b.signature || [who(req), 'Florida Beauty Express', me ? `Email: ${me}` : ''].filter(Boolean).join('\n'));
+    const esc = (x) => String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    try {
+      const r = await sendMail({ to, cc, subject, html: `<div style="font-family:Calibri,Arial,sans-serif;font-size:14px;white-space:pre-wrap">${esc(text)}</div>`, replyTo: [me, ...BROKER_INFO_CC].filter(Boolean) });
+      if (log) await log(SITE, trip, { type: 'email', kind: 'broker-driver-info', to: to.join(', '), text: subject, by: who(req), noThread: true }).catch(() => {});
+      res.json({ ok: true, to, cc, subject, held: !!(r && r.held), sentTo: (r && r.to) || to });
+    } catch (e) { res.status(502).json({ error: e.message || 'Could not send the email.' }); }
   });
   app.get('/truckmate/loadsheet/:trip/ratecon-draft', requireAuth, async (req, res) => {
     const d = await draftFor(String(req.params.trip));

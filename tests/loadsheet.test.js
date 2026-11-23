@@ -297,3 +297,29 @@ test('the compose route: a broker load from its own TruckMate record + rate con 
   assert.equal(nx.status, undefined); assert.equal(nx.body.trip, null); assert.equal(nx.body.broker, 'CH Robinson');
   assert.match(nx.body.text, /FB#: B181300\nTRIP#: \n/); assert.match(nx.body.text, /KROGER DC\nDETROIT, MI 48201/);
 });
+
+test('the driver info email to the broker, like dispatch writes it (B181051): subject, truck / trailer / temp, drivers with IDs, phones; the dispatch box CC\'d', async () => {
+  const { brokerInfoEmail, brokerInfoText, BROKER_INFO_CC } = await import('../loadsheet.js');
+  const rc = { broker: 'RXO Logistics', loadNumber: '24720958', tempSetting: '36', brokerEmail: 'Brian.Karch@rxo.com', contacts: [{ role: 'tracking', email: 'hmftracking@rxo.com' }, { role: 'other', email: 'billing@rxo.com' }, { role: 'dispatch', email: 'jvargas@floridabeauty.us' }],
+    pickups: [{ city: 'Chelsea', state: 'MA' }], deliveries: [{ city: 'Miami', state: 'FL' }] };
+  const e = brokerInfoEmail({ rc, bill: 'B181051', truck: '2614', trailer: '7371', drivers: [{ name: 'Manuel Rivera', code: '6291', phone: '7866917947' }, { name: 'Angel Rivera', code: '06689', phone: '(786) 691-7830' }], dispatcher: { name: 'Jeinner Vargas', email: 'jvargas@floridabeauty.us' } });
+  assert.equal(e.subject, 'RXO LOGISTICS LOAD 24720958 MA TO FL // TK: 2614 TL: 7371 // B181051');
+  assert.equal(e.body, 'Good day,\n\nPlease see the driver info below\n\n2614\n7371\n36F\nMANUEL RIVERA (6291)\nANGEL RIVERA (6689)\n\nPH#\nMANUEL RIVERA: 786-691-7947\nANGEL RIVERA: 786-691-7830');
+  assert.deepEqual(e.to, ['brian.karch@rxo.com', 'hmftracking@rxo.com']);   // the broker's own, never ours
+  assert.deepEqual(e.cc, BROKER_INFO_CC); assert.deepEqual(BROKER_INFO_CC, ['Inbound-Dispatch@floridabeauty.us']);
+  const full = brokerInfoText(e.body, 'Driver can pick up early.', e.signature);
+  assert.match(full, /786-691-7830\n\nDriver can pick up early\.\n\nThanks,\n\nJeinner Vargas\nFlorida Beauty Express\nEmail: jvargas@floridabeauty\.us$/);
+});
+
+test('the broker email route: sent with the dispatch box CC\'d and replies to the dispatcher; needs the broker\'s email', async () => {
+  const db = mem(); const routes = {}; const mails = [];
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put() {} };
+  initLoadSheets(app, { requireAuth: (req, res, next) => next(), db, sendMail: async (m) => { mails.push(m); return { ok: true, to: m.to }; } });
+  const call = async (body) => { let out = {}; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; await routes['POST /truckmate/loadsheet/:trip/broker-email'][1]({ body, params: { trip: '627900' }, user: { name: 'Jeremy Ospino', email: 'jospino@floridabeauty.us' } }, res); return out; };
+  assert.equal((await call({ to: '', subject: 'X', body: 'Y' })).status, 400);
+  const r = await call({ to: 'ops@echo.com, Team@Echo.com', subject: 'ECHO LOAD 69950678 MN TO FL // TK: 4561 TL: 2062 // B181091', body: 'Good day,\n\nPlease see the driver information below', comments: 'Driver is OTP tomorrow.' });
+  assert.equal(r.body.ok, true);
+  assert.deepEqual(mails[0].to, ['ops@echo.com', 'team@echo.com']); assert.deepEqual(mails[0].cc, ['inbound-dispatch@floridabeauty.us']);
+  assert.deepEqual(mails[0].replyTo, ['jospino@floridabeauty.us', 'Inbound-Dispatch@floridabeauty.us']);
+  assert.match(mails[0].html, /Driver is OTP tomorrow\.\n\nThanks,\n\nJeremy Ospino\nFlorida Beauty Express\nEmail: jospino@floridabeauty\.us/);
+});

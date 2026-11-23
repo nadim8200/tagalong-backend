@@ -113,6 +113,7 @@ export async function sendMail(message, { env = process.env, fetchFn = globalThi
       toRecipients: list.map((address) => ({ emailAddress: { address } })),
       ccRecipients: ccList.map((address) => ({ emailAddress: { address } })),
       bccRecipients: bcc,
+      ...(Array.isArray(guarded.replyTo) && guarded.replyTo.length ? { replyTo: guarded.replyTo.filter((x) => /@/.test(String(x))).map((address) => ({ emailAddress: { address } })) } : {}),   // replies go to the dispatcher (broker info email)
       attachments: attachments.map((a) => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: a.name, contentType: a.contentType || 'application/pdf', contentBytes: Buffer.from(a.bytes).toString('base64'), ...(a.cid ? { isInline: true, contentId: a.cid } : {}) })),
     },
     saveToSentItems: true,
