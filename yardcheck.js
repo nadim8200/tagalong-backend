@@ -5,6 +5,10 @@
 // trucks — yardreport.js); anything found that GPS didn't list is added by hand. When it's sent, it's compared: on GPS but
 // not found, found but not on GPS, a loaded trailer with the reefer off or its reading 5°F+ from the set point, damage.
 // Shown on the Yard tab only — no texts or emails (Nov 22: the user's call).
+// Nov 22 (2): the sheet from Nadim's design — each unit "Seen", the office's readiness (Available / Assigned and cleared /
+// Hold — needs attention / Down), load (loaded / empty / partial), a trailer's inside (clean / needs cleaning / damaged), a
+// truck's visible condition and access (blocked in), the truck's class (local / owner operator / outside carrier), one
+// issue / comment box; who checked and when.
 //
 //   GET  /truckmate/yard-checks?yard=MIAMI   → the sheet: who should be there, today's morning / night checks, the last 14
 //   POST /truckmate/yard-checks              → { yard, shift?, rows: [{ unit, kind, here, loaded, reeferOn, setF, tempF,
@@ -45,11 +49,21 @@ export function expectedUnits(report = {}, trucks = {}, yard = 'MIAMI') {
 }
 
 // One row from the phone, cleaned. Pure.
+export const READINESS = ['available', 'assigned', 'hold', 'down'];
+export const READINESS_LABEL = { available: 'Available', assigned: 'Assigned and cleared', hold: 'Hold — needs attention', down: 'Down' };
+const pick = (v, list) => (list.includes(v) ? v : null);
 export function cleanRow(r = {}) {
   const kind = r.kind === 'truck' ? 'truck' : 'trailer';
+  const seen = r.seen === true || r.here === true ? true : r.seen === false || r.here === false ? false : null;
   return {
-    unit: norm(r.unit), kind, here: r.here === true ? true : r.here === false ? false : null,
-    loaded: ['loaded', 'empty'].includes(r.loaded) ? r.loaded : null,
+    unit: norm(r.unit), kind, here: seen,
+    readiness: pick(r.readiness, READINESS),
+    loaded: pick(r.loaded, ['loaded', 'empty', 'partial']),
+    inside: kind === 'trailer' ? pick(r.inside, ['clean', 'cleaning', 'damaged']) : null,
+    condition: kind === 'truck' ? pick(r.condition, ['clear', 'issue']) : null,
+    access: kind === 'truck' ? pick(r.access, ['clear', 'blocked']) : null,
+    localTruck: kind === 'truck' && !!r.localTruck, ownerOperator: kind === 'truck' && !!r.ownerOperator, outsideCarrier: kind === 'truck' && !!r.outsideCarrier,
+    comments: String(r.comments || '').trim().slice(0, 1000) || null,
     reeferOn: kind === 'trailer' && typeof r.reeferOn === 'boolean' ? r.reeferOn : null,
     setF: kind === 'trailer' ? num(r.setF) : null, tempF: kind === 'trailer' ? num(r.tempF) : null,
     fuelPct: num(r.fuelPct) != null ? Math.max(0, Math.min(100, Math.round(num(r.fuelPct)))) : null,
@@ -68,9 +82,17 @@ export function compareCheck(expected = [], rows = []) {
   const extra = rows.filter((r) => r.here && !expKeys.has(`${r.kind}:${r.unit}`)).map((r) => ({ unit: r.unit, kind: r.kind }));
   const reefer = rows.filter((r) => r.here && r.kind === 'trailer' && r.loaded === 'loaded' && (r.reeferOn === false || (r.setF != null && r.tempF != null && Math.abs(r.tempF - r.setF) >= 5)))
     .map((r) => ({ unit: r.unit, why: r.reeferOn === false ? 'loaded, reefer off' : `reading ${r.tempF}°F, set ${r.setF}°F` }));
-  const damage = rows.filter((r) => r.here && r.damage).map((r) => ({ unit: r.unit, kind: r.kind, note: r.damage, photos: r.photos.length }));
+  const damage = rows.filter((r) => r.here && (r.damage || r.inside === 'damaged' || r.condition === 'issue')).map((r) => ({ unit: r.unit, kind: r.kind, note: r.damage || r.comments || (r.inside === 'damaged' ? 'inside damaged' : 'visible issue'), photos: r.photos.length }));
   const here = rows.filter((r) => r.here);
-  return { missing, extra, reefer, damage, unchecked, counts: { here: here.length, trailers: here.filter((r) => r.kind === 'trailer').length, trucks: here.filter((r) => r.kind === 'truck').length, loaded: here.filter((r) => r.loaded === 'loaded').length, empty: here.filter((r) => r.loaded === 'empty').length, expected: expected.length } };
+  // what the yard saw that needs someone: blocked in, needs cleaning, on hold, down
+  const why = (r) => [r.access === 'blocked' ? 'blocked in' : null, r.inside === 'cleaning' ? 'needs cleaning' : null, r.readiness === 'hold' ? 'on hold — needs attention' : null, r.readiness === 'down' ? 'down — cannot use' : null].filter(Boolean).join(', ');
+  const observations = here.filter((r) => why(r)).map((r) => ({ unit: r.unit, kind: r.kind, why: why(r), comments: r.comments || null }));
+  const split = (list) => ({ trucks: list.filter((r) => r.kind === 'truck').length, trailers: list.filter((r) => r.kind === 'trailer').length });
+  const readiness = Object.fromEntries(READINESS.map((k) => [k, split(here.filter((r) => r.readiness === k))]));
+  const trucksHere = here.filter((r) => r.kind === 'truck');
+  return { missing, extra, reefer, damage, observations, unchecked, readiness,
+    classes: { localTruck: trucksHere.filter((r) => r.localTruck).length, ownerOperator: trucksHere.filter((r) => r.ownerOperator).length, outsideCarrier: trucksHere.filter((r) => r.outsideCarrier).length },
+    counts: { here: here.length, trailers: here.filter((r) => r.kind === 'trailer').length, trucks: trucksHere.length, loaded: here.filter((r) => r.loaded === 'loaded').length, empty: here.filter((r) => r.loaded === 'empty').length, partial: here.filter((r) => r.loaded === 'partial').length, expected: expected.length } };
 }
 
 // Today's checks and whether one is late: morning not in by 11 AM, night not in by 11 PM (yard time). Pure.
@@ -84,7 +106,8 @@ export function dueNow(list = [], yard, now = Date.now()) {
     late: { morning: !morning && hourNight >= 11, night: !night && hourNight >= 23 } };
 }
 export const summary = (x) => ({ id: x.id, yard: x.yard, day: x.day, shift: x.shift, by: x.by, at: x.at, updated: x.updated || null, ...x.result.counts,
-  missing: x.result.missing.length, extra: x.result.extra.length, reefer: x.result.reefer.length, damage: x.result.damage.length, unchecked: x.result.unchecked.length });
+  missing: x.result.missing.length, extra: x.result.extra.length, reefer: x.result.reefer.length, damage: x.result.damage.length, unchecked: x.result.unchecked.length,
+  observations: (x.result.observations || []).length, readiness: x.result.readiness || null, checkedAt: x.checkedAt || x.at });
 
 export function initYardCheck(app, { requireAuth, db, report, trucks, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
@@ -117,7 +140,11 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
     if (!yard) return res.status(400).json({ error: 'Pick the yard: Miami or Ventura.' });
     const rows = (Array.isArray(b.rows) ? b.rows : []).slice(0, 400).map(cleanRow).filter((r) => r.unit);
     if (!rows.some((r) => r.here != null)) return res.status(400).json({ error: 'Mark at least one unit here or not here.' });
-    const clock = yardClock(now(), CHECK_YARDS[yard].tz);
+    // "Checked by" and "Date & time" from the sheet: a time within the last day (not ahead) picks the day and shift
+    const typed = Date.parse(String(b.checkedAt || ''));
+    const checkedMs = Number.isFinite(typed) && typed <= now() + 3600000 && typed >= now() - 86400000 ? typed : now();
+    const checkedBy = String(b.checkedBy || '').trim().slice(0, 80) || null;
+    const clock = yardClock(checkedMs, CHECK_YARDS[yard].tz);
     const shift = SHIFTS.includes(b.shift) ? b.shift : clock.shift;
     try {
       const exp = await expected(yard);
@@ -127,7 +154,7 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
       await db.update(KEY, (cur) => {
         const list = ((cur && cur.list) || []);
         const old = list.find((x) => x.yard === yard && x.day === clock.day && x.shift === shift);
-        saved = { id: old ? old.id : randomBytes(6).toString('hex'), yard, day: clock.day, shift, by: who(req), at: old ? old.at : at, ...(old ? { updated: at, updatedBy: who(req) } : {}), expected: exp, rows, result };
+        saved = { id: old ? old.id : randomBytes(6).toString('hex'), yard, day: clock.day, shift, by: checkedBy || who(req), login: who(req), checkedAt: new Date(checkedMs).toISOString(), at: old ? old.at : at, ...(old ? { updated: at, updatedBy: who(req) } : {}), expected: exp, rows, result };
         return { list: [saved, ...list.filter((x) => x !== old)].slice(0, 400) };
       }, { list: [] });
       res.json({ ok: true, check: summary(saved), result });
