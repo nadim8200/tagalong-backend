@@ -13,6 +13,7 @@
 //   GET  /truckmate/yard-checks?yard=MIAMI   → the sheet: who should be there, today's morning / night checks, the last 14
 //   POST /truckmate/yard-checks              → { yard, shift?, rows: [{ unit, kind, here, loaded, reeferOn, setF, tempF,
 //                                                fuelPct, damage, photos }] } one check per yard, day and shift (sent again: replaced)
+//   GET  /truckmate/yard-checks/days?yard=&month=YYYY-MM → the calendar: checks by day
 //   GET  /truckmate/yard-checks/:id          → one check in full
 //   POST /truckmate/yard-checks/photos       → { dataUrl } a damage photo (JPEG / PNG, ≤ 600 KB) → { id }
 //   GET  /truckmate/yard-checks/photos/:id   → the picture
@@ -107,6 +108,13 @@ export function dueNow(list = [], yard, now = Date.now()) {
   return { day: c.day, shiftNow: c.shift, morning: morning ? summary(morning) : null, night: night ? summary(night) : null,
     late: { morning: !morning && hourNight >= 11, night: !night && hourNight >= 23 } };
 }
+// One yard's checks in a month, by day (morning first). Pure.
+export function checksByDay(list = [], yard, month) {
+  const out = {};
+  for (const x of list) if (x.yard === yard && String(x.day).startsWith(month)) (out[x.day] = out[x.day] || []).push(summary(x));
+  for (const d of Object.keys(out)) out[d].sort((a, b) => (a.shift === b.shift ? 0 : a.shift === 'morning' ? -1 : 1));
+  return out;
+}
 export const summary = (x) => ({ id: x.id, yard: x.yard, day: x.day, shift: x.shift, by: x.by, at: x.at, updated: x.updated || null, ...x.result.counts,
   missing: x.result.missing.length, extra: x.result.extra.length, reefer: x.result.reefer.length, damage: x.result.damage.length, unchecked: x.result.unchecked.length,
   observations: (x.result.observations || []).length, readiness: x.result.readiness || null, checkedAt: x.checkedAt || x.at });
@@ -130,8 +138,15 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
         today: dueNow(list, yard, now()), history: list.filter((x) => x.yard === yard).slice(0, 14).map(summary) });
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
+  // the calendar (Nov 22): every check in one month, by day → { days: { 'YYYY-MM-DD': [summary…] } }
+  app.get('/truckmate/yard-checks/days', requireAuth, async (req, res) => {
+    if (!enabled) return res.json({ days: {} });
+    const yard = yardOf(req.query.yard) || 'MIAMI';
+    const month = /^\d{4}-\d{2}$/.test(String(req.query.month || '')) ? String(req.query.month) : new Date(now()).toISOString().slice(0, 7);
+    res.json({ yard, month, days: checksByDay(((await db.get(KEY, { list: [] })) || {}).list || [], yard, month) });
+  });
   app.get('/truckmate/yard-checks/:id', requireAuth, async (req, res, next) => {
-    if (req.params.id === 'photos') return next();
+    if (req.params.id === 'photos' || req.params.id === 'days') return next();
     const x = ((((await db.get(KEY, { list: [] })) || {}).list) || []).find((c) => c.id === String(req.params.id));
     return x ? res.json({ check: x }) : res.status(404).json({ error: 'No such check.' });
   });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { yardClock, expectedUnits, cleanRow, compareCheck, dueNow, initYardCheck } from '../yardcheck.js';
+import { yardClock, expectedUnits, cleanRow, compareCheck, dueNow, initYardCheck, checksByDay } from '../yardcheck.js';
 
 const REPORT = { hubs: [{ key: 'MIAMI', trailers: [{ trailer: '07280', unitOn: true, setF: 34, returnF: 35, onLoad: '627700', source: 'Thermo King' }, { trailer: '18094', unitOn: false, onLoad: null }] }, { key: 'VENTURA', trailers: [{ trailer: '262041' }] }] };
 const TRUCKS = { hubs: [{ key: 'MIAMI', trucks: [{ unit: '4504', trip: '627700', drivers: [{ name: 'Ferney Urrego' }], gpsAt: 'x' }] }] };
@@ -72,4 +72,12 @@ test('the design\'s fields (Nov 22): seen, office readiness, partial load, insid
   assert.equal(r.counts.partial, 1);
   assert.equal(rows[2].notes, 'PM due Monday'); assert.equal(rows[0].notes, null, 'truck comments are for trucks');
   assert.equal(r.observations[1].comments, 'Blocked by 7304 · PM due Monday');
+});
+
+test('the calendar: one yard\'s checks in a month, by day, morning first', () => {
+  const mk = (id, yard, day, shift) => ({ id, yard, day, shift, by: 'Luis', at: `${day}T12:00:00Z`, result: { counts: { here: 3 }, missing: [], extra: [], reefer: [], damage: [], unchecked: [] } });
+  const d = checksByDay([mk('a', 'MIAMI', '2026-11-22', 'night'), mk('b', 'MIAMI', '2026-11-22', 'morning'), mk('c', 'VENTURA', '2026-11-22', 'morning'), mk('e', 'MIAMI', '2026-10-30', 'night')], 'MIAMI', '2026-11');
+  assert.deepEqual(Object.keys(d), ['2026-11-22']);
+  assert.deepEqual(d['2026-11-22'].map((x) => x.shift), ['morning', 'night']);
+  assert.equal(d['2026-11-22'][0].here, 3);
 });
