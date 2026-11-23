@@ -9,11 +9,15 @@
 //   POST /truckmate/messages/send            → { thread | phone, text, via: 'app' | 'sms', clientId }
 //   POST /truckmate/messages/groups          → { members: [{ phone, name }], name?, trip? } a team-driver group
 //   PUT  /truckmate/messages/pins            → { pins: [threadId | phone] } my favorites
+//   POST /truckmate/messages/mass/preview    → { audience: 'all' | 'active' | 'area', units } who'd get it (masstext.js)
+//   POST /truckmate/messages/mass            → { …, text, clientId } each driver texted on their own; GET …/mass/:id progress
 //
 // Conversations: 'p:<10 digits>' one person, 'g:<id>' a group (members fixed when it's made; a truck or driver
 // change never edits them). Data: taMsgThreads / taMsgLog:<id> / taMsgRead / taMsgPins / taMsgSeen.
 import { randomBytes } from 'node:crypto';
 import { sentByHand } from './training.js';
+import { massRecipients } from './masstext.js';
+import { profanity } from './profanity.js';
 
 const SITE = 'florida-beauty';
 const THREADS = `taMsgThreads:${SITE}`;
@@ -433,6 +437,65 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       const t = { id: `g:${randomBytes(5).toString('hex')}`, kind: 'group', members: uniq, name: String(b.name || '').trim().slice(0, 60) || uniq.map((m) => m.name || `…${m.phone.slice(-4)}`).join(' + '), trip: verified ? verified.trip : null, truck: verified ? verified.truck : null, createdBy: nameOf(req.user), createdAt: iso() };
       await db.update(THREADS, (cur) => ({ ...(cur || {}), [t.id]: t }), {});
       res.json({ ok: true, thread: t });
+    });
+
+    // ---- mass text: the same text to many drivers, each on their own (masstext.js) ----
+    const massJobs = new Map();   // id → progress (kept in memory; every text is also in each driver's conversation)
+    async function massList(b) {
+      const audience = ['all', 'active', 'area'].includes(b.audience) ? b.audience : null;
+      if (!audience) throw Object.assign(new Error('Pick who gets it: all drivers, drivers on a load, or an area on the map.'), { status: 400 });
+      const units = (Array.isArray(b.units) ? b.units : []).slice(0, 500).map((u) => ({ unit: String((u && u.unit) || '').slice(0, 20) || null, driver: String((u && u.driver) || '').slice(0, 80) || null }));
+      if (audience === 'area' && !units.length) throw Object.assign(new Error('No trucks inside that area.'), { status: 400 });
+      const [loads, roster, consent, optOut, live] = await Promise.all([loadsNow(), (drivers ? drivers() : Promise.resolve([])).catch(() => []), db.get(CONSENT, {}), db.get('taSmsOptOut', {}), textingLiveNow()]);
+      return { audience, live, ...massRecipients({ audience, units, loads, roster: roster || [], consent: consent || {}, optOut: optOut || {} }) };
+    }
+    app.post('/truckmate/messages/mass/preview', requireAuth, async (req, res) => {
+      if (!guard(req, res)) return;
+      try { res.json(await massList(req.body || {})); } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+    });
+    app.post('/truckmate/messages/mass', requireAuth, sentByHand, async (req, res) => {
+      if (!guard(req, res)) return;
+      const b = req.body || {};
+      const text = String(b.text || '').trim().slice(0, 1000);
+      if (!text) return res.status(400).json({ error: 'Write the message first.' });
+      const bad = profanity(text);
+      if (bad.length) return res.status(400).json({ error: `Please reword it — no profanity in texts to drivers (${bad.join(', ')}).` });
+      const clientId = String(b.clientId || '').replace(/[^\w-]/g, '').slice(0, 40);
+      if (!clientId) return res.status(400).json({ error: 'Missing clientId.' });
+      if (massJobs.has(clientId)) return res.json({ ok: true, job: massJobs.get(clientId), duplicate: true });
+      let list;
+      try { list = await massList(b); } catch (e) { return res.status(e.status || 500).json({ error: e.message }); }
+      if (!list.live) return res.status(409).json({ error: 'Texting starts when RingCentral approves the company number.' });
+      if (!list.recipients.length) return res.status(409).json({ error: 'Nobody to text — no driver there has a cell with a text agreement on file.' });
+      const by = await fullName(req.user);
+      const job = { id: clientId, at: iso(), by, audience: list.audience, text, total: list.recipients.length, sent: 0, held: 0, failed: [], done: false, skipped: list.skipped.length };
+      massJobs.set(clientId, job);
+      if (massJobs.size > 50) massJobs.delete(massJobs.keys().next().value);
+      res.json({ ok: true, job });
+      // one at a time (the company line's send rate); each text lands in that driver's own conversation
+      (async () => {
+        for (const r of list.recipients) {
+          const t = personThread(r.phone, { name: r.name, role: 'driver' });
+          try {
+            const sent = await ringcentral.sendSms('__shared', { to: r.phone, text, by }); // eslint-disable-line no-await-in-loop
+            const status = sent && sent.id === 'training' ? 'held' : 'sent';
+            job[status] += 1;
+            await add(t, { dir: 'out', via: 'sms', text, by, status, note: `mass text (${job.total})`, trip: r.trip }, `send:${clientId}:${r.phone}`); // eslint-disable-line no-await-in-loop
+            if (comms && comms.log) await comms.log(SITE, r.trip, { type: 'text', kind: 'mass', to: r.phone, text, by, inboxId: `${clientId}:${r.phone}` }).catch(() => {}); // eslint-disable-line no-await-in-loop
+          } catch (e) {
+            job.failed.push({ name: r.name, truck: r.truck, why: String(e.message || 'failed').slice(0, 120) });
+            await add(t, { dir: 'out', via: 'sms', text, by, status: 'failed', note: String(e.message || 'failed').slice(0, 200) }, `send:${clientId}:${r.phone}`).catch(() => {}); // eslint-disable-line no-await-in-loop
+          }
+        }
+        job.done = true; job.doneAt = iso();
+        await db.update(`taMassTexts:${SITE}`, (cur) => [{ ...job, failed: job.failed.length }, ...(Array.isArray(cur) ? cur : [])].slice(0, 200), []).catch(() => {});
+      })().catch((e) => { job.done = true; job.error = e.message; });
+    });
+    app.get('/truckmate/messages/mass/:id', requireAuth, (req, res) => {
+      if (!guard(req, res)) return;
+      const job = massJobs.get(String(req.params.id));
+      if (!job) return res.status(404).json({ error: 'That mass text is not running here (the server restarted?). Each text is in the driver\'s own conversation.' });
+      res.json({ job });
     });
 
     app.put('/truckmate/messages/pins', requireAuth, async (req, res) => {
