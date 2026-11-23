@@ -333,24 +333,52 @@ export function initLoadSheets(app, { requireAuth, db, getBoard = null, sendApp 
   // "Send load info": the driver's text message written for dispatch to check and edit — from the rate con (TruckMate's stops + the
   // rate con's names, streets, PU#, notes, temperature), else TruckMate alone; the bonus and the release dispatch picks. POST so
   // the popup can rewrite it when the bonus / release change.
+  // Is it an LTL? Florida Beauty's own LTL leaves from the hubs and never gets this text (Nov 23, Nadim): a B bill is a broker
+  // load; M/G/H/P bills, a terminal pickup or a flower manifest are LTL. Pure.
+  const isLtlLoad = (item) => {
+    const bills = (item && (item.freightBills || item.orders)) || [];
+    if (bills.some((b) => /^B\d/i.test(String(b.billNumber || '')))) return false;
+    if (bills.some((b) => /^[MGHP]\d/i.test(String(b.billNumber || '')))) return true;
+    const t = tripOf(item); const m = item && item._manifest;
+    return /TERMINAL/i.test(String(t.origZoneDesc || '')) || !!(m && (/FLOWER/i.test(String(m.commodity || '')) || (m.stops || []).some((x) => /^LOAD/i.test(x.action || '') && /TERMINAL/i.test(String(x.customer || '')))));
+  };
+  // "Send load info" (Nov 23, Nadim): dispatch sends a driver their NEXT load while they're still on this one (a flower run, or a
+  // broker load they're delivering) — or, on a broker load not sent yet, the current one. The card's trip is :trip; body.target
+  // says which load the text is for: { trip } (a TruckMate trip — the current one or a booked next one) or { nextId } (a rate
+  // con Jarvis queued as the truck's next load). The text is written ONLY from that load's rate con (plus TruckMate's stops when
+  // it has the trip): no rate con → { needRateCon } and the pop-up asks for it. An LTL load never gets this text.
+  const nextRateConById = async (id) => {
+    const n = ((((await db.get(`taNextLoads:${SITE}`, { list: [] })) || {}).list) || []).find((x) => x.id === id && !x.doneAt);
+    if (!n) return { n: null, rc: null };
+    if (n.pendingId) { const p0 = ((await db.get(`taRateConPending:${SITE}`, [])) || []).find((x) => x.id === n.pendingId); if (p0 && p0.record) return { n, rc: p0.record.data || p0.record }; }
+    const t = n.trip || (n.verified && n.verified.trip);
+    if (t) { const r = ((await db.get(`taTruckMateRateCon:${SITE}`, {})) || {})[t]; if (r) return { n, rc: r.data || r }; }
+    return { n, rc: null };
+  };
   app.post('/truckmate/loadsheet/:trip/compose', requireAuth, async (req, res) => {
-    const trip = String(req.params.trip); const b = req.body || {};
-    const item = (await board()).find((it) => String(tripOf(it).tripNumber) === trip);
-    if (!item) return res.status(404).json({ error: 'That load is not on the board.' });
-    const d = await draftFor(trip);
-    const bills = (item.freightBills || item.orders || []);
-    let draft = d.sheet || null; let source = 'rate con';
-    if (!draft) {
-      const st = truckMateStops(item); let p = 0; let q = 0; for (const x of st) { if (x.kind === 'pickup') { p += 1; x.n = p; } else { q += 1; x.n = q; } }
-      draft = { bill: (bills[0] && bills[0].billNumber) || null, trip, temp: null, pickupNumbers: [], stops: [...st.filter((x) => x.kind === 'pickup'), ...st.filter((x) => x.kind === 'delivery')], instructions: [] };
-      source = 'TruckMate';
+    const b = req.body || {}; const target = b.target || { trip: String(req.params.trip) };
+    const [active, rcs] = await Promise.all([db.get(`taTruckMateActive:${SITE}`, { trips: {} }).catch(() => ({ trips: {} })), db.get(`taTruckMateRateCon:${SITE}`, {}).catch(() => ({}))]);
+    const itemOf = (t) => { const rec = Object.entries((active && active.trips) || {}).find(([k, r]) => k === String(t) || String(tripOf((r && r.item) || {}).tripNumber) === String(t)); return rec && rec[1] && rec[1].item; };
+    let rc = null; let trip = null; let item = null; let nx = null;
+    if (target.nextId) {
+      const got = await nextRateConById(String(target.nextId));
+      if (!got.n) return res.status(404).json({ error: 'That next load is not waiting any more.' });
+      nx = got.n; rc = got.rc; trip = nx.trip || (nx.verified && nx.verified.trip) || (b.trip ? String(b.trip) : null);
+    } else {
+      trip = String(target.trip || req.params.trip);
+      rc = (rcs || {})[trip] ? ((rcs[trip].data) || rcs[trip]) : null;
     }
+    if (trip) item = itemOf(trip);
+    if (item && isLtlLoad(item)) return res.status(409).json({ error: 'This is an LTL load — LTL leaves from the hubs, so there is no dispatch text. Pick the truck\'s next broker load.', ltl: true });
+    if (!rc) return res.status(409).json({ needRateCon: true, trip, error: 'Please upload the rate con so we can dispatch the driver.' });
+    const draft = sheetFromRateCon(rc, { trip, item });
+    if (!draft) return res.status(409).json({ needRateCon: true, trip, error: 'The rate con has no pickup or delivery Jarvis could read. Please upload a clearer copy so we can dispatch the driver.' });
     if (draft.temp && !draft.temp.text && draft.temp.degrees == null) draft.temp = null;
-    const sent = await get(trip);
+    const sent = trip ? await get(trip) : null;
     const release = b.release !== undefined ? b.release : (draft.release ? { ...draft.release, after: null } : null);
     const initials = b.initials != null ? String(b.initials).slice(0, 20) : initialsOf(who(req));
-    res.json({ text: composeDispatchMessage(draft, { bonus: b.bonus || '', release, initials }), source, initials, release, sentBefore: sent && sent.sent !== false ? { at: sent.at, by: sent.by } : null,
-      deliveries: draft.stops.filter((x) => x.kind === 'delivery').map((x) => [x.name, x.city].filter(Boolean).join(', ')) });
+    res.json({ text: composeDispatchMessage(draft, { bonus: b.bonus || '', release, initials }), source: item ? 'rate con' : 'rate con only', trip, broker: rc.broker || null, loadNumber: rc.loadNumber || null, initials, release,
+      sentBefore: sent && sent.sent !== false ? { at: sent.at, by: sent.by } : null, deliveries: draft.stops.filter((x) => x.kind === 'delivery').map((x) => [x.name, x.city].filter(Boolean).join(', ')) });
   });
   app.get('/truckmate/loadsheet/:trip/ratecon-draft', requireAuth, async (req, res) => {
     const d = await draftFor(String(req.params.trip));

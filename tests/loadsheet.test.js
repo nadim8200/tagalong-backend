@@ -269,3 +269,31 @@ test('"Send load info" writes the driver\'s text like dispatch does: bonus first
   assert.deepEqual([paid.release.type, paid.release.yard], ['paid', 'Miami']);
   assert.equal(initialsOf('Jeremy Lopez'), 'JEREMY'); assert.equal(initialsOf('ntellez@floridabeauty.us'), 'NTELLEZ');
 });
+
+test('the compose route: a broker load from its own TruckMate record + rate con (no board build); an LTL load gets no dispatch text', async () => {
+  const db = mem(); const routes = {}; let builds = 0;
+  const app = { get: (p, ...h) => { routes[`GET ${p}`] = h; }, post: (p, ...h) => { routes[`POST ${p}`] = h; }, put() {} };
+  initLoadSheets(app, { requireAuth: (req, res, next) => next(), db, getBoard: async () => { builds += 1; return { trips: [] }; } });
+  db.s['taTruckMateActive:florida-beauty'] = { trips: {
+    627800: { item: { trip: { tripNumber: 627800 }, freightBills: [{ billNumber: 'B181097', startZoneDescription: 'ELIOT, ME, 03903', endZoneDescription: 'ELKTON, FL, 32033' }] } },
+    627555: { item: { trip: { tripNumber: 627555, origZoneDesc: 'MIAMI TERMINAL' }, freightBills: [{ billNumber: 'G5065354', startZoneDescription: 'PIERSON, FL, 32180', endZoneDescription: 'CARPINTERIA, CA, 93013' }] } } } };
+  db.s['taTruckMateRateCon:florida-beauty'] = { 627800: { broker: 'TQL', loadNumber: '4016064', tempSetting: '-10', pickups: [{ name: 'Nature Rocks', address: '299 Dow Highway', city: 'Eliot', state: 'ME', zip: '03903', date: '11/21/26', appointment: 'ASAP' }], deliveries: [{ name: 'KeHE Distributors', address: '3800 Deer Park Blvd', city: 'Elkton', state: 'FL', zip: '32033', date: '11/23/26', appointment: '2:00 AM' }] } };
+  const call = async (trip, body = {}) => { let out = {}; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } }; await routes['POST /truckmate/loadsheet/:trip/compose'][1]({ body, params: { trip }, user: { name: 'Jeremy Lopez' } }, res); return out; };
+  const r = await call('627800', { bonus: '$150 flat fee' });
+  assert.equal(builds, 0);
+  assert.equal(r.body.source, 'rate con');
+  assert.match(r.body.text, /^\$150 FLAT FEE\n/); assert.match(r.body.text, /FB#: B181097\nTRIP#: 627800/);
+  assert.match(r.body.text, /PICK UP:\n\nNATURE ROCKS\n299 DOW HIGHWAY\nELIOT, ME 03903/); assert.match(r.body.text, /THANKS, JEREMY\.$/);
+  const ltl = await call('627555');
+  assert.equal(ltl.status, 409); assert.equal(ltl.body.ltl, true); assert.match(ltl.body.error, /LTL leaves from the hubs/);
+  // the driver is on the LTL (627555); the text is for the NEXT load: a booked TruckMate trip with no rate con yet → ask for it
+  db.s['taTruckMateActive:florida-beauty'].trips[627900] = { item: { trip: { tripNumber: 627900 }, freightBills: [{ billNumber: 'B181200', startZoneDescription: 'DETROIT, MI, 48201', endZoneDescription: 'FRESNO, CA, 93701' }] } };
+  const need = await call('627555', { target: { trip: '627900' } });
+  assert.equal(need.status, 409); assert.equal(need.body.needRateCon, true); assert.equal(need.body.error, 'Please upload the rate con so we can dispatch the driver.');
+  // a rate con Jarvis queued as the truck's next load (from Gus's email), no TruckMate trip yet
+  db.s['taNextLoads:florida-beauty'] = { list: [{ id: 'p1', pendingId: 'p1', truck: '1911', rc: { broker: 'CH Robinson' }, at: '2026-11-23T10:00:00Z' }] };
+  db.s['taRateConPending:florida-beauty'] = [{ id: 'p1', record: { broker: 'CH Robinson', loadNumber: '55501', fbfBillNumber: 'B181300', pickups: [{ name: 'Kroger DC', city: 'Detroit', state: 'MI', zip: '48201', date: '11/25/26', appointment: '08:00' }], deliveries: [{ name: 'Fresno Cold', city: 'Fresno', state: 'CA', zip: '93701', date: '11/28/26' }] } }];
+  const nx = await call('627555', { target: { nextId: 'p1' } });
+  assert.equal(nx.status, undefined); assert.equal(nx.body.trip, null); assert.equal(nx.body.broker, 'CH Robinson');
+  assert.match(nx.body.text, /FB#: B181300\nTRIP#: \n/); assert.match(nx.body.text, /KROGER DC\nDETROIT, MI 48201/);
+});
