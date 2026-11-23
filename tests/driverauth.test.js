@@ -15,9 +15,9 @@ function setup({ roster = [FRANK] } = {}) {
   const requireAdmin = (req, res, next) => requireAuth(req, res, () => (req.user.admin || req.user.companyAdmin ? next() : res.status(403).json({ error: 'Admins only.' })));
   const requireAuth = (req, res, next) => { try { req.user = jwt.verify(String(req.headers.authorization || '').slice(7), SECRET); } catch { return res.status(401).json({ error: 'x' }); } return next(); };
   initDriverAuth(app, { rosterCacheMs: 0, appCacheMs: 0, requireAuth, requireAdmin, secret: 'k', db, sign: (u, exp) => jwt.sign(u, SECRET, { expiresIn: exp }), roster: async () => list, getBoard: async () => ({ trips: BOARD }), docsLink: async (site, t) => `https://x/t/tok-${t}`, now: () => clock });
-  const call = async (key, { body = {}, params = {}, token = null, ip = '1.1.1.1' } = {}) => {
+  const call = async (key, { body = {}, params = {}, token = null, ip = '1.1.1.1', headers = {} } = {}) => {
     let out = { status: 200 }; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; } };
-    const req = { body, params, ip, headers: token ? { authorization: `Bearer ${token}` } : {} };
+    const req = { body, params, ip, method: key.split(' ')[0], headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers } };
     const hs = routes[key]; let i = 0; const next = async () => { const h = hs[i++]; if (h) await h(req, res, next); }; await next();
     return out;
   };
@@ -322,4 +322,21 @@ test('a submitted driver release shows on the driver\'s load: the hub, the yard 
   assert.deepEqual([r.hub, r.yard, r.address, r.by], ['MIAMI', 'Miami yard', '2355 NW 70th Ave, Miami, FL 33122', 'Ana']);   // the newest release
   assert.deepEqual(r.stops, [{ consignee: 'COSTCO', city: 'PORT SAINT LUCIE', state: 'FL', zip: '34987' }]);                 // blank rows dropped
   assert.match(r.map, /google\.com\/maps/);
+});
+
+test('Driver app view: a top admin reads a driver\'s app as them (GET only); dispatchers can\'t; the driver\'s "last in the app" stays', async () => {
+  const h = setup();
+  const view = { 'x-view-as-driver': '0986' };
+  const admin = jwt.sign({ role: 'admin', admin: true, name: 'Nadim' }, SECRET);
+  const company = jwt.sign({ role: 'dispatcher', companyAdmin: true, name: 'Ronen' }, SECRET);
+  const dispatch = jwt.sign({ role: 'dispatcher', name: 'Gio' }, SECRET);
+  const me = await h.call('GET /driver/me', { token: admin, headers: view });
+  assert.equal(me.status, 200); assert.equal(me.body.viewOnly, true); assert.equal(me.body.driverId, '0986');
+  assert.deepEqual(me.body.current.map((l) => l.trip), ['626265']);
+  assert.equal(h.db.s['taDriverApp:florida-beauty'], undefined, 'looking doesn\'t count as the driver opening the app');
+  assert.equal((await h.call('GET /driver/me', { token: dispatch, headers: view })).status, 403);
+  assert.equal((await h.call('GET /driver/me', { token: company, headers: view })).status, 403);
+  assert.equal((await h.call('POST /driver/me/loads/:trip/checkin', { token: admin, headers: view, params: { trip: '626265' }, body: { step: 'loaded' } })).status, 403, 'never sends as the driver');
+  assert.equal((await h.call('GET /driver/me', { token: admin, headers: { 'x-view-as-driver': '9999' } })).status, 404);
+  assert.equal((await h.call('GET /driver/me', { token: admin })).status, 403, 'without the header it is still drivers only');
 });

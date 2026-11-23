@@ -110,6 +110,8 @@ export function crewFor(it, code) {
   const other = slots[1 - i]; const oc = String(other.code || '').trim();
   return { team: !!oc, coDriver: oc ? { code: oc, name: other.name || null, hours: clock(other.hos) } : null, hours: clock(slots[i].hos) };
 }
+// who may open the console's Driver app view: top admins (not company admins or dispatchers). Pure.
+export const canViewAs = (u) => !!(u && u.role !== 'driver' && (u.admin === true || u.role === 'admin'));
 export function loadsFor(code, items = []) {
   const mine = items.filter((it) => [tripOf(it).driver, tripOf(it).driver2].some((c) => c && norm(c) === norm(code)) && !DONE.test(String(tripOf(it).status || '')));
   const brief = (it) => { const t = tripOf(it); return { trip: tripNo(it), status: t.status || null, truck: t.powerUnit || null, trailer: t.trailer || null, from: t.origZoneDesc || null, to: t.destZoneDesc || null, stops: billsOf(it).slice(0, 20).map((b) => ({ bill: b.billNumber || null, to: b.endZoneDescription || null, customer: b.billToName || null, deliverBy: b.deliverBy || null, pieces: b.pieces != null ? Number(b.pieces) : null, delivered: !!b.actualDelivery })), crew: crewFor(it, code) }; };
@@ -176,6 +178,14 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
 
   // a signed-in driver who is still on the roster
   const requireDriver = (req, res, next) => requireAuth(req, res, async () => {
+    // Driver app view (Nov 22, Nadim): an admin in the console sees exactly what one driver's app shows — reading only (GET),
+    // never as the driver: nothing can be tapped or sent, and the driver's "last in the app" isn't touched
+    const viewAs = norm(req.headers && req.headers['x-view-as-driver']);
+    if (viewAs && req.user && req.user.role !== 'driver') {
+      if (!canViewAs(req.user)) return res.status(403).json({ error: 'Driver app view is for admins only.' });
+      if (req.method !== 'GET') return res.status(403).json({ error: 'View only — this is the driver\'s screen.' });
+      try { const d = await byCode(viewAs); if (!d) return res.status(404).json({ error: 'No driver with that ID.' }); req.driver = { ...d, viewOnly: true }; return next(); } catch { return res.status(503).json({ error: 'Could not load that driver.' }); }
+    }
     if (!req.user || req.user.role !== 'driver') return res.status(403).json({ error: 'Driver sign-in only.' });
     try {
       const d = await byCode(req.user.driverCode);
@@ -229,6 +239,7 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       const rels = (await db.get(`taReleases:${SITE}`, {})) || {};
       for (const l of [...loads.current, ...loads.next]) l.released = releasedFor(rels[l.trip]);
       for (const l of [...loads.current, ...loads.next]) if (l.crew && l.crew.coDriver && !l.crew.coDriver.name) { const c = await byCode(l.crew.coDriver.code).catch(() => null); if (c) l.crew.coDriver.name = c.name || null; } // eslint-disable-line no-await-in-loop
+      if (req.driver.viewOnly) return res.json({ name: req.driver.name, driverId: req.driver.code, ...loads, jarvisPhone: process.env.RETELL_FROM_NUMBER || null, viewOnly: true });
       if (trips.length) await db.update(tripsKey(req.driver.code), (cur) => [...new Set([...trips, ...(Array.isArray(cur) ? cur : [])])].slice(0, 300), []);
       // the last time the driver was in the app (dispatch sees it on the load), written at most every 5 minutes
       const seen = (((await db.get(APP, {})) || {}).seen || {})[norm(req.driver.code)];
