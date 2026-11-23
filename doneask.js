@@ -9,9 +9,11 @@
 // ---------------------------------------------------------------
 import { staffEmail } from './staffmail.js';
 import { asStatusAsk } from './training.js';
+import { loadsFor } from './driverauth.js';
 
 const SITE = 'florida-beauty';
 const KEY = (site) => `taDoneAsk:${site}`;     // { asks: { trip: { codes, why, place, askedAt, count, answer } } }
+export const HANDOFF = (site) => `taDriverHandoff:${site}`;   // trip → { how, where, note, by, codes, at } — "I'm done with this load" (Nov 22)
 const MIN = 60000;
 export const REASK_MS = 2 * 60 * MIN;
 export const OPEN_MS = 12 * 60 * MIN;
@@ -91,13 +93,32 @@ export function emptyEmail(item, ans, trip) {
   });
 }
 
+// "I'm done with this load" in the driver app (Nov 22, Ferney on truck 4504): the driver dropped the trailer or did a release —
+// the load isn't theirs anymore though TruckMate may not show it yet. Inbound is told what to update. Pure.
+export const WRAP = ['delivered', 'dropped', 'release'];
+export function handoffEmail(item, h, trip) {
+  const t = (item && item.trip) || item || {};
+  const truck = String(t.powerUnit || '').trim(); const trailer = String(t.trailer || '').trim();
+  const lane = [t.origZoneDesc, t.destZoneDesc].filter(Boolean).map(city).join(' → ');
+  const what = h.how === 'release' ? `did a release${h.where ? ` at ${h.where}` : ''}` : `dropped trailer ${trailer || '—'}${h.where ? ` at ${h.where}` : ''}`;
+  const on = nowOn(item);
+  return staffEmail({
+    subject: `Driver ${h.how === 'release' ? 'did a release' : 'dropped the trailer'} — load ${trip}${truck ? `, truck ${truck}` : ''}`,
+    category: 'Driver app', headline: `Truck ${truck || '—'}: ${h.how === 'release' ? 'release' : 'trailer dropped'} on load ${trip}`, greeting: 'Hi team,',
+    body: `${h.by || 'The driver'} reported in the driver app that they ${what} on load ${trip}${lane ? ` (${lane})` : ''} and are done with it${h.note ? `: "${h.note}"` : ''}. Jarvis took it off their app${on.trip ? ` and shows them load ${on.trip}` : ''}; the load stays on the board until TruckMate is updated.\n\n{{updates}}\n\nPlease update TruckMate: who has trailer ${trailer || '—'} now, and ${on.trip ? `start load ${on.trip} on truck ${truck}` : `the truck's next load`}.`,
+    updates: [{ icon: 'clock', title: `Truck ${truck || '—'} is ${on.text}`, text: `Driver: ${h.by || '—'}${h.at ? ` · told Jarvis ${new Date(h.at).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} ET` : ''}` }],
+    closing: 'Jarvis',
+  });
+}
+
 export function initDoneAsk(app, { db, requireDriver = null, getBoard, notify = null, finishTrip = null, sendMail = null, recipients = async () => [], env = process.env, now = () => Date.now() } = {}) {
   const enabled = !!(db && db.enabled);
   async function process(site = SITE) {
     if (!enabled) return [];
     const board = (await getBoard(site)) || {};
     const st = (await db.get(KEY(site), {})) || {};
-    const cands = candidates(board);
+    const done = (await db.get(HANDOFF(site), {})) || {};
+    const cands = candidates(board).filter((c) => !done[c.trip]);   // the driver already said they're done with it
     // the driver already tapped "Delivered" at every delivery stop (the app's check-ins at the load's geofences): that's
     // their Yes — no second question
     const taps = (await db.get(`taDriverCheckins:${site}`, {})) || {};
@@ -165,6 +186,29 @@ export function initDoneAsk(app, { db, requireDriver = null, getBoard, notify = 
   }
   if (app && requireDriver) {
     app.get('/driver/me/done-ask', requireDriver, async (req, res) => { res.json({ ask: enabled ? await openFor(req.driver.code) : null }); });
+    // "I'm done with this load": delivered everything (closes it, like Yes), dropped the trailer, or did a release (off the
+    // driver's app; Inbound updates TruckMate). Either way Jarvis stops asking about it.
+    app.post('/driver/me/loads/:trip/wrapup', requireDriver, async (req, res) => {
+      if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
+      const trip = String(req.params.trip); const b = req.body || {};
+      const how = WRAP.includes(b.how) ? b.how : null;
+      if (!how) return res.status(400).json({ error: 'Choose what happened.' });
+      const items = ((await getBoard(SITE)) || {}).trips || [];
+      const mine = loadsFor(req.driver.code, items);
+      if (![...mine.current, ...mine.next].some((l) => l.trip === trip)) return res.status(404).json({ error: 'That load is not yours.' });
+      const item = items.find((it) => tripNo(it) === trip) || null;
+      const h = { how, where: String(b.where || '').trim().slice(0, 120) || null, note: String(b.note || '').trim().slice(0, 500) || null, by: req.driver.name, codes: [tripOf(item).driver, tripOf(item).driver2].map(norm).filter(Boolean), at: new Date(now()).toISOString() };
+      await db.update(HANDOFF(SITE), (cur) => ({ ...Object.fromEntries(Object.entries(cur || {}).filter(([, v]) => now() - Date.parse(v.at) < 7 * 86400000)), [trip]: h }), {});
+      if (how === 'delivered') {
+        const ans = { choice: 'yes', text: [h.where && `at ${h.where}`, h.note].filter(Boolean).join(' — ') || null, by: h.by, at: h.at, via: '"I\'m done with this load"' };
+        await db.update(KEY(SITE), (cur) => { const x = { ...(cur || {}) }; x.asks = { ...(x.asks || {}), [trip]: { ...((x.asks || {})[trip] || { codes: h.codes, askedAt: h.at, count: 0 }), answer: ans } }; return x; }, {});
+        return res.json({ ...(await confirm(trip, 'yes', ans.text || '', ans, SITE)), how });
+      }
+      let emailed = false;
+      if (sendMail) { try { const to = await recipients(); if (to.length) { const m = handoffEmail(item, h, trip); await sendMail({ to, subject: m.subject, html: m.html, text: m.text, attachments: m.attachments }); emailed = true; } } catch (e) { console.warn('[done-ask] handoff email:', e.message); } }
+      console.log(`[done-ask] trip ${trip}: ${h.by} is done with it (${how}${h.where ? ` at ${h.where}` : ''})`);
+      return res.json({ ok: true, how, emailed });
+    });
     app.post('/driver/me/done-ask/:trip', requireDriver, async (req, res) => {
       if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
       const b = req.body || {};

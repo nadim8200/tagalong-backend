@@ -189,6 +189,9 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
   app.get('/driver/me', requireDriver, async (req, res) => {
     try {
       const loads = loadsFor(req.driver.code, await board());
+      // "I'm done with this load" (doneask.js): it leaves this driver's app right away, even before TruckMate is updated
+      const handed = (await db.get(`taDriverHandoff:${SITE}`, {}).catch(() => ({}))) || {};
+      loads.current = loads.current.filter((l) => !(handed[l.trip] && (handed[l.trip].codes || []).includes(norm(req.driver.code))));
       const trips = [...loads.current, ...loads.next].map((l) => l.trip);
       // what dispatch sent the driver for each load: a message, or a rate con they checked and sent. A draft Jarvis made from a
       // rate con stays in the console until a dispatcher sends it

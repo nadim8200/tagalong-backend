@@ -46,6 +46,9 @@ test('an hour before any pickup the crew is asked in the app too (not when they 
   assert.deepEqual(r.asks.map((a) => [a.trip, a.before, a.afterTrip]), [['627300', true, null]]);
   assert.equal(dueAsks([load], { taps: { 627300: { steps: { 'at-shipper': { at: iso(NOW) } } } } }, NOW).asks.length, 0, 'already at the shipper');
   assert.equal(dueAsks([load], { asks: { 627300: { askedAt: iso(NOW) } } }, NOW).asks.length, 0, 'once');
+  // Nov 22, truck 4504: the trailer was already rolling out of the cooler (GPS) / TruckMate says LOADEDTOGO — no "Rolling to your pickup?"
+  assert.equal(dueAsks([load], { departed: { 627300: { at: iso(NOW - 60000) } } }, NOW).asks.length, 0, 'Jarvis saw it leave the cooler');
+  assert.equal(dueAsks([{ ...load, trip: { ...load.trip, status: 'LOADEDTOGO' } }], {}, NOW).asks.length, 0, 'TruckMate: loaded');
 });
 
 test('the load card shows what the driver last said in the app', async () => {

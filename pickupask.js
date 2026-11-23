@@ -69,9 +69,9 @@ export function dueAsks(items = [], state = {}, now = Date.now()) {
   for (const it of items) {
     const n = tripNo(it); const codes = codesOf(it);
     if (!n || !codes.length || asked[n] || out.some((a) => a.trip === n)) continue;
-    if (/^(ARRSHIP|DEPSHIP|ARRCONS|DEPCONS|DELV|INTRAN|ENROUTE|SPT)/i.test(String(tripOf(it).status || ''))) continue;
+    if (/^(ARRSHIP|DEPSHIP|ARRCONS|DEPCONS|DELV|INTRAN|ENROUTE|SPT|LOADING|LOADED)/i.test(String(tripOf(it).status || ''))) continue;
     const st = (taps[n] || {}).steps || {};
-    if (st['at-shipper'] || st.loaded) continue;
+    if (st['at-shipper'] || st.loaded || (state.departed || {})[n]) continue;   // checked in, or Jarvis saw it leave the cooler (GPS)
     const plan = plannedPickup(it);
     if (!plan || !plan.ms) continue;
     const left = plan.ms - now;
@@ -88,7 +88,7 @@ export function initPickupAsk(app, { db, requireDriver = null, getBoard, notify 
     if (!enabled) return [];
     const items = ((await getBoard(site)) || {}).trips || [];
     const st = (await db.get(KEY(site), {})) || {};
-    const { done, asks } = dueAsks(items, { ...st, taps: (await db.get(`taDriverCheckins:${site}`, {})) || {} }, now());
+    const { done, asks } = dueAsks(items, { ...st, taps: (await db.get(`taDriverCheckins:${site}`, {})) || {}, departed: (await db.get(`taAutoDepart:${site}`, {})) || {} }, now());
     const at = new Date(now()).toISOString();
     const nextAsks = { ...(st.asks || {}) };
     for (const a of asks) {

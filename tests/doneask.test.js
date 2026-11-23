@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { candidates, dueAsks, initDoneAsk, REASK_MS, OPEN_MS } from '../doneask.js';
+import { candidates, dueAsks, initDoneAsk, REASK_MS, OPEN_MS, handoffEmail } from '../doneask.js';
 
 const T = (n, more = {}, trip = {}) => ({ trip: { tripNumber: n, driver: '2000', driver2: '', powerUnit: '2219', destZoneDesc: 'SANTA ANA, CA, 92705', ...trip }, ...more });
 
@@ -89,4 +89,25 @@ test('the driver already tapped "Delivered" at every delivery stop: no second qu
   assert.deepEqual(pushes, [['3100', '627401']], 'one stop of two tapped: the driver is asked');
   await d.process('fb');
   assert.equal(finished.length, 1, 'once');
+});
+
+// "I'm done with this load" (Nov 22, Ferney Urrego on truck 4504) — SYNTHETIC
+test('I\'m done with this load: delivered closes it like Yes; dropped / release tells Inbound; Jarvis stops asking about it', async () => {
+  const m = new Map();
+  const db = { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, v), update: async (k, fn, fb) => { const v = fn(m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb); m.set(k, v); return v; } };
+  const routes = {}; const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.pop(); }, post: (p, ...h) => { routes[`POST ${p}`] = h.pop(); } };
+  const finished = []; const mails = []; const pushes = [];
+  const board = { trips: [T('627656', { _finishGuess: 'left the last delivery' }, { driver: '0986', driver2: '2473', status: 'ARRCONS', powerUnit: '4504', trailer: '18094', destZoneDesc: 'MELBOURNE, FL, 32934' }), T('627549', {}, { driver: '0986', status: 'ARRCONS', powerUnit: '4504', trailer: '18094' })], unclosed: [] };
+  const d = initDoneAsk(app, { db, requireDriver: () => {}, getBoard: async () => board, notify: async (c, x) => pushes.push(x.data.trip), finishTrip: async (...a) => finished.push(a), sendMail: async (x) => mails.push(x), recipients: async () => ['inbound@floridabeauty.us'], env: { NODE_ENV: 'test' }, now: () => Date.parse('2026-11-23T01:30:00Z') });
+  const call = async (trip, body, code = '0986') => { let out; const res = { status: (c) => ({ json: (j) => { out = { c, ...j }; } }), json: (j) => { out = j; } }; await routes['POST /driver/me/loads/:trip/wrapup']({ params: { trip }, body, driver: { code, name: 'Ferney Urrego' } }, res); return out; };
+  assert.equal((await call('627656', { how: 'maybe' })).c, 400);
+  assert.equal((await call('627656', { how: 'delivered' }, '7777')).c, 404, 'only their own load');
+  const r = await call('627656', { how: 'delivered', where: 'Melbourne' });
+  assert.equal(r.finished, true); assert.equal(finished[0][1], '627656'); assert.match(finished[0][2], /driver confirmed delivery in the app \("I'm done with this load"\) — Ferney Urrego: "at Melbourne"/);
+  await d.process();
+  assert.deepEqual(pushes, [], 'no "is it delivered?" push after the driver said so');
+  const r2 = await call('627549', { how: 'dropped', where: 'Miami cooler' });
+  assert.equal(r2.emailed, true); assert.match(mails.pop().subject, /^Driver dropped the trailer — load 627549, truck 4504/);
+  assert.deepEqual(Object.keys(m.get('taDriverHandoff:florida-beauty')).sort(), ['627549', '627656']);
+  assert.match(handoffEmail(board.trips[1], { how: 'release', where: 'Pompano yard', by: 'Ferney' }, '627549').subject, /did a release/);
 });
