@@ -305,7 +305,8 @@ test('the driver info email to the broker, like dispatch writes it (B181051): su
   const e = brokerInfoEmail({ rc, bill: 'B181051', truck: '2614', trailer: '7371', drivers: [{ name: 'Manuel Rivera', code: '6291', phone: '7866917947' }, { name: 'Angel Rivera', code: '06689', phone: '(786) 691-7830' }], dispatcher: { name: 'Jeinner Vargas', email: 'jvargas@floridabeauty.us' } });
   assert.equal(e.subject, 'RXO LOGISTICS LOAD 24720958 MA TO FL // TK: 2614 TL: 7371 // B181051');
   assert.equal(e.body, 'Good day,\n\nPlease see the driver info below\n\n2614\n7371\n36F\nMANUEL RIVERA (6291)\nANGEL RIVERA (6689)\n\nPH#\nMANUEL RIVERA: 786-691-7947\nANGEL RIVERA: 786-691-7830');
-  assert.deepEqual(e.to, ['brian.karch@rxo.com', 'hmftracking@rxo.com']);   // the broker's own, never ours
+  assert.deepEqual(e.to, ['brian.karch@rxo.com', 'hmftracking@rxo.com']);
+  assert.deepEqual(e.fields, { truck: '2614', trailer: '7371', temp: '36F', drivers: [{ name: 'MANUEL RIVERA', code: '6291', phone: '786-691-7947' }, { name: 'ANGEL RIVERA', code: '6689', phone: '786-691-7830' }] });   // the broker's own, never ours
   assert.deepEqual(e.cc, BROKER_INFO_CC); assert.deepEqual(BROKER_INFO_CC, ['Inbound-Dispatch@floridabeauty.us']);
   const full = brokerInfoText(e.body, 'Driver can pick up early.', e.signature);
   assert.match(full, /786-691-7830\n\nDriver can pick up early\.\n\nThanks,\n\nJeinner Vargas\nFlorida Beauty Express\nEmail: jvargas@floridabeauty\.us$/);

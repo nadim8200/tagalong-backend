@@ -253,7 +253,9 @@ export function brokerInfoEmail({ rc = {}, bill = '', truck = '', trailer = '', 
     'PH#', ...ds.filter((d) => ph(d.phone)).map((d) => `${String(d.name || '').toUpperCase()}: ${ph(d.phone)}`)].filter((x, i, a) => x !== '' || a[i - 1] !== '').join('\n').replace(/\n{3,}/g, '\n\n');
   const own = /@floridabeauty\.(us|com)$/i;
   const to = [...new Set([rc.brokerEmail, ...((rc.contacts || []).filter((c) => /broker_rep|tracking|dispatch|after_hours/.test(c.role || '')).map((c) => c.email))].filter((e) => e && /@/.test(e) && !own.test(e)).map((e) => String(e).trim().toLowerCase()))].slice(0, 6);
-  return { subject, body, to, cc: BROKER_INFO_CC, signature: [dispatcher.name || '', 'Florida Beauty Express', dispatcher.email ? `Email: ${dispatcher.email}` : ''].filter(Boolean).join('\n') };
+  // the same facts one by one, for the pop-up's fields (dispatch can fix a name or phone just for this email; nothing is saved)
+  const fields = { truck: String(truck || ''), trailer: String(trailer || ''), temp, drivers: ds.map((d) => ({ name: String(d.name || '').toUpperCase(), code: d.code ? String(d.code).replace(/^0+/, '') : '', phone: ph(d.phone) })) };
+  return { subject, body, fields, to, cc: BROKER_INFO_CC, signature: [dispatcher.name || '', 'Florida Beauty Express', dispatcher.email ? `Email: ${dispatcher.email}` : ''].filter(Boolean).join('\n') };
 }
 // The whole email as sent: the body, the comments, "Thanks," and the signature. Pure.
 export const brokerInfoText = (body, comments, signature) => [String(body || '').trim(), String(comments || '').trim(), 'Thanks,', '', String(signature || '').trim()].filter(Boolean).join('\n\n').replace(/Thanks,\n\n\n\n/, 'Thanks,\n\n');
