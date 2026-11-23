@@ -1,0 +1,152 @@
+// ---------------------------------------------------------------
+// Yard checks (Nov 22, Nadim): twice a day — morning and night — the yard person walks the Miami and Ventura yards with
+// a phone and marks every trailer and truck: here or not, loaded or empty, reefer on with its set point and reading, fuel,
+// and damage (notes + photos). The sheet starts with what GPS says is in the yard (Thermo King / Samsara trailers, Samsara
+// trucks — yardreport.js); anything found that GPS didn't list is added by hand. When it's sent, it's compared: on GPS but
+// not found, found but not on GPS, a loaded trailer with the reefer off or its reading 5°F+ from the set point, damage.
+// Shown on the Yard tab only — no texts or emails (Nov 22: the user's call).
+//
+//   GET  /truckmate/yard-checks?yard=MIAMI   → the sheet: who should be there, today's morning / night checks, the last 14
+//   POST /truckmate/yard-checks              → { yard, shift?, rows: [{ unit, kind, here, loaded, reeferOn, setF, tempF,
+//                                                fuelPct, damage, photos }] } one check per yard, day and shift (sent again: replaced)
+//   GET  /truckmate/yard-checks/:id          → one check in full
+//   POST /truckmate/yard-checks/photos       → { dataUrl } a damage photo (JPEG / PNG, ≤ 600 KB) → { id }
+//   GET  /truckmate/yard-checks/photos/:id   → the picture
+// Data: taYardChecks { list } (newest first, 400 kept) · taYardCheckPhoto:<id>
+// ---------------------------------------------------------------
+import { randomBytes } from 'node:crypto';
+
+export const CHECK_YARDS = { MIAMI: { name: 'Miami', tz: 'America/New_York' }, VENTURA: { name: 'Ventura', tz: 'America/Los_Angeles' } };
+export const SHIFTS = ['morning', 'night'];
+const KEY = 'taYardChecks';
+const PHOTO = (id) => `taYardCheckPhoto:${id}`;
+const PHOTO_MAX = 600 * 1024;
+const norm = (x) => String(x == null ? '' : x).trim().toUpperCase().replace(/^(TL|TRL|TRAILER|TK|TRUCK)\s*/, '').replace(/\s+/g, '').replace(/^0+(?=\d)/, '');
+const num = (v) => (v === '' || v == null || Number.isNaN(Number(v)) ? null : Number(v));
+
+// The yard's own clock: which day and which check a time belongs to. Morning 4:00 AM – 3:59 PM, night 4:00 PM – 3:59 AM (a
+// night check after midnight still counts for the evening before). Pure. → { day: 'YYYY-MM-DD', shift, hour }
+export function yardClock(ms, tz) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(ms)).map((p) => [p.type, p.value]));
+  const hour = Number(parts.hour) % 24;
+  let day = `${parts.year}-${parts.month}-${parts.day}`;
+  if (hour < 4) { const d = new Date(`${day}T12:00:00Z`); d.setUTCDate(d.getUTCDate() - 1); day = d.toISOString().slice(0, 10); }
+  return { day, shift: hour >= 4 && hour < 16 ? 'morning' : 'night', hour };
+}
+
+// Who should be in the yard now, from the yard report (trailers) and the truck report (trucks). Pure.
+export function expectedUnits(report = {}, trucks = {}, yard = 'MIAMI') {
+  const hub = ((report.hubs || []).find((h) => h.key === yard) || {}).trailers || [];
+  const th = ((trucks.hubs || []).find((h) => h.key === yard) || {}).trucks || [];
+  return [
+    ...hub.map((t) => ({ unit: norm(t.trailer), kind: 'trailer', onLoad: t.onLoad || null, reefer: { on: t.unitOn ?? null, setF: t.setF ?? null, returnF: t.returnF ?? null }, seenAt: t.seenAt || null, source: t.source || null })),
+    ...th.map((t) => ({ unit: norm(t.unit), kind: 'truck', onLoad: t.trip || null, driver: (t.drivers || [])[0] ? t.drivers[0].name || null : null, seenAt: t.gpsAt || null, source: 'Samsara' })),
+  ].filter((u) => u.unit);
+}
+
+// One row from the phone, cleaned. Pure.
+export function cleanRow(r = {}) {
+  const kind = r.kind === 'truck' ? 'truck' : 'trailer';
+  return {
+    unit: norm(r.unit), kind, here: r.here === true ? true : r.here === false ? false : null,
+    loaded: ['loaded', 'empty'].includes(r.loaded) ? r.loaded : null,
+    reeferOn: kind === 'trailer' && typeof r.reeferOn === 'boolean' ? r.reeferOn : null,
+    setF: kind === 'trailer' ? num(r.setF) : null, tempF: kind === 'trailer' ? num(r.tempF) : null,
+    fuelPct: num(r.fuelPct) != null ? Math.max(0, Math.min(100, Math.round(num(r.fuelPct)))) : null,
+    damage: String(r.damage || '').trim().slice(0, 500) || null,
+    photos: (Array.isArray(r.photos) ? r.photos : []).map(String).filter((x) => /^[a-f0-9]{12}$/.test(x)).slice(0, 4),
+    added: !!r.added,
+  };
+}
+
+// The check against what GPS said: what to look at. Pure. → { missing, extra, reefer, damage, unchecked, counts }
+export function compareCheck(expected = [], rows = []) {
+  const by = new Map(rows.map((r) => [`${r.kind}:${r.unit}`, r]));
+  const expKeys = new Set(expected.map((u) => `${u.kind}:${u.unit}`));
+  const missing = expected.filter((u) => (by.get(`${u.kind}:${u.unit}`) || {}).here === false).map((u) => ({ unit: u.unit, kind: u.kind, onLoad: u.onLoad || null }));
+  const unchecked = expected.filter((u) => { const r = by.get(`${u.kind}:${u.unit}`); return !r || r.here == null; }).map((u) => ({ unit: u.unit, kind: u.kind }));
+  const extra = rows.filter((r) => r.here && !expKeys.has(`${r.kind}:${r.unit}`)).map((r) => ({ unit: r.unit, kind: r.kind }));
+  const reefer = rows.filter((r) => r.here && r.kind === 'trailer' && r.loaded === 'loaded' && (r.reeferOn === false || (r.setF != null && r.tempF != null && Math.abs(r.tempF - r.setF) >= 5)))
+    .map((r) => ({ unit: r.unit, why: r.reeferOn === false ? 'loaded, reefer off' : `reading ${r.tempF}°F, set ${r.setF}°F` }));
+  const damage = rows.filter((r) => r.here && r.damage).map((r) => ({ unit: r.unit, kind: r.kind, note: r.damage, photos: r.photos.length }));
+  const here = rows.filter((r) => r.here);
+  return { missing, extra, reefer, damage, unchecked, counts: { here: here.length, trailers: here.filter((r) => r.kind === 'trailer').length, trucks: here.filter((r) => r.kind === 'truck').length, loaded: here.filter((r) => r.loaded === 'loaded').length, empty: here.filter((r) => r.loaded === 'empty').length, expected: expected.length } };
+}
+
+// Today's checks and whether one is late: morning not in by 11 AM, night not in by 11 PM (yard time). Pure.
+export function dueNow(list = [], yard, now = Date.now()) {
+  const { tz } = CHECK_YARDS[yard];
+  const c = yardClock(now, tz);
+  const mine = (shift) => list.find((x) => x.yard === yard && x.day === c.day && x.shift === shift) || null;
+  const morning = mine('morning'); const night = mine('night');
+  const hourNight = c.hour < 4 ? c.hour + 24 : c.hour;
+  return { day: c.day, shiftNow: c.shift, morning: morning ? summary(morning) : null, night: night ? summary(night) : null,
+    late: { morning: !morning && hourNight >= 11, night: !night && hourNight >= 23 } };
+}
+export const summary = (x) => ({ id: x.id, yard: x.yard, day: x.day, shift: x.shift, by: x.by, at: x.at, updated: x.updated || null, ...x.result.counts,
+  missing: x.result.missing.length, extra: x.result.extra.length, reefer: x.result.reefer.length, damage: x.result.damage.length, unchecked: x.result.unchecked.length });
+
+export function initYardCheck(app, { requireAuth, db, report, trucks, now = () => Date.now() }) {
+  const enabled = !!(db && db.enabled);
+  const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatch';
+  const yardOf = (v) => { const k = String(v || '').toUpperCase(); return CHECK_YARDS[k] ? k : null; };
+  async function expected(yard) {
+    const [r, t] = await Promise.all([report().catch(() => ({})), trucks().catch(() => ({}))]);
+    return expectedUnits(r, t, yard);
+  }
+  if (!app || !requireAuth) return { expected };
+
+  app.get('/truckmate/yard-checks', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const yard = yardOf(req.query.yard) || 'MIAMI';
+    try {
+      const list = ((await db.get(KEY, { list: [] })) || {}).list || [];
+      res.json({ yards: Object.entries(CHECK_YARDS).map(([key, y]) => ({ key, name: y.name, tz: y.tz, due: dueNow(list, key, now()) })), yard, expected: await expected(yard),
+        today: dueNow(list, yard, now()), history: list.filter((x) => x.yard === yard).slice(0, 14).map(summary) });
+    } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.get('/truckmate/yard-checks/:id', requireAuth, async (req, res, next) => {
+    if (req.params.id === 'photos') return next();
+    const x = ((((await db.get(KEY, { list: [] })) || {}).list) || []).find((c) => c.id === String(req.params.id));
+    return x ? res.json({ check: x }) : res.status(404).json({ error: 'No such check.' });
+  });
+  app.post('/truckmate/yard-checks', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const b = req.body || {};
+    const yard = yardOf(b.yard);
+    if (!yard) return res.status(400).json({ error: 'Pick the yard: Miami or Ventura.' });
+    const rows = (Array.isArray(b.rows) ? b.rows : []).slice(0, 400).map(cleanRow).filter((r) => r.unit);
+    if (!rows.some((r) => r.here != null)) return res.status(400).json({ error: 'Mark at least one unit here or not here.' });
+    const clock = yardClock(now(), CHECK_YARDS[yard].tz);
+    const shift = SHIFTS.includes(b.shift) ? b.shift : clock.shift;
+    try {
+      const exp = await expected(yard);
+      const result = compareCheck(exp, rows);
+      const at = new Date(now()).toISOString();
+      let saved = null;
+      await db.update(KEY, (cur) => {
+        const list = ((cur && cur.list) || []);
+        const old = list.find((x) => x.yard === yard && x.day === clock.day && x.shift === shift);
+        saved = { id: old ? old.id : randomBytes(6).toString('hex'), yard, day: clock.day, shift, by: who(req), at: old ? old.at : at, ...(old ? { updated: at, updatedBy: who(req) } : {}), expected: exp, rows, result };
+        return { list: [saved, ...list.filter((x) => x !== old)].slice(0, 400) };
+      }, { list: [] });
+      res.json({ ok: true, check: summary(saved), result });
+    } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.post('/truckmate/yard-checks/photos', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const m = String((req.body || {}).dataUrl || '').match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
+    if (!m) return res.status(400).json({ error: 'Send a JPEG or PNG picture.' });
+    if (m[2].length * 0.75 > PHOTO_MAX) return res.status(413).json({ error: 'That picture is too big.' });
+    const id = randomBytes(6).toString('hex');
+    await db.set(PHOTO(id), { type: m[1], data: m[2], by: who(req), at: new Date(now()).toISOString() });
+    res.json({ id });
+  });
+  app.get('/truckmate/yard-checks/photos/:id', requireAuth, async (req, res) => {
+    const p = /^[a-f0-9]{12}$/.test(String(req.params.id)) ? await db.get(PHOTO(req.params.id), null) : null;
+    if (!p) return res.status(404).json({ error: 'No such picture.' });
+    res.set('Content-Type', p.type); res.set('Cache-Control', 'private, max-age=86400');
+    return res.send(Buffer.from(p.data, 'base64'));
+  });
+  return { expected };
+}

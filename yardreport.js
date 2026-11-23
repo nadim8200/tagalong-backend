@@ -10,6 +10,7 @@ import { KNOWN_YARDS } from './loadsheet.js';
 import { geocodePlace } from './meetwatch.js';
 import { getLiveIndex, samsaraTokenFrom } from './samsara.js';
 import { nextParked } from './thermoking.js';
+import { initYardCheck } from './yardcheck.js';
 
 const SITE = 'florida-beauty';
 const POINTS = 'taHubPoints';      // hub → [{ lat, lng }] (the yard addresses, looked up once)
@@ -257,5 +258,7 @@ export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => ge
     }
     return out;
   }
+  // morning and night yard checks at Miami and Ventura, started from who GPS says is in the yard (yardcheck.js)
+  initYardCheck(app, { requireAuth, db, report, trucks, now });
   return { report, trucks, hubOf, readSamsara, trailerHubs };
 }
