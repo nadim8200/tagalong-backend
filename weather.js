@@ -9,7 +9,7 @@
 // Trucks close together share one look (a ~15-mile grid square, kept for the hour), so the cost stays at a few dollars a month.
 import { driverStops } from './driverstops.js';
 import { CHECKINS } from './checkins.js';
-import { placeKey } from './watchtower.js';
+import { placeKey, haversineMi } from './watchtower.js';
 import { asLive } from './training.js';
 
 const SITE = 'florida-beauty';
@@ -113,6 +113,19 @@ export function stopPoints(item, { geo = {}, steps = {}, etas = {} } = {}) {
     const log = etas[placeKey(x.place || x.key)]; const last = log && (log.ours || []).slice(-1)[0];
     return g ? { role: 'stop', stop: x.key, lat: g.lat, lng: g.lng, place: x.place || x.name || null, eta: last && last.etaMs ? last.etaMs : null } : null;
   }).filter(Boolean);
+}
+
+// No ETA logged for a stop yet (Nov 22, Ferney in Miami: stops in Connecticut / Massachusetts showed tonight's storms): a rough
+// arrival from where the truck is, in stop order — road miles ≈ 1.2 × straight line at 50 mph, an hour at each stop before.
+// Good enough to pick the right day's forecast; never shown as an ETA. Pure. → points with eta filled in
+export function roughEtas(points = [], truck = null, now = Date.now()) {
+  if (!truck || truck.lat == null || truck.lng == null) return points;
+  let at = { lat: Number(truck.lat), lng: Number(truck.lng) }; let hours = 0;
+  return points.map((p, i) => {
+    hours += (haversineMi(at.lat, at.lng, p.lat, p.lng) * 1.2) / 50 + (i ? 1 : 0);
+    at = { lat: p.lat, lng: p.lng };
+    return p.eta ? p : { ...p, eta: now + hours * HOUR, rough: true };
+  });
 }
 
 // the picture for one stop when the truck gets there (our ETA): an official warning still on then, else the worst forecast
@@ -246,10 +259,11 @@ export function initWeather(app, { db, board, notify, requireAuth = null, requir
         if (h) alerts.push({ kind: h.kind, id: `${h.kind}|${p.role}|${p.place || cell(p)}`, at: h.at, percent: h.percent, tempF: h.tempF, text: h.text, role: p.role, place: p.place });
       }
       const stops = {};
-      for (const sp of stopPoints(it, { geo, steps: (checkins[trip] || {}).steps || {}, etas: etaLog[trip] || {} })) {
+      const sm = it._samsara || {};
+      for (const sp of roughEtas(stopPoints(it, { geo, steps: (checkins[trip] || {}).steps || {}, etas: etaLog[trip] || {} }), sm.lat != null ? { lat: sm.lat, lng: sm.lng } : null, now())) {
         const w = await look(sp, 55).catch(() => null); // eslint-disable-line no-await-in-loop   // hourly: the NWS is free
         const sky = stopSky(w, { eta: sp.eta, now: now() });
-        if (sky) stops[sp.stop] = sky;
+        if (sky) stops[sp.stop] = sp.rough ? { ...sky, roughEta: true } : sky;
       }
       trips[trip] = { alerts, stops, checkedAt: new Date(now()).toISOString(), truck: tripOf(it).powerUnit || null };
       const t = tripOf(it); const codes = [t.driver, t.driver2].map((x) => String(x || '').trim()).filter(Boolean);

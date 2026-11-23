@@ -10,7 +10,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } 
 import { CHECKINS, validStep } from './checkins.js';
 import { leftCooler, withDetected } from './autodepart.js';
 import { driverStops, cityStep, stepsWithReports } from './driverstops.js';
-import { roadFacts, truckStopFinder, aheadOf } from './driverroad.js';
+import { roadFacts, truckStopFinder, aheadOf, milesBetween } from './driverroad.js';
 import { initTripLog } from './triplog.js';
 import { KNOWN_YARDS } from './loadsheet.js';
 import { tapStamp } from './taptime.js';
@@ -231,7 +231,11 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
         // a team sees the same stops done: a box count either driver sent counts as delivered (stopreports)
         const stopsHere = driverStops(it, { geo });
         const reports = ((reportsAll || (reportsAll = (await db.get(`taStopReports:${SITE}`, {}).catch(() => ({}))) || {}))[l.trip]) || []; // eslint-disable-line no-await-in-loop
-        l.checkin = { stops: stopsHere.map(({ zip, tmPlace, cityLabel, ...x }) => x), steps: withDetected(stepsWithReports(steps, stopsHere, reports), seen) };
+        // how far the truck is from each stop (straight line), so a far-away "I'm at the receiver" asks first (Nov 22)
+        const sam = (it && it._samsara) || {};
+        const truckAt = sam.lat != null && sam.lng != null && !(Number(sam.lat) === 0 && Number(sam.lng) === 0) ? { lat: Number(sam.lat), lng: Number(sam.lng) } : null;
+        const away = (x) => { const g = truckAt && x.zip ? geo[x.zip] : null; return g && g.lat != null ? Math.round(milesBetween(truckAt, g)) : null; };
+        l.checkin = { stops: stopsHere.map(({ zip, tmPlace, cityLabel, ...x }) => ({ ...x, milesAway: away({ zip }) })), steps: withDetected(stepsWithReports(steps, stopsHere, reports), seen) };
         // on the road: each stop's delivery notes, the trailer temp, the truck's position (driverroad.js)
         l.road = loads.current.includes(l) ? roadFacts(it, { stops: l.checkin.stops, now: now() }) : null;
       }

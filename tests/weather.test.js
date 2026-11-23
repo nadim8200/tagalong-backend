@@ -40,7 +40,7 @@ test('the hourly sweep: rolling trucks only, both drivers of a team, each warnin
     urls.push(url);
     if (url.includes('/alerts/active')) return { ok: true, json: async () => ({ features: url.includes('40.') ? [{ properties: { id: 'w1', event: 'Winter Weather Advisory', severity: 'Moderate', status: 'Actual' } }] : [] }) };
     if (url.includes('/points/')) return { ok: true, json: async () => ({ properties: { forecastHourly: `https://api.weather.gov/gridpoints/X/${url.split('/points/')[1]}/forecast/hourly` } }) };
-    if (url.includes('/forecast/hourly')) return { ok: true, json: async () => ({ properties: { periods: [{ startTime: new Date(NOW + 2 * 3600000).toISOString(), isDaytime: true, temperature: 30, temperatureUnit: 'F', probabilityOfPrecipitation: { value: 70 }, shortForecast: 'Snow Likely' }] } }) };
+    if (url.includes('/forecast/hourly')) return { ok: true, json: async () => ({ properties: { periods: Array.from({ length: 12 }, (_, i) => ({ startTime: new Date(NOW + (2 + i) * 3600000).toISOString(), isDaytime: true, temperature: 30, temperatureUnit: 'F', probabilityOfPrecipitation: { value: 70 }, shortForecast: 'Snow Likely' })) } }) };   // 12 hours: the Ludlow stop is ~6 h out (rough ETA)
     throw new Error('Google should not be called while the NWS answers');
   };
   let clock = NOW;
@@ -137,4 +137,15 @@ test('when the NWS forecast does not answer, Google fills in (and only then it c
   const r = await w.sweep();
   assert.equal(r.googleCalls, 1);
   assert.equal((await db.get('taWeather:florida-beauty')).trips['9'].alerts[0].kind, 'storm');
+});
+
+test('a stop with no ETA yet gets a rough one from where the truck is, in order — so the right day\'s forecast is used (Nov 22, Miami → Massachusetts)', async () => {
+  const { roughEtas } = await import('../weather.js');
+  const now = Date.parse('2026-11-23T01:00:00Z');
+  const pts = [{ stop: 'SOUTHAMPTON, PA', lat: 40.17, lng: -75.03 }, { stop: 'WINCHESTER, MA', lat: 42.45, lng: -71.14, eta: now + 99 }];
+  const r = roughEtas(pts, { lat: 25.8, lng: -80.3 }, now);
+  const h = (r[0].eta - now) / 3600000;
+  assert.ok(h > 20 && h < 30, `about a day of driving, got ${h}`); assert.equal(r[0].rough, true);
+  assert.equal(r[1].eta, now + 99, 'a logged ETA wins'); assert.equal(r[1].rough, undefined);
+  assert.deepEqual(roughEtas(pts, null, now), pts, 'no truck position: unchanged');
 });
