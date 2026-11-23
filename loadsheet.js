@@ -224,7 +224,9 @@ export function composeDispatchMessage(d = {}, { bonus = '', release = null, ini
   const out = [];
   if (String(bonus || '').trim()) out.push(String(bonus).trim().toUpperCase());
   out.push('--------------------------------------------', `FB#: ${d.bill || ''}`, `TRIP#: ${d.trip || ''}`, `TEMP: ${t}`, `PU#: ${(d.pickupNumbers || []).join(', ')}`, RULE_L);
-  pus.forEach((x, i) => { out.push(...block(pus.length > 1 ? `PICK UP #${i + 1}` : 'PICK UP', x), RULE_L); });
+  // every pickup asks for the seal (Nov 23, Nadim): "PLEASE SIGN SLC ON BOL" under the pickup's date and time
+  const SLC = 'PLEASE SIGN SLC ON BOL';
+  pus.forEach((x, i) => { const b = block(pus.length > 1 ? `PICK UP #${i + 1}` : 'PICK UP', x); if (!b.some((l) => /SIGN\s+SLC/i.test(l))) b.push('', SLC); out.push(...b, RULE_L); });
   if (after == null || after === 0) out.push(`           ${relLine}`, RULE_L);
   dels.forEach((x, i) => {
     out.push(...block(dels.length > 1 ? `DELIVERY #${i + 1}` : 'DELIVERY', x), RULE_L);

@@ -258,6 +258,8 @@ test('"Send load info" writes the driver\'s text like dispatch does: bonus first
   assert.match(none, /^\$150 FLAT FEE\n-{20,}\nFB#: B180938\nTRIP#: 627004\nTEMP: 15F {2}\*\*\*CONTINUOUS\*\*\*\nPU#: 360233119\n/);
   assert.match(none, /\*\*\* NO RELEASE \*\*\*/); assert.match(none, /RECEIVE THIS MESSAGE, THANKS, NADIM\.$/);
   assert.match(none, /DATE: 11\/12\/26 {2}TIME: 9AM\nP\/U LOADED TRAILER/);
+  // the pickup asks the driver to sign the SLC on the BOL — once, on the pickup only
+  assert.match(none, /P\/U LOADED TRAILER\n\nPLEASE SIGN SLC ON BOL\n-{20,}\n/); assert.equal(none.match(/SIGN SLC/g).length, 1);
   const back = parseDispatchMessage(none);
   assert.equal(back.bill, 'B180938'); assert.equal(back.trip, '627004'); assert.deepEqual(back.pickupNumbers, ['360233119']);
   assert.deepEqual(back.stops.map((x) => [x.kind, x.city, x.zip]), [['pickup', 'CORAL SPRINGS', '33071'], ['delivery', 'MONROE', '30655'], ['delivery', 'COCOA', '32926']]);
