@@ -205,3 +205,16 @@ test('one time: loads the first POD-email rule closed come back to the board and
   assert.deepEqual(store['taTruckMateDelivered:florida-beauty'].items.map((x) => x.tripNumber), ['627001']);
   assert.deepEqual(store.taFinishedPodFix1.undone, ['627606']);
 });
+
+test('the truck\'s later load is the one picked up later, not the one booked later (Nov 22, truck 2094)', async () => {
+  const { movedOn } = await import('../finished.js');
+  // 627542 (Mountaire NC → FL) was booked first but picked up Nov 22; 627568 (Pelham → Salisbury) picked up Nov 20 and delivered
+  const old = { trip: { tripNumber: '627568', status: 'ARRCONS', powerUnit: '2094', trailer: '2080' }, freightBills: [{ billNumber: 'B181068' }], _times: { createdAt: '2026-11-20T02:51:00Z', statusHistory: [{ status: 'DEPSHIP', at: '2026-11-20T11:52:34Z' }, { status: 'ARRCONS', at: '2026-11-21T03:43:28Z' }] } };
+  const now = { trip: { tripNumber: '627542', status: 'DEPSHIP', powerUnit: '2094', trailer: '2077' }, freightBills: [{ billNumber: 'B181061' }], _times: { createdAt: '2026-11-19T18:00:00Z', statusHistory: [{ status: 'DEPSHIP', at: '2026-11-22T04:07:40Z' }] } };
+  assert.deepEqual(movedOn(old, [old, now]), { by: 'truck', unit: '2094', newTrip: '627542', newStatus: 'DEPSHIP' });
+  assert.equal(movedOn(now, [old, now]), null, 'the load he is running is not "not closed"');
+  // neither picked up yet: the created time decides (createdAt, not the trip number)
+  const a = { trip: { tripNumber: '627700', status: 'DEPSHIP', powerUnit: '1' }, _times: { createdAt: '2026-11-22T01:00:00Z' } };
+  const b = { trip: { tripNumber: '627600', status: 'DEPSHIP', powerUnit: '1' }, _times: { createdAt: '2026-11-23T01:00:00Z' } };
+  assert.equal(movedOn(a, [a, b]).newTrip, '627600');
+});

@@ -26,7 +26,7 @@ const NOT_STARTED = /^(DISP|ASSGN|ASSIGNED|AVAIL|AVBL|NEW|PLAN|PEND|PRINTED)/i;
 const DONE = /^(DELVD|DELIV|DELIVERED|DEL$|CMPLT|COMPLETE)/i;
 const cityOf = (s) => String(s || '').split(',')[0].trim().toUpperCase();
 const ON_NEW_LOAD = /^(ARRSHIP|DEPSHIP|ARRCONS|DEPCONS|INTRAN|ENROUTE)/i;   // at / past the new load's shipper
-const created = (it) => Date.parse((it && it._times && it._times.created) || '') || Number(tripNo(it)) || 0;
+const created = (it) => Date.parse((it && it._times && (it._times.createdAt || it._times.created)) || '') || Number(tripNo(it)) || 0;
 // An empty move (no bills, going to the YARD / a terminal) is not a new load: the truck still has the old one to deliver.
 const TERMINAL = /^(YARD|.*TERMINAL)\b/i;
 export const emptyMove = (it) => !(((it && (it.freightBills || it.orders)) || []).length) && TERMINAL.test(String(tripOf(it).destZoneDesc || tripOf(it).destinationZone || '').trim());
@@ -36,7 +36,11 @@ const pickedAt = (it) => {
   const h = ((it && it._times && it._times.statusHistory) || []).find((x) => /^(ARRSHIP|DEPSHIP)/i.test(String(x.status || '')));
   return (h && Date.parse(h.at)) || null;
 };
-const realCreated = (it) => Date.parse((it && it._times && it._times.created) || '') || null;
+// Which of two loads on the same truck is the later one (Nov 22, truck 2094: 627542 was booked first but picked up two days
+// after 627568 — by trip number / created time the old load looked like the new one): picked up later when both have been
+// picked up, else created later. Pure.
+export const laterLoad = (o, item) => { const po = pickedAt(o); const pi = pickedAt(item); return po && pi ? po > pi : created(o) > created(item); };
+const realCreated = (it) => Date.parse((it && it._times && (it._times.createdAt || it._times.created)) || '') || null;
 // Two trips picked up within 6 hours of each other ride the same truck together (co-loaded) —
 // neither is "left open".
 function together(a, b) {
@@ -51,8 +55,8 @@ export function movedOn(item, items = []) {
   const t = tripOf(item);
   if (!t || NOT_STARTED.test(String(t.status || '')) || DONE.test(String(t.status || '')) || (item && item._oc)) return null;
   const unit = unitKey(t.powerUnit); const trailer = unitKey(t.trailer);
-  const newer = (o) => o !== item && !(o && o._oc) && !emptyMove(o) && ON_NEW_LOAD.test(String(tripOf(o).status || '')) && created(o) > created(item) && !together(item, o);
-  const newest = (list) => list.sort((a, b) => created(b) - created(a))[0];      // the truck's current load, not another old one
+  const newer = (o) => o !== item && !(o && o._oc) && !emptyMove(o) && ON_NEW_LOAD.test(String(tripOf(o).status || '')) && laterLoad(o, item) && !together(item, o);
+  const newest = (list) => list.sort((a, b) => (laterLoad(b, a) ? 1 : laterLoad(a, b) ? -1 : 0))[0];      // the truck's current load, not another old one
   if (unit && !/^OC/.test(unit)) {
     const o = newest(items.filter((x) => newer(x) && unitKey(tripOf(x).powerUnit) === unit));
     if (o) return { by: 'truck', unit: t.powerUnit, newTrip: tripNo(o), newStatus: String(tripOf(o).status || '') };
@@ -86,8 +90,7 @@ export function finishReason(item, items = []) {
   }
   const unit = unitKey(t.powerUnit);
   if (unit && !(item && item._oc) && !/^OC/.test(unit) && !NOT_STARTED.test(status)) {
-    const created = (it) => Date.parse((it && it._times && it._times.created) || '') || Number(tripNo(it)) || 0;
-    const next = items.find((o) => o !== item && !emptyMove(o) && unitKey(tripOf(o).powerUnit) === unit && ROLLING.test(String(tripOf(o).status || '')) && created(o) > created(item));
+    const next = items.find((o) => o !== item && !emptyMove(o) && unitKey(tripOf(o).powerUnit) === unit && ROLLING.test(String(tripOf(o).status || '')) && laterLoad(o, item));
     if (next) return `truck ${t.powerUnit} moved on to trip ${tripNo(next)}`;
   }
   return null;
