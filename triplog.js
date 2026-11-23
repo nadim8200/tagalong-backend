@@ -424,10 +424,13 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
   async function prefill(driver) {
     const code = driver.code;
     const items = await board();
-    const known = [...new Set([...(((await loadsFor(code, items)) || {}).current || []).map((l) => l.trip), ...((await tripsOf(code)) || [])])].slice(0, 40);
+    const rundowns = (await db.get(`taRundowns:${SITE}`, {}).catch(() => ({}))) || {};
+    // finished loads TruckMate had this driver on (driver or co-driver), even ones never opened in the app (Nov 23: Ferney's
+    // 627549 and 627656 ran before he used the app, so they weren't in his app trips)
+    const ran = Object.entries(rundowns).filter(([, r]) => { const t = tripOf((r && r.rec && r.rec.item) || {}); return codeOf(t.driver) === codeOf(code) || codeOf(t.driver2) === codeOf(code); }).map(([k]) => String(k));
+    const known = [...new Set([...(((await loadsFor(code, items)) || {}).current || []).map((l) => l.trip), ...((await tripsOf(code)) || []), ...ran])].slice(0, 60);
     const done = (await turnedIn(code)).trips;
     const book = (await db.get(CHECKINS(SITE), {})) || {};
-    const rundowns = (await db.get(`taRundowns:${SITE}`, {}).catch(() => ({}))) || {};
     const geo = (await db.get('taGeoZip', {}).catch(() => ({}))) || {};
     const clocks = (await db.get(`taWaiting:${SITE}`, {}).catch(() => ({}))) || {};   // dispatch's waiting-time clocks, by stay
     const since = now() - LOOKBACK_DAYS * DAY;
