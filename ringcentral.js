@@ -64,6 +64,10 @@ export function pickTextNumber(records = [], prefer = null) {
   return can.length === 1 ? can[0].phoneNumber : null;
 }
 
+// The company line for modules started without it (the DVIR reminders, yarddvr.js): set once initRingCentral runs. Training
+// mode still applies inside sendSms (Jarvis's own texts go only to the allowed cell).
+let sharedLine = null;
+export const sharedSms = (opts) => (sharedLine ? sharedLine('__shared', opts) : Promise.reject(new Error('Texting is not set up yet.')));
 export function initRingCentral(app, { requireAuth, db, pool, env = process.env }) {
   const cfgKey = 'taRingCentral';
 
@@ -459,5 +463,6 @@ export function initRingCentral(app, { requireAuth, db, pool, env = process.env 
   const setOnCall = (fn) => { onCall = fn; };
 
   const hasOwnConfig = async (owner) => !!((await db.get(cfgKey, {})) || {})[owner];
+  sharedLine = sendSms;
   return { api: (owner, path, init) => rcFetch(owner, path, init), mainNumber, hasOwnConfig, mediaBytes, sendSms, wasCalled, callLogWith, accessToken, ringOut, inboundSince, configFor, autoFrom, wasHeld, setOnCall, setNameResolver: (fn) => { nameFor = fn; } };
 }

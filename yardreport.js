@@ -11,6 +11,7 @@ import { geocodePlace } from './meetwatch.js';
 import { getLiveIndex, samsaraTokenFrom } from './samsara.js';
 import { nextParked } from './thermoking.js';
 import { initYardCheck } from './yardcheck.js';
+import { initYardDvr } from './yarddvr.js';
 
 const SITE = 'florida-beauty';
 const POINTS = 'taHubPoints';      // hub → [{ lat, lng }] (the yard addresses, looked up once)
@@ -260,5 +261,7 @@ export function initYardReport(app, { requireAuth, db, getBoard, geo = (q) => ge
   }
   // morning and night yard checks at Miami and Ventura, started from who GPS says is in the yard (yardcheck.js)
   initYardCheck(app, { requireAuth, db, report, trucks, now });
+  // DVIRs on the Yard tab: open / completed, location and next load, reminders when a unit with one comes down (yarddvr.js)
+  initYardDvr(app, { requireAuth, db, getBoard, getFleet, hubOf: hubForDest, now });
   return { report, trucks, hubOf, readSamsara, trailerHubs };
 }
