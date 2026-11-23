@@ -707,6 +707,40 @@ export function initTripLog(app, { db, requireDriver, requireAuth = null, board,
       res.set('Content-Type', rows[0].media_type); res.set('Cache-Control', 'private, max-age=3600');
       return res.end(rows[0].data);
     });
+    // TEST homework (Nov 23, Nadim: "we need to test the steps"): an admin turns in a COPY of a driver's open sheet to payroll —
+    // under a TEST code (TEST0986; the co-driver as TEST2473), signed by nobody, no push to anyone, so the drivers' own
+    // homework and their partner's sheet don't change. It lands on payroll's list like a real one, and the payroll email (with
+    // the PDF) goes out as usual (PAYROLL_EMAILS — Nadim while training). "Delete test copies" takes every TEST one away.
+    const isAdmin = (u) => !!(u && (u.admin === true || u.role === 'admin'));
+    const testCode = (c) => `TEST${codeOf(c)}`;
+    app.post('/truckmate/driver-profiles/:code/logs/test-submit', requireAuth, async (req, res) => {
+      if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admins only.' });
+      const code = codeOf(req.params.code);
+      try {
+        const name = (nameOf ? await nameOf(code).catch(() => '') : '') || `driver ${code}`;
+        const fresh = await prefill({ code, name });
+        const saved = (await store(code))[OPEN];
+        const lines = cleanLines(saved ? mergeSheet(saved.lines || [], fresh.lines.map(({ _ms, ...x }) => x), saved.dismissed || []) : fresh.lines.map(({ _ms, ...x }) => x));
+        if (!lines.length) return res.status(409).json({ error: `${name} has no lines on the open sheet to test with.` });
+        const real = cleanHead({ ...fresh.head, ...((saved && saved.head) || {}) });
+        const head = { ...real, name: `TEST — ${real.name || name}`, id: testCode(code), co: real.co ? `${real.co} (test)` : '', coid: real.coid ? testCode(real.coid) : '' };
+        const period = periodOf(lines, now());
+        const id = `${period.start}T${new Date(period.fromMs).toISOString().slice(11, 16)}-test`;
+        const at = new Date(now()).toISOString();
+        const log = { head, lines, expenses: cleanExpenses((saved && saved.expenses) || []), odometer: fresh.odometer || (saved && saved.odometer) || null, status: 'submitted', submittedAt: at, test: true, testBy: (req.user && (req.user.name || req.user.email)) || 'admin', period: { ...period, end: ymdET(Math.max(...lines.map((l) => Date.parse(l.at) || 0).filter(Boolean), period.fromMs)) }, miles: [] };
+        await db.update(LOGS(testCode(code)), (cur) => keep(cur, id, { ...log, submissions: [at] }), {});
+        const emailed = await toPayroll(testCode(code), head.name, id);
+        return res.json({ ok: true, code: testCode(code), id, lines: lines.length, emailed, to: String(env.PAYROLL_EMAILS || 'ntellez@floridabeauty.us').split(',').map((x) => x.trim()).filter(Boolean) });
+      } catch (e) { return res.status(502).json({ error: e.message }); }
+    });
+    app.post('/truckmate/payroll/test-copies/delete', requireAuth, async (req, res) => {
+      if (!isAdmin(req.user)) return res.status(403).json({ error: 'Admins only.' });
+      const idx = (await db.get(INDEX, {})) || {};
+      const codes = [...new Set(Object.values(idx).map((x) => String(x.code || '')).filter((c) => /^TEST/.test(c)))];
+      for (const c of codes) await db.set(LOGS(c), {}); // eslint-disable-line no-await-in-loop
+      await db.update(INDEX, (cur) => Object.fromEntries(Object.entries(cur || {}).filter(([, x]) => !/^TEST/.test(String((x && x.code) || '')))), {});
+      return res.json({ ok: true, removed: codes });
+    });
     app.get('/truckmate/payroll/me', requireAuth, (req, res) => res.json({ canPay: mayRead(req.user) }));
     // every sheet turned in (newest first), to review or reviewed
     app.get('/truckmate/payroll/logs', requireAuth, async (req, res) => {

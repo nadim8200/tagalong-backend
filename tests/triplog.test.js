@@ -346,3 +346,29 @@ test('payroll waits for the co-driver: signed in time → sent with both signatu
   assert.equal(mails.length, 1);
   assert.equal(h.kv['taTripLog:florida-beauty:986'][r.body.id].coSignedBy, 'Wilber Echeverri');
 });
+
+test('TEST homework (admin): a copy of Ferney\'s open sheet goes to payroll under TEST codes; his and Wilber\'s real sheets don\'t change; delete takes it away', async () => {
+  const { initTripLog } = await import('../triplog.js');
+  const h = harness(); const sent = [];
+  const items = [{ trip: { tripNumber: 627549, driver: '986', driver2: '2473', powerUnit: '4504', trailer: '18094', origZoneDesc: 'MIAMI, FL, 33126' }, freightBills: [{ billNumber: 'G5065356', endZoneDescription: 'CLIFTON, NJ, 07011', pieces: 68 }] }];
+  h.kv['taDriverCheckins:florida-beauty'] = { 627549: { steps: { loaded: { at: '2026-11-19T20:00:00Z' }, 'arrived:CLIFTON, NJ, 07011': { at: '2026-11-20T13:00:00Z' }, 'delivered:CLIFTON, NJ, 07011': { at: '2026-11-20T14:00:00Z' } } } };
+  initTripLog(h.app, { db: h.db, requireDriver: (q, s, n) => n(), requireAuth: (q, s, n) => n(), board: async () => items, tripsOf: async () => ['627549'], loadsFor: () => ({ current: [], next: [] }), nameOf: async (c) => (c === '2473' ? 'Wilber Echeverri' : 'Ferney Urrego'), env: {}, now: () => Date.parse('2026-11-22T23:00:00Z'), mail: async (m) => { sent.push(m); } });
+  assert.equal((await h.call('POST /truckmate/driver-profiles/:code/logs/test-submit', { params: { code: '0986' }, user: { role: 'dispatcher', payroll: true } })).status, 403, 'admins only');
+  const r = await h.call('POST /truckmate/driver-profiles/:code/logs/test-submit', { params: { code: '0986' }, user: { admin: true, name: 'Nadim' } });
+  assert.equal(r.body.ok, true); assert.equal(r.body.code, 'TEST986'); assert.equal(r.body.emailed, true);
+  const idx = Object.values(h.kv['taTripLogIndex:florida-beauty']);
+  assert.deepEqual(idx.map((x) => [x.code, x.co, x.coName]), [['TEST986', 'TEST2473', 'Wilber Echeverri (test)']]);
+  assert.match(sent[0].html || sent[0].subject, /TEST — Ferney Urrego/);
+  // the real drivers: Ferney's open sheet still has the trip, Wilber's isn't cut, nobody's sheet is turned in
+  assert.equal(h.kv['taTripLog:florida-beauty:986'], undefined);
+  assert.equal((await h.call('GET /driver/me/log', { driver: { code: '986', name: 'Ferney Urrego' }, query: {} })).body.lines.length, 2);
+  const w = await h.call('GET /driver/me/log', { driver: { code: '2473', name: 'Wilber Echeverri' }, query: {} });
+  assert.equal(w.body.partner, null);
+  // payroll sees it
+  const list = await h.call('GET /truckmate/payroll/logs', { user: { admin: true } });
+  assert.equal(list.body.logs[0].code, 'TEST986');
+  // delete test copies
+  await h.call('POST /truckmate/payroll/test-copies/delete', { user: { admin: true } });
+  assert.deepEqual(Object.keys(h.kv['taTripLogIndex:florida-beauty']), []);
+  assert.deepEqual(h.kv['taTripLog:florida-beauty:TEST986'], {});
+});
