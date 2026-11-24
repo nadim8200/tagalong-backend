@@ -182,3 +182,11 @@ test('shop updates: each update with when it should be ready, newest first; a tr
   assert.equal(cleanRow({ unit: '7280', kind: 'trailer', condition: 'shop' }).condition, 'shop');
   assert.equal(cleanRow({ unit: '7280', kind: 'trailer', condition: 'issue' }).condition, null);
 });
+
+test('a local truck counts as local, never as available (Nov 24)', () => {
+  const r = cleanRow({ unit: '935', kind: 'truck', here: true, readiness: 'available', localTruck: true });
+  assert.deepEqual([r.localTruck, r.readiness], [true, null]);
+  const c = compareCheck([], [r, cleanRow({ unit: '2216', kind: 'truck', here: true, readiness: 'available' })]);
+  assert.deepEqual([c.readiness.available.trucks, c.classes.localTruck], [1, 1]);
+  assert.equal(cleanRow({ unit: '935', kind: 'truck', readiness: 'hold', localTruck: true }).readiness, 'hold');
+});

@@ -113,7 +113,8 @@ export function cleanRow(r = {}) {
   const seen = r.seen === true || r.here === true ? true : r.seen === false || r.here === false ? false : null;
   return {
     unit: norm(r.unit), kind, here: seen,
-    readiness: pick(r.readiness, READINESS),
+    // a local truck (Nov 24) counts as local and is never available for dispatch
+    readiness: r.kind === 'truck' && r.localTruck && r.readiness === 'available' ? null : pick(r.readiness, READINESS),
     loaded: pick(r.loaded, ['loaded', 'empty', 'partial']),
     inside: kind === 'trailer' ? pick(r.inside, ['clean', 'cleaning', 'damaged']) : null,
     // Nov 24: "In shop" (in a bay with our yard mechanics) and "Needs dealer"; "At dealer" with the day it went, carried from check
