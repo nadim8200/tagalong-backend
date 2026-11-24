@@ -9,7 +9,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from 'node:crypto';
 import { CHECKINS, validStep } from './checkins.js';
 import { leftCooler, withDetected } from './autodepart.js';
-import { driverStops, cityStep, stepsWithReports } from './driverstops.js';
+import { driverStops, cityStep, stepsWithReports, stepsWithTruckMate } from './driverstops.js';
 import { roadFacts, truckStopFinder, aheadOf, milesBetween } from './driverroad.js';
 import { initTripLog } from './triplog.js';
 import { KNOWN_YARDS } from './loadsheet.js';
@@ -235,7 +235,7 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
         const sam = (it && it._samsara) || {};
         const truckAt = sam.lat != null && sam.lng != null && !(Number(sam.lat) === 0 && Number(sam.lng) === 0) ? { lat: Number(sam.lat), lng: Number(sam.lng) } : null;
         const away = (x) => { const g = truckAt && x.zip ? geo[x.zip] : null; return g && g.lat != null ? Math.round(milesBetween(truckAt, g)) : null; };
-        l.checkin = { stops: stopsHere.map(({ zip, tmPlace, cityLabel, ...x }) => ({ ...x, milesAway: away({ zip }) })), steps: withDetected(stepsWithReports(steps, stopsHere, reports), seen) };
+        l.checkin = { stops: stopsHere.map(({ zip, tmPlace, cityLabel, ...x }) => ({ ...x, milesAway: away({ zip }) })), steps: withDetected(stepsWithTruckMate(stepsWithReports(steps, stopsHere, reports), stopsHere), seen) };
         // on the road: each stop's delivery notes, the trailer temp, the truck's position (driverroad.js)
         l.road = loads.current.includes(l) ? roadFacts(it, { stops: l.checkin.stops, now: now() }) : null;
       }

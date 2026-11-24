@@ -18,7 +18,7 @@ const zipOf = (x) => (String(x || '').match(/\b(\d{5})\b/) || [])[1] || null;
 const cleanName = (x) => String(x || '').replace(/\s*\*+\s*$/, '').trim();
 const MIAMI = { lat: 25.82, lng: -80.32 };
 const miles = (a, b) => { const R = 3958.8; const r = (d) => (d * Math.PI) / 180; const dLat = r(b.lat - a.lat); const dLng = r(b.lng - a.lng); const h = Math.sin(dLat / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dLng / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(h)); };
-const billRow = (b) => ({ bill: String(b.billNumber || b.bill || ''), pieces: Number(b.pieces) || 0 });
+const billRow = (b) => ({ bill: String(b.billNumber || b.bill || ''), pieces: Number(b.pieces) || 0, ...(b.actualDelivery ? { deliveredAt: b.actualDelivery } : {}) });
 const done = (bs) => bs.length > 0 && bs.every((b) => !!b.actualDelivery);
 
 // → [{ key, number, name, place, address, appt, receivingHours, callAhead, instructions, references, boxes, sheetBoxes, bills, delivered, source }]
@@ -129,6 +129,20 @@ export function stepsWithReports(steps = {}, stops = [], reports = []) {
     if (!r) continue;
     out[`delivered:${st.key}`] = { at: r.at, by: r.by || null, from: 'box count' };
     if (!out[`arrived:${st.key}`]) out[`arrived:${st.key}`] = { at: r.at, by: r.by || null, from: 'box count' };
+  }
+  return out;
+}
+
+// A stop TruckMate shows delivered (every bill there has its delivery time) counts as delivered on the phone too, so the app moves
+// on to the next stop (Nov 24: Wilber delivered Asia Grocers alone and scanned the POD without finishing the stop in the app —
+// Ferney's phone stayed on that stop all night). TruckMate is a fact, not a guess. Only fills a step nobody tapped. Pure.
+export function stepsWithTruckMate(steps = {}, stops = []) {
+  const out = { ...steps };
+  for (const st of stops) {
+    if (!st || !st.delivered || out[`delivered:${st.key}`]) continue;
+    const at = (st.bills || []).map((b) => b && (b.deliveredAt || b.actualDelivery)).filter(Boolean).sort().pop() || null;
+    out[`delivered:${st.key}`] = { at, by: null, from: 'TruckMate' };
+    if (!out[`arrived:${st.key}`]) out[`arrived:${st.key}`] = { at, by: null, from: 'TruckMate' };
   }
   return out;
 }

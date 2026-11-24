@@ -113,3 +113,16 @@ test('a team sees the same stops done: a box count either driver sent counts as 
   const tapped = { 'delivered:LUDLOW, MA, 01056': { at: '2026-11-21T11:41:00Z', by: 'Wilber Echeverri' } };
   assert.equal(stepsWithReports(tapped, stops, reports)['delivered:LUDLOW, MA, 01056'].at, '2026-11-21T11:41:00Z');   // a real tap stays
 });
+
+test('a stop TruckMate shows delivered counts as delivered on the phone, so the app moves on (Nov 24: Asia Grocers, partner scanned the POD but never finished it)', async () => {
+  const { stepsWithTruckMate } = await import('../driverstops.js');
+  const stops = [{ key: 'NORTHVALE, NJ', delivered: true, bills: [{ bill: 'M1', deliveredAt: '2026-11-23T23:30:10' }] },
+    { key: 'BLOOMFIELD, CT', delivered: true, bills: [{ bill: 'P045494', deliveredAt: '2026-11-24T02:05:53' }] },
+    { key: 'MEDFORD, MA', delivered: false, bills: [{ bill: 'M2' }] }];
+  const tapped = { at: '2026-11-23T23:25:00Z', by: 'Ferney Urrego' };
+  const out = stepsWithTruckMate({ 'delivered:NORTHVALE, NJ': tapped }, stops);
+  assert.deepEqual(out['delivered:NORTHVALE, NJ'], tapped);   // a tap is never overwritten
+  assert.deepEqual(out['delivered:BLOOMFIELD, CT'], { at: '2026-11-24T02:05:53', by: null, from: 'TruckMate' });
+  assert.ok(out['arrived:BLOOMFIELD, CT']);
+  assert.equal(out['delivered:MEDFORD, MA'], undefined);
+});
