@@ -138,7 +138,9 @@ export function cleanRow(r = {}) {
 }
 
 // The check against what GPS said: what to look at. Pure. → { missing, extra, reefer, damage, unchecked, counts }
-export function compareCheck(expected = [], rows = [], day = null) {
+// a trailer with freight on it (Nov 24): the yard saw it loaded / partial, or TruckMate has it on a load — never "available"
+export const isLoadedTrailer = (r, loads = {}) => r.kind === 'trailer' && (r.loaded === 'loaded' || r.loaded === 'partial' || !!loads[`trailer:${r.unit}`]);
+export function compareCheck(expected = [], rows = [], day = null, loads = {}) {
   const by = new Map(rows.map((r) => [`${r.kind}:${r.unit}`, r]));
   const expKeys = new Set(expected.map((u) => `${u.kind}:${u.unit}`));
   // the sheet starts empty and the yard person adds what they find (Nov 22, Nadim): on GPS but not added = not found
@@ -154,11 +156,12 @@ export function compareCheck(expected = [], rows = [], day = null) {
   const why = (r) => [r.condition === 'shop' ? 'in the shop' : null, r.condition === 'dealer' && !r.atDealer ? 'needs the dealer' : null, r.atDealer ? atD(r) : null, r.access === 'blocked' ? 'blocked in' : null, r.inside === 'cleaning' ? 'needs cleaning' : null, r.readiness === 'hold' ? 'on hold — needs attention' : null, r.readiness === 'down' ? 'down — cannot use' : null].filter(Boolean).join(', ');
   const observations = here.filter((r) => why(r)).map((r) => ({ unit: r.unit, kind: r.kind, why: why(r), comments: [r.comments, r.notes].filter(Boolean).join(' · ') || null }));
   const split = (list) => ({ trucks: list.filter((r) => r.kind === 'truck').length, trailers: list.filter((r) => r.kind === 'trailer').length });
-  const readiness = Object.fromEntries(READINESS.map((k) => [k, split(here.filter((r) => r.readiness === k))]));
+  const readiness = Object.fromEntries(READINESS.map((k) => [k, split(here.filter((r) => r.readiness === k && !(k === 'available' && isLoadedTrailer(r, loads))))]));
+  const loadedTrailers = here.filter((r) => isLoadedTrailer(r, loads)).length;
   const trucksHere = here.filter((r) => r.kind === 'truck');
   return { missing, extra, reefer, damage, observations, unchecked, readiness,
     classes: { companyTruck: trucksHere.filter((r) => r.companyTruck).length, localTruck: trucksHere.filter((r) => r.localTruck).length, ownerOperator: trucksHere.filter((r) => r.ownerOperator).length, outsideCarrier: trucksHere.filter((r) => r.outsideCarrier).length },
-    counts: { here: here.length, trailers: here.filter((r) => r.kind === 'trailer').length, trucks: trucksHere.length, loaded: here.filter((r) => r.loaded === 'loaded').length, empty: here.filter((r) => r.loaded === 'empty').length, partial: here.filter((r) => r.loaded === 'partial').length, expected: expected.length } };
+    counts: { loadedTrailers, here: here.length, trailers: here.filter((r) => r.kind === 'trailer').length, trucks: trucksHere.length, loaded: here.filter((r) => r.loaded === 'loaded').length, empty: here.filter((r) => r.loaded === 'empty').length, partial: here.filter((r) => r.loaded === 'partial').length, expected: expected.length } };
 }
 
 // Today's checks and whether one is late: morning not in by 11 AM, night not in by 11 PM (yard time). Pure.
@@ -283,7 +286,7 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
     try {
       const exp = await expected(yard);
       rows.forEach((r) => { if (r.atDealer && !r.dealerSince) r.dealerSince = clock.day; });   // checked today with no start day: it went today
-      const result = compareCheck(exp, rows, clock.day);
+      const result = compareCheck(exp, rows, clock.day, unitLoads(await db.get('taTruckMateActive:florida-beauty', { trips: {} }).catch(() => ({ trips: {} }))));
       const at = new Date(now()).toISOString();
       let saved = null;
       await db.update(KEY, (cur) => {

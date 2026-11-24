@@ -190,3 +190,12 @@ test('a local truck counts as local, never as available (Nov 24)', () => {
   assert.deepEqual([c.readiness.available.trucks, c.classes.localTruck], [1, 1]);
   assert.equal(cleanRow({ unit: '935', kind: 'truck', readiness: 'hold', localTruck: true }).readiness, 'hold');
 });
+
+test('a loaded trailer never counts as available — the yard says loaded / partial, or TruckMate has it on a load (Nov 24)', () => {
+  const rows = [cleanRow({ unit: '7384', kind: 'trailer', here: true, readiness: 'available', loaded: 'empty' }),
+    cleanRow({ unit: '7301', kind: 'trailer', here: true, readiness: 'available', loaded: 'empty' }),
+    cleanRow({ unit: '7222', kind: 'trailer', here: true, readiness: 'available', loaded: 'loaded' })];
+  const c = compareCheck([], rows, '2026-11-24', { 'trailer:7301': { trip: '627588' } });
+  assert.equal(c.readiness.available.trailers, 1);
+  assert.equal(c.counts.loadedTrailers, 2);
+});
