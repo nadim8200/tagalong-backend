@@ -91,6 +91,16 @@ export function mergeDraft(cur = {}, patch = {}, nowMs = Date.now()) {
 }
 export const draftKeyOf = (yard, day, shift) => `${yard}:${day}:${shift}`;
 
+// Shop updates (Nov 24): a truck or trailer in the shop (or at / needing the dealer) gets an update each time there is news,
+// with when it should be ready. Kept per unit across checks, newest first. Pure. → the unit's list with the new update on top
+export function addShopUpdate(list = [], { text = '', eta = null, by = null } = {}, nowMs = Date.now()) {
+  const t = String(text || '').trim().slice(0, 1000);
+  const e = /^\d{4}-\d\d-\d\dT\d\d:\d\d/.test(String(eta || '')) ? String(eta).slice(0, 16) : /^\d{4}-\d\d-\d\d$/.test(String(eta || '')) ? String(eta) : null;
+  if (!t && !e) return null;
+  return [{ id: `su${nowMs.toString(36)}`, at: new Date(nowMs).toISOString(), by: String(by || '').trim().slice(0, 80) || null, text: t || null, eta: e }, ...(list || [])].slice(0, 50);
+}
+export const unitKey = (kind, unit) => `${kind === 'truck' ? 'truck' : 'trailer'}:${norm(unit)}`;
+
 // One row from the phone, cleaned. Pure.
 export const READINESS = ['available', 'assigned', 'hold', 'down'];
 export const READINESS_LABEL = { available: 'Available', assigned: 'Assigned and cleared', hold: 'Hold — needs attention', down: 'Down' };
@@ -108,7 +118,7 @@ export function cleanRow(r = {}) {
     inside: kind === 'trailer' ? pick(r.inside, ['clean', 'cleaning', 'damaged']) : null,
     // Nov 24: "In shop" (in a bay with our yard mechanics) and "Needs dealer"; "At dealer" with the day it went, carried from check
     // to check so the days count up until it is unchecked
-    condition: kind === 'truck' ? pick(r.condition, CONDITIONS) : null,
+    condition: kind === 'truck' ? pick(r.condition, CONDITIONS) : pick(r.condition, ['shop', 'dealer']),   // Nov 24: a trailer can be in the shop too
     atDealer: kind === 'truck' && !!r.atDealer,
     dealerSince: kind === 'truck' && r.atDealer && /^\d{4}-\d\d-\d\d$/.test(String(r.dealerSince || '')) ? String(r.dealerSince) : null,
     access: kind === 'truck' ? pick(r.access, ['clear', 'blocked']) : null,
@@ -211,7 +221,7 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
     res.json({ yard, month, days: checksByDay(((await db.get(KEY, { list: [] })) || {}).list || [], yard, month) });
   });
   app.get('/truckmate/yard-checks/:id', requireAuth, async (req, res, next) => {
-    if (req.params.id === 'photos' || req.params.id === 'days' || req.params.id === 'draft') return next();
+    if (['photos', 'days', 'draft', 'shop-updates'].includes(req.params.id)) return next();
     const x = ((((await db.get(KEY, { list: [] })) || {}).list) || []).find((c) => c.id === String(req.params.id));
     return x ? res.json({ check: x }) : res.status(404).json({ error: 'No such check.' });
   });
@@ -235,6 +245,26 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
       out = all[k]; return all;
     });
     res.json({ key: k, rows: Object.values(out.rows), removed: Object.keys(out.removed), at: out.at });
+  });
+  // shop updates: every unit's list (newest first), and a new update with its ETA to be ready
+  const SHOP = 'taShopUpdates:florida-beauty';
+  app.get('/truckmate/yard-checks/shop-updates', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    res.json({ units: (await db.get(SHOP, {})) || {} });
+  });
+  app.post('/truckmate/yard-checks/shop-updates', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const b = req.body || {}; const unit = norm(b.unit);
+    if (!unit) return res.status(400).json({ error: 'Which truck or trailer?' });
+    const k = unitKey(b.kind, unit); let list = null;
+    await db.update(SHOP, (cur) => {
+      const all = { ...(cur || {}) };
+      const next = addShopUpdate(all[k], { text: b.text, eta: b.eta, by: b.by || who(req) }, now());
+      if (next) { all[k] = next; list = next; }
+      return all;
+    });
+    if (!list) return res.status(400).json({ error: 'Write the update or set when it will be ready.' });
+    res.json({ ok: true, key: k, updates: list });
   });
   app.post('/truckmate/yard-checks', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });

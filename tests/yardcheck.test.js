@@ -170,3 +170,15 @@ test('the shared draft routes: two devices fill one sheet; sending the check cle
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual((await call('GET /truckmate/yard-checks/draft', { query: q })).body.rows, []);
 });
+
+test('shop updates: each update with when it should be ready, newest first; a trailer can be in the shop (Nov 24)', async () => {
+  const { addShopUpdate, unitKey } = await import('../yardcheck.js');
+  let l = addShopUpdate([], { text: 'Waiting on turbo actuator', eta: '2026-11-26T15:00', by: 'Luis' }, Date.parse('2026-11-24T20:00:00Z'));
+  l = addShopUpdate(l, { text: 'Part arrived, installing', by: 'Mechanic' }, Date.parse('2026-11-25T14:00:00Z'));
+  assert.deepEqual(l.map((u) => [u.text, u.eta, u.by]), [['Part arrived, installing', null, 'Mechanic'], ['Waiting on turbo actuator', '2026-11-26T15:00', 'Luis']]);
+  assert.equal(addShopUpdate(l, { text: '  ' }), null);
+  assert.equal(addShopUpdate([], { eta: '2026-11-27' })[0].eta, '2026-11-27');
+  assert.equal(unitKey('trailer', 'TL 07280'), 'trailer:7280');
+  assert.equal(cleanRow({ unit: '7280', kind: 'trailer', condition: 'shop' }).condition, 'shop');
+  assert.equal(cleanRow({ unit: '7280', kind: 'trailer', condition: 'issue' }).condition, null);
+});
