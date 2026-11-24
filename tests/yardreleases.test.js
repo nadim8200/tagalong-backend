@@ -255,3 +255,16 @@ test('tracking the redelivery: the local truck\'s GPS on the release; in the del
   assert.match(m.subject, /Redelivery not done — COSTCO \(Miami yard\), appt 11\/18 9:00 AM/);
   assert.match(m.text, /local driver Julio Hernandez \(TK 935\) · truck now: Port St\. Lucie, FL/);
 });
+
+test('two deliveries in one sheet row: each line of the time, city and consignee cells is its own stop (Nov 24, trip 627654)', () => {
+  const sheet = [MIAMI[0], ['', '', '', '', '', '', '11/27/2026'],
+    ['', '', '', '', '7184', 'B181094', '627654', '35F', '1:30 AM\n7:00 AM', 'KEHE\nFRESHPOINT', 'HIALEAH\nPOMPANO BEACH', '', ''],
+    ['', '', '', '', '7280', 'B181103', '627708', '-10F', '3:30 AM', 'KEHE', 'HIALEAH', '', '']];
+  const now = Date.parse('2026-11-24T22:00:00Z');
+  const list = buildReleases({ sheets: { miami: parseMiami(sheet, { year: 2026 }) }, items: [], now });
+  const two = list.find((x) => x.trip === '627654');
+  assert.deepEqual(two.stops.map((s) => [s.n, s.customer, s.city, s.appt.date, s.appt.time]), [[1, 'KEHE', 'HIALEAH', '2026-11-27', '01:30'], [2, 'FRESHPOINT', 'POMPANO BEACH', '2026-11-27', '07:00']]);
+  assert.equal(two.appt.time, '01:30');
+  assert.equal(two.destination, 'HIALEAH → POMPANO BEACH, FL');
+  assert.equal(list.find((x) => x.trip === '627708').stops, null);
+});

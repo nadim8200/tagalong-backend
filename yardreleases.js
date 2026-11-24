@@ -277,6 +277,14 @@ function shape(id, x, { trailerHubs, finished, assignments = {}, fleet = {}, now
   const tz = place ? tzOf(place) : null;
   const hm = timeOf(r.time);
   const appt = r.date ? { date: `${r.date.y}-${pad(r.date.m)}-${pad(r.date.d)}`, time: hm, tz, zone: tz ? zoneName(tz) : null, raw: [r.time].filter(Boolean).join(' ') || null } : null;
+  // two (or more) deliveries in one sheet row (Nov 24: trip 627654 — "1:30 AM / 7:00 AM", "HIALEAH / POMPANO BEACH"): each line
+  // of the time, city and consignee cells is its own stop, in order; the first is the row's appointment (sorting, the day)
+  const tLines = S(r.time).match(/\d{1,2}:\d{2}\s*[AP]\.?\s*M/gi) || [];
+  const cLines = S(r.city).split(/\n+/).map(S).filter(Boolean);
+  const nLines = S(r.consignee).split(/\n+/).map(S).filter(Boolean);
+  const nStops = Math.max(tLines.length, cLines.length);
+  const stops = nStops > 1 ? Array.from({ length: nStops }, (_, i) => ({ n: i + 1, customer: nLines[i] || nLines[nLines.length - 1] || null, city: cLines[i] || cLines[cLines.length - 1] || null, state: r.state || state,
+    appt: appt ? { ...appt, time: timeOf(tLines[i] || '') || (i === 0 ? hm : null), raw: tLines[i] || null } : null })) : null;
   const sam = (it && it._samsara) || {};
   const hp = HUB_POINT[x.hub];
   const miles = hp && sam.lat != null ? Math.round(haversineMi(Number(sam.lat), Number(sam.lng), hp.lat, hp.lng)) : null;
@@ -287,7 +295,8 @@ function shape(id, x, { trailerHubs, finished, assignments = {}, fleet = {}, now
     sourceStatus: r.status || null, inYard: r.inYard || null,
     trip: x.trip || null, bill: x.bill || (billsOf(it)[0] && billsOf(it)[0].billNumber) || null, bills: billsOf(it).map((b) => b && b.billNumber).filter(Boolean).slice(0, 6), trailer,
     customer: r.consignee || S(lastBill.consigneeName || (lastBill.consignee && lastBill.consignee.name)) || null, city: r.city || null, state: r.state || state,
-    destination: r.city ? [r.city, r.state || state].filter(Boolean).join(', ') : (S(lastBill.endZoneDescription) || null),
+    destination: stops ? [stops.map((x) => x.city).filter(Boolean).join(' → '), r.state || state].filter(Boolean).join(', ') : r.city ? [r.city, r.state || state].filter(Boolean).join(', ') : (S(lastBill.endZoneDescription) || null),
+    stops,
     temp: r.temp || (lastBill.temperature != null ? `${lastBill.temperature}F` : null) || (rc.tempSetting || null),
     appt, temps,
     local: localOf(r, x.hub, assignments[id], fleet),
