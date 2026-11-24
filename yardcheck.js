@@ -53,10 +53,31 @@ export function expectedUnits(report = {}, trucks = {}, yard = 'MIAMI') {
   ].filter((u) => u.unit);
 }
 
+// Every truck and trailer on a load in TruckMate (Nov 24): the trip, where it goes, and its delivery date (the last bill's
+// deliver-by), so a loaded trailer's card shows its load and a unit that left on a load is flagged on the next check.
+// taTruckMateActive → { 'trailer:7280': { trip, to, deliverBy, status }, 'truck:4504': … }. Pure.
+export function unitLoads(active = {}) {
+  const out = {};
+  for (const rec of Object.values((active && active.trips) || {})) {
+    const it = (rec && rec.item) || {}; const t = it.trip || {};
+    const bills = it.freightBills || it.orders || t.freightBills || [];
+    if (!t.tripNumber || bills.length && bills.every((b) => b && b.actualDelivery)) continue;
+    const open = bills.filter((b) => b && !b.actualDelivery);
+    const deliverBy = open.map((b) => String(b.deliverByEnd || b.deliverBy || '').slice(0, 16)).filter(Boolean).sort().pop() || null;
+    const load = { trip: String(t.tripNumber), to: t.destZoneDesc || null, deliverBy, status: t.status || null };
+    if (t.trailer) out[`trailer:${norm(t.trailer)}`] = load;
+    if (t.powerUnit) out[`truck:${norm(t.powerUnit)}`] = load;
+  }
+  return out;
+}
+
 // One row from the phone, cleaned. Pure.
 export const READINESS = ['available', 'assigned', 'hold', 'down'];
 export const READINESS_LABEL = { available: 'Available', assigned: 'Assigned and cleared', hold: 'Hold — needs attention', down: 'Down' };
 const pick = (v, list) => (list.includes(v) ? v : null);
+export const CONDITIONS = ['clear', 'issue', 'shop', 'dealer'];
+// whole days at the dealer: from the day it went to the check's day. Pure.
+export const dealerDays = (since, day) => (since && day ? Math.max(0, Math.round((Date.parse(`${day}T12:00:00Z`) - Date.parse(`${since}T12:00:00Z`)) / 86400000)) : null);
 export function cleanRow(r = {}) {
   const kind = r.kind === 'truck' ? 'truck' : 'trailer';
   const seen = r.seen === true || r.here === true ? true : r.seen === false || r.here === false ? false : null;
@@ -65,10 +86,16 @@ export function cleanRow(r = {}) {
     readiness: pick(r.readiness, READINESS),
     loaded: pick(r.loaded, ['loaded', 'empty', 'partial']),
     inside: kind === 'trailer' ? pick(r.inside, ['clean', 'cleaning', 'damaged']) : null,
-    condition: kind === 'truck' ? pick(r.condition, ['clear', 'issue']) : null,
+    // Nov 24: "In shop" (in a bay with our yard mechanics) and "Needs dealer"; "At dealer" with the day it went, carried from check
+    // to check so the days count up until it is unchecked
+    condition: kind === 'truck' ? pick(r.condition, CONDITIONS) : null,
+    atDealer: kind === 'truck' && !!r.atDealer,
+    dealerSince: kind === 'truck' && r.atDealer && /^\d{4}-\d\d-\d\d$/.test(String(r.dealerSince || '')) ? String(r.dealerSince) : null,
     access: kind === 'truck' ? pick(r.access, ['clear', 'blocked']) : null,
     companyTruck: kind === 'truck' && !!r.companyTruck, localTruck: kind === 'truck' && !!r.localTruck, ownerOperator: kind === 'truck' && !!r.ownerOperator, outsideCarrier: kind === 'truck' && !!r.outsideCarrier,
     comments: String(r.comments || '').trim().slice(0, 1000) || null,
+    // Nov 24: the issues added one by one on the card (comments carries them joined, for the summary and the email)
+    issues: (Array.isArray(r.issues) ? r.issues : []).map((x) => String(x || '').trim().slice(0, 300)).filter(Boolean).slice(0, 20),
     notes: kind === 'truck' ? String(r.notes || '').trim().slice(0, 2000) || null : null,   // "Truck comments": repair notes, instructions for dispatch
     reeferOn: kind === 'trailer' && typeof r.reeferOn === 'boolean' ? r.reeferOn : null,
     setF: kind === 'trailer' ? num(r.setF) : null, tempF: kind === 'trailer' ? num(r.tempF) : null,
@@ -80,7 +107,7 @@ export function cleanRow(r = {}) {
 }
 
 // The check against what GPS said: what to look at. Pure. → { missing, extra, reefer, damage, unchecked, counts }
-export function compareCheck(expected = [], rows = []) {
+export function compareCheck(expected = [], rows = [], day = null) {
   const by = new Map(rows.map((r) => [`${r.kind}:${r.unit}`, r]));
   const expKeys = new Set(expected.map((u) => `${u.kind}:${u.unit}`));
   // the sheet starts empty and the yard person adds what they find (Nov 22, Nadim): on GPS but not added = not found
@@ -92,7 +119,8 @@ export function compareCheck(expected = [], rows = []) {
   const damage = rows.filter((r) => r.here && (r.damage || r.inside === 'damaged' || r.condition === 'issue')).map((r) => ({ unit: r.unit, kind: r.kind, note: r.damage || r.comments || (r.inside === 'damaged' ? 'inside damaged' : 'visible issue'), photos: r.photos.length }));
   const here = rows.filter((r) => r.here);
   // what the yard saw that needs someone: blocked in, needs cleaning, on hold, down
-  const why = (r) => [r.access === 'blocked' ? 'blocked in' : null, r.inside === 'cleaning' ? 'needs cleaning' : null, r.readiness === 'hold' ? 'on hold — needs attention' : null, r.readiness === 'down' ? 'down — cannot use' : null].filter(Boolean).join(', ');
+  const atD = (r) => { const n = dealerDays(r.dealerSince, day); return `at the dealer${n != null ? ` (${n} day${n === 1 ? '' : 's'})` : ''}`; };
+  const why = (r) => [r.condition === 'shop' ? 'in the shop' : null, r.condition === 'dealer' && !r.atDealer ? 'needs the dealer' : null, r.atDealer ? atD(r) : null, r.access === 'blocked' ? 'blocked in' : null, r.inside === 'cleaning' ? 'needs cleaning' : null, r.readiness === 'hold' ? 'on hold — needs attention' : null, r.readiness === 'down' ? 'down — cannot use' : null].filter(Boolean).join(', ');
   const observations = here.filter((r) => why(r)).map((r) => ({ unit: r.unit, kind: r.kind, why: why(r), comments: [r.comments, r.notes].filter(Boolean).join(' · ') || null }));
   const split = (list) => ({ trucks: list.filter((r) => r.kind === 'truck').length, trailers: list.filter((r) => r.kind === 'trailer').length });
   const readiness = Object.fromEntries(READINESS.map((k) => [k, split(here.filter((r) => r.readiness === k))]));
@@ -149,7 +177,10 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
     try {
       const list = ((await db.get(KEY, { list: [] })) || {}).list || [];
       res.json({ yards: Object.entries(CHECK_YARDS).map(([key, y]) => ({ key, name: y.name, tz: y.tz, due: dueNow(list, key, now()) })), yard, expected: await expected(yard),
-        today: dueNow(list, yard, now()), history: list.filter((x) => x.yard === yard).slice(0, 14).map(summary) });
+        loads: unitLoads(await db.get('taTruckMateActive:florida-beauty', { trips: {} }).catch(() => ({ trips: {} }))),
+        today: dueNow(list, yard, now()), history: list.filter((x) => x.yard === yard).slice(0, 14).map(summary),
+        // the last check's units (Nov 24): the next sheet starts with them so the yard person confirms instead of typing them again
+        last: (() => { const l = list.filter((x) => x.yard === yard).sort((p, q) => String(q.checkedAt || q.at).localeCompare(String(p.checkedAt || p.at)))[0]; return l ? { id: l.id, day: l.day, shift: l.shift, by: l.by, at: l.checkedAt || l.at, rows: (l.rows || []).filter((r) => r.here) } : null; })() });
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
   // the calendar (Nov 22): every check in one month, by day → { days: { 'YYYY-MM-DD': [summary…] } }
@@ -179,7 +210,8 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
     const shift = SHIFTS.includes(b.shift) ? b.shift : clock.shift;
     try {
       const exp = await expected(yard);
-      const result = compareCheck(exp, rows);
+      rows.forEach((r) => { if (r.atDealer && !r.dealerSince) r.dealerSince = clock.day; });   // checked today with no start day: it went today
+      const result = compareCheck(exp, rows, clock.day);
       const at = new Date(now()).toISOString();
       let saved = null;
       await db.update(KEY, (cur) => {

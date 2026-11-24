@@ -105,3 +105,34 @@ test('the summary email: totals, readiness, needs attention, against GPS, every 
   const p = await call('POST /truckmate/yard-checks/email-preview', {});
   assert.deepEqual(p.body.to, ['ntellez@floridabeauty.us']); assert.match(sent[1].subject, /Luis|5 trucks/);
 });
+
+test('a truck in the shop, one needing the dealer, one at the dealer with its days counted from the day it went (Nov 24)', async () => {
+  const { dealerDays } = await import('../yardcheck.js');
+  const shop = cleanRow({ unit: '2216', kind: 'truck', here: true, condition: 'shop' });
+  const need = cleanRow({ unit: '2217', kind: 'truck', here: true, condition: 'dealer' });
+  const at = cleanRow({ unit: '2218', kind: 'truck', here: true, condition: 'dealer', atDealer: true, dealerSince: '2026-11-20' });
+  const back = cleanRow({ unit: '2219', kind: 'truck', here: true, atDealer: false, dealerSince: '2026-11-20' });
+  assert.deepEqual([shop.condition, need.condition, at.atDealer, at.dealerSince, back.dealerSince], ['shop', 'dealer', true, '2026-11-20', null]);
+  assert.equal(cleanRow({ unit: '9', kind: 'trailer', condition: 'shop', atDealer: true }).atDealer, false);
+  assert.equal(dealerDays('2026-11-20', '2026-11-24'), 4);
+  const r = compareCheck([], [shop, need, at, back], '2026-11-24');
+  assert.deepEqual(r.observations.map((o) => [o.unit, o.why]), [['2216', 'in the shop'], ['2217', 'needs the dealer'], ['2218', 'at the dealer (4 days)']]);
+});
+
+test('issues added one by one stay a list on the unit (Nov 24)', () => {
+  const r = cleanRow({ unit: '2618', kind: 'truck', here: true, readiness: 'available', issues: ['Needs wash', ' ', 'Left mirror cracked'], comments: 'Needs wash · Left mirror cracked' });
+  assert.deepEqual(r.issues, ['Needs wash', 'Left mirror cracked']);
+  assert.equal(r.comments, 'Needs wash · Left mirror cracked');
+  assert.deepEqual(cleanRow({ unit: '1', kind: 'truck' }).issues, []);
+});
+
+test('units on a load in TruckMate: the trip, where it goes and the last open bill\'s delivery date; finished trips left out (Nov 24)', async () => {
+  const { unitLoads } = await import('../yardcheck.js');
+  const active = { trips: {
+    a: { item: { trip: { tripNumber: 627700, trailer: '07280', powerUnit: '4504', destZoneDesc: 'WINCHESTER, MA', status: 'ARRCONS' }, freightBills: [{ deliverBy: '2026-11-23T00:00:00', actualDelivery: '2026-11-23T10:00:00' }, { deliverBy: '2026-11-25T08:00:00' }, { deliverBy: '2026-11-24T00:00:00' }] } },
+    b: { item: { trip: { tripNumber: 627001, trailer: '18094' }, freightBills: [{ deliverBy: '2026-11-20', actualDelivery: '2026-11-20T09:00' }] } } } };
+  const m = unitLoads(active);
+  assert.deepEqual(m['trailer:7280'], { trip: '627700', to: 'WINCHESTER, MA', deliverBy: '2026-11-25T08:00', status: 'ARRCONS' });
+  assert.equal(m['truck:4504'].trip, '627700');
+  assert.equal(m['trailer:18094'], undefined);
+});
