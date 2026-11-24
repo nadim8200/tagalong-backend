@@ -19,7 +19,8 @@ const name = (r) => `${r.kind === 'truck' ? 'Truck' : 'Trailer'} ${r.unit}`;
 const unitKeyOf = (r) => `${r.kind}:${r.unit}`;
 // one row per unit (a unit typed twice — two devices — counts once: the one with the most filled in, then the later)
 export function dedupeRows(rows = []) {
-  const score = (r) => (r.readiness ? 4 : 0) + (r.loaded ? 1 : 0) + ((r.issues || []).length || r.comments ? 1 : 0);
+  const real = (r) => { const t = String(((r.issues || []).join(' ')) || r.comments || r.notes || '').trim(); return !!t && !/^update$/i.test(t); };
+  const score = (r) => (r.readiness ? 4 : 0) + (r.loaded ? 1 : 0) + ((r.issues || []).length || r.comments ? 1 : 0) + (real(r) ? 2 : 0);
   const by = new Map(); const twice = new Map();
   for (const r of rows) { const k = unitKeyOf(r); if (by.has(k)) { twice.set(k, (twice.get(k) || 1) + 1); if (score(r) >= score(by.get(k))) by.set(k, r); } else by.set(k, r); }
   return { rows: [...by.values()], twice: [...twice.entries()].map(([k, n]) => ({ key: k, n })) };
@@ -36,12 +37,12 @@ export function downReason(r) {
   if (!t.trim() || /^(update|\?|-)$/.test(t.trim()) || /^update\b/.test(t.trim())) return 'No reason given';
   return 'Other';
 }
-const REASONS = ['Waiting on parts', 'Towed in', 'In shop', 'At / needs the dealer', 'Sold / for sale', 'Other', 'No reason given'];
+const REASONS = ['Waiting on parts', 'Towed in', 'In shop', 'At / needs the dealer', 'Other', 'Sold / for sale', 'No reason given'];
 const short = (s, n = 26) => { const x = String(s || '').trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
 const fmtWhen = (v) => { const m = String(v || '').match(/^(\d{4})-(\d\d)-(\d\d)(?:T(\d\d):(\d\d))?/); if (!m) return ''; const d = `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m[2]) - 1]} ${Number(m[3])}`; if (!m[4] || (m[4] === '00' && m[5] === '00')) return d; const h = Number(m[4]); return `${d} ${h % 12 || 12}${m[5] !== '00' ? `:${m[5]}` : ''} ${h < 12 ? 'AM' : 'PM'}`; };
 const town = (to) => String(to || '').split(',')[0].toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 
-export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://mytagalong.app/truckmate', shop = {}, test = false, loads = {} } = {}) {
+export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://mytagalong.app/truckmate', shop = {}, test = false, loads = {}, downSince = {} } = {}) {
   const { rows, twice } = dedupeRows((c.rows || []).filter((r) => r.here));
   const trucks = rows.filter((r) => r.kind === 'truck'); const trailers = rows.filter((r) => r.kind === 'trailer');
   const when = new Date(c.checkedAt || c.at).toLocaleString('en-US', { timeZone: TZ[c.yard] || TZ.MIAMI, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -63,47 +64,74 @@ export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://
   const unset = trucks.filter((r) => !r.readiness && !r.localTruck);
   const subject = `${test ? 'TEST — ' : ''}${yard} · ${shift.toLowerCase()} · READY: ${readyTrucks.length} truck${readyTrucks.length === 1 ? '' : 's'} · ${readyTrailers.length} trailer${readyTrailers.length === 1 ? '' : 's'} · ${down.length} down · ${hold.length} hold`;
 
-  const chip = (r, warn = null, note = null) => `<span style="display:inline-block;margin:0 4px 6px 0;background:${warn ? '#FFF7ED' : '#FFFFFF'};border:1px solid ${warn ? '#F59E0B' : '#86EFAC'};border-radius:6px;padding:3px 8px;font-weight:bold;white-space:nowrap">${r.kind === 'truck' ? 'TK' : 'TL'} ${esc(r.unit)}${warn || note ? ` <span style="color:#B45309;font-weight:normal">· ${esc(warn || note)}</span>` : ''}</span>`;
-  const readyBox = (n, label, list, foot) => `<div style="background:#ECFDF3;border:2px solid #16A34A;border-radius:12px;padding:12px 14px"><div><span style="font-size:44px;font-weight:bold;color:#15803D;line-height:1">${n}</span> <span style="font-size:17px;font-weight:bold;color:#14532D">${label}</span></div><div style="margin-top:10px;line-height:1.9">${list || '<span style="color:#64748B">None</span>'}</div>${foot ? `<div style="font-size:12px;color:#166534;margin-top:4px">${foot}</div>` : ''}</div>`;
-  const truckList = readyTrucks.map((r) => chip(r, sus(r), sus(r) ? null : short(noteOf(r).replace(/^update$/i, ''), 18) || null)).join('');
-  const tlList = readyTrailers.map((r) => chip(r, null, short(noteOf(r), 18) || null)).join('');
-  const ownerOps = readyTrucks.filter((r) => r.ownerOperator).map((r) => r.unit);
-  const tile = (n, label, sub, color) => `<td width="25%" style="padding:0 3px;vertical-align:top"><div style="background:#FFFFFF;border:1px solid #DDE3EC;border-left:4px solid ${color};border-radius:8px;padding:8px 10px"><div style="font-size:24px;font-weight:bold;color:${color}">${n}</div><div style="font-size:12px;font-weight:bold">${label}</div><div style="font-size:11px;color:#64748B">${sub}</div></div></td>`;
-  const split = (list) => `${list.filter((r) => r.kind === 'truck').length} trucks · ${list.filter((r) => r.kind === 'trailer').length} trailers`;
+  // ── the look (Nov 24, Nadim: "more modern, and all the info shows: ready trucks and trailers, loaded trailers and delivery
+  // time, down trucks / trailers with the reason and how long they've been down") — cards, big numbers, clean tables.
+  const F = "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
   const nm = (r) => `${r.kind === 'truck' ? 'TK' : 'TL'} ${r.unit}`;
-  const withNote = (r) => { const n = noteOf(r); return `${esc(nm(r))}${n && !/^update$/i.test(n) ? ` ${esc(short(n, 40))}` : ''}${dvrUnits.has(unitKeyOf(r)) ? ' <b style="color:#B91C1C">(DVIR open)</b>' : ''}`; };
-  const groups = REASONS.map((g) => [g, down.filter((r) => r.kind === 'truck' && downReason(r) === g)]).filter(([, l]) => l.length);
-  const tlDown = down.filter((r) => r.kind === 'trailer');
-  const row = (k, v) => `<tr><td style="padding:6px 8px;border-top:1px solid #EEF2F7;white-space:nowrap;vertical-align:top"><b>${esc(k)}</b></td><td style="padding:6px 8px;border-top:1px solid #EEF2F7">${v}</td></tr>`;
-  const sec = (label, color, inner, bg = '#FFFFFF') => `<div style="background:${bg};border:1px solid #DDE3EC;border-top:0;padding:14px 18px"><div style="font-size:12px;letter-spacing:1.5px;font-weight:bold;color:${color}">${label}</div>${inner}</div>`;
+  const nowMs = Date.parse(c.checkedAt || c.at) || Date.now();
+  const downFor = (r) => { const t = Date.parse(downSince[unitKeyOf(r)] || ''); if (!Number.isFinite(t)) return { text: 'New today', days: 0 }; const d = Math.floor((nowMs - t) / 86400000); return d < 1 ? { text: 'New today', days: 0 } : { text: `${d} day${d === 1 ? '' : 's'}`, days: d, since: fmtWhen(new Date(t).toISOString().slice(0, 10)) }; };
+  const pill = (r, note, warn) => `<span style="display:inline-block;margin:0 6px 8px 0;padding:6px 10px;border-radius:10px;background:${warn ? '#FFF4E5' : '#FFFFFF'};border:1px solid ${warn ? '#F5B35C' : '#BBE5C8'};font-size:15px;font-weight:700;color:#0F2A1D;white-space:nowrap">${esc(r.unit)}${note ? `<span style="font-size:12px;font-weight:600;color:${warn ? '#B45309' : '#4B6B57'}"> · ${esc(note)}</span>` : ''}</span>`;
+  const hero = (n, label, sub, list) => `<td width="50%" class="stack" style="padding:6px;vertical-align:top"><div style="background:linear-gradient(160deg,#E9FBEF,#D4F5DF);background-color:#E3F8EA;border-radius:18px;padding:18px 18px 10px">
+<div style="font-size:11px;letter-spacing:1.6px;font-weight:800;color:#15803D">READY ${esc(label.toUpperCase())}</div>
+<div style="font-size:56px;line-height:1;font-weight:800;color:#0F5132;margin-top:6px">${n}</div><div style="font-size:12px;color:#3F6B50;margin:4px 0 12px">${sub}</div>
+<div>${list || '<span style="font-size:13px;color:#4B6B57">None right now</span>'}</div></div></td>`;
+  const stat = (n, label, color) => `<td width="25%" style="padding:4px;vertical-align:top"><div style="background:#FFFFFF;border:1px solid #E6EAF1;border-radius:14px;padding:12px 12px 10px;text-align:center"><div style="font-size:26px;font-weight:800;color:${color};line-height:1">${n}</div><div style="font-size:11px;font-weight:700;color:#5B6676;margin-top:6px;letter-spacing:.3px">${label}</div></div></td>`;
+  const card = (title, count, color, inner, note = '') => `<div style="background:#FFFFFF;border:1px solid #E6EAF1;border-radius:18px;margin-top:14px;overflow:hidden">
+<div style="padding:14px 18px;border-bottom:1px solid #EEF1F6"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color};margin-right:8px"></span><b style="font-size:16px;color:#14213D">${title}</b> <span style="font-size:14px;color:#8A94A6;font-weight:700">${count}</span>${note ? `<div style="font-size:12px;color:#8A94A6;margin-top:3px">${note}</div>` : ''}</div>${inner}</div>`;
+  const th = (t, w = '') => `<th align="left" style="padding:9px 18px;font-size:10.5px;letter-spacing:1.2px;color:#8A94A6;font-weight:800;background:#F8FAFC${w ? `;width:${w}` : ''}">${t}</th>`;
+  const td = (v, x = '') => `<td style="padding:11px 18px;border-top:1px solid #F0F2F6;font-size:14px;color:#14213D;vertical-align:top${x}">${v}</td>`;
+  const table = (head, body) => `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head}${body}</table>`;
+  const unitCell = (r) => `<b style="font-size:15px">${esc(nm(r))}</b>${r.ownerOperator ? '<div style="font-size:11px;color:#8A94A6">owner op</div>' : r.localTruck ? '<div style="font-size:11px;color:#7E22CE">local</div>' : ''}`;
+  const badge = (t, bg, fg) => `<span style="display:inline-block;padding:3px 9px;border-radius:999px;background:${bg};color:${fg};font-size:12px;font-weight:800;white-space:nowrap">${esc(t)}</span>`;
 
-  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#14213D;background:#EEF1F6;padding:18px 10px">
+  const truckPills = readyTrucks.map((r) => pill(r, sus(r) || short(noteOf(r).replace(/^update$/i, ''), 16) || (r.ownerOperator ? 'owner op' : ''), !!sus(r))).join('');
+  const tlPills = readyTrailers.map((r) => pill(r, short(noteOf(r), 16))).join('');
+  // loaded trailers: where they go and when they're due (TruckMate), soonest first
+  const loadedRows = loadedTl.map((r) => ({ r, l: loadOf(r) })).sort((a, b) => String((a.l && a.l.deliverBy) || '9').localeCompare(String((b.l && b.l.deliverBy) || '9')));
+  // down: every truck and trailer with the reason and how long, longest first
+  const downRows = down.map((r) => ({ r, why: downReason(r), note: noteOf(r), d: downFor(r), eta: etaOf(r) })).sort((a, b) => b.d.days - a.d.days || REASONS.indexOf(a.why) - REASONS.indexOf(b.why) || (a.r.kind === b.r.kind ? 0 : a.r.kind === 'truck' ? -1 : 1));
+  const whyColor = { 'Waiting on parts': ['#FEF3C7', '#92400E'], 'Towed in': ['#FEE2E2', '#991B1B'], 'In shop': ['#DBEAFE', '#1E40AF'], 'At / needs the dealer': ['#EDE9FE', '#5B21B6'], 'Sold / for sale': ['#F1F5F9', '#475569'], Other: ['#F1F5F9', '#334155'], 'No reason given': ['#F1F5F9', '#94A3B8'] };
+
+  const html = `<div style="${F};background:#EEF1F6;padding:20px 10px;color:#14213D">
+<style>@media (max-width:600px){.stack{display:block!important;width:100%!important;box-sizing:border-box}}</style>
 <div style="max-width:720px;margin:0 auto">
-<div style="background:#1B2742;color:#FFFFFF;border-radius:12px 12px 0 0;padding:14px 18px">
-<div style="font-size:11px;letter-spacing:2px;color:#9DB8FF;font-weight:bold">${test ? 'TEST · NOT SAVED · ' : ''}YARD CHECK · ${esc(yard.toUpperCase())}</div>
-<div style="font-size:20px;font-weight:bold;margin-top:3px">${shift} check · ${esc(when.split(',').slice(0, 2).join(','))}</div>
-<div style="font-size:13px;color:#C9D6EA;margin-top:2px">Checked by ${esc(c.by)} at ${esc(when.split(', ').pop())} · ${trucks.length} trucks and ${trailers.length} trailers on the ground</div></div>
-${sec('READY TO DISPATCH NOW', '#15803D', `<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-top:8px"><tr>
-<td width="50%" style="padding-right:6px;vertical-align:top">${readyBox(readyTrucks.length, readyTrucks.length === 1 ? 'truck' : 'trucks', truckList, ownerOps.length ? `${ownerOps.join(', ')} ${ownerOps.length === 1 ? 'is an owner operator' : 'are owner operators'}` : '')}</td>
-<td width="50%" style="padding-left:6px;vertical-align:top">${readyBox(readyTrailers.length, readyTrailers.length === 1 ? 'trailer' : 'trailers', tlList, readyTrailers.length ? 'Empty, not on any load in TruckMate' : '')}</td></tr></table>
-${onLoadEmpty.length ? `<div style="margin-top:12px;background:#FFF7ED;border:1px solid #FDBA74;border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.6"><b style="color:#9A3412">Check before using — ${onLoadEmpty.length} trailer${onLoadEmpty.length === 1 ? ' is' : 's are'} empty in the yard but TruckMate still has ${onLoadEmpty.length === 1 ? 'it' : 'them'} on a load:</b><br>${onLoadEmpty.map((r) => `${esc(nm(r))} (trip ${esc(loadOf(r).trip)})`).join(' · ')}<br><span style="color:#7C2D12">If those loads are done, close them in TruckMate and ${onLoadEmpty.length === 1 ? 'it becomes' : 'these become'} available.</span></div>` : ''}`)}
-${sec('NOT AVAILABLE', '#475569', `<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-top:8px"><tr>${tile(loadedTl.length, 'Loaded trailers', 'on loads, waiting', '#1D4ED8')}${tile(local.length, 'Local trucks', 'yard / local use', '#7E22CE')}${tile(hold.length, 'On hold', split(hold), '#D97706')}${tile(down.length, 'Down', split(down), '#DC2626')}</tr></table>
-<div style="margin-top:12px;font-size:13px;line-height:1.7">
-${loadedTl.length ? `<div><b style="color:#1D4ED8">Loaded trailers (${loadedTl.length}):</b> ${loadedTl.map((r) => { const l = loadOf(r); return `${esc(nm(r))}${l ? ` → ${esc(town(l.to))}${l.deliverBy ? `, ${esc(fmtWhen(l.deliverBy))}` : ''}` : ''}${r.readiness === 'down' ? ' <span style="color:#DC2626">(down)</span>' : ''}`; }).join(' · ')}</div>` : ''}
-${local.length ? `<div><b style="color:#7E22CE">Local (${local.length}):</b> ${local.map((r) => `${esc(r.unit)}${r.readiness === 'down' ? ' (down)' : ''}`).join(' · ')}</div>` : ''}
-${hold.length ? `<div><b style="color:#D97706">On hold (${hold.length}):</b> ${hold.map(withNote).join(' · ')}</div>` : ''}
-</div>`, '#F8FAFC')}
-${down.length ? sec(`DOWN (${down.length}) — BY REASON`, '#DC2626', `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-top:8px;font-size:13px">${groups.map(([g, l]) => row(`${g} ${l.length}`, l.map((r) => { const e = etaOf(r); return `${withNote(r).replace(/^TK /, '')}${e ? ` <b style="color:#1D4ED8">· ready ${esc(fmtWhen(e))}</b>` : ''}`; }).join(' · '))).join('')}${tlDown.length ? row(`Trailers ${tlDown.length}`, tlDown.map(withNote).join(' · ')) : ''}</table>`) : ''}
-${unset.length || twice.length ? sec(`NO READINESS SET (${unset.length}) — ASK THE YARD`, '#475569', `${unset.length ? `<div style="font-size:13px;line-height:1.7;margin-top:6px">${unset.map(withNote).join(' · ')}</div>` : ''}${twice.length ? `<div style="font-size:12px;color:#B45309;margin-top:8px">⚠ On the sheet twice: ${twice.map((x) => `${esc(x.key.replace('truck:', 'TK ').replace('trailer:', 'TL '))} (${x.n}×)`).join(', ')} — counted once above.</div>` : ''}`) : ''}
-<div style="background:#FFFFFF;border:1px solid #DDE3EC;border-top:0;border-radius:0 0 12px 12px;padding:12px 18px;font-size:13px"><a href="${esc(consoleUrl)}" style="color:#1D4ED8;font-weight:bold">Open the full yard check</a> — every unit's card, photos and shop updates.<div style="color:#64748B;margin-top:8px">Jarvis · AI Dispatcher · Florida Beauty Flora</div></div>
+<div style="background:#0F1B33;border-radius:20px;padding:20px 22px;color:#FFFFFF">
+<div style="font-size:11px;letter-spacing:2px;font-weight:800;color:#8FB0FF">${test ? 'TEST · NOT SAVED · ' : ''}YARD CHECK</div>
+<div style="font-size:24px;font-weight:800;margin-top:4px">${esc(yard)} · ${shift.toLowerCase()}</div>
+<div style="font-size:13px;color:#AFC0DB;margin-top:4px">${esc(when)} · checked by ${esc(c.by)} · ${trucks.length} trucks · ${trailers.length} trailers on the ground</div></div>
+
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-top:10px"><tr>
+${hero(readyTrucks.length, 'trucks', 'Available to dispatch now', truckPills)}
+${hero(readyTrailers.length, 'trailers', 'Empty · on no load in TruckMate', tlPills)}
+</tr></table>
+
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-top:4px"><tr>
+${stat(loadedTl.length, 'LOADED TRAILERS', '#1D4ED8')}${stat(local.length, 'LOCAL TRUCKS', '#7E22CE')}${stat(hold.length, 'ON HOLD', '#D97706')}${stat(down.length, 'DOWN', '#DC2626')}
+</tr></table>
+
+${onLoadEmpty.length ? `<div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:16px;padding:12px 16px;margin-top:14px;font-size:13.5px;line-height:1.55;color:#7C2D12"><b>Check before using:</b> ${onLoadEmpty.map((r) => `${esc(nm(r))} (trip ${esc(loadOf(r).trip)})`).join(' · ')} — empty in the yard but still on a load in TruckMate. Close the load and ${onLoadEmpty.length === 1 ? 'it is' : 'they are'} ready.</div>` : ''}
+
+${loadedRows.length ? card('Loaded trailers', loadedRows.length, '#1D4ED8', table(`<tr>${th('TRAILER', '22%')}${th('LOAD')}${th('GOING TO')}${th('DELIVER BY')}</tr>`, loadedRows.map(({ r, l }) => `<tr>${td(`<b style="font-size:15px">${esc(r.unit)}</b>${r.readiness === 'down' ? `<div>${badge('down', '#FEE2E2', '#991B1B')}</div>` : ''}`)}${td(l ? `Trip ${esc(l.trip)}` : '<span style="color:#8A94A6">—</span>')}${td(l && l.to ? esc(town(l.to)) : '<span style="color:#8A94A6">—</span>')}${td(l && l.deliverBy ? `<b>${esc(fmtWhen(l.deliverBy))}</b>` : '<span style="color:#8A94A6">not given</span>', ';white-space:nowrap')}</tr>`).join(''))) : ''}
+
+${downRows.length ? card('Down', downRows.length, '#DC2626', table(`<tr>${th('UNIT', '22%')}${th('REASON')}${th('DOWN FOR')}</tr>`, downRows.map(({ r, why, note, d, eta }) => { const [bg, fg] = whyColor[why] || whyColor.Other; return `<tr>${td(unitCell(r))}${td(`${badge(why, bg, fg)}${note && !/^update$/i.test(note) ? `<div style="font-size:13px;color:#5B6676;margin-top:5px">${esc(short(note, 60))}</div>` : ''}${eta ? `<div style="font-size:12.5px;color:#1D4ED8;font-weight:700;margin-top:4px">Ready ETA ${esc(fmtWhen(eta))}</div>` : ''}${dvrUnits.has(unitKeyOf(r)) ? `<div style="margin-top:4px">${badge('DVIR open', '#FEE2E2', '#991B1B')}</div>` : ''}`)}${td(`<b style="color:${d.days >= 7 ? '#B91C1C' : d.days >= 3 ? '#B45309' : '#14213D'}">${esc(d.text)}</b>${d.since ? `<div style="font-size:11.5px;color:#8A94A6">since ${esc(d.since)}</div>` : ''}`, ';white-space:nowrap')}</tr>`; }).join('')), 'Longest first · "New today" = first check it showed up down') : ''}
+
+${hold.length ? card('On hold', hold.length, '#D97706', table('', hold.map((r) => `<tr>${td(unitCell(r), ';width:22%')}${td(esc(noteOf(r) && !/^update$/i.test(noteOf(r)) ? noteOf(r) : 'No note'))}</tr>`).join(''))) : ''}
+
+${local.length ? card('Local trucks', local.length, '#7E22CE', `<div style="padding:12px 18px 4px">${local.map((r) => pill(r, r.readiness === 'down' ? 'down' : '', false)).join('')}</div>`) : ''}
+
+${unset.length || twice.length ? card('Needs a decision', unset.length, '#64748B', `<div style="padding:12px 18px;font-size:13.5px;line-height:1.6">${unset.length ? `No readiness set: ${unset.map((r) => `<b>${esc(r.unit)}</b>${noteOf(r) && !/^update$/i.test(noteOf(r)) ? ` (${esc(short(noteOf(r), 30))})` : ''}`).join(' · ')}` : ''}${twice.length ? `<div style="color:#B45309;margin-top:6px">On the sheet twice (counted once): ${twice.map((x) => esc(x.key.replace('truck:', 'TK ').replace('trailer:', 'TL '))).join(', ')}</div>` : ''}</div>`) : ''}
+
+<div style="text-align:center;margin:18px 0 6px"><a href="${esc(consoleUrl)}" style="display:inline-block;background:#1D4ED8;color:#FFFFFF;text-decoration:none;font-weight:800;font-size:14px;padding:12px 22px;border-radius:12px">Open the full yard check</a></div>
+<div style="text-align:center;font-size:12px;color:#8A94A6">Jarvis · AI Dispatcher · Florida Beauty Flora</div>
 </div></div>`;
   const text = [`${test ? 'TEST — ' : ''}YARD CHECK — ${yard}, ${shift.toLowerCase()} check`, `${when} · checked by ${c.by}`, '',
-    `READY TO DISPATCH: ${readyTrucks.length} trucks · ${readyTrailers.length} trailers`,
-    `Trucks: ${readyTrucks.map((r) => `${r.unit}${sus(r) ? ` (${sus(r)})` : ''}`).join(', ') || 'none'}`, `Trailers: ${readyTrailers.map((r) => r.unit).join(', ') || 'none'}`,
+    `READY TRUCKS (${readyTrucks.length}): ${readyTrucks.map((r) => `${r.unit}${sus(r) ? ` (${sus(r)})` : ''}`).join(', ') || 'none'}`,
+    `READY TRAILERS (${readyTrailers.length}): ${readyTrailers.map((r) => r.unit).join(', ') || 'none'}`,
     ...(onLoadEmpty.length ? [`Check before using (empty, still on a TruckMate load): ${onLoadEmpty.map((r) => `${r.unit} (trip ${loadOf(r).trip})`).join(', ')}`] : []), '',
-    `NOT AVAILABLE: ${loadedTl.length} loaded trailers · ${local.length} local trucks · ${hold.length} on hold · ${down.length} down`,
-    ...groups.map(([g, l]) => `- ${g}: ${l.map((r) => r.unit).join(', ')}`), ...(tlDown.length ? [`- Trailers down: ${tlDown.map((r) => r.unit).join(', ')}`] : []),
-    ...(unset.length ? ['', `No readiness set: ${unset.map((r) => r.unit).join(', ')}`] : []), '', `Full check: ${consoleUrl}`, 'Jarvis · AI Dispatcher'].join('\n');
+    `LOADED TRAILERS (${loadedRows.length}):`, ...loadedRows.map(({ r, l }) => `- ${r.unit}${l ? ` · trip ${l.trip} · ${town(l.to)}${l.deliverBy ? ` · deliver ${fmtWhen(l.deliverBy)}` : ''}` : ''}`), '',
+    `DOWN (${downRows.length}):`, ...downRows.map(({ r, why, note, d, eta }) => `- ${nm(r)} · ${why}${note && !/^update$/i.test(note) ? ` (${note})` : ''} · down ${d.text}${eta ? ` · ready ETA ${fmtWhen(eta)}` : ''}`), '',
+    `On hold: ${hold.map((r) => r.unit).join(', ') || 'none'} · Local trucks: ${local.map((r) => r.unit).join(', ') || 'none'}`,
+    ...(unset.length ? [`No readiness set: ${unset.map((r) => r.unit).join(', ')}`] : []), '', `Full check: ${consoleUrl}`, 'Jarvis · AI Dispatcher'].join('\n');
   return { subject, html, text };
 }
 

@@ -104,6 +104,24 @@ export function addShopUpdate(list = [], { text = '', eta = null, by = null } = 
 }
 export const unitKey = (kind, unit) => `${kind === 'truck' ? 'truck' : 'trailer'}:${norm(unit)}`;
 
+// How long each down unit has been down (Nov 24): walk back through this yard's earlier checks while the unit was still down;
+// the oldest of those is when it went down. checks newest first or not — sorted here. → { 'truck:2215': ISO }. Pure.
+export function downSince(list = [], yard, rows = [], currentAt = null) {
+  const prev = (list || []).filter((x) => x && x.yard === yard && (!currentAt || String(x.checkedAt || x.at) < String(currentAt))).sort((a, b) => String(b.checkedAt || b.at).localeCompare(String(a.checkedAt || a.at)));
+  const out = {};
+  for (const r of rows) {
+    if (!r || !r.here || r.readiness !== 'down') continue;
+    const k = `${r.kind}:${norm(r.unit)}`; let since = currentAt;
+    for (const c of prev) {
+      const was = (c.rows || []).find((x) => x && x.here && `${x.kind}:${norm(x.unit)}` === k);
+      if (!was || was.readiness !== 'down') break;
+      since = c.checkedAt || c.at;
+    }
+    out[k] = since;
+  }
+  return out;
+}
+
 // One row from the phone, cleaned. Pure.
 export const READINESS = ['available', 'assigned', 'hold', 'down'];
 export const READINESS_LABEL = { available: 'Available', assigned: 'Assigned and cleared', hold: 'Hold — needs attention', down: 'Down' };
@@ -204,7 +222,8 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
     const dvrUnits = new Set(open.map((d) => (d.part === 'truck' ? `truck:${norm(d.truck)}` : `trailer:${norm(d.trailer)}`)));
     const shop = (await db.get('taShopUpdates:florida-beauty', {}).catch(() => ({}))) || {};
     const loads = unitLoads(await db.get('taTruckMateActive:florida-beauty', { trips: {} }).catch(() => ({ trips: {} })));
-    const m = yardCheckEmail(c, { dvrUnits, shop, test, loads });
+    const since = downSince(((await db.get(KEY, { list: [] }).catch(() => ({ list: [] }))) || {}).list || [], c.yard, c.rows || [], c.checkedAt || c.at);
+    const m = yardCheckEmail(c, { dvrUnits, shop, test, loads, downSince: since });
     await sendMail({ to: emailTo(), subject: m.subject, html: m.html, text: m.text });
     return emailTo();
   }

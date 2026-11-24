@@ -86,12 +86,12 @@ test('the summary email: totals, readiness, needs attention, against GPS, every 
   const { yardCheckEmail, mockYardCheck } = await import('../yardcheckemail.js');
   const m = yardCheckEmail(mockYardCheck(Date.parse('2026-11-23T04:30:00Z')), { dvrUnits: new Set(['trailer:2052']) });
   assert.equal(m.subject, 'Miami yard · night · READY: 2 trucks · 2 trailers · 1 down · 2 hold');
-  const txt = m.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-  assert.match(txt, /READY TO DISPATCH NOW 2 trucks TK 2216 TK 39/);
-  assert.match(txt, /2 trailers TL 7304 · Clean and empty TL 7366/);
-  assert.match(txt, /On hold \(2\): TK 2405 Missing front bumper · TL 2052 Rear door seal torn \(DVIR open\)/);
+  const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  assert.match(txt, /READY TRUCKS 2 Available to dispatch now 2216 39 · owner op/);
+  assert.match(txt, /READY TRAILERS 2 Empty · on no load in TruckMate 7304 · Clean and empty 7366/);
+  assert.match(txt, /On hold 2 TK 2405 Missing front bumper TL 2052 Rear door seal torn/);
   assert.ok(!/Every unit|Against GPS/.test(m.html + m.text), 'the every-unit table lives on the console now');
-  assert.match(m.text, /^READY TO DISPATCH: 2 trucks · 2 trailers$/m);
+  assert.match(m.text, /^READY TRUCKS \(2\): 2216, 39$/m);
   assert.ok(!/<script/i.test(yardCheckEmail({ yard: 'MIAMI', shift: 'night', by: '<script>x</script>', checkedAt: new Date().toISOString(), rows: [] }).html), 'typed text is escaped');
   // sent on submit, and the mock on request
   const s = {}; const db = { enabled: true, get: async (k, d) => (k in s ? JSON.parse(JSON.stringify(s[k])) : d), set: async (k, v) => { s[k] = v; }, update: async (k, f, d) => (s[k] = f(k in s ? JSON.parse(JSON.stringify(s[k])) : d)) };
@@ -210,15 +210,16 @@ test('the yard email (Nov 24 redesign): READY first with the unit numbers; empty
   const loads = { 'trailer:7301': { trip: '627588', to: 'POMPANO BEACH, FL' }, 'trailer:7184': { trip: '627654', to: 'POMPANO BEACH, FL, 33069', deliverBy: '2026-11-27T01:30' } };
   const m = yardCheckEmail({ yard: 'MIAMI', shift: 'morning', by: 'nadim', checkedAt: '2026-11-24T21:16:00Z', rows }, { test: true, loads, shop: { 'truck:2216': [{ eta: '2026-11-26T15:00' }] } });
   assert.equal(m.subject, 'TEST — Miami yard · morning · READY: 3 trucks · 1 trailer · 6 down · 1 hold');
-  const txt = m.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-  assert.match(txt, /3 trucks TK 2618 · Needs wash TK 2094 TK 44 · says &quot;Tow&quot;\?/);
-  assert.match(txt, /1 trailer TL 7384/);
-  assert.match(txt, /Check before using — 1 trailer is empty in the yard but TruckMate still has it on a load: TL 7301 \(trip 627588\)/);
-  assert.match(txt, /Loaded trailers \(2\): TL 7184 → Pompano Beach, Nov 27 1:30 AM · TL 7370 \(down\)/);
-  assert.match(txt, /Local \(2\): 939 · 935 \(down\)/);
-  assert.match(txt, /Waiting on parts 1 721 Parts/); assert.match(txt, /Towed in 1 1814/); assert.match(txt, /In shop 1 2216 · ready Nov 26 3 PM/); assert.match(txt, /No reason given 2 935 · 717/);
-  assert.match(txt, /NO READINESS SET \(1\) — ASK THE YARD TK 738 Parts truck/);
-  assert.match(txt, /On the sheet twice: TK 935 \(2×\)/);
+  const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').replace(/&quot;/g, '"');
+  assert.match(txt, /READY TRUCKS 3 Available to dispatch now 2618 · Needs wash 2094 · owner op 44 · says "Tow"\?/);
+  assert.match(txt, /READY TRAILERS 1 Empty · on no load in TruckMate 7384/);
+  assert.match(txt, /Check before using: TL 7301 \(trip 627588\)/);
+  assert.match(txt, /Loaded trailers 2 TRAILER LOAD GOING TO DELIVER BY 7184 Trip 627654 Pompano Beach Nov 27 1:30 AM 7370 down/);
+  assert.match(txt, /TK 721 Waiting on parts Parts New today TK 1814 Towed in No window, towed in New today TK 2216 In shop Ready ETA Nov 26 3 PM/);
+  assert.match(txt, /Local trucks 2 939 935 · down/);
+  assert.match(txt, /No readiness set: 738 \(Parts truck\)/);
+  assert.match(txt, /On the sheet twice \(counted once\): TK 935/);
+  assert.match(m.text, /- TK 2216 · In shop · down New today · ready ETA Nov 26 3 PM/);
   assert.equal(downReason({ issues: ['Sold'] }), 'Sold / for sale');
 });
 
@@ -229,4 +230,19 @@ test('the same unit added on two devices: the second card is not kept, and a sen
   d = mergeDraft(d, { rows: [{ id: 'mac', unit: '935', kind: 'truck', updatedAt: 2 }, { id: 'mac2', unit: '935', kind: 'trailer', updatedAt: 2 }] }, 20, dups);
   assert.deepEqual(Object.keys(d.rows).sort(), ['ipad', 'mac2']);
   assert.deepEqual(dups, ['mac']);
+});
+
+test('how long a unit has been down: back through the earlier checks while it stayed down (Nov 24)', async () => {
+  const { downSince } = await import('../yardcheck.js');
+  const { yardCheckEmail } = await import('../yardcheckemail.js');
+  const ck = (at, rows) => ({ yard: 'MIAMI', checkedAt: at, rows });
+  const list = [ck('2026-11-24T13:00:00Z', [{ kind: 'truck', unit: '2215', here: true, readiness: 'down' }, { kind: 'truck', unit: '721', here: true, readiness: 'available' }]),
+    ck('2026-11-21T13:00:00Z', [{ kind: 'truck', unit: '2215', here: true, readiness: 'down' }]), ck('2026-11-20T13:00:00Z', [{ kind: 'truck', unit: '2215', here: true, readiness: 'available' }]),
+    ck('2026-11-19T13:00:00Z', [{ kind: 'truck', unit: '2215', here: true, readiness: 'down' }]), { yard: 'VENTURA', checkedAt: '2026-11-18T13:00:00Z', rows: [{ kind: 'truck', unit: '721', here: true, readiness: 'down' }] }];
+  const rows = [cleanRow({ kind: 'truck', unit: '2215', here: true, readiness: 'down', issues: ['Waiting on parts caliper'] }), cleanRow({ kind: 'truck', unit: '721', here: true, readiness: 'down', issues: ['Parts'] })];
+  const since = downSince(list, 'MIAMI', rows, '2026-11-24T21:00:00Z');
+  assert.deepEqual(since, { 'truck:2215': '2026-11-21T13:00:00Z', 'truck:721': '2026-11-24T21:00:00Z' });
+  const m = yardCheckEmail({ yard: 'MIAMI', shift: 'night', by: 'Luis', checkedAt: '2026-11-24T21:00:00Z', rows }, { downSince: since });
+  const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  assert.match(txt, /TK 2215 Waiting on parts Waiting on parts caliper 3 days since Nov 21 TK 721 Waiting on parts Parts New today/);
 });
