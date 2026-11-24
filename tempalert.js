@@ -97,7 +97,15 @@ export function isFlowerTemp(lt) {
 const frozenReading = (lt) => isFlowerTemp(lt) && lt.current && lt.current.readingF != null && Number.isFinite(Number(lt.current.readingF)) && r1(lt.current.readingF) <= FREEZE_F;
 export const ONBOARD = new Set(['loading', 'on']);
 
-const base = (it) => ({ trip: tripNo(it), truck: String(tripOf(it).powerUnit || '').trim() || null, trailer: String(tripOf(it).trailer || '').trim() || null, where: (it._samsara && it._samsara.location) || null });
+// Nov 24: the texts also carry the load number (the B# when there is one, else the first bill and how many more) and a Google
+// Maps link to where the unit is now (the truck's GPS)
+const billsOfIt = (it) => ((it && (it.freightBills || it.orders)) || tripOf(it).freightBills || []).map((b) => String((b && b.billNumber) || '').trim()).filter(Boolean);
+export const loadNo = (bills = []) => { const b = bills.find((x) => /^B\d/i.test(x)) || bills[0]; if (!b) return null; const more = bills.length - 1; return /^B\d/i.test(b) || !more ? b : `${b} +${more} more`; };
+export const mapsLink = (lat, lng) => (lat != null && lng != null && Number.isFinite(Number(lat)) && Number.isFinite(Number(lng)) ? `https://maps.google.com/?q=${Number(lat).toFixed(5)},${Number(lng).toFixed(5)}` : null);
+const base = (it) => ({ trip: tripNo(it), truck: String(tripOf(it).powerUnit || '').trim() || null, trailer: String(tripOf(it).trailer || '').trim() || null, where: (it._samsara && it._samsara.location) || null,
+  load: loadNo(billsOfIt(it)), map: mapsLink(it._samsara && it._samsara.lat, it._samsara && it._samsara.lng) });
+// the lines every text ends with: the load, where the unit is, the map link
+const tail = (x) => [x.load ? `Load: ${x.load}` : null, x.where ? `Location: ${x.where}` : null, x.map ? `Map: ${x.map}` : null].filter(Boolean);
 // The LTL loads with a temperature problem right now: the reading more than `limit` °F off (kind 'reading'), or the set
 // point not what the load needs (kind 'setpoint'). Pure.
 // `phases` (trip → phase from loadPhase; missing = 'on'): only while the load is on the trailer; while loading a warm
@@ -138,7 +146,7 @@ export function tempMessage(x, { worse = false } = {}) {
     const html = `<div style="font-family:Arial,sans-serif;font-size:14px"><p>Good day,</p><p>The reefer set point on LTL trip ${esc(x.trip)} is not the temperature the load needs.</p>`
       + `<table style="border-collapse:collapse">${rows.map(([k, v]) => `<tr><td style="padding:3px 12px 3px 0;color:#555"><b>${esc(k)}</b></td><td style="padding:3px 0">${esc(v)}</td></tr>`).join('')}</table>`
       + '<p>Jarvis — AI Dispatcher<br>Florida Beauty Flora</p></div>';
-    return { subject, html, sms: `${x.freeze ? 'FREEZE RISK — flowers. ' : ''}LTL set point alert: trip ${x.trip}${x.trailer ? ` trailer ${x.trailer}` : ''} is set to ${x.setF}F but the load needs ${x.refText.replace(/^required /, '')}.` };
+    return { subject, html, sms: [`${x.freeze ? 'FREEZE RISK — flowers. ' : ''}LTL set point alert: trip ${x.trip}${x.trailer ? ` trailer ${x.trailer}` : ''} is set to ${x.setF}F but the load needs ${x.refText.replace(/^required /, '')}.`, ...tail(x)].join('\n') };
   }
   const dir = x.offF > 0 ? 'above' : 'below';
   const amt = `${Math.abs(x.offF)}°F ${dir} ${x.vs === 'set point' ? 'the set point' : 'the required temperature'}`;
@@ -222,6 +230,7 @@ export function tempSms(x, t, { kind = 'alert' } = {}) {
   } else lines.push(`${word} set point for: Duration unavailable`);
   if (kind === 'freeze') lines.push(`At or below ${FREEZE_F}°F: ${t && t.cold && t.cold.n >= 2 ? `${t.cold.n} readings in a row since ${ET(t.cold.since)}` : 'this reading'}`);
   lines.push(`Reading taken: ${x.at ? ET(x.at) : 'time not reported'}`);
+  lines.push(...tail(x));
   lines.push('Jarvis · Florida Beauty Dispatch');
   return lines.join('\n');
 }
@@ -230,7 +239,7 @@ export function tempSms(x, t, { kind = 'alert' } = {}) {
 export function backSms(x, prev) {
   return ['TEMP BACK IN RANGE', `Trailer ${x.trailer || 'not on file'} | Trip ${x.trip}`, `Reading: ${f1(x.readingF)}`, `Set point: ${x.setF != null ? f1(x.setF) : 'not reported'}`,
     ...(prev && prev.readingF != null ? [`Was: ${f1(prev.readingF)}${prev.readAt ? ` at ${ET(prev.readAt)}` : ''}`] : []),
-    `Reading taken: ${x.at ? ET(x.at) : 'time not reported'}`, 'Jarvis · Florida Beauty Dispatch'].join('\n');
+    `Reading taken: ${x.at ? ET(x.at) : 'time not reported'}`, ...tail(x), 'Jarvis · Florida Beauty Dispatch'].join('\n');
 }
 // minutes a reading must stay off before the FIRST text: freeze → 2 readings in a row (no clock); 10°F+ warm → 30 min;
 // otherwise the 2 hours. → true while still holding. Pure.

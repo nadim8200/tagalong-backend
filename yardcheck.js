@@ -71,6 +71,26 @@ export function unitLoads(active = {}) {
   return out;
 }
 
+// The sheet while it is being filled (Nov 24, Nadim: "when you start filling it out it populates everywhere"): every phone and
+// computer on the same yard, day and shift shares one draft. Each card has an id and an updatedAt; a save merges card by card
+// (the newer card wins) and a removed card leaves a marker so it doesn't come back from another device. Pure.
+// cur: { rows: { id: row }, removed: { id: ms }, at } ; patch: { rows: [row], removed: [id] } → the merged draft
+export function mergeDraft(cur = {}, patch = {}, nowMs = Date.now()) {
+  const rows = { ...((cur && cur.rows) || {}) }; const removed = { ...((cur && cur.removed) || {}) };
+  for (const id of (Array.isArray(patch.removed) ? patch.removed : []).slice(0, 400)) { const k = String(id).slice(0, 60); removed[k] = nowMs; delete rows[k]; }
+  for (const r of (Array.isArray(patch.rows) ? patch.rows : []).slice(0, 400)) {
+    if (!r || typeof r !== 'object' || !r.id) continue;
+    const id = String(r.id).slice(0, 60);
+    if (JSON.stringify(r).length > 12000) continue;
+    const at = Number(r.updatedAt) || 0;   // no edit time (a card carried from the last check) = oldest: never over a real edit
+    if (removed[id] && removed[id] >= at) continue;
+    if (rows[id] && (Number(rows[id].updatedAt) || 0) > at) continue;
+    rows[id] = { ...r, id, updatedAt: at };
+  }
+  return { rows, removed, at: nowMs };
+}
+export const draftKeyOf = (yard, day, shift) => `${yard}:${day}:${shift}`;
+
 // One row from the phone, cleaned. Pure.
 export const READINESS = ['available', 'assigned', 'hold', 'down'];
 export const READINESS_LABEL = { available: 'Available', assigned: 'Assigned and cleared', hold: 'Hold — needs attention', down: 'Down' };
@@ -191,9 +211,30 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
     res.json({ yard, month, days: checksByDay(((await db.get(KEY, { list: [] })) || {}).list || [], yard, month) });
   });
   app.get('/truckmate/yard-checks/:id', requireAuth, async (req, res, next) => {
-    if (req.params.id === 'photos' || req.params.id === 'days') return next();
+    if (req.params.id === 'photos' || req.params.id === 'days' || req.params.id === 'draft') return next();
     const x = ((((await db.get(KEY, { list: [] })) || {}).list) || []).find((c) => c.id === String(req.params.id));
     return x ? res.json({ check: x }) : res.status(404).json({ error: 'No such check.' });
+  });
+  // the shared draft: read it, save changed cards (merged), gone once the check is sent
+  const DRAFTS = 'taYardDraft:florida-beauty';
+  const dkey = (q) => { const yard = yardOf(q.yard); const day = /^\d{4}-\d\d-\d\d$/.test(String(q.day || '')) ? String(q.day) : null; const shift = SHIFTS.includes(q.shift) ? q.shift : null; return yard && day && shift ? draftKeyOf(yard, day, shift) : null; };
+  app.get('/truckmate/yard-checks/draft', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const k = dkey(req.query || {}); if (!k) return res.status(400).json({ error: 'Pick the yard, day and shift.' });
+    const d = (((await db.get(DRAFTS, {})) || {})[k]) || null;
+    res.json({ key: k, rows: d ? Object.values(d.rows || {}) : [], removed: d ? Object.keys(d.removed || {}) : [], at: d ? d.at : null });
+  });
+  app.post('/truckmate/yard-checks/draft', requireAuth, async (req, res) => {
+    if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
+    const b = req.body || {}; const k = dkey(b); if (!k) return res.status(400).json({ error: 'Pick the yard, day and shift.' });
+    let out = null;
+    await db.update(DRAFTS, (cur) => {
+      const all = { ...(cur || {}) };
+      for (const [key, v] of Object.entries(all)) if (!v || now() - (v.at || 0) > 3 * 86400000) delete all[key];   // drafts older than 3 days go
+      all[k] = mergeDraft(all[k], { rows: b.rows, removed: b.removed }, now());
+      out = all[k]; return all;
+    });
+    res.json({ key: k, rows: Object.values(out.rows), removed: Object.keys(out.removed), at: out.at });
   });
   app.post('/truckmate/yard-checks', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
@@ -221,6 +262,8 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
         return { list: [saved, ...list.filter((x) => x !== old)].slice(0, 400) };
       }, { list: [] });
       res.json({ ok: true, check: summary(saved), result });
+      // sent: the shared draft for this yard, day and shift is done with (the sheet's own day too, when it differs)
+      db.update(DRAFTS, (cur) => { const all = { ...(cur || {}) }; delete all[draftKeyOf(yard, clock.day, shift)]; if (/^\d{4}-\d\d-\d\d$/.test(String(b.draftDay || ''))) delete all[draftKeyOf(yard, String(b.draftDay), shift)]; return all; }).catch(() => {});
       emailCheck(saved).catch((e) => console.warn('[yard-check] email:', e.message));
     } catch (e) { res.status(502).json({ error: e.message }); }
   });

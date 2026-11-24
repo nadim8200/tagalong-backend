@@ -136,3 +136,37 @@ test('units on a load in TruckMate: the trip, where it goes and the last open bi
   assert.equal(m['truck:4504'].trip, '627700');
   assert.equal(m['trailer:18094'], undefined);
 });
+
+test('the shared draft: cards merge card by card, the newer one wins, a removed card stays removed (Nov 24)', async () => {
+  const { mergeDraft } = await import('../yardcheck.js');
+  let d = mergeDraft({}, { rows: [{ id: 'a', unit: '4504', kind: 'truck', updatedAt: 100 }, { id: 'b', unit: '7304', kind: 'trailer', updatedAt: 100 }] }, 1000);
+  d = mergeDraft(d, { rows: [{ id: 'a', unit: '4504', readiness: 'hold', updatedAt: 200 }] }, 1100);        // phone 1 edits a
+  d = mergeDraft(d, { rows: [{ id: 'a', unit: '4504', readiness: 'available', updatedAt: 150 }] }, 1200);    // an older copy from phone 2 loses
+  assert.equal(d.rows.a.readiness, 'hold');
+  d = mergeDraft(d, { removed: ['b'] }, 1300);
+  d = mergeDraft(d, { rows: [{ id: 'b', unit: '7304', updatedAt: 120 }] }, 1400);                         // a stale copy doesn't bring it back
+  assert.equal(d.rows.b, undefined);
+  d = mergeDraft(d, { rows: [{ id: 'c', unit: '2216', kind: 'truck' }] }, 1500);
+  assert.equal(d.rows.c.updatedAt, 0);
+  d = mergeDraft(d, { rows: [{ id: 'a', unit: '4504', readiness: 'available' }] }, 1600);                    // a carried copy never beats an edit
+  assert.equal(d.rows.a.readiness, 'hold');
+  assert.deepEqual(Object.keys(d.rows).sort(), ['a', 'c']);
+});
+
+test('the shared draft routes: two devices fill one sheet; sending the check clears it (Nov 24)', async () => {
+  const s = {}; const db = { enabled: true, get: async (k, d) => (k in s ? JSON.parse(JSON.stringify(s[k])) : d), set: async (k, v) => { s[k] = v; }, update: async (k, f, d) => (s[k] = f(k in s ? JSON.parse(JSON.stringify(s[k])) : d)) };
+  const routes = {}; const app = { get: (p, ...h) => { routes[`GET ${p}`] = h.pop(); }, post: (p, ...h) => { routes[`POST ${p}`] = h.pop(); } };
+  let clock = Date.parse('2026-11-22T13:00:00Z');   // 8 AM in Miami
+  initYardCheck(app, { requireAuth: () => {}, db, report: async () => REPORT, trucks: async () => TRUCKS, now: () => clock });
+  const call = async (key, { body = {}, query = {}, params = {} } = {}) => { const out = {}; const res = { status(c) { out.status = c; return this; }, json(j) { out.body = j; }, set() {}, send(b) { out.sent = b; } }; await routes[key]({ body, query, params, user: { name: 'Yard Miami' } }, res, () => {}); return out; };
+  assert.equal((await call('POST /truckmate/yard-checks', { body: { yard: 'X', rows: [] } })).status, 400);
+  const q = { yard: 'MIAMI', day: '2026-11-22', shift: 'morning' };
+  assert.equal((await call('GET /truckmate/yard-checks/draft', { query: { yard: 'MIAMI' } })).status, 400);
+  await call('POST /truckmate/yard-checks/draft', { body: { ...q, rows: [{ id: 'p1', unit: '7280', kind: 'trailer', here: true, updatedAt: 10 }] } });       // the iPad
+  const pc = await call('POST /truckmate/yard-checks/draft', { body: { ...q, rows: [{ id: 'p2', unit: '4504', kind: 'truck', here: true, updatedAt: 11 }] } });   // the office computer
+  assert.deepEqual(pc.body.rows.map((r) => r.unit).sort(), ['4504', '7280']);
+  assert.deepEqual((await call('GET /truckmate/yard-checks/draft', { query: q })).body.rows.length, 2);
+  await call('POST /truckmate/yard-checks', { body: { yard: 'MIAMI', draftDay: '2026-11-22', rows: [{ unit: '7280', kind: 'trailer', here: true }] } });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual((await call('GET /truckmate/yard-checks/draft', { query: q })).body.rows, []);
+});

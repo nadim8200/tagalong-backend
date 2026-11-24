@@ -40,7 +40,7 @@ test('first text waits until it has been off for 2 hours (by the readings); one 
   assert.equal(texts.length, 0, 'not 2 hours yet');
   await run(41.4, 135);                                                     // 10:15 → 2 h off
   assert.equal(texts.length, 1);
-  assert.equal(texts[0][1], ['REEFER TEMP ALERT', 'Trailer 7136 | Trip 2', 'Reading: 41.4°F', 'Set point: 35.0°F', 'Above set point: +6.4°F', 'Above set point for: 2 hr', 'Since: Nov 13, 8:15 AM ET', 'Reading taken: Nov 13, 10:15 AM ET', 'Jarvis · Florida Beauty Dispatch'].join('\n'));
+  assert.equal(texts[0][1], ['REEFER TEMP ALERT', 'Trailer 7136 | Trip 2', 'Reading: 41.4°F', 'Set point: 35.0°F', 'Above set point: +6.4°F', 'Above set point for: 2 hr', 'Since: Nov 13, 8:15 AM ET', 'Reading taken: Nov 13, 10:15 AM ET', 'Load: M1', 'Jarvis · Florida Beauty Dispatch'].join('\n'));
   await a.process('s', { trips: [ltlAt('2', 41.4, 34.99, 135)] });           // the same reading again (a retry / next cycle)
   await run(41.6, 150);
   assert.equal(texts.length, 1, 'no duplicates');
@@ -51,7 +51,7 @@ test('first text waits until it has been off for 2 hours (by the readings); one 
   assert.equal(mails.length, 2);
   await run(34.5, 210);                                                     // back at the set point → one BACK IN RANGE text, forgotten
   assert.equal(texts.length, 3);
-  assert.equal(texts[2][1], ['TEMP BACK IN RANGE', 'Trailer 7136 | Trip 2', 'Reading: 34.5°F', 'Set point: 35.0°F', 'Was: 44.6°F at Nov 13, 11:15 AM ET', 'Reading taken: Nov 13, 11:30 AM ET', 'Jarvis · Florida Beauty Dispatch'].join('\n'));
+  assert.equal(texts[2][1], ['TEMP BACK IN RANGE', 'Trailer 7136 | Trip 2', 'Reading: 34.5°F', 'Set point: 35.0°F', 'Was: 44.6°F at Nov 13, 11:15 AM ET', 'Reading taken: Nov 13, 11:30 AM ET', 'Load: M1', 'Jarvis · Florida Beauty Dispatch'].join('\n'));
   await run(34.5, 210);
   assert.equal(texts.length, 3, 'said once');
   await run(41.2, 225);
@@ -217,4 +217,18 @@ test('the board gets each LTL load\'s flowers-on-board phase (the card stops war
   await a.overlay('s', trips);
   assert.deepEqual(trips[0]._flowerPhase, { phase: 'delivered', by: 'stops left + set for the next load', since: 1 });
   assert.equal(trips[1]._flowerPhase, undefined);
+});
+
+test('the texts carry the load number and a Google Maps link to the unit (Nov 24)', async () => {
+  const { tempSms, loadNo, mapsLink } = await import('../tempalert.js');
+  assert.equal(loadNo(['M1', 'B181103', 'M2']), 'B181103');
+  assert.equal(loadNo(['M5067186', 'G5067296', 'M2']), 'M5067186 +2 more');
+  assert.equal(loadNo(['M1']), 'M1');
+  assert.equal(loadNo([]), null);
+  assert.equal(mapsLink(25.81234567, -80.3), 'https://maps.google.com/?q=25.81235,-80.30000');
+  assert.equal(mapsLink(null, -80), null);
+  const t = tempSms({ trip: '627831', trailer: '7315', readingF: 17, setF: -10, offF: 27, vs: 'set point', at: Date.parse('2026-11-24T19:42:00Z'), load: 'M5067500 +12 more', where: '88 Hicks Ave, Medford, MA', map: 'https://maps.google.com/?q=42.40228,-71.10221' }, null);
+  assert.match(t, /\nLoad: M5067500 \+12 more\nLocation: 88 Hicks Ave, Medford, MA\nMap: https:\/\/maps\.google\.com\/\?q=42\.40228,-71\.10221\nJarvis/);
+  const sp = tempMessage({ kind: 'setpoint', trip: '627754', trailer: '262074', setF: 36, offF: 2, refText: 'required 34°F', load: 'B181094', map: 'https://maps.google.com/?q=1.00000,2.00000' }).sms;
+  assert.equal(sp, 'LTL set point alert: trip 627754 trailer 262074 is set to 36F but the load needs 34°F.\nLoad: B181094\nMap: https://maps.google.com/?q=1.00000,2.00000');
 });
