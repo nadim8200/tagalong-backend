@@ -160,7 +160,9 @@ export function cleanRow(r = {}) {
 
 // The check against what GPS said: what to look at. Pure. → { missing, extra, reefer, damage, unchecked, counts }
 // a trailer with freight on it (Nov 24): the yard saw it loaded / partial, or TruckMate has it on a load — never "available"
-export const isLoadedTrailer = (r, loads = {}) => r.kind === 'trailer' && (r.loaded === 'loaded' || r.loaded === 'partial' || !!loads[`trailer:${r.unit}`]);
+// Nov 24 (Nadim): "if I mark them empty during the yard check it's because they are — don't cross reference them": the yard's
+// mark wins; TruckMate only decides for a trailer the yard didn't mark
+export const isLoadedTrailer = (r, loads = {}) => r.kind === 'trailer' && (r.loaded === 'loaded' || r.loaded === 'partial' || (!r.loaded && !!loads[`trailer:${r.unit}`]));
 export function compareCheck(expected = [], rows = [], day = null, loads = {}) {
   const by = new Map(rows.map((r) => [`${r.kind}:${r.unit}`, r]));
   const expKeys = new Set(expected.map((u) => `${u.kind}:${u.unit}`));

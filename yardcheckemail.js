@@ -53,12 +53,13 @@ export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://
   const yard = YARD[c.yard] || c.yard;
   const etaOf = (r) => ((shop[unitKeyOf(r)] || []).find((u) => u.eta) || {}).eta || null;
   const loadOf = (r) => loads[unitKeyOf(r)] || null;
-  const yardLoaded = (r) => r.loaded === 'loaded' || r.loaded === 'partial';
+  // the yard's mark wins (Nov 24): marked empty = empty, whatever TruckMate says; not marked → TruckMate's load decides
+  const yardLoaded = (r) => r.loaded === 'loaded' || r.loaded === 'partial' || (!r.loaded && !!loadOf(r));
   // READY: available trucks (not local); available trailers empty in the yard and on no TruckMate load
   const readyTrucks = trucks.filter((r) => r.readiness === 'available' && !r.localTruck);
   const availTl = trailers.filter((r) => r.readiness === 'available' && !yardLoaded(r));
-  const readyTrailers = availTl.filter((r) => !loadOf(r));
-  const onLoadEmpty = availTl.filter((r) => loadOf(r));
+  const readyTrailers = availTl;
+  const onLoadEmpty = [];
   const sus = (r) => (/\blocal\b/i.test(noteOf(r)) ? 'says "Local"?' : /\btow/i.test(noteOf(r)) ? 'says "Tow"?' : null);
   const loadedTl = trailers.filter(yardLoaded);
   const local = trucks.filter((r) => r.localTruck);
@@ -106,7 +107,7 @@ export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://
 
 <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-top:10px"><tr>
 ${hero(readyTrucks.length, 'trucks', 'Available to dispatch now', truckPills)}
-${hero(readyTrailers.length, 'trailers', 'Empty · on no load in TruckMate', tlPills)}
+${hero(readyTrailers.length, 'trailers', 'Empty · ready to go', tlPills)}
 </tr></table>
 
 <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-top:4px"><tr>

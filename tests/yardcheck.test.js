@@ -88,7 +88,7 @@ test('the summary email: totals, readiness, needs attention, against GPS, every 
   assert.equal(m.subject, 'Miami yard · night · READY: 2 trucks · 2 trailers · 1 down · 2 hold');
   const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/&zwnj;/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
   assert.match(txt, /READY TRUCKS 2 Available to dispatch now 2216 39 · owner op/);
-  assert.match(txt, /READY TRAILERS 2 Empty · on no load in TruckMate 7304 · Clean and empty 7366/);
+  assert.match(txt, /READY TRAILERS 2 Empty · ready to go 7304 · Clean and empty 7366/);
   assert.match(txt, /On hold 2 TK 2405 Missing front bumper TL 2052 Rear door seal torn/);
   assert.ok(!/Every unit|Against GPS/.test(m.html + m.text), 'the every-unit table lives on the console now');
   assert.match(m.text, /^READY TRUCKS \(2\): 2216, 39$/m);
@@ -195,8 +195,9 @@ test('a loaded trailer never counts as available — the yard says loaded / part
   const rows = [cleanRow({ unit: '7384', kind: 'trailer', here: true, readiness: 'available', loaded: 'empty' }),
     cleanRow({ unit: '7301', kind: 'trailer', here: true, readiness: 'available', loaded: 'empty' }),
     cleanRow({ unit: '7222', kind: 'trailer', here: true, readiness: 'available', loaded: 'loaded' })];
-  const c = compareCheck([], rows, '2026-11-24', { 'trailer:7301': { trip: '627588' } });
-  assert.equal(c.readiness.available.trailers, 1);
+  const c = compareCheck([], [...rows, cleanRow({ unit: '7400', kind: 'trailer', here: true, readiness: 'available' })], '2026-11-24', { 'trailer:7301': { trip: '627588' }, 'trailer:7400': { trip: '627999' } });
+  // the yard's mark wins: 7301 marked empty is empty (TruckMate's load ignored); 7400 not marked → TruckMate's load decides
+  assert.equal(c.readiness.available.trailers, 2);
   assert.equal(c.counts.loadedTrailers, 2);
 });
 
@@ -209,11 +210,11 @@ test('the yard email (Nov 24 redesign): READY first with the unit numbers; empty
     L('7384', { readiness: 'available', loaded: 'empty' }), L('7301', { readiness: 'available', loaded: 'empty' }), L('7184', { readiness: 'assigned', loaded: 'loaded' }), L('7370', { readiness: 'down', loaded: 'loaded', issues: ['Full of pallets'] })];
   const loads = { 'trailer:7301': { trip: '627588', to: 'POMPANO BEACH, FL' }, 'trailer:7184': { trip: '627654', to: 'POMPANO BEACH, FL, 33069', deliverBy: '2026-11-27T01:30' } };
   const m = yardCheckEmail({ yard: 'MIAMI', shift: 'morning', by: 'nadim', checkedAt: '2026-11-24T21:16:00Z', rows }, { test: true, loads, shop: { 'truck:2216': [{ eta: '2026-11-26T15:00' }] } });
-  assert.equal(m.subject, 'TEST — Miami yard · morning · READY: 3 trucks · 1 trailer · 6 down · 1 hold');
+  assert.equal(m.subject, 'TEST — Miami yard · morning · READY: 3 trucks · 2 trailers · 6 down · 1 hold');
   const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/&zwnj;/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').replace(/&quot;/g, '"');
   assert.match(txt, /READY TRUCKS 3 Available to dispatch now 2618 · Needs wash 2094 · owner op 44 · says "Tow"\?/);
-  assert.match(txt, /READY TRAILERS 1 Empty · on no load in TruckMate 7384/);
-  assert.match(txt, /Check before using: TL 7301 \(trip 627588\)/);
+  assert.match(txt, /READY TRAILERS 2 Empty · ready to go 7384 7301/);   // 7301 marked empty: empty, TruckMate's load ignored
+  assert.ok(!/Check before using/.test(txt));
   assert.match(txt, /Loaded trailers 2 TRAILER LOAD GOING TO DELIVER BY 7184 Trip 627654 Pompano Beach Nov 27 1:30 AM 7370 down/);
   assert.match(txt, /TK 721 Waiting on parts Parts New today TK 1814 Towed in No window, towed in New today TK 2216 In shop Ready ETA Nov 26 3 PM/);
   assert.match(txt, /Local trucks 2 939 935 · down/);
