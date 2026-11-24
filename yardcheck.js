@@ -23,7 +23,7 @@
 // ---------------------------------------------------------------
 import { randomBytes } from 'node:crypto';
 import { sendMail as mailerSend } from './mailer.js';
-import { yardCheckEmail, mockYardCheck } from './yardcheckemail.js';
+import { yardCheckEmail, mockYardCheck, dedupeRows } from './yardcheckemail.js';
 
 export const CHECK_YARDS = { MIAMI: { name: 'Miami', tz: 'America/New_York' }, VENTURA: { name: 'Ventura', tz: 'America/Los_Angeles' } };
 export const SHIFTS = ['morning', 'night'];
@@ -75,7 +75,7 @@ export function unitLoads(active = {}) {
 // computer on the same yard, day and shift shares one draft. Each card has an id and an updatedAt; a save merges card by card
 // (the newer card wins) and a removed card leaves a marker so it doesn't come back from another device. Pure.
 // cur: { rows: { id: row }, removed: { id: ms }, at } ; patch: { rows: [row], removed: [id] } → the merged draft
-export function mergeDraft(cur = {}, patch = {}, nowMs = Date.now()) {
+export function mergeDraft(cur = {}, patch = {}, nowMs = Date.now(), dups = null) {
   const rows = { ...((cur && cur.rows) || {}) }; const removed = { ...((cur && cur.removed) || {}) };
   for (const id of (Array.isArray(patch.removed) ? patch.removed : []).slice(0, 400)) { const k = String(id).slice(0, 60); removed[k] = nowMs; delete rows[k]; }
   for (const r of (Array.isArray(patch.rows) ? patch.rows : []).slice(0, 400)) {
@@ -85,6 +85,9 @@ export function mergeDraft(cur = {}, patch = {}, nowMs = Date.now()) {
     const at = Number(r.updatedAt) || 0;   // no edit time (a card carried from the last check) = oldest: never over a real edit
     if (removed[id] && removed[id] >= at) continue;
     if (rows[id] && (Number(rows[id].updatedAt) || 0) > at) continue;
+    // Nov 24: the same truck / trailer added on two devices — the first card stays, the second isn't kept (the device shows it)
+    const u = String(r.unit || '').trim().toUpperCase();
+    if (u && Object.values(rows).some((x) => x.id !== id && x.kind === r.kind && String(x.unit || '').trim().toUpperCase() === u)) { if (dups) dups.push(id); continue; }
     rows[id] = { ...r, id, updatedAt: at };
   }
   return { rows, removed, at: nowMs };
@@ -200,7 +203,8 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
     const open = Object.values((await db.get('taDvr:florida-beauty', {}).catch(() => ({}))) || {}).filter((d) => d.status !== 'completed');
     const dvrUnits = new Set(open.map((d) => (d.part === 'truck' ? `truck:${norm(d.truck)}` : `trailer:${norm(d.trailer)}`)));
     const shop = (await db.get('taShopUpdates:florida-beauty', {}).catch(() => ({}))) || {};
-    const m = yardCheckEmail(c, { dvrUnits, shop, test });
+    const loads = unitLoads(await db.get('taTruckMateActive:florida-beauty', { trips: {} }).catch(() => ({ trips: {} })));
+    const m = yardCheckEmail(c, { dvrUnits, shop, test, loads });
     await sendMail({ to: emailTo(), subject: m.subject, html: m.html, text: m.text });
     return emailTo();
   }
@@ -242,14 +246,14 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
   app.post('/truckmate/yard-checks/draft', requireAuth, async (req, res) => {
     if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
     const b = req.body || {}; const k = dkey(b); if (!k) return res.status(400).json({ error: 'Pick the yard, day and shift.' });
-    let out = null;
+    let out = null; const dupIds = [];
     await db.update(DRAFTS, (cur) => {
       const all = { ...(cur || {}) };
       for (const [key, v] of Object.entries(all)) if (!v || now() - (v.at || 0) > 3 * 86400000) delete all[key];   // drafts older than 3 days go
-      all[k] = mergeDraft(all[k], { rows: b.rows, removed: b.removed }, now());
+      all[k] = mergeDraft(all[k], { rows: b.rows, removed: b.removed }, now(), dupIds);
       out = all[k]; return all;
     });
-    res.json({ key: k, rows: Object.values(out.rows), removed: Object.keys(out.removed), at: out.at });
+    res.json({ key: k, rows: Object.values(out.rows), removed: Object.keys(out.removed), at: out.at, dups: dupIds });
   });
   // shop updates: every unit's list (newest first), and a new update with its ETA to be ready
   const SHOP = 'taShopUpdates:florida-beauty';
@@ -276,7 +280,7 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
     const b = req.body || {};
     const yard = yardOf(b.yard);
     if (!yard) return res.status(400).json({ error: 'Pick the yard: Miami or Ventura.' });
-    const rows = (Array.isArray(b.rows) ? b.rows : []).slice(0, 400).map(cleanRow).filter((r) => r.unit);
+    const rows = dedupeRows((Array.isArray(b.rows) ? b.rows : []).slice(0, 400).map(cleanRow).filter((r) => r.unit)).rows;   // a unit on the sheet twice counts once
     if (!rows.some((r) => r.here != null)) return res.status(400).json({ error: 'Mark at least one unit here or not here.' });
     // "Checked by" and "Date & time" from the sheet: a time within the last day (not ahead) picks the day and shift
     const typed = Date.parse(String(b.checkedAt || ''));
