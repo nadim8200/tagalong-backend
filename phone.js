@@ -55,6 +55,28 @@ export function initPhone(app, { requireAuth, db, secret, clientId, activity = n
       return res.json({ ok: true, ext: rec.ext, name: rec.name, callerId: rec.callerId });
     } catch (e) { return res.status(502).json({ error: 'Could not reach RingCentral. Try again.' }); }
   });
+  // Which device has this login's phone line (Nov 24, Nadim: "choose where to start the phone if I'm logged on the computer
+  // and the iPad"): one device at a time. The first to start takes it; another device takes it over only when someone taps
+  // "Use the phone here" there (or the holder has been quiet 3 minutes — closed). The holder checks in every ~45 s and lets
+  // go when another device took it.
+  const DEVICES = 'taPhoneDevice';
+  const fresh = (d) => d && now() - (d.seenAt || 0) < 3 * 60000;
+  app.get('/ringcentral/phone/device', requireAuth, async (req, res) => {
+    if (!guard(req, res)) return undefined;
+    return res.json({ device: (((await db.get(DEVICES, {})) || {})[uid(req)]) || null });
+  });
+  app.post('/ringcentral/phone/device', requireAuth, async (req, res) => {
+    if (!guard(req, res)) return undefined;
+    const b = req.body || {}; const id = String(b.id || '').slice(0, 64); const label = String(b.label || 'Another device').slice(0, 60);
+    if (!id) return res.status(400).json({ error: 'Which device?' });
+    let out = null;
+    await db.update(DEVICES, (cur) => {
+      const all = { ...(cur || {}) }; const d = all[uid(req)];
+      if (b.take || !d || !fresh(d) || d.id === id) all[uid(req)] = { id, label: d && d.id === id && !b.take ? d.label : label, at: d && d.id === id ? d.at : now(), seenAt: now() };
+      out = all[uid(req)]; return all;
+    }, {});
+    return res.json({ device: out, mine: out.id === id });
+  });
   // this dispatcher's own calling credentials, for the phone in their console
   app.get('/ringcentral/phone/sip', requireAuth, async (req, res) => {
     if (!guard(req, res)) return undefined;

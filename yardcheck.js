@@ -195,11 +195,12 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
   }
   // the summary email: to YARD_CHECK_EMAIL (default Nadim), with the units that have an open DVIR marked
   const emailTo = () => String(env.YARD_CHECK_EMAIL || 'ntellez@floridabeauty.us').split(/[,;\s]+/).filter(Boolean);
-  async function emailCheck(c) {
+  async function emailCheck(c, { test = false } = {}) {
     if (env.YARD_CHECK_EMAIL === 'off') return null;
     const open = Object.values((await db.get('taDvr:florida-beauty', {}).catch(() => ({}))) || {}).filter((d) => d.status !== 'completed');
     const dvrUnits = new Set(open.map((d) => (d.part === 'truck' ? `truck:${norm(d.truck)}` : `trailer:${norm(d.trailer)}`)));
-    const m = yardCheckEmail(c, { dvrUnits });
+    const shop = (await db.get('taShopUpdates:florida-beauty', {}).catch(() => ({}))) || {};
+    const m = yardCheckEmail(c, { dvrUnits, shop, test });
     await sendMail({ to: emailTo(), subject: m.subject, html: m.html, text: m.text });
     return emailTo();
   }
@@ -299,6 +300,20 @@ export function initYardCheck(app, { requireAuth, db, report, trucks, now = () =
       // sent: the shared draft for this yard, day and shift is done with (the sheet's own day too, when it differs)
       db.update(DRAFTS, (cur) => { const all = { ...(cur || {}) }; delete all[draftKeyOf(yard, clock.day, shift)]; if (/^\d{4}-\d\d-\d\d$/.test(String(b.draftDay || ''))) delete all[draftKeyOf(yard, String(b.draftDay), shift)]; return all; }).catch(() => {});
       emailCheck(saved).catch((e) => console.warn('[yard-check] email:', e.message));
+    } catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  // a test email of the sheet being filled (Nov 24): the shared draft as if it were sent now, marked TEST, nothing saved
+  app.post('/truckmate/yard-checks/test-email', requireAuth, async (req, res) => {
+    const b = req.body || {}; const k = dkey(b);
+    if (!k) return res.status(400).json({ error: 'Pick the yard, day and shift.' });
+    const d = (((await db.get(DRAFTS, {})) || {})[k]) || null;
+    const rows = Object.values((d && d.rows) || {}).map((r) => cleanRow({ ...r, comments: Array.isArray(r.issues) && r.issues.length ? r.issues.join(' · ') : r.comments })).filter((r) => r.unit && r.here);
+    if (!rows.length) return res.status(400).json({ error: 'Nothing on the sheet yet.' });
+    try {
+      const exp = await expected(yardOf(b.yard));
+      const result = compareCheck(exp, rows, String(b.day), unitLoads(await db.get('taTruckMateActive:florida-beauty', { trips: {} }).catch(() => ({ trips: {} }))));
+      const to = await emailCheck({ yard: yardOf(b.yard), shift: b.shift, day: String(b.day), by: `${String(b.by || who(req)).slice(0, 80)} (TEST — not saved)`, checkedAt: new Date(now()).toISOString(), rows, result }, { test: true });
+      res.json({ ok: true, to, units: rows.length, counts: result.counts, available: result.readiness.available });
     } catch (e) { res.status(502).json({ error: e.message }); }
   });
   app.post('/truckmate/yard-checks/email-preview', requireAuth, async (req, res) => {

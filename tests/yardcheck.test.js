@@ -199,3 +199,15 @@ test('a loaded trailer never counts as available — the yard says loaded / part
   assert.equal(c.readiness.available.trailers, 1);
   assert.equal(c.counts.loadedTrailers, 2);
 });
+
+test('the yard email: Available trucks / Available trailers / Loaded trailers / Local trucks up top; TEST in the subject; the shop ready ETA (Nov 24)', async () => {
+  const { yardCheckEmail } = await import('../yardcheckemail.js');
+  const rows = [cleanRow({ unit: '939', kind: 'truck', here: true, localTruck: true, readiness: 'available' }), cleanRow({ unit: '2216', kind: 'truck', here: true, readiness: 'available', condition: 'shop' }),
+    cleanRow({ unit: '7384', kind: 'trailer', here: true, readiness: 'available', loaded: 'empty' }), cleanRow({ unit: '7301', kind: 'trailer', here: true, readiness: 'available', loaded: 'empty' })];
+  const result = compareCheck([], rows, '2026-11-24', { 'trailer:7301': { trip: '627588' } });
+  const m = yardCheckEmail({ yard: 'MIAMI', shift: 'morning', by: 'nadim (TEST — not saved)', checkedAt: '2026-11-24T20:00:00Z', rows, result }, { test: true, shop: { 'truck:2216': [{ eta: '2026-11-26T15:00' }] } });
+  assert.match(m.subject, /^TEST — Yard check \/\/ Miami/);
+  const txt = m.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  assert.match(txt, /1 Available trucks 1 Available trailers 1 Loaded trailers 1 Local trucks/);
+  assert.match(txt, /ready ETA 2026-11-26 15:00/);
+});

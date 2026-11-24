@@ -11,7 +11,7 @@ const CLASSES = [['companyTruck', 'company'], ['localTruck', 'local'], ['ownerOp
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const name = (r) => `${r.kind === 'truck' ? 'Truck' : 'Trailer'} ${r.unit}`;
 
-export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://mytagalong.app/truckmate' } = {}) {
+export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://mytagalong.app/truckmate', shop = {}, test = false } = {}) {
   const rows = (c.rows || []).filter((r) => r.here);
   const trucks = rows.filter((r) => r.kind === 'truck'); const trailers = rows.filter((r) => r.kind === 'trailer');
   const when = new Date(c.checkedAt || c.at).toLocaleString('en-US', { timeZone: TZ[c.yard] || TZ.MIAMI, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -24,8 +24,14 @@ export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://
       set != null && now != null && Math.abs(now - set) >= 5 ? `reefer ${now}°F / set ${set}°F` : null, dvrUnits.has(`${r.kind}:${r.unit}`) ? 'DVIR open' : null].filter(Boolean);
     return why.length ? { r, why, note: [r.comments, r.notes].filter(Boolean).join(' · ') } : null;
   }).filter(Boolean);
-  const tally = (k) => ({ t: trucks.filter((r) => r.readiness === k).length, l: trailers.filter((r) => r.readiness === k).length });
-  const subject = `Yard check // ${yard} // ${shift.toLowerCase()} // ${trucks.length} trucks · ${trailers.length} trailers${att.length ? ` · ${att.length} need attention` : ''}`;
+  // Nov 24: a local truck and a loaded trailer are never available — the server's counts when it has them (TruckMate loads too)
+  const loadedTl = (r) => r.loaded === 'loaded' || r.loaded === 'partial';
+  const rd = (c.result && c.result.readiness) || null;
+  const tally = (k) => (rd && rd[k] ? { t: rd[k].trucks, l: rd[k].trailers } : { t: trucks.filter((r) => r.readiness === k && !(k === 'available' && r.localTruck)).length, l: trailers.filter((r) => r.readiness === k && !(k === 'available' && loadedTl(r))).length });
+  const loadedN = c.result && c.result.counts && c.result.counts.loadedTrailers != null ? c.result.counts.loadedTrailers : trailers.filter(loadedTl).length;
+  const localN = trucks.filter((r) => r.localTruck).length;
+  const etaOf = (r) => ((shop[`${r.kind}:${r.unit}`] || []).find((u) => u.eta) || {}).eta || null;
+  const subject = `${test ? 'TEST — ' : ''}Yard check // ${yard} // ${shift.toLowerCase()} // ${trucks.length} trucks · ${trailers.length} trailers${att.length ? ` · ${att.length} need attention` : ''}`;
 
   const card = 'background:#FFFFFF;border:1px solid #E2E8F0;border-radius:10px;padding:12px 14px';
   const totals = (label, n, sub) => `<td width="50%" style="padding:0 6px 0 0;vertical-align:top"><div style="${card}"><div style="font-size:13px;color:#475569">${label}</div><div style="font-size:30px;font-weight:bold;color:#14213D;line-height:1.15">${n}</div><div style="font-size:12px;color:#64748B">${sub}</div></div></td>`;
@@ -33,7 +39,7 @@ export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://
   const chip = (k) => { const r = READY.find(([v]) => v === k); return r ? `<span style="background:${r[2]};color:${r[3]};padding:2px 7px;border-radius:5px;font-size:11px;font-weight:bold;white-space:nowrap">${esc(r[1].split(' ')[0])}</span>` : '—'; };
   const th = (t) => `<th align="left" style="padding:8px 10px;font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:#64748B;border-bottom:1px solid #E2E8F0">${t}</th>`;
   const table = rows.map((r) => {
-    const cond = [r.inside ? (r.inside === 'cleaning' ? 'needs cleaning' : r.inside) : null, r.condition === 'issue' ? 'issue found' : r.condition === 'clear' ? 'no visible issue' : r.condition === 'shop' ? 'in the shop' : r.condition === 'dealer' && !r.atDealer ? 'needs the dealer' : null, r.atDealer ? `at the dealer${r.dealerSince ? ` since ${r.dealerSince.slice(5).replace('-', '/')}` : ''}` : null, r.access === 'blocked' ? 'blocked in' : null].filter(Boolean).join(' · ');
+    const cond = [r.inside ? (r.inside === 'cleaning' ? 'needs cleaning' : r.inside) : null, r.condition === 'issue' ? 'issue found' : r.condition === 'clear' ? 'no visible issue' : r.condition === 'shop' ? 'in the shop' : r.condition === 'dealer' && !r.atDealer ? 'needs the dealer' : null, r.atDealer ? `at the dealer${r.dealerSince ? ` since ${r.dealerSince.slice(5).replace('-', '/')}` : ''}` : null, r.access === 'blocked' ? 'blocked in' : null, etaOf(r) ? `ready ETA ${String(etaOf(r)).replace('T', ' ')}` : null, r.localTruck ? 'local' : null].filter(Boolean).join(' · ');
     const cls = CLASSES.filter(([k]) => r[k]).map(([, l]) => l).join(', ');
     const note = [cls, r.comments, r.notes].filter(Boolean).join(' · ');
     return `<tr><td style="padding:8px 10px;border-top:1px solid #EEF2F7;white-space:nowrap"><b>${r.kind === 'truck' ? 'TK' : 'TL'} ${esc(r.unit)}</b></td><td style="padding:8px 10px;border-top:1px solid #EEF2F7">${chip(r.readiness)}</td><td style="padding:8px 10px;border-top:1px solid #EEF2F7">${esc(r.loaded || '—')}</td><td style="padding:8px 10px;border-top:1px solid #EEF2F7">${esc(cond || '—')}</td><td style="padding:8px 10px;border-top:1px solid #EEF2F7;white-space:nowrap">${r.tempF || r.setF ? `${esc(r.tempF || '—')} / ${esc(r.setF || '—')}°F` : '—'}</td><td style="padding:8px 10px;border-top:1px solid #EEF2F7;color:#475569">${esc(note || '—')}${dvrUnits.has(`${r.kind}:${r.unit}`) ? ' <b style="color:#B91C1C">· DVIR</b>' : ''}${(r.photos || []).length ? ` · ${r.photos.length} photo${r.photos.length === 1 ? '' : 's'}` : ''}</td></tr>`;
@@ -50,6 +56,7 @@ export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://
 ${totals('Trucks in the yard', trucks.length, CLASSES.map(([k, l]) => `${trucks.filter((r) => r[k]).length} ${l}`).join(' · '))}
 ${totals('Trailers in the yard', trailers.length, `${trailers.filter((r) => r.loaded === 'loaded').length} loaded · ${trailers.filter((r) => r.loaded === 'empty').length} empty · ${trailers.filter((r) => r.loaded === 'partial').length} partial`)}
 </tr></table>
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-top:10px"><tr>${[['Available trucks', tally('available').t, '#ECFDF3', '#15803D'], ['Available trailers', tally('available').l, '#ECFDF3', '#15803D'], ['Loaded trailers', loadedN, '#EFF6FF', '#1D4ED8'], ['Local trucks', localN, '#F3E8FF', '#7E22CE']].map(([l, n, bg, fg]) => `<td width="25%" style="padding:0 3px;vertical-align:top"><div style="background:${bg};border:2px solid ${fg};border-radius:8px;padding:9px 10px"><div style="font-size:26px;font-weight:bold;color:${fg}">${n}</div><div style="font-size:12px;font-weight:bold;color:${fg}">${l}</div></div></td>`).join('')}</tr></table>
 <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-top:10px"><tr>${ready}</tr></table>
 <div style="${card};margin-top:10px"><div style="font-size:15px;font-weight:bold;margin-bottom:6px">Needs attention (${att.length})</div>${att.length ? att.map(({ r, why, note }) => `<div style="font-size:13px;line-height:1.6"><b>${esc(name(r))}</b> · ${esc(why.join(', '))}${note ? ` <span style="color:#64748B">— ${esc(note)}</span>` : ''}</div>`).join('') : '<div style="font-size:13px;color:#64748B">Nothing — every unit is clear.</div>'}</div>
 <div style="font-size:15px;font-weight:bold;margin:14px 0 6px">Every unit (${rows.length})</div>

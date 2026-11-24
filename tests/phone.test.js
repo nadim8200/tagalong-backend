@@ -115,3 +115,18 @@ test('main-line calls on/off: reads and sets RingCentral presence for your own l
   assert.equal(none.status, 409); assert.match(none.body.error, /Connect your phone/);
   assert.equal((await call('GET /ringcentral/phone/queue', { user: { id: 'x', role: 'customer' } })).status, 403);
 });
+
+test('one device has the phone line: the first takes it, another takes it over only when asked or when the first went quiet (Nov 24)', async () => {
+  const { call } = setup();
+  const mac = { user: geo, body: { id: 'mac1', label: 'Mac · Chrome' } };
+  const pad = { user: geo, body: { id: 'ipad1', label: 'iPad · Safari' } };
+  assert.equal((await call('POST /ringcentral/phone/device', mac)).body.mine, true);                    // the computer starts first
+  const p1 = await call('POST /ringcentral/phone/device', pad);                                           // the iPad opens the console
+  assert.deepEqual([p1.body.mine, p1.body.device.label], [false, 'Mac · Chrome']);
+  const p2 = await call('POST /ringcentral/phone/device', { user: geo, body: { ...pad.body, take: true } });   // "Use the phone here" on the iPad
+  assert.equal(p2.body.mine, true);
+  const m2 = await call('POST /ringcentral/phone/device', mac);                                           // the computer's check-in: let go
+  assert.deepEqual([m2.body.mine, m2.body.device.label], [false, 'iPad · Safari']);
+  assert.equal((await call('GET /ringcentral/phone/device', { user: geo, query: {} })).body.device.id, 'ipad1');
+  assert.equal((await call('POST /ringcentral/phone/device', { user: geo, body: {} })).status, 400);
+});
