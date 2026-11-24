@@ -86,7 +86,7 @@ test('the summary email: totals, readiness, needs attention, against GPS, every 
   const { yardCheckEmail, mockYardCheck } = await import('../yardcheckemail.js');
   const m = yardCheckEmail(mockYardCheck(Date.parse('2026-11-23T04:30:00Z')), { dvrUnits: new Set(['trailer:2052']) });
   assert.equal(m.subject, 'Miami yard · night · READY: 2 trucks · 2 trailers · 1 down · 2 hold');
-  const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/&zwnj;/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
   assert.match(txt, /READY TRUCKS 2 Available to dispatch now 2216 39 · owner op/);
   assert.match(txt, /READY TRAILERS 2 Empty · on no load in TruckMate 7304 · Clean and empty 7366/);
   assert.match(txt, /On hold 2 TK 2405 Missing front bumper TL 2052 Rear door seal torn/);
@@ -210,7 +210,7 @@ test('the yard email (Nov 24 redesign): READY first with the unit numbers; empty
   const loads = { 'trailer:7301': { trip: '627588', to: 'POMPANO BEACH, FL' }, 'trailer:7184': { trip: '627654', to: 'POMPANO BEACH, FL, 33069', deliverBy: '2026-11-27T01:30' } };
   const m = yardCheckEmail({ yard: 'MIAMI', shift: 'morning', by: 'nadim', checkedAt: '2026-11-24T21:16:00Z', rows }, { test: true, loads, shop: { 'truck:2216': [{ eta: '2026-11-26T15:00' }] } });
   assert.equal(m.subject, 'TEST — Miami yard · morning · READY: 3 trucks · 1 trailer · 6 down · 1 hold');
-  const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').replace(/&quot;/g, '"');
+  const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/&zwnj;/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').replace(/&quot;/g, '"');
   assert.match(txt, /READY TRUCKS 3 Available to dispatch now 2618 · Needs wash 2094 · owner op 44 · says "Tow"\?/);
   assert.match(txt, /READY TRAILERS 1 Empty · on no load in TruckMate 7384/);
   assert.match(txt, /Check before using: TL 7301 \(trip 627588\)/);
@@ -243,6 +243,16 @@ test('how long a unit has been down: back through the earlier checks while it st
   const since = downSince(list, 'MIAMI', rows, '2026-11-24T21:00:00Z');
   assert.deepEqual(since, { 'truck:2215': '2026-11-21T13:00:00Z', 'truck:721': '2026-11-24T21:00:00Z' });
   const m = yardCheckEmail({ yard: 'MIAMI', shift: 'night', by: 'Luis', checkedAt: '2026-11-24T21:00:00Z', rows }, { downSince: since });
-  const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const txt = m.html.replace(/<style.*?<\/style>/s, '').replace(/&zwnj;/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
   assert.match(txt, /TK 2215 Waiting on parts Waiting on parts caliper 3 days since Nov 21 TK 721 Waiting on parts Parts New today/);
+});
+
+test('the yard email: unit numbers and the date are not turned into links by phone mail apps (Nov 24)', async () => {
+  const { yardCheckEmail, noLink } = await import('../yardcheckemail.js');
+  assert.equal(noLink('7331'), '7&zwnj;3&zwnj;3&zwnj;1');
+  const m = yardCheckEmail({ yard: 'MIAMI', shift: 'night', by: 'nadim', checkedAt: '2026-11-24T21:44:00Z', rows: [cleanRow({ unit: '7331', kind: 'trailer', here: true, readiness: 'available', loaded: 'empty' })] });
+  assert.ok(!/>7331</.test(m.html)); assert.match(m.html, /7&zwnj;3&zwnj;3&zwnj;1/);
+  assert.match(m.html, /format-detection" content="telephone=no,date=no,address=no"/);
+  assert.match(m.html, /color-scheme" content="light only"/);
+  assert.match(m.text, /READY TRAILERS \(1\): 7331/);   // the plain text keeps the plain number
 });

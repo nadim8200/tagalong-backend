@@ -17,6 +17,9 @@ const name = (r) => `${r.kind === 'truck' ? 'Truck' : 'Trailer'} ${r.unit}`;
 // then NOT AVAILABLE at a glance (loaded, local, hold, down), DOWN grouped by why, no readiness set, units on the sheet twice.
 // The every-unit table lives on the console (link). loads: TruckMate loads by unit ('trailer:7301' → { trip, to, deliverBy }).
 const unitKeyOf = (r) => `${r.kind}:${r.unit}`;
+// Nov 24 (on an iPhone, Outlook made 7331, 18088 and the date blue links): an invisible joiner between digits so mail apps
+// don't read unit numbers as phone numbers / dates. Text, escaped.
+export const noLink = (v) => esc(v).replace(/(\d)(?=\d)/g, '$1&zwnj;');
 // one row per unit (a unit typed twice — two devices — counts once: the one with the most filled in, then the later)
 export function dedupeRows(rows = []) {
   const real = (r) => { const t = String(((r.issues || []).join(' ')) || r.comments || r.notes || '').trim(); return !!t && !/^update$/i.test(t); };
@@ -70,7 +73,7 @@ export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://
   const nm = (r) => `${r.kind === 'truck' ? 'TK' : 'TL'} ${r.unit}`;
   const nowMs = Date.parse(c.checkedAt || c.at) || Date.now();
   const downFor = (r) => { const t = Date.parse(downSince[unitKeyOf(r)] || ''); if (!Number.isFinite(t)) return { text: 'New today', days: 0 }; const d = Math.floor((nowMs - t) / 86400000); return d < 1 ? { text: 'New today', days: 0 } : { text: `${d} day${d === 1 ? '' : 's'}`, days: d, since: fmtWhen(new Date(t).toISOString().slice(0, 10)) }; };
-  const pill = (r, note, warn) => `<span style="display:inline-block;margin:0 6px 8px 0;padding:6px 10px;border-radius:10px;background:${warn ? '#FFF4E5' : '#FFFFFF'};border:1px solid ${warn ? '#F5B35C' : '#BBE5C8'};font-size:15px;font-weight:700;color:#0F2A1D;white-space:nowrap">${esc(r.unit)}${note ? `<span style="font-size:12px;font-weight:600;color:${warn ? '#B45309' : '#4B6B57'}"> · ${esc(note)}</span>` : ''}</span>`;
+  const pill = (r, note, warn) => `<span style="display:inline-block;margin:0 6px 8px 0;padding:6px 10px;border-radius:10px;background:${warn ? '#FFF4E5' : '#FFFFFF'};border:1px solid ${warn ? '#F5B35C' : '#BBE5C8'};font-size:15px;font-weight:700;color:#0F2A1D;white-space:nowrap">${noLink(r.unit)}${note ? `<span style="font-size:12px;font-weight:600;color:${warn ? '#B45309' : '#4B6B57'}"> · ${esc(note)}</span>` : ''}</span>`;
   const hero = (n, label, sub, list) => `<td width="50%" class="stack" style="padding:6px;vertical-align:top"><div style="background:linear-gradient(160deg,#E9FBEF,#D4F5DF);background-color:#E3F8EA;border-radius:18px;padding:18px 18px 10px">
 <div style="font-size:11px;letter-spacing:1.6px;font-weight:800;color:#15803D">READY ${esc(label.toUpperCase())}</div>
 <div style="font-size:56px;line-height:1;font-weight:800;color:#0F5132;margin-top:6px">${n}</div><div style="font-size:12px;color:#3F6B50;margin:4px 0 12px">${sub}</div>
@@ -81,7 +84,7 @@ export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://
   const th = (t, w = '') => `<th align="left" style="padding:9px 18px;font-size:10.5px;letter-spacing:1.2px;color:#8A94A6;font-weight:800;background:#F8FAFC${w ? `;width:${w}` : ''}">${t}</th>`;
   const td = (v, x = '') => `<td style="padding:11px 18px;border-top:1px solid #F0F2F6;font-size:14px;color:#14213D;vertical-align:top${x}">${v}</td>`;
   const table = (head, body) => `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head}${body}</table>`;
-  const unitCell = (r) => `<b style="font-size:15px">${esc(nm(r))}</b>${r.ownerOperator ? '<div style="font-size:11px;color:#8A94A6">owner op</div>' : r.localTruck ? '<div style="font-size:11px;color:#7E22CE">local</div>' : ''}`;
+  const unitCell = (r) => `<b style="font-size:15px">${noLink(nm(r))}</b>${r.ownerOperator ? '<div style="font-size:11px;color:#8A94A6">owner op</div>' : r.localTruck ? '<div style="font-size:11px;color:#7E22CE">local</div>' : ''}`;
   const badge = (t, bg, fg) => `<span style="display:inline-block;padding:3px 9px;border-radius:999px;background:${bg};color:${fg};font-size:12px;font-weight:800;white-space:nowrap">${esc(t)}</span>`;
 
   const truckPills = readyTrucks.map((r) => pill(r, sus(r) || short(noteOf(r).replace(/^update$/i, ''), 16) || (r.ownerOperator ? 'owner op' : ''), !!sus(r))).join('');
@@ -93,12 +96,13 @@ export function yardCheckEmail(c, { dvrUnits = new Set(), consoleUrl = 'https://
   const whyColor = { 'Waiting on parts': ['#FEF3C7', '#92400E'], 'Towed in': ['#FEE2E2', '#991B1B'], 'In shop': ['#DBEAFE', '#1E40AF'], 'At / needs the dealer': ['#EDE9FE', '#5B21B6'], 'Sold / for sale': ['#F1F5F9', '#475569'], Other: ['#F1F5F9', '#334155'], 'No reason given': ['#F1F5F9', '#94A3B8'] };
 
   const html = `<div style="${F};background:#EEF1F6;padding:20px 10px;color:#14213D">
-<style>@media (max-width:600px){.stack{display:block!important;width:100%!important;box-sizing:border-box}}</style>
+<meta name="color-scheme" content="light only"><meta name="supported-color-schemes" content="light only"><meta name="format-detection" content="telephone=no,date=no,address=no">
+<style>:root{color-scheme:light only;supported-color-schemes:light only}a[x-apple-data-detectors],u + #body a{color:inherit!important;text-decoration:none!important;font:inherit!important}@media (max-width:600px){.stack{display:block!important;width:100%!important;box-sizing:border-box}}</style>
 <div style="max-width:720px;margin:0 auto">
 <div style="background:#0F1B33;border-radius:20px;padding:20px 22px;color:#FFFFFF">
 <div style="font-size:11px;letter-spacing:2px;font-weight:800;color:#8FB0FF">${test ? 'TEST · NOT SAVED · ' : ''}YARD CHECK</div>
 <div style="font-size:24px;font-weight:800;margin-top:4px">${esc(yard)} · ${shift.toLowerCase()}</div>
-<div style="font-size:13px;color:#AFC0DB;margin-top:4px">${esc(when)} · checked by ${esc(c.by)} · ${trucks.length} trucks · ${trailers.length} trailers on the ground</div></div>
+<div style="font-size:13px;color:#AFC0DB;margin-top:4px">${noLink(when)} · checked by ${esc(c.by)} · ${trucks.length} trucks · ${trailers.length} trailers on the ground</div></div>
 
 <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;margin-top:10px"><tr>
 ${hero(readyTrucks.length, 'trucks', 'Available to dispatch now', truckPills)}
@@ -109,9 +113,9 @@ ${hero(readyTrailers.length, 'trailers', 'Empty · on no load in TruckMate', tlP
 ${stat(loadedTl.length, 'LOADED TRAILERS', '#1D4ED8')}${stat(local.length, 'LOCAL TRUCKS', '#7E22CE')}${stat(hold.length, 'ON HOLD', '#D97706')}${stat(down.length, 'DOWN', '#DC2626')}
 </tr></table>
 
-${onLoadEmpty.length ? `<div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:16px;padding:12px 16px;margin-top:14px;font-size:13.5px;line-height:1.55;color:#7C2D12"><b>Check before using:</b> ${onLoadEmpty.map((r) => `${esc(nm(r))} (trip ${esc(loadOf(r).trip)})`).join(' · ')} — empty in the yard but still on a load in TruckMate. Close the load and ${onLoadEmpty.length === 1 ? 'it is' : 'they are'} ready.</div>` : ''}
+${onLoadEmpty.length ? `<div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:16px;padding:12px 16px;margin-top:14px;font-size:13.5px;line-height:1.55;color:#7C2D12"><b>Check before using:</b> ${onLoadEmpty.map((r) => `${noLink(nm(r))} (trip ${noLink(loadOf(r).trip)})`).join(' · ')} — empty in the yard but still on a load in TruckMate. Close the load and ${onLoadEmpty.length === 1 ? 'it is' : 'they are'} ready.</div>` : ''}
 
-${loadedRows.length ? card('Loaded trailers', loadedRows.length, '#1D4ED8', table(`<tr>${th('TRAILER', '22%')}${th('LOAD')}${th('GOING TO')}${th('DELIVER BY')}</tr>`, loadedRows.map(({ r, l }) => `<tr>${td(`<b style="font-size:15px">${esc(r.unit)}</b>${r.readiness === 'down' ? `<div>${badge('down', '#FEE2E2', '#991B1B')}</div>` : ''}`)}${td(l ? `Trip ${esc(l.trip)}` : '<span style="color:#8A94A6">—</span>')}${td(l && l.to ? esc(town(l.to)) : '<span style="color:#8A94A6">—</span>')}${td(l && l.deliverBy ? `<b>${esc(fmtWhen(l.deliverBy))}</b>` : '<span style="color:#8A94A6">not given</span>', ';white-space:nowrap')}</tr>`).join(''))) : ''}
+${loadedRows.length ? card('Loaded trailers', loadedRows.length, '#1D4ED8', table(`<tr>${th('TRAILER', '22%')}${th('LOAD')}${th('GOING TO')}${th('DELIVER BY')}</tr>`, loadedRows.map(({ r, l }) => `<tr>${td(`<b style="font-size:15px">${noLink(r.unit)}</b>${r.readiness === 'down' ? `<div>${badge('down', '#FEE2E2', '#991B1B')}</div>` : ''}`)}${td(l ? `Trip ${noLink(l.trip)}` : '<span style="color:#8A94A6">—</span>')}${td(l && l.to ? esc(town(l.to)) : '<span style="color:#8A94A6">—</span>')}${td(l && l.deliverBy ? `<b>${noLink(fmtWhen(l.deliverBy))}</b>` : '<span style="color:#8A94A6">not given</span>', ';white-space:nowrap')}</tr>`).join(''))) : ''}
 
 ${downRows.length ? card('Down', downRows.length, '#DC2626', table(`<tr>${th('UNIT', '22%')}${th('REASON')}${th('DOWN FOR')}</tr>`, downRows.map(({ r, why, note, d, eta }) => { const [bg, fg] = whyColor[why] || whyColor.Other; return `<tr>${td(unitCell(r))}${td(`${badge(why, bg, fg)}${note && !/^update$/i.test(note) ? `<div style="font-size:13px;color:#5B6676;margin-top:5px">${esc(short(note, 60))}</div>` : ''}${eta ? `<div style="font-size:12.5px;color:#1D4ED8;font-weight:700;margin-top:4px">Ready ETA ${esc(fmtWhen(eta))}</div>` : ''}${dvrUnits.has(unitKeyOf(r)) ? `<div style="margin-top:4px">${badge('DVIR open', '#FEE2E2', '#991B1B')}</div>` : ''}`)}${td(`<b style="color:${d.days >= 7 ? '#B91C1C' : d.days >= 3 ? '#B45309' : '#14213D'}">${esc(d.text)}</b>${d.since ? `<div style="font-size:11.5px;color:#8A94A6">since ${esc(d.since)}</div>` : ''}`, ';white-space:nowrap')}</tr>`; }).join('')), 'Longest first · "New today" = first check it showed up down') : ''}
 
