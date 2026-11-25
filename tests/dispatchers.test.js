@@ -151,3 +151,19 @@ test('a signed-in dispatcher can open any email link, and a link path opens noth
   }
   for (const p of ['/sr', '/sr/abc/more', '/admin/dispatchers', '/loads', '/track', '/driverx/link/abc']) assert.equal(dispatcherMayUse('GET', p, { role: 'dispatcher' }), 'outside', p);
 });
+
+test('admin reset can email the new temporary password to that person (Nov 25)', async () => {
+  const { call, sent } = harness({ mail: true });
+  const admin = tok({ id: 1, role: 'admin', admin: true, name: 'Nadim' });
+  const made = (await call('POST /admin/dispatchers', { token: admin, body: { name: 'Luis Jimenez', email: 'luis@floridabeauty.us', password: 'Welcome2026' } })).body;
+  const n = sent.length;
+  const r = await call('POST /admin/dispatchers/:id/reset', { token: admin, params: { id: made.id }, body: { how: 'temp', send: true } });
+  assert.equal(r.body.emailed, true);
+  const m = sent[sent.length - 1];
+  assert.equal(sent.length, n + 1); assert.deepEqual(m.to, ['luis@floridabeauty.us']);
+  assert.match(m.subject, /new Dynamic Dispatch password/);
+  assert.ok(m.html.includes(r.body.tempPassword)); assert.match(m.html, /PASSWORD WAS RESET/); assert.match(m.html, /Hi Luis/);
+  // without send: shown only, nothing emailed
+  await call('POST /admin/dispatchers/:id/reset', { token: admin, params: { id: made.id }, body: { how: 'temp' } });
+  assert.equal(sent.length, n + 1);
+});

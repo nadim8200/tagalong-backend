@@ -218,21 +218,24 @@ export function initDispatchers(app, { requireAuth, db, hashPassword, verifyPass
       if (!d) return res.status(404).json({ error: 'Not found.' });
       if ((req.body || {}).how === 'email') {
         if (!mailReady()) return res.status(503).json({ error: 'Email reset links work once the Jarvis mailbox (Outlook) is connected.' });
+        if (mail.mayReach && !(await mail.mayReach(d.email))) return res.status(409).json({ error: `Training mode is on, so nothing goes to ${d.email}. Use "Show me a new password" and pass it on yourself.` });
         await sendResetLink(d, who(req));
         await save((l) => l.map((x) => (x.id === d.id ? { ...x, passwordLog: [{ at: new Date().toISOString(), by: who(req), how: 'reset link emailed by admin' }, ...(x.passwordLog || [])].slice(0, 30) } : x)));
         return res.json({ ok: true, emailed: d.email });
       }
       const temp = tempPassword();
       await save((l) => l.map((x) => (x.id === d.id ? logPw({ ...x, pass: hashPassword(temp), mustChange: true, tempUntil: tempUntil(), pwAt: Date.now(), reset: null }, { at: new Date().toISOString(), by: who(req), how: 'temporary password set by admin' }) : x)));
-      res.json({ ok: true, tempPassword: temp });   // shown to the admin once; never stored readable
+      // Nov 25 (Nadim): "send the new password when I do the manual reset" — emailed to that person only, if asked
+      const sent = (req.body || {}).send ? await emailLogin(d, temp, who(req), { reset: true }) : {};
+      res.json({ ok: true, tempPassword: temp, ...sent });   // shown to the admin once; never stored readable
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   // the new login, emailed to that person only. The login stands either way: if this fails the admin still has the password to pass on
-  async function emailLogin(d, temp, by) {
+  async function emailLogin(d, temp, by, { reset = false } = {}) {
     if (!mailReady()) return { emailed: false, emailError: 'Outlook is not connected, so it was not emailed.' };
     if (mail.mayReach && !(await mail.mayReach(d.email))) return { emailed: false, emailError: 'Training mode is on, so nothing goes to an outside address. It was not emailed.' };
-    try { await mail.send({ to: [d.email], ...renderLoginEmail({ name: d.name, email: d.email, tempPassword: temp, url: `${appUrl}/truckmate?admin`, by }) }); return { emailed: true }; } catch (e) { console.warn('[dispatchers] login email:', e.message); return { emailed: false, emailError: 'The email did not go out.' }; }
+    try { await mail.send({ to: [d.email], ...renderLoginEmail({ name: d.name, email: d.email, tempPassword: temp, url: `${appUrl}/truckmate?admin`, by, reset }) }); return { emailed: true }; } catch (e) { console.warn('[dispatchers] login email:', e.message); return { emailed: false, emailError: 'The email did not go out.' }; }
   }
   // an employee manager only needs to know who has a login: no sign-in history, no IPs
   const brief = ({ id, email, name, active, mustChange, companyAdmin, staffAdmin, phoneManager, payroll }) => ({ id, email, name, active, mustChange, companyAdmin, staffAdmin, phoneManager, payroll: !!payroll });
