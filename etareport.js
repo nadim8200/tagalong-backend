@@ -10,6 +10,8 @@
 import { localToUtcMs } from './watchtower.js';
 import { STATE_TZ, fmtLocalShort } from './localtime.js';
 import { outboundDate, nameScore } from './voice.js';
+import { initDailyLoads } from './dailyloads.js';
+import { sendMail as mailerSend } from './mailer.js';
 import { initRunReport, renderRunReport, mergeRules, DEFAULT_RULES } from './runreport.js';
 import { learn, lateCheck, dueByTrip, lateEmail, usualView, usualFor as usualOf, parseClock, parseWeekday, learnedDays, stopKey, hubKey, hubOf } from './usualarrival.js';
 
@@ -200,10 +202,12 @@ export function accuracySummary(rows = []) {
   }
   return out;
 }
-export function initEtaReport({ app = null, requireAuth = null, db, sendMail = null, recipients = async () => [], lateRecipients = async () => [], lateCc = async () => [], now = () => Date.now() }) {
+export function initEtaReport({ app = null, requireAuth = null, db, sendMail = null, recipients = async () => [], lateRecipients = async () => [], lateCc = async () => [], now = () => Date.now(), dailySend = undefined }) {
   const enabled = !!(db && db.enabled);
   // the whole run + the driver's grade, when an LTL or team run finishes (runreport.js)
   const runReport = initRunReport({ db, sendMail, now });
+  // Nov 25: the 8 AM loads summary — straight through to its list (Luis), not held by training mode
+  const daily = initDailyLoads({ app, requireAuth, db, now, send: dailySend !== undefined ? dailySend : (sendMail && !globalThis.process.env.NODE_TEST_CONTEXT ? (m) => mailerSend(m, { env: globalThis.process.env, direct: true }) : null) });
   let lastItems = [];   // the board from the latest cycle (the run-report preview looks trips up here)
   // after each Watchtower cycle: log this cycle's ETAs
   async function process(site, board) {
@@ -211,6 +215,7 @@ export function initEtaReport({ app = null, requireAuth = null, db, sendMail = n
     const etas = ((await db.get(`taWatch:${site}`, {})) || {}).etas || {};
     const items = (board && board.trips) || [];
     lastItems = items;
+    try { await daily.tick(items); } catch (e) { console.warn('[daily-loads]', e.message); }
     const at = now();
     await db.update(LOG(site), (cur) => {
       const next = foldLog(cur || {}, items, etas, at);

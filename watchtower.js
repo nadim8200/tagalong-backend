@@ -198,7 +198,7 @@ const isAtStop = (code) => /^(arrship|arrcons|spot)/i.test(String(code || ''));
 // "BROUSSARD", "LA" → "BROUSSARD|LA" — same key as commitments.js (inlined: it imports this file). Pure.
 const commitKey = (city, state) => { const c = String(city || '').split(',')[0].toUpperCase().replace(/[^A-Z ]/g, '').replace(/\s+/g, ' ').trim(); const st = String(state || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 2); return c && st ? `${c}|${st}` : null; };
 // Everything the rules need from one board item, flattened once.
-function tripFacts(item, now) {
+export function tripFacts(item, now) {
   const t = (item && item.trip) || item || {};
   const billsRaw = (item && (item.freightBills || item.orders)) || t.freightBills || [];
   const bills = Array.isArray(billsRaw) ? billsRaw : [];
