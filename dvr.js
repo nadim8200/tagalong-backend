@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { makeToken, readToken } from './breakdownreport.js';
 import { readableFile } from './heic.js';
+import { liveRoadCalls, onRoadCallClosed } from './roadcall.js';
 
 const SITE = 'florida-beauty';
 const KEY = (site) => `taDvr:${site}`;
@@ -215,7 +216,25 @@ export function initDvr(app, { db, secret, requireDriver, requireAuth, sendMail 
   }
   if (app && requireAuth) app.get('/truckmate/dvr', requireAuth, async (req, res) => res.json({ reports: Object.values(await all()).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 100) }));
 
+  // every DVIR also opens (or joins) a road call on the Breakdowns tab (Nov 26): dispatch handles it there; completing that road call closes the DVIR
+  async function toRoadCall(r) {
+    const rcs = liveRoadCalls();
+    if (!rcs || !rcs.open || r.roadCall) return null;
+    const unit = r.part === 'truck' ? `Truck ${r.truck || '?'}` : `${r.part === 'reefer' ? 'Reefer · trailer' : 'Trailer'} ${r.trailer || '?'}`;
+    const rc = await rcs.open({ trip: r.trip, truck: r.truck, source: 'app', by: `driver app ${r.by || r.driverCode}`, quiet: true, type: r.category === 'tires' ? 'tire' : 'mechanical', safe: !r.unsafe,
+      details: `${r.source === 'pretrip' ? 'Pre-trip DVIR' : 'DVIR'} · ${unit} · ${r.itemLabel || CAT_LABEL[r.category] || r.category}${r.unsafe ? ' (NOT SAFE TO DRIVE)' : ' (fix when back)'}${r.text ? `: ${r.text}` : ''}`.slice(0, 300),
+      driver: { name: r.by } });
+    if (rc && rc.id) await patch(r.id, (x) => ({ ...x, roadCall: rc.id }));
+    return rc;
+  }
+  if (enabled) onRoadCallClosed(async (rc, by) => {
+    if (!rc || rc.status !== 'completed') return;   // a cancelled road call leaves the DVIR open (still to fix at the yard)
+    const at = new Date(now()).toISOString();
+    await db.update(KEY(SITE), (cur) => { const c = { ...(cur || {}) }; for (const [id, x] of Object.entries(c)) if (x.roadCall === rc.id && x.status !== 'completed') c[id] = { ...x, status: 'completed', completedAt: at, completedBy: by || 'Breakdowns tab', completedNote: `Road call ${rc.id} completed` }; return c; }, {});
+  });
+
   async function send(r) {
+    try { await toRoadCall(r); } catch (e) { console.warn('[dvr] road call:', e.message); }
     const to = await recipients();
     const links = (r.files || []).map((f, i, a) => ({ id: f.id, kind: f.kind, size: f.size, n: a.slice(0, i + 1).filter((x) => x.kind === f.kind).length, url: `${baseUrl}/dvr/f/${makeToken({ f: f.id }, secret, now(), PURPOSE, LINK_DAYS)}` }));
     // the photos ride along as far as they fit (videos stay links)

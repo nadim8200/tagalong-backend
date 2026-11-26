@@ -17,6 +17,12 @@ const MIN = 60000;
 const tripOf = (it) => (it && it.trip) || it || {};
 const tripNo = (it) => String(tripOf(it).tripNumber || '');
 const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// the running road calls (Nov 26): DVIRs from the driver app open one too (dvr.js), and a completed road call closes its DVIRs
+let LIVE = null;
+export const liveRoadCalls = () => LIVE;
+const closers = [];
+export const onRoadCallClosed = (fn) => { closers.push(fn); };
+const closed = async (rc, by) => { for (const fn of closers) { try { await fn(rc, by); } catch (e) { console.warn('[roadcall] on close:', e.message); } } }; // eslint-disable-line no-await-in-loop
 export const STATUSES = ['gathering', 'ready', 'approved', 'sent', 'accepted', 'tech en route', 'on site', 'completed', 'cancelled'];
 
 // A driver's words about a breakdown (English / Spanish). Pure. → 'tire' | 'mechanical' | 'tow' | null
@@ -282,7 +288,7 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
           ...(STATUSES.includes(b.status) && !['ready', 'gathering', 'approved', 'sent'].includes(b.status) ? { status: b.status } : {}) };
         const rc = await update(req.params.id, patch, who(req));
         if (!rc) return res.status(404).json({ error: 'Road call not found' });
-        if (b.status === 'completed' || b.status === 'cancelled') await notify(rc, b.status === 'completed' ? '🏁 Road call completed' : 'Road call cancelled');
+        if (b.status === 'completed' || b.status === 'cancelled') { await notify(rc, b.status === 'completed' ? '🏁 Road call completed' : 'Road call cancelled'); await closed(rc, who(req)); }
         res.json(rc);
       } catch (e) { res.status(500).json({ error: e.message }); }
     });
@@ -309,11 +315,13 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
         const rc = { ...cur, status, provider: { ...(cur.provider || {}), status: b.status || null, eta: b.eta || b.estimatedArrival || (cur.provider && cur.provider.eta) || null, tech: b.technician || b.vendor || (cur.provider && cur.provider.tech) || null, at: new Date(now()).toISOString() }, log: [...(cur.log || []), { at: new Date(now()).toISOString(), by: prov.name, text: `${b.status || 'update'}${b.eta ? ` · ETA ${b.eta}` : ''}` }] };
         await save(rc);
         await notify(rc, `${prov.name}: ${b.status || 'update'}`);
+        if (status === 'completed' && cur.status !== 'completed') await closed(rc, prov.name);
         res.status(200).json({ ok: true, used: true, id: rc.id });
       } catch (e) { res.status(200).json({ ok: false }); }
     };
     app.post('/roadcall/provider/callback', cb);
     app.get('/roadcall/provider/callback', cb);
   }
-  return { open, update, approve, fromDriverText, photos, askText, list, checkDriver, tick };
+  LIVE = { open, update, approve, fromDriverText, photos, askText, list, checkDriver, tick };
+  return LIVE;
 }

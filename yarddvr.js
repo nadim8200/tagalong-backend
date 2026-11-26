@@ -12,6 +12,7 @@ import { makeToken } from './breakdownreport.js';
 import { sendMail as mailerSend } from './mailer.js';
 import { sharedSms } from './ringcentral.js';
 import { AUTO_ALLOW } from './training.js';
+import { liveRoadCalls } from './roadcall.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taDvr:${SITE}`;
@@ -123,13 +124,23 @@ export function initYardDvr(app, { requireAuth, db, getBoard, getFleet = null, h
     });
     const setStatus = (completed) => async (req, res) => {
       if (!enabled) return res.status(503).json({ error: 'Needs the database.' });
-      const id = String(req.params.id); let found = null;
+      const id = String(req.params.id); let found = null; let all2 = null;
       await db.update(KEY, (cur) => {
         const c = { ...(cur || {}) }; if (!c[id]) return c;
         c[id] = completed ? { ...c[id], status: 'completed', completedAt: new Date(now()).toISOString(), completedBy: who(req), completedNote: String((req.body || {}).note || '').trim().slice(0, 500) || null }
           : { ...c[id], status: 'open', completedAt: null, completedBy: null, completedNote: null, reopenedBy: who(req), reopenedAt: new Date(now()).toISOString() };
-        found = c[id]; return c;
+        found = c[id]; all2 = c; return c;
       }, {});
+      // the other way too (Nov 26): the DVIR's road call on the Breakdowns tab is completed once every DVIR on it is closed —
+      // never a road call a driver's breakdown opened (that one is closed on the Breakdowns tab)
+      if (found && completed && found.roadCall) {
+        try {
+          const rcs = liveRoadCalls();
+          const rc = rcs && rcs.list ? ((await rcs.list()) || []).find((x) => x.id === found.roadCall) : null;
+          const left = Object.values(all2 || {}).filter((x) => x.roadCall === found.roadCall && x.status !== 'completed');
+          if (rc && !rc.report && !['completed', 'cancelled'].includes(rc.status) && !left.length) await rcs.update(rc.id, { status: 'completed' }, `${who(req)} (DVIR closed)`);
+        } catch (e) { console.warn('[yard-dvr] road call:', e.message); }
+      }
       return found ? res.json({ ok: true, status: found.status }) : res.status(404).json({ error: 'No such DVIR.' });
     };
     app.post('/truckmate/yard-dvrs/:id/complete', requireAuth, setStatus(true));

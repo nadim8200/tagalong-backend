@@ -48,3 +48,49 @@ test('a driver\'s reports: DVIRs, pre-trip problems and breakdowns, open / close
   assert.deepEqual(r.counts, { total: 3, dvrs: 2, breakdowns: 1, open: 1, closed: 2, pretrips: 1, last30: 3, lastPretripAt: '2026-11-26T12:00:00Z' });
   assert.equal(r.list[2].closedNote, 'Replaced'); assert.equal(r.list[1].closedNote, 'Resolved');
 });
+
+test('a DVIR goes to the Breakdowns tab as a road call; completing that road call closes the DVIR (Nov 26)', async () => {
+  const { initRoadCalls } = await import('../roadcall.js');
+  const { initDvr } = await import('../dvr.js');
+  const kv = new Map();
+  const db = { enabled: true, pool: { query: async () => ({ rows: [] }) }, get: async (k, d) => (kv.has(k) ? kv.get(k) : d), set: async (k, v) => { kv.set(k, v); }, update: async (k, fn, d) => { const v = fn(kv.has(k) ? kv.get(k) : d); kv.set(k, v); return v; } };
+  const routes = {}; const app = { get() {}, put: (p, ...h) => { routes[`PUT ${p}`] = h[h.length - 1]; }, post: (p, ...h) => { routes[`POST ${p}`] = h[h.length - 1]; } };
+  const rcs = initRoadCalls(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: [] }), sendMail: null });
+  initDvr(app, { db, secret: 's', requireDriver: (q, r, n) => n(), requireAuth: (q, r, n) => n(), sendMail: async () => {}, recipients: async () => ['x@floridabeauty.us'] });
+  const res = () => { const out = {}; return { out, status() { return this; }, json(b) { Object.assign(out, b); return this; } }; };
+  const r1 = res();
+  await routes['POST /driver/me/pretrip']({ driver: { code: '0612', name: 'Juan' }, body: { truck: '4504', trailer: '7280', trip: '627700', items: [{ key: 'doors', status: 'bad', note: 'Seal torn', safe: true }] } }, r1);
+  assert.equal(r1.out.problems, 1);
+  const [rc] = await rcs.list();
+  assert.equal(Object.values(kv.get('taDvr:florida-beauty'))[0].roadCall, rc.id);
+  assert.match(rc.details, /^Pre-trip DVIR · Trailer 7280 · Doors and seals \(fix when back\): Seal torn/);
+  const statusRoute = Object.keys(routes).find((k) => /roadcalls\/:id$/.test(k));
+  await routes[statusRoute]({ params: { id: rc.id }, body: { status: 'completed' }, user: { name: 'Mary' } }, res());
+  const dvr = Object.values(kv.get('taDvr:florida-beauty'))[0];
+  assert.equal(dvr.status, 'completed'); assert.equal(dvr.completedBy, 'Mary'); assert.match(dvr.completedNote, /Road call .* completed/);
+});
+
+test('the other way: closing the DVIR (yard check card / Yard → DVIRs) completes its road call; a breakdown\'s road call stays (Nov 26)', async () => {
+  const { initRoadCalls } = await import('../roadcall.js');
+  const { initDvr } = await import('../dvr.js');
+  const { initYardDvr } = await import('../yarddvr.js');
+  const kv = new Map();
+  const db = { enabled: true, pool: { query: async () => ({ rows: [] }) }, get: async (k, d) => (kv.has(k) ? kv.get(k) : d), set: async (k, v) => { kv.set(k, v); }, update: async (k, fn, d) => { const v = fn(kv.has(k) ? kv.get(k) : d); kv.set(k, v); return v; } };
+  const routes = {}; const app = { get() {}, put() {}, post: (p, ...h) => { routes[p] = h[h.length - 1]; } };
+  const rcs = initRoadCalls(null, { db, getBoard: async () => ({ trips: [] }), sendMail: null });
+  initDvr(app, { db, secret: 's', requireDriver: (q, r, n) => n(), requireAuth: (q, r, n) => n(), sendMail: async () => {}, recipients: async () => ['x@floridabeauty.us'] });
+  initYardDvr(app, { requireAuth: (q, r, n) => n(), db, getBoard: async () => ({ trips: [] }), hubOf: () => null, sendMail: async () => {}, sendText: async () => {} });
+  const res = { status() { return this; }, json() { return this; } };
+  await routes['/driver/me/pretrip']({ driver: { code: '0612', name: 'Juan' }, body: { truck: '4504', trailer: '7280', trip: '627700', items: [{ key: 'doors', status: 'bad', note: 'Seal torn' }, { key: 'tlights', status: 'bad', note: 'Marker out' }] } }, res);
+  const [a, b] = Object.values(kv.get('taDvr:florida-beauty'));
+  assert.equal(a.roadCall, b.roadCall, 'both problems on one road call (same truck / trip)');
+  await routes['/truckmate/yard-dvrs/:id/complete']({ params: { id: a.id }, body: { note: 'New seal' }, user: { name: 'Luis' } }, res);
+  assert.equal((await rcs.list())[0].status !== 'completed', true, 'one DVIR still open → the road call stays open');
+  await routes['/truckmate/yard-dvrs/:id/complete']({ params: { id: b.id }, body: {}, user: { name: 'Luis' } }, res);
+  assert.equal((await rcs.list())[0].status, 'completed');
+  // a breakdown's road call is never closed from a DVIR
+  const bk = await rcs.open({ trip: '627800', truck: '39', source: 'app', report: 'bk1', details: 'Tire' });
+  kv.set('taDvr:florida-beauty', { ...kv.get('taDvr:florida-beauty'), z: { id: 'z', part: 'truck', truck: '39', category: 'tires', status: 'open', roadCall: bk.id, at: '2026-11-26T12:00:00Z' } });
+  await routes['/truckmate/yard-dvrs/:id/complete']({ params: { id: 'z' }, body: {}, user: { name: 'Luis' } }, res);
+  assert.notEqual((await rcs.list()).find((x) => x.id === bk.id).status, 'completed');
+});
