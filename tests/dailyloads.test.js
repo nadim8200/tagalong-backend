@@ -79,3 +79,19 @@ test('false lates from TruckMate: a stop the truck already drove past (GPS) is n
   assert.deepEqual(d.late, []);
   assert.equal(d.counts.ontime, 1, 'Newark on time; Baltimore passed by GPS; the timestamp load not judged');
 });
+
+test('judged by when the truck ARRIVED (TruckMate), not when unloading ended; a POD email means delivered, not late (Nov 25)', () => {
+  const hist = (...a) => ({ statusHistory: a.map(([status, at]) => ({ status, at })) });
+  // arrived 7:15 for a 7:00 appointment, delivery closed 9:36 → on time
+  const a = { trip: { tripNumber: '627726', powerUnit: '5', status: 'DEPCONS', currentZone: '32123', origZoneDesc: 'MIAMI, FL', destZoneDesc: 'X' }, freightBills: [bill('B1', '32123', '2026-11-25T07:00', { actualDelivery: '2026-11-25T09:36:11' })], _times: hist(['ARRCONS', '2026-11-25T12:15:44Z'], ['DEPCONS', '2026-11-25T14:37:44Z']), _ratecon: { broker: 'X' } };
+  // at the consignee since the afternoon before its 7 AM appointment, not closed
+  const b = { trip: { tripNumber: '627797', powerUnit: '6', status: 'ARRCONS', currentZone: '28601', origZoneDesc: 'YARD', destZoneDesc: 'HICKORY, NC, 28601' }, freightBills: [bill('B2', '28601', '2026-11-25T07:00')], _times: hist(['ARRCONS', '2026-11-24T20:49:36Z']), _ratecon: { broker: 'X' } };
+  // 6 AM appointment, no arrival, but staff emailed the POD
+  const c = { trip: { tripNumber: '627798', powerUnit: '7', status: 'DEPSHIP', origZoneDesc: 'YARD', destZoneDesc: 'Y' }, freightBills: [bill('B3', '32809', '2026-11-25T06:00')], _staffPod: { by: 'Valeria' }, _ratecon: { broker: 'X' } };
+  // really late: arrived 9:40 for 7:00
+  const d0 = { trip: { tripNumber: '627799', powerUnit: '8', status: 'ARRCONS', currentZone: '30301', origZoneDesc: 'YARD', destZoneDesc: 'Z' }, freightBills: [bill('B4', '30301', '2026-11-25T07:00')], _times: hist(['ARRCONS', '2026-11-25T14:40:00Z']), _ratecon: { broker: 'X' } };
+  const d = dailyLoads([a, b, c, d0], { now: Date.parse('2026-11-25T16:00:00Z') });
+  assert.deepEqual(d.late.map((l) => l.trip), ['627799']);
+  assert.match(d.late[0].stops[0].text, /Arrived 2h 40m late/);
+  assert.deepEqual(d.counts, { late: 1, issue: 0, ontime: 2, check: 1 });
+});

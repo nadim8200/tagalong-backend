@@ -33,9 +33,28 @@ function timestampOnly(item, stop) {
   return bills.length > 0 && bills.every((b) => /T\d{2}:\d{2}:(?!00)\d{2}/.test(String(b.deliverBy || '')));
 }
 
+// When the truck got to this stop: TruckMate's ARRIVE CONSIGNEE times. A delivered stop → the arrival just before its delivery;
+// the stop the truck is at now (ARRCONS / DEPCONS at that zone) → the latest arrival. Pure.
+export function arrivedAt(item, stop, doneMs = null) {
+  const t = (item && item.trip) || {};
+  const arr = (((item && item._times && item._times.statusHistory) || [])).filter((x) => /^ARRCONS/i.test(String(x.status || ''))).map((x) => Date.parse(x.at)).filter((x) => !Number.isNaN(x)).sort((a, b) => a - b);
+  if (!arr.length) return null;
+  if (doneMs != null) { const before = arr.filter((x) => x <= doneMs + MIN && doneMs - x < 18 * 60 * MIN); return before.length ? before[before.length - 1] : null; }
+  const here = String(t.currentZone || '') && String(stop.key).startsWith(String(t.currentZone)) && /^(ARRCONS|DEPCONS)/i.test(String(t.status || ''));
+  return here ? arr[arr.length - 1] : null;
+}
+// Staff emailed the POD / delivered, or GPS saw it leave the last delivery (finished.js / inbox.js) — not closed in TruckMate yet. Pure.
+const finishedBy = (item) => (item && item._staffPod ? 'POD / delivered email from staff' : item && /^(delivered|left the last delivery|left every)/i.test(String(item._finishGuess || '')) ? String(item._finishGuess).split(' — ')[0] : null);
+
 // One stop judged against its appointment. Pure.
-export function judgeStop(stop, { now, etaMs = null, doneMs = null }) {
+export function judgeStop(stop, { now, etaMs = null, doneMs = null, arriveMs = null }) {
   const appt = stop.apptMs;
+  // the truck's arrival is what counts against an appointment (unloading after it isn't late — 627726 arrived 7:15 for 7:00)
+  if (arriveMs != null) {
+    const late = Math.floor((arriveMs - appt) / MIN);   // whole minutes: 7:15:44 for 7:00 is within the 15
+    const when = clock(arriveMs, stop.tz);
+    return late > GRACE_MIN ? { status: 'late', lateMin: late, text: `Arrived ${hm(late)} late (${when}, TruckMate)` } : { status: 'ontime', text: `Arrived on time (${when}, TruckMate)${stop.delivered ? '' : ' — not closed yet'}` };
+  }
   if (stop.delivered) {
     if (doneMs == null) return { status: 'ontime', text: 'Delivered' };
     const late = (doneMs - appt) / MIN;
@@ -87,6 +106,7 @@ export function dailyLoads(items = [], { now = Date.now(), etas = {}, alerts = [
     if (!f || !f.trip) continue;
     const trip = String(f.trip);
     const eta = etas[trip] || {};
+    const done = finishedBy(item);
     const passed = new Set((eta.passed || []).map((x) => x.key));   // GPS: stops behind the truck (watchtower passedCount)
     const stops = [];
     for (const st of f.stops || []) {
@@ -97,7 +117,10 @@ export function dailyLoads(items = [], { now = Date.now(), etas = {}, alerts = [
       if (!(isToday || missedBefore)) continue;
       if (!st.delivered && st.apptFrom && st.apptFrom.startsWith('truckmate') && timestampOnly(item, st)) continue;   // a leftover timestamp, not an appointment
       const e = (eta.stops || []).find((x) => x.key === st.key);
-      const j = !st.delivered && passed.has(st.key) ? { status: 'ontime', text: 'Truck already drove past this stop (GPS) — delivered, not closed in TruckMate yet' } : judgeStop(st, { now, etaMs: e && e.etaMs != null ? e.etaMs : null, doneMs });
+      const arriveMs = arrivedAt(item, st, doneMs);
+      const j = !st.delivered && passed.has(st.key) ? { status: 'ontime', text: 'Truck already drove past this stop (GPS) — delivered, not closed in TruckMate yet' }
+        : !st.delivered && arriveMs == null && done && st.apptMs < now ? { status: 'check', text: `Delivered (${done}) — not closed in TruckMate; arrival time unknown` }
+          : judgeStop(st, { now, etaMs: e && e.etaMs != null ? e.etaMs : null, doneMs, arriveMs });
       stops.push({ place: title(st.label), customers: st.customers || st.consignees || [], appt: clock(st.apptMs, st.tz), apptMs: st.apptMs, from: FROM[st.apptFrom] || 'TruckMate', ...j });
     }
     const issues = brokerIssues(trip, { now, alerts, emails, tasks, holds });
