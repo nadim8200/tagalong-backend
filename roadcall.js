@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------
 import { timingSafeEqual } from 'crypto';
 import { sendMail as mailerSend } from './mailer.js';
+import { makeToken, readToken } from './breakdownreport.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taRoadCalls:${SITE}`;
@@ -31,6 +32,60 @@ export function threadOf(rc) {
   const root = `<breakdown-${String(rc.id).toLowerCase()}@floridabeauty.us>`;
   return { base, root, first: !(rc.mail && rc.mail.sent), subject: rc.mail && rc.mail.sent ? `RE: ${(rc.mail && rc.mail.base) || base}` : base };
 }
+// ---- the Breakdown desk (Nov 26) ----
+// The desk's status from the road call's own lifecycle — never rewritten: a provider status always wins; a dispatcher's
+// "waiting on driver / finding service / needs attention" is kept beside it (deskStatus) only while the lifecycle is before approval.
+export const DESK = ['Needs attention', 'Waiting on driver', 'Finding service', 'Service en route', 'Repairing', 'Resolved'];
+export function deskOf(rc = {}) {
+  const st = rc.status || 'gathering';
+  const unconfirmed = !rc.type && rc.source === 'dispatch';
+  let desk;
+  if (st === 'completed' || st === 'cancelled') desk = 'Resolved';
+  else if (st === 'on site') desk = 'Repairing';
+  else if (st === 'tech en route' || st === 'accepted') desk = 'Service en route';
+  else if (st === 'approved' || st === 'sent') desk = 'Finding service';
+  else if (rc.deskStatus && ['Needs attention', 'Waiting on driver', 'Finding service'].includes(rc.deskStatus)) desk = rc.deskStatus;
+  else if (st === 'gathering' && rc.check && (rc.check.texted || rc.check.calledAt)) desk = 'Waiting on driver';
+  else desk = 'Needs attention';
+  const label = st === 'cancelled' ? 'Cancelled' : st === 'accepted' ? 'Service accepted' : desk;
+  return { desk, label, unconfirmed };
+}
+// the one next task, from where it stands. Pure.
+export function nextAction(rc = {}) {
+  const st = rc.status || 'gathering'; const m = missing(rc);
+  if (st === 'completed') return 'Done';
+  if (st === 'cancelled') return 'Cancelled';
+  if (/^(Pre-trip )?DVIR\b/.test(String(rc.details || '')) && rc.safe !== false && ['gathering', 'ready'].includes(st)) return 'Fix it at the yard before its next load';
+  if (st === 'gathering') return m.length ? `Get from the driver: ${m.join(' + ')}` : 'Get the details from the driver';
+  if (st === 'ready') return 'Approve road service';
+  if (st === 'approved' || st === 'sent') return `Get ${(rc.provider && rc.provider.name) || 'road service'} to accept`;
+  if (st === 'accepted') return 'Get the technician ETA';
+  if (st === 'tech en route') return `Confirm the technician arrives${rc.provider && rc.provider.eta ? ` (ETA ${rc.provider.eta})` : ''}`;
+  if (rc.driverStep && rc.driverStep.step === 'left' && !['completed', 'cancelled'].includes(st)) return 'The driver says the tech left — confirm it is fixed, then resolve';
+  if (st === 'on site') return 'Confirm the repair is done and the truck rolls';
+  return '';
+}
+const etText = (iso) => (iso ? `${new Date(iso).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} ET` : null);
+const where = (rc) => { const l = rc.location || {}; return l.address || l.text || (l.lat != null ? `${l.lat.toFixed(4)}, ${l.lng.toFixed(4)}` : null); };
+// The update email (a dispatcher's update on the desk). Author from the login, never from the page. User text escaped. Pure.
+export function updateEmail(rc, { author, text, status, followUp = null }) {
+  const th = threadOf(rc);
+  const headline = `Breakdown update | Truck ${rc.truck || '?'} | ${rc.id} | ${status}`;
+  const rows = [['Case', rc.id], ['Truck', rc.truck || '—'], ['Trailer', rc.trailer || '—'], ['Trip', rc.trip || '—'], ...(rc.bill ? [['Bill', rc.bill]] : []), ['Location', where(rc) || 'Location unavailable'], ['Status', status],
+    ['Next', nextAction(rc) || '—'], ...(followUp ? [['Next follow-up', etText(followUp)]] : [])];
+  const e = (x) => String(x == null ? '' : x).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#182D47;max-width:640px">
+<p style="margin:0 0 10px;font-size:16px"><b>${e(headline)}</b></p>
+<p style="white-space:pre-line;margin:0 0 12px;padding:10px 12px;background:#EDF4FF;border-left:3px solid #1955B8">${e(text)}</p>
+<table style="border-collapse:collapse;font-size:13px">${rows.map(([k, v]) => `<tr><td style="padding:2px 14px 2px 0;color:#637389">${e(k)}</td><td style="padding:2px 0"><b>${e(v)}</b></td></tr>`).join('')}</table>
+<p style="margin:14px 0 0">Update from ${e(author)}<br><span style="color:#637389">Sent via Jarvis · Florida Beauty</span></p>
+<p style="color:#637389;font-size:12px;margin-top:12px">${e(th.base)} — every update on this breakdown comes in this email thread.</p></div>`;
+  const plain = [headline, '', text, '', ...rows.map(([k, v]) => `${k}: ${v}`), '', `Update from ${author}`, 'Sent via Jarvis · Florida Beauty'].join('\n');
+  return { subject: th.subject, headline, html, text: plain, headers: th.first ? { 'Message-ID': th.root, 'Thread-Topic': th.base } : { 'In-Reply-To': th.root, References: th.root, 'Thread-Topic': th.base } };
+}
+export const DRIVER_STEPS = { arrived: 'Tech arrived', working: 'Tech working on it', left: 'Tech left' };
+const DESK_TO_STATUS = { 'Service en route': 'tech en route', Repairing: 'on site', Resolved: 'completed' };
+
 // a written update, cleaned. → { note } | { error }. Pure.
 export function cleanNote(text, { by, who = 'dispatch', at }) {
   const t = String(text || '').replace(/\r/g, '').trim().slice(0, 1000);
@@ -139,7 +194,13 @@ export function initRoadCalls(app, { sendThread = undefined, requireAuth, db, ge
   const enabled = !!(db && db.enabled);
   const prov = provider || michelinProvider({ env, fetchFn });
   const list = async () => ((await db.get(KEY, [])) || []);
-  async function save(rc) { await db.update(KEY, (cur) => [rc, ...(Array.isArray(cur) ? cur : []).filter((x) => x.id !== rc.id)].slice(0, 300), []); return rc; }
+  // every save notices a status change (Nov 26): it goes on the case, to the driver's card and phone, and in the email thread
+  async function save(rc) {
+    let before = null;
+    await db.update(KEY, (cur) => { const list0 = Array.isArray(cur) ? cur : []; before = list0.find((x) => x.id === rc.id) || null; return [rc, ...list0.filter((x) => x.id !== rc.id)].slice(0, 300); }, []);
+    if (before) markStatus(rc.id, deskOf(before).label, deskOf(rc).label, ((rc.log || [])[(rc.log || []).length - 1] || {}).by || 'Jarvis');
+    return rc;
+  }
   const boardItem = async (trip) => (trip && getBoard ? (((await getBoard(SITE).catch(() => null)) || {}).trips || []).find((x) => tripNo(x) === String(trip)) || null : null);
 
   // what the board already knows: truck, trailer, driver, GPS, engine fault codes
@@ -152,49 +213,202 @@ export function initRoadCalls(app, { sendThread = undefined, requireAuth, db, ge
       faults: rc.faults && rc.faults.length ? rc.faults : (s.dtcCodes || []).slice(0, 10).map((c) => ({ code: c.code, description: c.description || c.text || null })),
       reefer: rc.reefer ?? !!(item._reefer || (item._samsara && item._samsara.reefer)) };
   }
+  // ---- status changes (Nov 26): one email per change in the case's thread — or folded into the email that goes out for the same step ----
+  const pending = new Map();   // case id → { from, to, by }
+  function markStatus(id, from, to, by) {
+    if (!from || from === to) return;
+    const prev = pending.get(id);
+    pending.set(id, { from: prev ? prev.from : from, to, by: by || 'Dispatch' });
+    setTimeout(() => { flushStatus(id).catch((e) => console.warn('[roadcall] status:', e.message)); }, 0);
+  }
+  const takeStatus = (id) => { const p = pending.get(id); pending.delete(id); return p && p.from !== p.to ? p : null; };
+  async function statusNote(id, st) {
+    const note = { id: `s${Date.parse(new Date(now()).toISOString()).toString(36)}${Math.random().toString(36).slice(2, 5)}`, at: new Date(now()).toISOString(), by: st.by, who: 'status', kind: 'status', text: `Status changed: ${st.from} → ${st.to}` };
+    await db.update(KEY, (all) => (Array.isArray(all) ? all : []).map((x) => (x.id === id ? { ...x, notes: [...(x.notes || []), note].slice(-200) } : x)), []);
+    const rc = (await list()).find((x) => x.id === id);
+    for (const fn of noters) { try { await fn(rc, note); } catch (e) { console.warn('[roadcall] on status:', e.message); } } // eslint-disable-line no-await-in-loop
+    return { rc, note };
+  }
+  async function flushStatus(id) {
+    const st = takeStatus(id); if (!st) return;
+    const { rc, note } = await statusNote(id, st);
+    if (!rc) return;
+    let ok = false;
+    try { ok = !!(await mailThread(rc, `Status changed: ${st.to}`, `<p style="margin:0 0 8px">Was: ${esc(st.from)} → now: <b>${esc(st.to)}</b> · changed by ${esc(st.by)}</p><p style="color:#5B6778;margin:0">${esc([rc.truck ? `Truck ${rc.truck}` : null, rc.trailer ? `trailer ${rc.trailer}` : null, rc.trip ? `trip ${rc.trip}` : null].filter(Boolean).join(' · '))} · next: ${esc(nextAction(rc) || '—')}</p>`, `Was: ${st.from} → now: ${st.to} · changed by ${st.by}\nNext: ${nextAction(rc) || '—'}`)); } catch (e) { console.warn('[roadcall] status email:', e.message); }
+    await db.update(KEY, (all) => (Array.isArray(all) ? all : []).map((x) => (x.id !== id ? x : { ...x, notes: (x.notes || []).map((n) => (n.id === note.id ? { ...n, mail: { state: ok ? 'sent' : 'failed' } } : n)) })), []);
+  }
+
   // every email about one breakdown goes in its own chain (Nov 26): the first one starts it, each update replies to it
   // breakdown emails go straight through, never held by training mode (Nov 26, Nadim: "don't hold the emails"); tests pass their own
   const threadSend = sendThread !== undefined ? sendThread : (sendMail && !globalThis.process.env.NODE_TEST_CONTEXT ? (m) => mailerSend(m, { env, direct: true }) : sendMail);
-  async function mailThread(rc, what, bodyHtml, bodyText) {
+  async function mailThread(rc, what, bodyHtml, bodyText, attachments = []) {
     if (!threadSend) return null;
     const to = recipients ? await recipients().catch(() => []) : [];
     if (!to.length) return null;
     const th = threadOf(rc);
     const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#14213D;max-width:640px"><p style="margin:0 0 8px"><b>${esc(what)}</b></p>${bodyHtml}<p style="color:#64748b;font-size:12px;margin-top:14px">${esc(th.base)} — every update on this breakdown comes in this email thread. Breakdowns tab in the console to see it all or write an update.</p></div>`;
-    await threadSend({ to, subject: th.subject, html, text: `${what}\n\n${bodyText}\n\n${th.base} — every update on this breakdown comes in this email thread.`,
+    await threadSend({ to, subject: th.subject, html, text: attachments.length ? null : `${what}\n\n${bodyText}\n\n${th.base} — every update on this breakdown comes in this email thread.`, ...(attachments.length ? { attachments } : {}),
       headers: th.first ? { 'Message-ID': th.root, 'Thread-Topic': th.base } : { 'In-Reply-To': th.root, References: th.root, 'Thread-Topic': th.base } });
     if (th.first) await db.update(KEY, (cur) => (Array.isArray(cur) ? cur : []).map((x) => (x.id === rc.id ? { ...x, mail: { sent: new Date(now()).toISOString(), base: th.base } } : x)), []);
     return true;
   }
   async function notify(rc, what) {
+    const st = takeStatus(rc.id);   // a status change in the same step rides in this email
+    if (st) await statusNote(rc.id, st);
     const lines = packetText(rc).split('\n');
     const miss = missing(rc);
     const fresh = (await list()).find((x) => x.id === rc.id) || rc;
-    await mailThread(fresh, `${what} — ${rc.id}`, `<pre style="font-family:inherit;white-space:pre-wrap;margin:0">${esc(lines.join('\n'))}</pre>${miss.length ? `<p>Still needed: ${esc(miss.join(', '))}</p>` : ''}${rc.status === 'ready' ? '<p><b>Approve it in the console (Breakdowns tab).</b></p>' : ''}`, `${lines.join('\n')}${miss.length ? `\nStill needed: ${miss.join(', ')}` : ''}`);
+    await mailThread(fresh, `${what} — ${rc.id}`, `${st ? `<p style="margin:0 0 8px">Status: ${esc(st.from)} → <b>${esc(st.to)}</b></p>` : ''}<pre style="font-family:inherit;white-space:pre-wrap;margin:0">${esc(lines.join('\n'))}</pre>${miss.length ? `<p>Still needed: ${esc(miss.join(', '))}</p>` : ''}${rc.status === 'ready' ? '<p><b>Approve it in the console (Breakdowns tab).</b></p>' : ''}`, `${lines.join('\n')}${miss.length ? `\nStill needed: ${miss.join(', ')}` : ''}`);
   }
   // a written update from dispatch or the driver (Nov 26): on the card in the console and in the driver app, and emailed in the breakdown's chain
-  async function addNote(id, text, { by, who = 'dispatch' } = {}) {
+  // a written update from dispatch or the driver (Nov 26): on the card in the console and in the driver app, and emailed in the breakdown's chain.
+  // The driver can add where the tech is (arrived / working / left) and pictures; the same clientId twice → once.
+  async function addNote(id, text, { by, who = 'dispatch', step = null, photos = [], clientId = null } = {}) {
     const at = new Date(now()).toISOString();
-    const c = cleanNote(text, { by, who, at });
+    const st0 = DRIVER_STEPS[step] ? step : null;
+    const pics = (Array.isArray(photos) ? photos : []).filter((f) => f && /^image\/(jpeg|png|webp)$/i.test(f.mediaType || '') && typeof f.dataBase64 === 'string' && f.dataBase64.length < 9 * 1024 * 1024).slice(0, 6);
+    const words = String(text || '').trim();
+    const c = cleanNote(st0 ? `${DRIVER_STEPS[st0]}${words ? `: ${words}` : ''}` : words || (pics.length ? 'Sent pictures.' : ''), { by, who, at });
     if (c.error) return { error: c.error };
-    let rc = null;
-    await db.update(KEY, (cur) => (Array.isArray(cur) ? cur : []).map((x) => {
+    const cur = (await list()).find((x) => x.id === id);
+    if (!cur) return { error: 'Breakdown not found.' };
+    const key = String(clientId || '').slice(0, 60);
+    if (key && (cur.notes || []).some((n) => n.clientId === key)) return { rc: cur, note: (cur.notes || []).find((n) => n.clientId === key) };
+    let stored = [];
+    if (pics.length) {
+      if (!docs || !docs.storeDocs) return { error: 'Picture storage is not set up on the server.' };
+      stored = (await docs.storeDocs({ site: SITE, kind: 'message', trip: cur.trip || null, files: pics.map((f, i) => ({ filename: String(f.filename || `breakdown-${id}-${i + 1}.jpg`).slice(0, 80), mediaType: f.mediaType, dataBase64: f.dataBase64 })), by })) || [];
+    }
+    const note = { ...c.note, clientId: key || null, kind: who === 'driver' ? 'driver' : 'internal', ...(st0 ? { step: st0 } : {}), ...(stored.length ? { photos: stored.map((d, i) => ({ docId: String(d.id), name: pics[i] ? pics[i].filename : `picture ${i + 1}` })) } : {}) };
+    await db.update(KEY, (all) => (Array.isArray(all) ? all : []).map((x) => (x.id !== id ? x : { ...x, notes: [...(x.notes || []), note].slice(-200), ...(st0 ? { driverStep: { step: st0, at, by } } : {}), ...(who === 'dispatch' && !x.owner ? { owner: { name: note.by, at } } : {}) })), []);
+    // the tech arrived / is working → the road call is "on site" (Repairing) — the status change rides in this same email
+    if ((st0 === 'arrived' || st0 === 'working') && !['on site', 'completed', 'cancelled'].includes(cur.status)) await update(id, { status: 'on site' }, `${by} (driver app)`);
+    const st = takeStatus(id); if (st) await statusNote(id, st);
+    const rc = (await list()).find((x) => x.id === id);
+    let emailed = false;
+    try {
+      let attachments = [];
+      if (stored.length && docs && docs.readDocs) { const files = await docs.readDocs({ site: SITE, ids: stored.map((d) => String(d.id)) }).catch(() => []); let room = 2700 * 1024; for (const f of files) { if (f.data.length > room) continue; room -= f.data.length; attachments.push({ name: `${id}-picture-${attachments.length + 1}.jpg`, contentType: f.mediaType, bytes: f.data }); } }
+      emailed = !!(await mailThread(rc, who === 'driver' ? `Update from the driver, ${note.by}` : `Update from ${note.by}`, `${st ? `<p style="margin:0 0 8px">Status: ${esc(st.from)} → <b>${esc(st.to)}</b></p>` : ''}<p style="white-space:pre-line;margin:0;padding:10px 12px;background:#F4F6FA;border-radius:8px">${esc(note.text)}</p>${stored.length ? `<p style="color:#5B6778;margin:6px 0 0">${stored.length} picture${stored.length === 1 ? '' : 's'} attached.</p>` : ''}<p style="color:#5B6778;margin:8px 0 0">${esc([rc.truck ? `Truck ${rc.truck}` : null, rc.trailer ? `trailer ${rc.trailer}` : null, rc.trip ? `trip ${rc.trip}` : null, rc.driver && rc.driver.name ? `driver ${rc.driver.name}` : null].filter(Boolean).join(' · '))} · now: ${esc(deskOf(rc).label)}</p>`, note.text, attachments));
+    } catch (e) { console.warn('[roadcall] update email:', e.message); }
+    if (emailed) await db.update(KEY, (all) => (Array.isArray(all) ? all : []).map((x) => (x.id === id ? { ...x, notes: (x.notes || []).map((n) => (n.id === note.id ? { ...n, emailed: true } : n)) } : x)), []);
+    for (const fn of noters) { try { await fn(rc, { ...note, emailed }); } catch (e) { console.warn('[roadcall] on note:', e.message); } } // eslint-disable-line no-await-in-loop
+    return { rc: (await list()).find((x) => x.id === id) || rc, note: { ...note, emailed } };
+  }
+  // The desk's quick update (Nov 26): an internal note or an emailed one, a status, a follow-up. The same clientId twice → the same
+  // note (a retry never duplicates it); an email already sent is never sent again.
+  async function deskUpdate(id, { clientId, text, email = false, status = null, followUp = null, kind = null, photos = [] }, by) {
+    const at = new Date(now()).toISOString();
+    const all0 = await list(); const cur = all0.find((x) => x.id === id);
+    if (!cur) return { error: 'Breakdown not found.', code: 404 };
+    const key = String(clientId || '').slice(0, 60);
+    let note = key ? (cur.notes || []).find((n) => n.clientId === key) : null;
+    if (!note) {
+      const c = cleanNote(text, { by, who: 'dispatch', at });
+      if (c.error) return { error: c.error, code: 400 };
+      if (status && !DESK.includes(status)) return { error: 'Pick a status from the list.', code: 400 };
+      const fu = followUp ? new Date(followUp) : null;
+      if (followUp && Number.isNaN(fu.getTime())) return { error: 'The follow-up date / time is not valid.', code: 400 };
+      let stored = [];
+      const pics = (Array.isArray(photos) ? photos : []).filter((f) => f && /^image\/(jpeg|png|webp)$/i.test(f.mediaType || '') && typeof f.dataBase64 === 'string' && f.dataBase64.length < 9 * 1024 * 1024).slice(0, 6);
+      if (pics.length) {
+        if (!docs || !docs.storeDocs) return { error: 'Picture storage is not set up on the server.', code: 503 };
+        stored = (await docs.storeDocs({ site: SITE, kind: 'message', trip: cur.trip || null, files: pics.map((f, i) => ({ filename: String(f.filename || `breakdown-${id}-${i + 1}.jpg`).slice(0, 80), mediaType: f.mediaType, dataBase64: f.dataBase64 })), by })) || [];
+      }
+      note = { ...c.note, clientId: key || null, kind: email ? 'email' : kind === 'vendor' ? 'vendor' : 'internal', ...(stored.length ? { photos: stored.map((d, i) => ({ docId: String(d.id), name: pics[i] ? pics[i].filename : `picture ${i + 1}` })) } : {}), status: status || deskOf(cur).desk, followUp: fu ? fu.toISOString() : null, mail: email ? { state: 'sending' } : null };
+      const lifecycle = status && DESK_TO_STATUS[status] && DESK_TO_STATUS[status] !== cur.status ? DESK_TO_STATUS[status] : null;
+      await db.update(KEY, (all) => (Array.isArray(all) ? all : []).map((x) => (x.id !== id ? x : { ...x, notes: [...(x.notes || []), note].slice(-200), ...(fu ? { followUp: { at: fu.toISOString(), by, setAt: at } } : {}),
+        ...(status && !lifecycle && !DESK_TO_STATUS[status] ? { deskStatus: status, deskStatusAt: at } : {}), ...(!x.owner ? { owner: { name: by, at } } : {}) })), []);
+      if (lifecycle) {
+        const rc2 = await update(id, { status: lifecycle }, by);
+        if (lifecycle === 'completed') await closed(rc2, by);
+      } else {
+        const after = (await list()).find((x) => x.id === id);
+        markStatus(id, deskOf(cur).label, deskOf(after).label, by);
+      }
+      // an emailed update carries the status change itself (one email, not two); an internal note leaves it to its own email
+      if (note.kind === 'email') { const st = takeStatus(id); if (st) { await statusNote(id, st); note.statusFrom = st.from; } }
+    }
+    if (note.kind === 'email' && (!note.mail || note.mail.state !== 'sent')) await sendNote(id, note.id, by);
+    for (const fn of noters) { try { await fn((await list()).find((x) => x.id === id), note); } catch (e) { console.warn('[roadcall] on note:', e.message); } } // eslint-disable-line no-await-in-loop
+    return { rc: (await list()).find((x) => x.id === id) };
+  }
+  // email one saved note (and retry a failed one): never twice
+  async function sendNote(id, noteId, by) {
+    const rc = (await list()).find((x) => x.id === id); if (!rc) return { error: 'Breakdown not found.' };
+    const n = (rc.notes || []).find((x) => x.id === noteId); if (!n) return { error: 'Update not found.' };
+    if (n.mail && n.mail.state === 'sent') return { ok: true, already: true };
+    const to = recipients ? await recipients().catch(() => []) : [];
+    const setMail = (mail) => db.update(KEY, (all) => (Array.isArray(all) ? all : []).map((x) => (x.id !== id ? x : { ...x, notes: (x.notes || []).map((y) => (y.id === noteId ? { ...y, mail } : y)) })), []);
+    if (!to.length || !threadSend) { await setMail({ state: 'failed', error: 'No one is on the breakdown email list.', at: new Date(now()).toISOString() }); return { error: 'No one is on the breakdown email list.' }; }
+    const m = updateEmail(rc, { author: n.by, text: n.text, status: n.status || deskOf(rc).desk, followUp: n.followUp });
+    await setMail({ state: 'sending', to, subject: m.subject, at: new Date(now()).toISOString() });
+    try {
+      let attachments = [];
+      if ((n.photos || []).length && docs && docs.readDocs) {
+        const files = await docs.readDocs({ site: SITE, ids: n.photos.map((x) => x.docId) }).catch(() => []);
+        let room = 2700 * 1024;
+        for (const f of files) { if (f.data.length > room) continue; room -= f.data.length; attachments.push({ name: `${rc.id}-picture-${attachments.length + 1}.jpg`, contentType: f.mediaType, bytes: f.data }); }
+      }
+      const r = await threadSend({ to, subject: m.subject, html: m.html, text: attachments.length ? null : m.text, headers: m.headers, ...(attachments.length ? { attachments } : {}) });
+      const held = !!(r && (r.training || r.held));
+      await setMail({ state: held ? 'held' : 'sent', to, subject: m.subject, at: new Date(now()).toISOString() });
+      if (!(rc.mail && rc.mail.sent)) await db.update(KEY, (all) => (Array.isArray(all) ? all : []).map((x) => (x.id === id ? { ...x, mail: { sent: new Date(now()).toISOString(), base: threadOf(rc).base } } : x)), []);
+      return { ok: true };
+    } catch (e) { await setMail({ state: 'failed', to, subject: m.subject, error: String(e.message || 'Could not send').slice(0, 200), at: new Date(now()).toISOString() }); return { error: e.message }; }
+  }
+  async function preview(id, { text, status, followUp }, by) {
+    const rc = (await list()).find((x) => x.id === id); if (!rc) return null;
+    const to = recipients ? await recipients().catch(() => []) : [];
+    const m = updateEmail(rc, { author: by, text: String(text || '').trim(), status: status || deskOf(rc).desk, followUp: followUp || null });
+    return { to, subject: m.subject, headline: m.headline, html: m.html, text: m.text, author: by, held: false };
+  }
+  // the vendor on this road call (Nov 26): name, phone, email — on the case, every change in the activity
+  async function setVendor(id, b, by) {
+    const name = String((b && b.name) || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const phone = String((b && b.phone) || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+    const email = String((b && b.email) || '').trim().toLowerCase().slice(0, 120);
+    if (!name) return { error: 'Add the vendor name.' };
+    if (phone && phone.length !== 10) return { error: 'The phone number needs 10 digits.' };
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { error: 'Check the email address.' };
+    if (!phone && !email) return { error: 'Add a phone number or an email.' };
+    const at = new Date(now()).toISOString(); let rc = null;
+    await db.update(KEY, (all) => (Array.isArray(all) ? all : []).map((x) => {
       if (x.id !== id) return x;
-      rc = { ...x, notes: [...(x.notes || []), c.note].slice(-200), ...(who === 'dispatch' && !x.owner ? { owner: { name: c.note.by, at } } : {}) };
+      const note = { id: `v${Date.parse(at).toString(36)}`, at, by, who: 'dispatch', kind: 'vendor', text: `${x.vendor ? 'Changed' : 'Added'} the vendor: ${name}${phone ? ` · ${phone}` : ''}${email ? ` · ${email}` : ''}` };
+      rc = { ...x, vendor: { name, phone: phone || null, email: email || null, by, at }, notes: [...(x.notes || []), note].slice(-200) };
       return rc;
     }), []);
-    if (!rc) return { error: 'Breakdown not found.' };
-    let emailed = false;
-    try { emailed = !!(await mailThread(rc, who === 'driver' ? `Update from the driver, ${c.note.by}` : `Update from ${c.note.by}`, `<p style="white-space:pre-line;margin:0;padding:10px 12px;background:#F4F6FA;border-radius:8px">${esc(c.note.text)}</p><p style="color:#5B6778;margin:8px 0 0">${esc([rc.truck ? `Truck ${rc.truck}` : null, rc.trailer ? `trailer ${rc.trailer}` : null, rc.trip ? `trip ${rc.trip}` : null, rc.driver && rc.driver.name ? `driver ${rc.driver.name}` : null].filter(Boolean).join(' · '))} · now: ${esc(rc.status)}</p>`, c.note.text)); } catch (e) { console.warn('[roadcall] update email:', e.message); }
-    if (emailed) await db.update(KEY, (cur) => (Array.isArray(cur) ? cur : []).map((x) => (x.id === id ? { ...x, notes: (x.notes || []).map((n) => (n.id === c.note.id ? { ...n, emailed: true } : n)) } : x)), []);
-    for (const fn of noters) { try { await fn(rc, { ...c.note, emailed }); } catch (e) { console.warn('[roadcall] on note:', e.message); } } // eslint-disable-line no-await-in-loop
-    return { rc: (await list()).find((x) => x.id === id) || rc, note: { ...c.note, emailed } };
+    return rc ? { rc } : { error: 'Breakdown not found.', code: 404 };
+  }
+  // an email to the vendor, from Jarvis, signed by the dispatcher (their own message: not held). The same clientId twice → once.
+  async function emailVendor(id, { text, clientId }, by) {
+    const rc = (await list()).find((x) => x.id === id); if (!rc) return { error: 'Breakdown not found.', code: 404 };
+    if (!rc.vendor || !rc.vendor.email) return { error: 'Add the vendor\'s email first.' };
+    const t = String(text || '').trim().slice(0, 2000); if (t.length < 2) return { error: 'Write the email first.' };
+    const key = String(clientId || '').slice(0, 60);
+    if (key && (rc.notes || []).some((n) => n.clientId === key)) return { rc };
+    const e = (x) => String(x == null ? '' : x).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    const subject = `Florida Beauty breakdown · Truck ${rc.truck || '?'}${rc.trailer ? ` · trailer ${rc.trailer}` : ''} · ${rc.id}`;
+    const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#182D47"><p style="white-space:pre-line">${e(t)}</p><p style="color:#637389">${e(by)} · Florida Beauty dispatch<br>Sent via Jarvis · ${e(rc.id)}</p></div>`;
+    const at = new Date(now()).toISOString();
+    let state = 'sent'; let err = null;
+    try { if (!threadSend) throw new Error('Email is not set up.'); await threadSend({ to: [rc.vendor.email], subject, html, text: `${t}\n\n${by} · Florida Beauty dispatch\nSent via Jarvis · ${rc.id}` }); } catch (x) { state = 'failed'; err = String(x.message || 'failed').slice(0, 200); }
+    const note = { id: `ve${Date.parse(at).toString(36)}`, clientId: key || null, at, by, who: 'dispatch', kind: 'vendor', text: `Emailed the vendor ${rc.vendor.name} (${rc.vendor.email}): ${t}`, mail: { state, to: [rc.vendor.email], subject, ...(err ? { error: err } : {}) } };
+    await db.update(KEY, (all) => (Array.isArray(all) ? all : []).map((x) => (x.id === id ? { ...x, notes: [...(x.notes || []), note].slice(-200) } : x)), []);
+    return state === 'sent' ? { rc: (await list()).find((x) => x.id === id) } : { error: `The email did not go out: ${err}`, code: 502 };
   }
   async function take(id, by) {
     let rc = null;
     await db.update(KEY, (cur) => (Array.isArray(cur) ? cur : []).map((x) => { if (x.id !== id) return x; rc = { ...x, owner: { name: String(by || 'Dispatch').slice(0, 80), at: new Date(now()).toISOString() } }; return rc; }), []);
     return rc;
   }
+  // pictures on a case (Nov 26): kept with the load's documents; a signed link (30 days) opens one in the console, the driver app and the email
+  const secret = env.JWT_SECRET || 'dev-secret';
+  const apiBase = String(env.PUBLIC_API_URL || 'https://tagalong-backend-fdzx.onrender.com').replace(/\/$/, '');
+  const photoUrl = (docId) => `${apiBase}/roadcall/f/${makeToken({ d: String(docId) }, secret, now(), 'roadcall-photo', 30)}`;
+  const urlsFor = (x) => (x ? { ...x, notes: (x.notes || []).map((n) => ((n.photos || []).length ? { ...n, photos: n.photos.map((ph) => (ph.docId ? { ...ph, url: photoUrl(ph.docId) } : ph)) } : n)) } : x);
+  const view = (x) => (x ? { ...urlsFor(x), missing: missing(x), packet: packetText(x), desk: deskOf(x), next: nextAction(x) } : x);
   const step = (rc) => ({ ...rc, missing: missing(rc), status: ['gathering', 'ready'].includes(rc.status) ? (missing(rc).length ? 'gathering' : 'ready') : rc.status });
 
   // open (or add to the open one for that truck / trip)
@@ -327,7 +541,7 @@ export function initRoadCalls(app, { sendThread = undefined, requireAuth, db, ge
 
   if (app && requireAuth) {
     const who = (req) => (req.user && (req.user.name || req.user.email)) || 'dispatcher';
-    app.get('/truckmate/roadcalls', requireAuth, async (req, res) => { try { res.json({ provider: { name: prov.name, ready: prov.ready, phone: prov.phone }, calls: (await list()).map((x) => ({ ...x, missing: missing(x), packet: packetText(x) })) }); } catch (e) { res.status(500).json({ error: e.message }); } });
+    app.get('/truckmate/roadcalls', requireAuth, async (req, res) => { try { res.json({ provider: { name: prov.name, ready: prov.ready, phone: prov.phone }, calls: (await list()).map(view), me: who(req), recipients: recipients ? await recipients().catch(() => []) : [] }); } catch (e) { res.status(500).json({ error: e.message }); } });
     app.post('/truckmate/roadcalls', requireAuth, async (req, res) => { try { const b = req.body || {}; res.json(await open({ trip: b.trip || null, truck: b.truck || null, type: b.type || null, details: b.details || null, source: 'console', by: who(req) })); } catch (e) { res.status(500).json({ error: e.message }); } });
     app.post('/truckmate/roadcalls/:id', requireAuth, async (req, res) => {
       try {
@@ -344,11 +558,32 @@ export function initRoadCalls(app, { sendThread = undefined, requireAuth, db, ge
     });
     // option 1: "check with the driver" (console button / Jarvis chat)
     app.post('/truckmate/roadcalls/check', requireAuth, async (req, res) => { try { const b = req.body || {}; if (!b.trip) return res.status(400).json({ error: 'Which trip?' }); const rc = await checkDriver(String(b.trip), who(req), b.note || null); return rc ? res.json(rc) : res.status(503).json({ error: 'Road calls need the database.' }); } catch (e) { res.status(500).json({ error: e.message }); } });
+    // the desk: preview the email (exact recipients, subject, body), save an update (internal or emailed), retry a failed email
+    app.post('/truckmate/roadcalls/:id/preview', requireAuth, async (req, res) => { try { const p = await preview(req.params.id, req.body || {}, who(req)); return p ? res.json(p) : res.status(404).json({ error: 'Breakdown not found.' }); } catch (e) { return res.status(500).json({ error: e.message }); } });
+    app.post('/truckmate/roadcalls/:id/update', requireAuth, async (req, res) => {
+      try { const b = req.body || {}; const r = await deskUpdate(req.params.id, { clientId: b.clientId, text: b.text, email: !!b.email, status: b.status || null, followUp: b.followUp || null, kind: b.kind === 'vendor' ? 'vendor' : null, photos: b.photos || [] }, who(req)); return r.error ? res.status(r.code || 400).json({ error: r.error }) : res.json(view(r.rc)); } catch (e) { return res.status(500).json({ error: e.message }); }
+    });
+    app.post('/truckmate/roadcalls/:id/notes/:noteId/retry', requireAuth, async (req, res) => { try { const r = await sendNote(req.params.id, req.params.noteId, who(req)); const rc = (await list()).find((x) => x.id === req.params.id); return r.error && !rc ? res.status(404).json({ error: r.error }) : res.json(view(rc)); } catch (e) { return res.status(500).json({ error: e.message }); } });
+    app.post('/truckmate/roadcalls/:id/vendor', requireAuth, async (req, res) => { try { const r = await setVendor(req.params.id, req.body || {}, who(req)); return r.error ? res.status(r.code || 400).json({ error: r.error }) : res.json(view(r.rc)); } catch (e) { return res.status(500).json({ error: e.message }); } });
+    app.post('/truckmate/roadcalls/:id/vendor/email', requireAuth, async (req, res) => { try { const r = await emailVendor(req.params.id, req.body || {}, who(req)); return r.error ? res.status(r.code || 400).json({ error: r.error }) : res.json(view(r.rc)); } catch (e) { return res.status(500).json({ error: e.message }); } });
     app.post('/truckmate/roadcalls/:id/take', requireAuth, async (req, res) => { try { const rc = await take(req.params.id, who(req)); return rc ? res.json(rc) : res.status(404).json({ error: 'Breakdown not found.' }); } catch (e) { return res.status(500).json({ error: e.message }); } });
     app.post('/truckmate/roadcalls/:id/note', requireAuth, async (req, res) => {
       try { const r = await addNote(req.params.id, (req.body || {}).text, { by: who(req), who: 'dispatch' }); return r.error ? res.status(r.error === 'Breakdown not found.' ? 404 : 400).json({ error: r.error }) : res.json(r.rc); } catch (e) { return res.status(500).json({ error: e.message }); }
     });
     app.post('/truckmate/roadcalls/:id/approve', requireAuth, async (req, res) => { try { const rc = await approve(req.params.id, who(req)); return rc ? res.json(rc) : res.status(404).json({ error: 'Road call not found' }); } catch (e) { res.status(500).json({ error: e.message }); } });
+  }
+  // one picture of a case from its signed link (console, driver app, email): no login, 30 days
+  if (app) {
+    app.get('/roadcall/f/:token', async (req, res) => {
+      const p = readToken(req.params.token, secret, now(), 'roadcall-photo');
+      if (!p || !p.d || !docs || !docs.readDocs) return res.status(404).send('This link has expired or is not valid.');
+      try {
+        const [f] = await docs.readDocs({ site: SITE, ids: [p.d] });
+        if (!f) return res.status(404).send('Not found.');
+        res.setHeader('Content-Type', f.mediaType); res.setHeader('Cache-Control', 'private, max-age=3600');
+        return res.end(f.data);
+      } catch { return res.status(500).send('Could not open it.'); }
+    });
   }
   // the provider's updates (accepted, tech dispatched + ETA, on site, completed) — key in the URL or Basic auth
   if (app) {
@@ -376,6 +611,6 @@ export function initRoadCalls(app, { sendThread = undefined, requireAuth, db, ge
     app.post('/roadcall/provider/callback', cb);
     app.get('/roadcall/provider/callback', cb);
   }
-  LIVE = { open, update, approve, fromDriverText, photos, askText, list, checkDriver, tick, addNote, take };
+  LIVE = { open, update, approve, fromDriverText, photos, askText, list, checkDriver, tick, addNote, take, deskUpdate, sendNote, preview, setVendor, emailVendor, urlsFor };
   return LIVE;
 }

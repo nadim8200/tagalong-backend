@@ -95,6 +95,20 @@ export async function sendMail(message, { env = process.env, fetchFn = globalThi
   const ccList = (Array.isArray(cc) ? cc : String(cc || '').split(/[,;\s]+/)).map((x) => String(x).trim()).filter((x) => /@/.test(x) && !list.includes(x));
   const t = await token(cfg, fetchFn);
   const bcc = noCopy ? [] : mailCopy(env, [...list, ...ccList]);
+  // a threaded email with pictures (Nov 26, breakdowns): MIME multipart/mixed so the thread headers survive (Graph's JSON send drops them)
+  if (attachments.length && guarded.headers && typeof guarded.headers === 'object') {
+    const b64 = (x) => Buffer.from(x).toString('base64').replace(/.{76}/g, '$&\r\n');
+    const hdr = Object.entries(guarded.headers).filter(([k, v]) => /^(Message-ID|In-Reply-To|References|Thread-Topic)$/i.test(k) && /^[^\r\n]{1,300}$/.test(String(v || ''))).map(([k, v]) => `${k}: ${v}`);
+    const mixed = `jvm_${Date.now().toString(36)}`;
+    const safeName = (n) => String(n || 'file').replace(/[^\w.\- ]+/g, '_').slice(0, 80);
+    const mime = [...hdr, `From: ${cfg.from}`, `To: ${list.join(', ')}`, ...(ccList.length ? [`Cc: ${ccList.join(', ')}`] : []), ...(bcc.length ? [`Bcc: ${bcc.map((x) => x.emailAddress.address).join(', ')}`] : []), `Subject: =?UTF-8?B?${Buffer.from(String(subject || ''), 'utf8').toString('base64')}?=`, 'MIME-Version: 1.0', `Content-Type: multipart/mixed; boundary="${mixed}"`, '',
+      `--${mixed}`, 'Content-Type: text/html; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', b64(Buffer.from(String(html), 'utf8')),
+      ...attachments.flatMap((a) => [`--${mixed}`, `Content-Type: ${a.contentType || 'application/octet-stream'}; name="${safeName(a.name)}"`, 'Content-Transfer-Encoding: base64', `Content-Disposition: attachment; filename="${safeName(a.name)}"`, '', b64(Buffer.from(a.bytes))]),
+      `--${mixed}--`, ''].join('\r\n');
+    const r = await fetchFn(`${GRAPH}/users/${encodeURIComponent(cfg.from)}/sendMail`, { method: 'POST', headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'text/plain' }, body: Buffer.from(mime, 'utf8').toString('base64') });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(`Outlook could not send (${r.status}): ${(j.error && j.error.message) || 'unknown'}`); }
+    return { ok: true, to: list, from: cfg.from, mime: true };
+  }
   // with a plain-text twin (and no files): send MIME multipart/alternative so every mail app has a readable version
   if (text && !attachments.length) {
     const b64 = (x) => Buffer.from(String(x), 'utf8').toString('base64').replace(/.{76}/g, '$&\r\n');

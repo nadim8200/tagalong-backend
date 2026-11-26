@@ -19,7 +19,7 @@ import { initCallPush } from './callpush.js';
 import { initDeskNotes } from './desknotes.js';
 import { SELF_KEY, PHOTO_KEY, cleanSelf, selfCell } from './driverself.js';
 import { initDriverReports } from './driverreports.js';
-import { liveRoadCalls, onRoadCallNote } from './roadcall.js';
+import { liveRoadCalls, onRoadCallNote, deskOf } from './roadcall.js';
 
 // The driver release a dispatcher submitted on this load (release.js keeps them per trip, newest last) → what the driver
 // app shows (Nov 19): released at which hub, its yard address + directions, who authorized it and when, and the stops it
@@ -566,8 +566,9 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     return ((await rcs.list()) || []).filter((rc) => (rc.trip && trips.has(String(rc.trip))) || (rc.truck && trucks.has(norm(rc.truck))))
       .filter((rc) => !['completed', 'cancelled'].includes(rc.status) || now() - Date.parse(rc.completedAt || (rc.log && rc.log.length ? rc.log[rc.log.length - 1].at : rc.at)) < 3 * 86400000);
   }
-  const driverView = (rc) => ({ id: rc.id, at: rc.at, status: rc.status, stage: STAGE[rc.status] || rc.status, done: ['completed', 'cancelled'].includes(rc.status), truck: rc.truck || null, trailer: rc.trailer || null, trip: rc.trip || null,
-    details: rc.details || null, owner: rc.owner ? rc.owner.name : null, eta: (rc.provider && rc.provider.eta) || null, notes: (rc.notes || []).map((n) => ({ id: n.id, at: n.at, by: n.by, who: n.who, text: n.text })) });
+  const driverView = (rc) => ({ id: rc.id, at: rc.at, status: rc.status, stage: deskOf(rc).label || STAGE[rc.status] || rc.status,   // the same status as the console's Breakdown desk done: ['completed', 'cancelled'].includes(rc.status), truck: rc.truck || null, trailer: rc.trailer || null, trip: rc.trip || null,
+    details: rc.details || null, owner: rc.owner ? rc.owner.name : null, eta: (rc.provider && rc.provider.eta) || null, driverStep: rc.driverStep ? rc.driverStep.step : null,
+    notes: ((liveRoadCalls() && liveRoadCalls().urlsFor ? liveRoadCalls().urlsFor(rc) : rc).notes || []).filter((n) => n.kind !== 'vendor').map((n) => ({ id: n.id, at: n.at, by: n.by, who: n.who, text: n.text, photos: (n.photos || []).filter((ph) => ph.url).map((ph) => ({ url: ph.url, name: ph.name || null })) })) });   // vendor calls / texts / emails stay in the console
   app.get('/driver/me/roadcalls', requireDriver, async (req, res) => {
     try { res.json({ breakdowns: (await myRoadCalls(req.driver.code)).map(driverView) }); } catch { res.status(503).json({ error: 'Could not load the breakdowns.' }); }
   });
@@ -576,15 +577,16 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     try {
       const rc = (await myRoadCalls(req.driver.code)).find((x) => x.id === req.params.id);
       if (!rc) return res.status(404).json({ error: 'That breakdown is not on your loads.' });
-      const r = await liveRoadCalls().addNote(rc.id, (req.body || {}).text, { by: req.driver.name || `Driver ${req.driver.code}`, who: 'driver' });
+      const b = req.body || {};
+      const r = await liveRoadCalls().addNote(rc.id, b.text, { by: req.driver.name || `Driver ${req.driver.code}`, who: 'driver', step: b.step || null, photos: b.photos || [], clientId: b.clientId || null });
       return r.error ? res.status(400).json({ error: r.error }) : res.json({ ok: true, breakdown: driverView(r.rc) });
     } catch { return res.status(503).json({ error: 'Could not send the update. Try again.' }); }
   });
   // dispatch wrote an update → the driver's phone gets it (opens the Breakdown tab)
   onRoadCallNote(async (rc, n) => {
-    if (n.who !== 'dispatch' || !rc.trip) return;
+    if (!['dispatch', 'status'].includes(n.who) || !rc || !rc.trip) return;   // a written update or a status change
     const t = tripOf((await board()).find((x) => tripNo(x) === String(rc.trip)));
-    for (const c of [t.driver, t.driver2].filter(Boolean)) await notify(c, { title: `Breakdown update · ${n.by}`, body: String(n.text).slice(0, 180), data: { tab: 'bd', trip: String(rc.trip) } }); // eslint-disable-line no-await-in-loop
+    for (const c of [t.driver, t.driver2].filter(Boolean)) await notify(c, { title: n.who === 'status' ? `Breakdown ${rc.truck ? `truck ${rc.truck}` : rc.id}: ${deskOf(rc).label}` : `Breakdown update · ${n.by}`, body: String(n.text).slice(0, 180), data: { tab: 'bd', trip: String(rc.trip) } }); // eslint-disable-line no-await-in-loop
   });
   return { requireDriver, notify, notifyTrip, roster: everyone };
 }
