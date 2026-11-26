@@ -36,3 +36,15 @@ test('pre-trip: problems become DVIRs on the unit; untouched items are OK; a pro
   assert.match(m.subject, /^PRE-TRIP DVIR \/\/ REEFER 7280 \/\/ REEFER UNIT \/\/ NOT SAFE TO DRIVE \/\/ TRIP 627700$/);
   assert.match(m.html, /DRIVER SAYS NOT SAFE TO DRIVE/);
 });
+
+test('a driver\'s reports: DVIRs, pre-trip problems and breakdowns, open / closed, newest first (Nov 26)', async () => {
+  const { driverReports } = await import('../driverreports.js');
+  const dvrs = { a: { id: 'a', driverCode: '0612', part: 'trailer', trailer: '7280', category: 'lights', itemLabel: 'Lights', source: 'pretrip', text: 'Marker burned', at: '2026-11-26T12:00:00Z', status: 'open', files: [{}] },
+    b: { id: 'b', driverCode: '612', part: 'truck', truck: '4504', category: 'tires', text: 'Low tire', at: '2026-11-20T12:00:00Z', status: 'completed', completedAt: '2026-11-21T10:00:00Z', completedBy: 'Luis', completedNote: 'Replaced' },
+    c: { id: 'c', driverCode: '0999', part: 'truck', category: 'air', at: '2026-11-25T12:00:00Z' } };
+  const breakdowns = { k: { id: 'k', driverCode: '0612', part: 'reefer', trailer: '7280', category: 'nostart', status: 'stopped', at: '2026-11-24T12:00:00Z', closed: 'resolved', closedAt: '2026-11-24T15:00:00Z', closedBy: 'Mary' } };
+  const r = driverReports('0612', { dvrs, breakdowns, pretrips: [{ driverCode: '0612', at: '2026-11-26T12:00:00Z' }, { driverCode: '0999' }], now: Date.parse('2026-11-26T13:00:00Z') });
+  assert.deepEqual(r.list.map((x) => [x.id, x.from, x.unit, x.problem, x.status]), [['a', 'Pre-trip', 'Trailer 7280', 'Lights', 'open'], ['k', 'Breakdown', 'Reefer · trailer 7280', "Reefer won't start", 'closed'], ['b', 'DVIR', 'Truck 4504', 'Tires', 'closed']]);
+  assert.deepEqual(r.counts, { total: 3, dvrs: 2, breakdowns: 1, open: 1, closed: 2, pretrips: 1, last30: 3, lastPretripAt: '2026-11-26T12:00:00Z' });
+  assert.equal(r.list[2].closedNote, 'Replaced'); assert.equal(r.list[1].closedNote, 'Resolved');
+});

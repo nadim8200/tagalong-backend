@@ -18,6 +18,7 @@ import { initWeather } from './weather.js';
 import { initCallPush } from './callpush.js';
 import { initDeskNotes } from './desknotes.js';
 import { SELF_KEY, PHOTO_KEY, cleanSelf, selfCell } from './driverself.js';
+import { initDriverReports } from './driverreports.js';
 
 // The driver release a dispatcher submitted on this load (release.js keeps them per trip, newest last) → what the driver
 // app shows (Nov 19): released at which hub, its yard address + directions, who authorized it and when, and the stops it
@@ -208,6 +209,8 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
   });
   const board = async () => (((await getBoard(SITE)) || {}).trips || []);
 
+  // a driver's DVIRs, pre-trip problems and breakdowns, open / closed (driverreports.js): console Driver profiles + the driver's own profile
+  initDriverReports(app, { db, requireAuth, requireDriver, site: SITE, now });
   // My profile (Nov 26): the driver's own picture, name, numbers, email and emergency contact (driverself.js)
   app.get('/driver/me/profile', requireDriver, async (req, res) => {
     try {
