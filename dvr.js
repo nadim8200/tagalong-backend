@@ -30,6 +30,32 @@ const S = (x, n = 120) => String(x == null ? '' : x).replace(/\s+/g, ' ').trim()
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const et = (ms) => new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
+// Pre-trip inspection (Nov 26): the checklist items in the driver app → the part and DVIR category each problem files under.
+export const PRETRIP = {
+  tires: ['truck', 'tires', 'Tires and wheels'], lights: ['truck', 'lights', 'Lights and signals'], brakes: ['truck', 'brakes', 'Brakes and air lines'], mirrors: ['truck', 'body', 'Mirrors and glass'],
+  leaks: ['truck', 'air', 'Leaks (oil, fuel, coolant)'], other: ['truck', 'other', 'Something else'],
+  doors: ['trailer', 'body', 'Doors and seals'], reefer: ['reefer', 'reefer', 'Reefer unit'], ttires: ['trailer', 'tires', 'Tires and wheels'], tlights: ['trailer', 'lights', 'Lights'],
+  body: ['trailer', 'body', 'Body damage'], hitch: ['trailer', 'other', 'Kingpin and landing gear'], tother: ['trailer', 'other', 'Something else'],
+};
+// A pre-trip as the driver sent it, cleaned: every item OK or a problem with a note. Items not touched were confirmed OK on the pop-up.
+// → { pretrip, problems: [report…] } | { error }. Pure.
+export function cleanPretrip(b = {}) {
+  const truck = S(b.truck, 12) || null; const trailer = S(b.trailer, 12) || null; const trip = S(b.trip, 12) || null;
+  const items = []; const problems = [];
+  for (const x of (Array.isArray(b.items) ? b.items : []).slice(0, 30)) {
+    const def = PRETRIP[x && x.key]; if (!def) continue;
+    const bad = x.status === 'bad';
+    const note = String((x && x.note) || '').trim().slice(0, 2000);
+    if (bad && note.length < 2) return { error: `Write what's wrong: ${def[2]}.` };
+    items.push({ key: x.key, status: bad ? 'bad' : 'ok', checked: !!x.checked });
+    if (bad) problems.push({ part: def[0], category: def[1], itemKey: x.key, itemLabel: def[2], text: note, unsafe: x.safe === false, truck, trailer, trip, photoIdx: Number.isInteger(x.photoIdx) ? x.photoIdx : null });
+  }
+  if (!items.length) return { error: 'Nothing was checked.' };
+  if (problems.some((p) => p.part === 'truck') && !truck) return { error: 'Which truck? Your truck number is missing.' };
+  if (problems.some((p) => p.part !== 'truck') && !trailer) return { error: 'Which trailer? Your trailer number is missing.' };
+  return { pretrip: { truck, trailer, trip, items }, problems };
+}
+
 // What the driver sent, cleaned: a part, a category, words. → { report } | { error }. Pure.
 export function cleanReport(b = {}) {
   const part = PARTS.includes(b.part) ? b.part : null;
@@ -43,12 +69,12 @@ export function cleanReport(b = {}) {
 
 // The email. Photos already attached are marked; every file has its link. Pure. → { subject, html, text }
 export function dvrEmail(r, links = [], attachedIds = []) {
-  const what = `${r.part === 'truck' ? 'Truck' : r.part === 'trailer' ? 'Trailer' : 'Reefer'}${r.part === 'trailer' ? (r.trailer ? ` ${r.trailer}` : '') : (r.truck ? ` ${r.truck}` : '')}`;
-  const urgency = 'NEEDS ATTENTION WHEN IT COMES BACK';
-  const subject = `DVIR // ${what.toUpperCase()} // ${CAT_LABEL[r.category].toUpperCase()}${r.trip ? ` // TRIP ${r.trip}` : ''}`;
-  const rows = [['Report', what], ['Problem', CAT_LABEL[r.category]], ['Driver', `${r.by || 'Driver'}${r.driverCode ? ` (ID ${r.driverCode})` : ''}`],
+  const what = `${r.part === 'truck' ? 'Truck' : r.part === 'trailer' ? 'Trailer' : 'Reefer'}${r.part === 'truck' ? (r.truck ? ` ${r.truck}` : '') : (r.trailer ? ` ${r.trailer}` : '')}`;   // the reefer is on the trailer
+  const urgency = r.unsafe ? 'DRIVER SAYS NOT SAFE TO DRIVE' : 'NEEDS ATTENTION WHEN IT COMES BACK';
+  const subject = `${r.source === 'pretrip' ? 'PRE-TRIP ' : ''}DVIR // ${what.toUpperCase()} // ${String(r.itemLabel || CAT_LABEL[r.category]).toUpperCase()}${r.unsafe ? ' // NOT SAFE TO DRIVE' : ''}${r.trip ? ` // TRIP ${r.trip}` : ''}`;
+  const rows = [['Report', what], ...(r.source === 'pretrip' ? [['From', 'Pre-trip inspection']] : []), ['Problem', r.itemLabel || CAT_LABEL[r.category]], ['Driver', `${r.by || 'Driver'}${r.driverCode ? ` (ID ${r.driverCode})` : ''}`],
     ['Truck / trailer', `${r.truck || '—'} / ${r.trailer || '—'}`], ...(r.trip ? [['Trip', r.trip]] : []), ['Sent', `${et(Date.parse(r.at))} ET`]];
-  const tone = '#B45309';
+  const tone = r.unsafe ? '#B91C1C' : '#B45309';
   const files = links.map((l) => `<li style="margin:3px 0"><a href="${esc(l.url)}" style="color:#1D4ED8">${esc(l.kind === 'video' ? `Video ${l.n}` : `Photo ${l.n}`)}</a>${l.kind === 'video' ? ` <span style="color:#5B6778">(${Math.round(l.size / 1048576)} MB)</span>` : ''}${attachedIds.includes(l.id) ? ' <span style="color:#5B6778">· attached</span>' : ''}</li>`).join('');
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#14213D;max-width:600px">
 <div style="background:#13325B;color:#fff;padding:12px 16px;border-radius:8px 8px 0 0"><b style="letter-spacing:1px">FLORIDA BEAUTY FLORA</b><br><span style="font-size:12px;letter-spacing:2px;color:#C9D6EA">DRIVER VEHICLE INSPECTION REPORT (DVIR)</span></div>
@@ -123,6 +149,52 @@ export function initDvr(app, { db, secret, requireDriver, requireAuth, sendMail 
     app.get('/driver/me/dvr', requireDriver, async (req, res) => {
       const mine = Object.values(await all()).filter((r) => r.driverCode === String(req.driver.code)).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 20);
       res.json({ reports: mine.map((r) => ({ id: r.id, at: r.at, part: r.part, category: r.category, truck: r.truck, trailer: r.trailer, photos: (r.files || []).filter((f) => f.kind === 'photo').length, videos: (r.files || []).filter((f) => f.kind === 'video').length, sentAt: r.sentAt })) });
+    });
+  }
+  // Pre-trip inspection (Nov 26): every problem becomes a DVIR on that truck / trailer (the Yard tab's DVIRs, the yard check pop-up and the
+  // close-to-the-yard reminders all work from those), each emailed to the DVIR list; the whole checklist is kept in taPretrips.
+  if (app && requireDriver) {
+    app.post('/driver/me/pretrip', requireDriver, async (req, res) => {
+      if (req.driver.viewOnly) return res.status(403).json({ error: "View only — this is the driver's screen." });
+      if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
+      const c = cleanPretrip(req.body || {});
+      if (c.error) return res.status(400).json({ error: c.error });
+      const at = new Date(now()).toISOString(); const by = req.driver.name || null; const code = String(req.driver.code);
+      const pid = `pt${now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;
+      const photos = Array.isArray(req.body.photos) ? req.body.photos.slice(0, 40) : [];
+      const ids = [];
+      for (const p of c.problems) {
+        const id = `dvr${now().toString(36)}${crypto.randomBytes(3).toString('hex')}`;
+        const { photoIdx, ...rest } = p;
+        const r = { id, ...rest, source: 'pretrip', pretripId: pid, by, driverCode: code, at, files: [], status: 'open', sentAt: null };
+        await db.update(KEY(SITE), (cur) => Object.fromEntries(Object.entries({ ...(cur || {}), [id]: r }).slice(-500)), {}); // eslint-disable-line no-await-in-loop
+        const mine = photos.filter((f) => f && f.item === p.itemKey).slice(0, 6);
+        for (let i = 0; i < mine.length; i++) {
+          try {
+            const f = await readableFile(mine[i]); // eslint-disable-line no-await-in-loop
+            const buf = Buffer.from(String(f.dataBase64 || ''), 'base64');
+            if (buf.length && buf.length <= PHOTO_MAX && /^image\//i.test(f.mediaType || '')) await addFile(id, 'photo', f.filename || `photo-${i + 1}.jpg`, f.mediaType, buf); // eslint-disable-line no-await-in-loop
+          } catch { /* the report still goes, without that photo */ }
+        }
+        ids.push(id);
+      }
+      await db.update(`taPretrips:${SITE}`, (cur) => [{ id: pid, at, by, driverCode: code, ...c.pretrip, dvrs: ids }, ...(Array.isArray(cur) ? cur : [])].slice(0, 2000), []);
+      let mailed = true;
+      for (const id of ids) { const r = (await all())[id]; try { await send(r); } catch { mailed = false; } } // eslint-disable-line no-await-in-loop
+      return res.json({ ok: true, id: pid, at, problems: ids.length, mailed });
+    });
+    // what the driver sees above the checklist: problems still open on their truck / trailer, and what was fixed in the last 14 days
+    app.get('/driver/me/pretrip', requireDriver, async (req, res) => {
+      const n = (x) => String(x == null ? '' : x).trim().toUpperCase().replace(/^0+(?=\d)/, '');
+      const truck = n(req.query.truck); const trailer = n(req.query.trailer);
+      const onUnit = (r) => (r.part === 'truck' ? truck && n(r.truck) === truck : trailer && n(r.trailer) === trailer);
+      const unit = (r) => (r.part === 'truck' ? `Truck ${r.truck}` : `Trailer ${r.trailer}`);
+      const list = Object.values(await all()).filter(onUnit);
+      const open = list.filter((r) => r.status !== 'completed').sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 10)
+        .map((r) => ({ unit: unit(r), item: r.itemKey || r.category, label: r.itemLabel || CAT_LABEL[r.category] || r.category, text: r.text, by: r.by, at: r.at }));
+      const fixed = list.filter((r) => r.status === 'completed' && r.completedAt && now() - Date.parse(r.completedAt) < 14 * 86400000).sort((a, b) => String(b.completedAt).localeCompare(String(a.completedAt))).slice(0, 5)
+        .map((r) => ({ unit: unit(r), item: r.itemKey || r.category, label: r.itemLabel || CAT_LABEL[r.category] || r.category, fix: r.completedNote || 'Fixed', at: r.completedAt }));
+      res.json({ open, fixed });
     });
   }
   // a signed link from the email: one photo or video, no login (30 days)

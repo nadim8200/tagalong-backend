@@ -1,0 +1,38 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { cleanSelf, applySelfPhones } from '../driverself.js';
+import { mergeRoster } from '../driverauth.js';
+import { cleanPretrip, dvrEmail } from '../dvr.js';
+
+test('my profile: cleaned — cell first, 10-digit numbers, email checked, at least one cell (Nov 26)', () => {
+  const c = cleanSelf({ name: '  Juan   Avila ', phones: [{ number: '(305) 555-0199', label: 'Home' }, { number: '1-786-555-0142', label: 'Cell' }], email: 'Juan@Gmail.com', emergency: { name: 'Ana', phone: '305 555 0100' } });
+  assert.deepEqual(c.profile.phones, [{ number: '7865550142', label: 'Cell' }, { number: '3055550199', label: 'Home' }]);
+  assert.equal(c.profile.name, 'Juan Avila'); assert.equal(c.profile.email, 'juan@gmail.com'); assert.deepEqual(c.profile.emergency, { name: 'Ana', phone: '3055550100' });
+  assert.equal(c.photo, undefined, 'no picture sent → the old one stays');
+  assert.match(cleanSelf({ name: 'J', phones: [{ number: '305555', label: 'Cell' }] }).error, /10-digit/);
+  assert.match(cleanSelf({ name: 'J', phones: [{ number: '3055550199', label: 'Home' }] }).error, /cell/);
+  assert.match(cleanSelf({ name: 'J', phones: [{ number: '3055550199', label: 'Cell' }], email: 'nope' }).error, /email/);
+  assert.match(cleanSelf({ name: 'J', phones: [{ number: '3055550199', label: 'Cell' }], photo: 'javascript:alert(1)' }).error, /picture/);
+  assert.equal(cleanSelf({ name: 'J', phones: [{ number: '3055550199', label: 'Cell' }], photo: null }).photo, null);
+});
+
+test('the driver\'s own cell wins: on the board (texts, calls, Jarvis) and first on the roster (sign-in, Driver profiles)', () => {
+  const items = [{ trip: { tripNumber: '1', driver: '0612', driver2: '0700' }, _samsara: { driver1Info: { id: '9', name: 'Juan', phone: '+13055550000' }, driver2Info: { name: 'Leo', phone: '3055551111' } } }];
+  applySelfPhones(items, { 612: { phones: [{ number: '7865550142', label: 'Cell' }] } });
+  assert.equal(items[0]._samsara.driver1Info.phone, '7865550142'); assert.equal(items[0]._samsara.driver1Info.samsaraPhone, '+13055550000');
+  assert.equal(items[0]._samsara.driver2Info.phone, '3055551111', 'the co-driver keeps Samsara\'s');
+  const r = mergeRoster([{ code: '0612', name: 'JUAN AVILA', phone: '3055550000' }], {}, {}, { 612: { name: 'Juan Avila', phones: [{ number: '7865550142', label: 'Cell' }], email: 'j@x.com', updatedAt: '2026-11-26T12:00:00Z' } });
+  assert.equal(r[0].phone, '7865550142'); assert.deepEqual(r[0].phones.map((x) => x.from), ['driver', 'samsara']);
+  assert.equal(r[0].name, 'Juan Avila'); assert.equal(r[0].email, 'j@x.com'); assert.equal(r[0].samsaraDiffers, true);
+});
+
+test('pre-trip: problems become DVIRs on the unit; untouched items are OK; a problem needs a note (Nov 26)', () => {
+  const c = cleanPretrip({ truck: '4504', trailer: '7280', trip: '627700', items: [{ key: 'tlights', status: 'bad', note: 'Right marker burned', safe: true, checked: true }, { key: 'reefer', status: 'bad', note: 'Door switch', safe: false }, { key: 'tires', status: 'ok' }, { key: 'nope', status: 'bad' }] });
+  assert.equal(c.pretrip.items.length, 3);
+  assert.deepEqual(c.problems.map((p) => [p.part, p.category, p.trailer, p.unsafe]), [['trailer', 'lights', '7280', false], ['reefer', 'reefer', '7280', true]]);
+  assert.match(cleanPretrip({ truck: '1', trailer: '2', items: [{ key: 'doors', status: 'bad', note: '' }] }).error, /Doors and seals/);
+  assert.match(cleanPretrip({ truck: '1', items: [{ key: 'doors', status: 'bad', note: 'torn' }] }).error, /trailer/);
+  const m = dvrEmail({ ...c.problems[1], source: 'pretrip', by: 'Juan', at: '2026-11-26T12:00:00Z' });
+  assert.match(m.subject, /^PRE-TRIP DVIR \/\/ REEFER 7280 \/\/ REEFER UNIT \/\/ NOT SAFE TO DRIVE \/\/ TRIP 627700$/);
+  assert.match(m.html, /DRIVER SAYS NOT SAFE TO DRIVE/);
+});

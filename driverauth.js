@@ -17,6 +17,7 @@ import { tapStamp } from './taptime.js';
 import { initWeather } from './weather.js';
 import { initCallPush } from './callpush.js';
 import { initDeskNotes } from './desknotes.js';
+import { SELF_KEY, PHOTO_KEY, cleanSelf, selfCell } from './driverself.js';
 
 // The driver release a dispatcher submitted on this load (release.js keeps them per trip, newest last) → what the driver
 // app shows (Nov 19): released at which hub, its yard address + directions, who authorized it and when, and the stops it
@@ -60,7 +61,7 @@ export const openPin = (enc, secret) => { const [iv, tag, data] = String(enc || 
 // Every Samsara driver is saved the first time we see them; one Samsara no longer has keeps their profile and still signs in, until dispatch
 // removes them. Any of a driver's cells signs them in (with their PIN). Pure.
 // → [{ code, name, phone, phones: [{ number, label, from }], samsara, saved, console }]
-export function mergeRoster(samsara = [], profiles = {}, saved = {}) {
+export function mergeRoster(samsara = [], profiles = {}, saved = {}, self = {}) {
   const out = new Map();
   const live = new Set(samsara.map((d) => norm(d.code)));
   for (const d of Object.values(saved || {})) {
@@ -76,6 +77,16 @@ export function mergeRoster(samsara = [], profiles = {}, saved = {}) {
     const k = norm(code); const cur = out.get(k) || { code: p.code || k, name: null, samsaraName: null, phones: [], samsara: false, saved: false, console: false };
     const extra = (p.phones || []).map((x) => ({ number: last10(x.number), label: x.label || 'Cell', from: 'console' })).filter((x) => x.number && !cur.phones.some((y) => y.number === x.number));
     out.set(k, { ...cur, name: p.name || cur.name, phones: [...cur.phones, ...extra], console: true, updatedBy: p.updatedBy || p.addedBy || null, updatedAt: p.updatedAt || p.addedAt || null });
+  }
+  // what the driver set in the app wins (Nov 26): their numbers first (the cell is the one we text), their name, email, emergency contact
+  for (const [code, p] of Object.entries(self || {})) {
+    const k = norm(code); const cur = out.get(k);
+    if (!cur) continue;   // only drivers on the roster
+    const mine = (p.phones || []).map((x) => ({ number: last10(x.number), label: x.label || 'Cell', from: 'driver' })).filter((x) => x.number);
+    const sam = cur.phones.find((x) => x.from === 'samsara' || x.from === 'saved');
+    const cell = selfCell(p);
+    out.set(k, { ...cur, name: p.name || cur.name, phones: [...mine, ...cur.phones.filter((x) => !mine.some((y) => y.number === x.number))], email: p.email || null, emergency: p.emergency || null,
+      photoAt: p.photoAt || null, selfUpdatedAt: p.updatedAt || null, samsaraDiffers: !!(sam && cell && sam.number !== cell.number) });
   }
   return [...out.values()].map((d) => ({ ...d, phone: d.phones.length ? d.phones[0].number : null }));
 }
@@ -123,6 +134,7 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
   const PUSH = `taDriverPush:${SITE}`;            // driver ID → [{ token, platform, env, at }] (the phones signed in to the profile)
   const tripsKey = (code) => `taDriverTrips:${SITE}:${norm(code)}`;
   const profiles = async () => (enabled ? (await db.get(PROFILES, {})) || {} : {});
+  const selves = async () => (enabled ? (await db.get(SELF_KEY(SITE), {})) || {} : {});
   // Samsara's drivers, saved as we see them (new ones, a new name or cell): the console keeps every driver's profile for good
   // the driver list, shared for a minute (every driver-app request and console card asks for it)
   let crowd = null;
@@ -141,9 +153,9 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
     const changed = live.filter((d) => { const had = saved[norm(d.code)]; return !had || had.name !== (d.name || null) || last10(had.phone) !== last10(d.phone); });
     if (enabled && changed.length) {
       const next = await db.update(SAVED, (cur) => { const all = { ...(cur || {}) }; for (const d of changed) { const had = all[norm(d.code)]; all[norm(d.code)] = { code: String(d.code).trim(), name: d.name || null, phone: last10(d.phone) || (had && had.phone) || null, firstSeenAt: (had && had.firstSeenAt) || at, updatedAt: at }; } return all; }, {});
-      return mergeRoster(live, await profiles(), next || saved);
+      return mergeRoster(live, await profiles(), next || saved, await selves());
     }
-    return mergeRoster(live, await profiles(), saved);
+    return mergeRoster(live, await profiles(), saved, await selves());
   };
   const byCode = async (code) => (await everyone()).find((d) => norm(d.code) === norm(code)) || null;
   const misses = new Map();   // phone or connection → wrong tries in the last 15 minutes
@@ -196,6 +208,30 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
   });
   const board = async () => (((await getBoard(SITE)) || {}).trips || []);
 
+  // My profile (Nov 26): the driver's own picture, name, numbers, email and emergency contact (driverself.js)
+  app.get('/driver/me/profile', requireDriver, async (req, res) => {
+    try {
+      const code = norm(req.driver.code);
+      const mine = (await selves())[code] || null;
+      const d = await byCode(code);
+      const photo = enabled ? await db.get(PHOTO_KEY(SITE, code), null) : null;
+      return res.json({ profile: { name: (mine && mine.name) || (d && d.name) || req.driver.name || '', phones: mine ? mine.phones : ((d && d.phones) || []).slice(0, 4).map((x) => ({ number: x.number, label: 'Cell' })).slice(0, 1),
+        email: (mine && mine.email) || '', emergency: (mine && mine.emergency) || { name: '', phone: '' }, photo: (photo && photo.data) || null, updatedAt: (mine && mine.updatedAt) || null } });
+    } catch { return res.status(503).json({ error: 'Could not load your profile.' }); }
+  });
+  app.put('/driver/me/profile', requireDriver, async (req, res) => {
+    if (req.driver.viewOnly) return res.status(403).json({ error: "View only — this is the driver's screen." });
+    if (!enabled) return res.status(503).json({ error: 'Not available right now.' });
+    const c = cleanSelf(req.body || {});
+    if (c.error) return res.status(400).json({ error: c.error });
+    const code = norm(req.driver.code); const at = new Date(now()).toISOString();
+    if (c.photo === null) await db.set(PHOTO_KEY(SITE, code), null);
+    else if (c.photo) await db.set(PHOTO_KEY(SITE, code), { data: c.photo, at });
+    await db.update(SELF_KEY(SITE), (cur) => { const had = (cur || {})[code] || {}; return { ...(cur || {}), [code]: { ...c.profile, photoAt: c.photo === null ? null : c.photo ? at : had.photoAt || null, updatedAt: at } }; }, {});
+    forget();
+    req.body = { driver: code, profile: 'updated by the driver' };   // the activity log: who changed their profile (not the numbers)
+    return res.json({ ok: true, updatedAt: at });
+  });
   app.get('/driver/me', requireDriver, async (req, res) => {
     try {
       const loads = loadsFor(req.driver.code, await board());
@@ -453,6 +489,14 @@ export function initDriverAuth(app, { requireAuth, requireAdmin = null, db, sign
       }).sort((a, b) => (!!b.current - !!a.current) || String(a.name || '~').localeCompare(String(b.name || '~')) || a.code.localeCompare(b.code));
       return res.json({ drivers });
     } catch (e) { return res.status(502).json({ error: 'Could not read the driver profiles.' }); }
+  });
+  app.get('/truckmate/driver-profiles/:code/photo', requireAuth, async (req, res) => {
+    if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });
+    const p = enabled ? await db.get(PHOTO_KEY(SITE, norm(req.params.code)), null) : null;
+    const m = p && /^data:(image\/[a-z]+);base64,(.+)$/.exec(p.data || '');
+    if (!m) return res.status(404).json({ error: 'No picture.' });
+    res.setHeader('Content-Type', m[1]); res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.end(Buffer.from(m[2], 'base64'));
   });
   app.put('/truckmate/driver-profiles/:code', requireAuth, async (req, res) => {
     if (!isStaff(req.user)) return res.status(403).json({ error: 'Dispatch logins only.' });

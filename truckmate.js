@@ -19,6 +19,7 @@ import { loadTarget, checkReading } from './temppolicy.js';
 import { traceCheck } from './tracecheck.js';
 import { wrongSite } from './sitecheck.js';
 import { HUBS, haversineMi } from './watchtower.js';
+import { applySelfPhones, SELF_KEY } from './driverself.js';
 
 // ===============================================================
 // Trimble TruckMate adapter (inlined). ALL PATHS/FIELDS ARE GUESSES until a
@@ -578,6 +579,8 @@ export function initTruckMate(app, { requireAuth, db, env = process.env, TRACCAR
         trips.forEach((item) => { try { const live = correlate(item, idx); if (live) item._samsara = live; } catch { /* per-trip skip */ } });
       }
     } catch { /* no live overlay this cycle */ }
+    // a driver's own cell from the driver app (driverself.js) replaces the Samsara number: texts, calls, Jarvis and chats use it
+    try { if (db && db.enabled) applySelfPhones(trips, (await db.get(SELF_KEY(site), {})) || {}); } catch { /* keep Samsara's */ }
     mark('Samsara live');
     // Traccar overlay for trucks on Teltonika trackers (e.g. 2403) that Samsara
     // doesn't have — matched by power-unit number. Only fills trips Samsara missed.
