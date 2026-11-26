@@ -94,3 +94,25 @@ test('the other way: closing the DVIR (yard check card / Yard → DVIRs) complet
   await routes['/truckmate/yard-dvrs/:id/complete']({ params: { id: 'z' }, body: {}, user: { name: 'Luis' } }, res);
   assert.notEqual((await rcs.list()).find((x) => x.id === bk.id).status, 'completed');
 });
+
+test('breakdown updates (Nov 26): dispatch and driver write on the same card; every email is in the breakdown\'s one chain', async () => {
+  const { initRoadCalls, onRoadCallNote } = await import('../roadcall.js');
+  const kv = new Map();
+  const db = { enabled: true, get: async (k, d) => (kv.has(k) ? kv.get(k) : d), set: async (k, v) => { kv.set(k, v); }, update: async (k, fn, d) => { const v = fn(kv.has(k) ? kv.get(k) : d); kv.set(k, v); return v; } };
+  const mails = []; const pushed = [];
+  const rcs = initRoadCalls(null, { db, getBoard: async () => ({ trips: [] }), sendMail: async (m) => { mails.push(m); }, recipients: async () => ['dispatches@floridabeauty.us'] });
+  onRoadCallNote((rc, n) => { pushed.push([n.who, n.text]); });
+  const rc = await rcs.open({ trip: '627930', truck: '2614', source: 'console', by: 'Luis', details: 'Started by dispatch' });
+  assert.equal(rc.notes[0].text, 'Opened: Started by dispatch');
+  assert.equal(mails.length, 1); assert.equal(mails[0].subject, `Breakdown ${rc.id} · Truck 2614 · trip 627930`);
+  const a = await rcs.addNote(rc.id, 'Called Michelin, case 88213', { by: 'Luis', who: 'dispatch' });
+  assert.equal(a.rc.owner.name, 'Luis', 'the first dispatcher to write is on it');
+  assert.equal(mails[1].subject, `RE: Breakdown ${rc.id} · Truck 2614 · trip 627930`);
+  assert.equal(mails[1].headers['In-Reply-To'], mails[0].headers['Message-ID']);
+  assert.match(mails[1].html, /Update from Luis/); assert.match(mails[1].html, /Called Michelin, case 88213/);
+  const b = await rcs.addNote(rc.id, 'Tech is here', { by: 'Mancini Hall', who: 'driver' });
+  assert.match(mails[2].html, /Update from the driver, Mancini Hall/); assert.equal(mails[2].subject, mails[1].subject);
+  assert.deepEqual(b.rc.notes.map((n) => [n.who, n.by, !!n.emailed]).slice(1), [['dispatch', 'Luis', true], ['driver', 'Mancini Hall', true]]);
+  assert.deepEqual(pushed.slice(-2), [['dispatch', 'Called Michelin, case 88213'], ['driver', 'Tech is here']]);
+  assert.equal((await rcs.addNote(rc.id, ' ', { by: 'x' })).error, 'Write the update first.');
+});

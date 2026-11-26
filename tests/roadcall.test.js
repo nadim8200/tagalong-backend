@@ -40,13 +40,16 @@ test('a driver texts a flat → road call opens with GPS + fault codes, asks wha
   assert.equal(first.rc.type, 'tire'); assert.equal(first.rc.truck, '2220'); assert.equal(first.rc.location.lat, 35.42); assert.equal(first.rc.faults[0].code, 'SPN 110 FMI 0');
   assert.equal(first.rc.tire.position.label, 'Trailer · right · outer');
   assert.match(first.reply, /road call RC-\d{4}-\d{3} is open\. Please reply with a photo of the tire sidewall .*; are you in a safe spot/);
-  assert.match(mails[0].subject, /Road call opened \(tire\) — road call RC-.* · truck 2220 · trip 624889/);
+  // Nov 26: one email chain per breakdown — the same subject (RE: after the first), the event in the body
+  assert.match(mails[0].subject, /^Breakdown RC-\d{4}-\d{3} · Truck 2220 · trip 624889$/); assert.match(mails[0].html, /Road call opened \(tire\)/);
+  assert.match(mails[0].headers['Message-ID'], /^<breakdown-rc-.*@floridabeauty\.us>$/);
   // the sidewall photo → the size; "on the shoulder" → safe → ready to approve
   const withSize = await rcs.photos('florida-beauty', '624889', { docIds: ['d1'], by: 'driver app' });
   assert.equal(withSize.tire.size, '295/75R22.5'); assert.equal(withSize.tire.sizeFrom, 'sidewall photo');
   const ready = (await rcs.fromDriverText({ trip: '624889', from: '+17864444512', text: 'on the shoulder, loaded' })).rc;
   assert.equal(ready.status, 'ready');
-  assert.match(mails[mails.length - 1].subject, /Road call ready to approve/);
+  assert.match(mails[mails.length - 1].subject, /^RE: Breakdown RC-/); assert.match(mails[mails.length - 1].html, /Road call ready to approve/);
+  assert.equal(mails[mails.length - 1].headers['In-Reply-To'], mails[0].headers['Message-ID']);
   // dispatch approves → sent to Michelin with the packet; their update comes back
   const ap = await rcs.approve(ready.id, 'Rosa');
   assert.equal(ap.status, 'sent'); assert.equal(ap.provider.ref, 'ONC-55501');
@@ -68,7 +71,7 @@ test('no Michelin API yet → approving gives dispatch the packet to call 1-800-
   const rc = await rcs.open({ trip: '1', truck: '2220', type: 'mechanical', details: 'won\'t start', location: { text: 'TA Knoxville' }, safe: true });
   const ap = await rcs.approve(rc.id, 'Rosa');
   assert.equal(ap.status, 'approved'); assert.equal(ap.provider, undefined);
-  assert.match(mails[mails.length - 1].subject, /Approved — call Michelin ONCall \(1-800-847-3911/);
+  assert.match(mails[mails.length - 1].html, /Approved — call Michelin ONCall \(1-800-847-3911/);
 });
 
 // option 1 (Oct 13): the dispatcher asks Jarvis to check on the driver

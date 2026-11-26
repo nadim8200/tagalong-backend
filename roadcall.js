@@ -10,6 +10,7 @@
 // Only what was gathered or recorded is sent — nothing is guessed. Recipients: Employees → Alert emails.
 // ---------------------------------------------------------------
 import { timingSafeEqual } from 'crypto';
+import { sendMail as mailerSend } from './mailer.js';
 
 const SITE = 'florida-beauty';
 const KEY = `taRoadCalls:${SITE}`;
@@ -22,6 +23,20 @@ let LIVE = null;
 export const liveRoadCalls = () => LIVE;
 const closers = [];
 export const onRoadCallClosed = (fn) => { closers.push(fn); };
+const noters = [];
+export const onRoadCallNote = (fn) => { noters.push(fn); };   // a written update (driver app push, Nov 26)
+// One email chain per breakdown (Nov 26): the same subject and Message-ID every time, so Outlook / Gmail keep one thread. Pure.
+export function threadOf(rc) {
+  const base = `Breakdown ${rc.id}${rc.truck ? ` · Truck ${rc.truck}` : ''}${rc.trip ? ` · trip ${rc.trip}` : ''}`;
+  const root = `<breakdown-${String(rc.id).toLowerCase()}@floridabeauty.us>`;
+  return { base, root, first: !(rc.mail && rc.mail.sent), subject: rc.mail && rc.mail.sent ? `RE: ${(rc.mail && rc.mail.base) || base}` : base };
+}
+// a written update, cleaned. → { note } | { error }. Pure.
+export function cleanNote(text, { by, who = 'dispatch', at }) {
+  const t = String(text || '').replace(/\r/g, '').trim().slice(0, 1000);
+  if (t.length < 2) return { error: 'Write the update first.' };
+  return { note: { id: `n${Date.parse(at).toString(36)}${Math.random().toString(36).slice(2, 5)}`, at, by: String(by || 'Dispatch').slice(0, 80), who, text: t } };
+}
 const closed = async (rc, by) => { for (const fn of closers) { try { await fn(rc, by); } catch (e) { console.warn('[roadcall] on close:', e.message); } } }; // eslint-disable-line no-await-in-loop
 export const STATUSES = ['gathering', 'ready', 'approved', 'sent', 'accepted', 'tech en route', 'on site', 'completed', 'cancelled'];
 
@@ -120,7 +135,7 @@ export function michelinProvider({ env = process.env, fetchFn = globalThis.fetch
 const same = (a, b) => { const x = Buffer.from(String(a)); const y = Buffer.from(String(b)); return x.length === y.length && timingSafeEqual(x, y); };
 const id4 = (now) => `RC-${new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: '2-digit', day: '2-digit' }).replace('/', '')}-${String(Math.floor(Math.random() * 900) + 100)}`;
 
-export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail = null, recipients = null, help = null, docs = null, provider = null, textDriver = null, callDriver = null, photoLink = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
+export function initRoadCalls(app, { sendThread = undefined, requireAuth, db, getBoard = null, sendMail = null, recipients = null, help = null, docs = null, provider = null, textDriver = null, callDriver = null, photoLink = null, env = process.env, fetchFn = globalThis.fetch, now = () => Date.now() }) {
   const enabled = !!(db && db.enabled);
   const prov = provider || michelinProvider({ env, fetchFn });
   const list = async () => ((await db.get(KEY, [])) || []);
@@ -137,14 +152,48 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
       faults: rc.faults && rc.faults.length ? rc.faults : (s.dtcCodes || []).slice(0, 10).map((c) => ({ code: c.code, description: c.description || c.text || null })),
       reefer: rc.reefer ?? !!(item._reefer || (item._samsara && item._samsara.reefer)) };
   }
-  async function notify(rc, what) {
-    if (!sendMail) return;
+  // every email about one breakdown goes in its own chain (Nov 26): the first one starts it, each update replies to it
+  // breakdown emails go straight through, never held by training mode (Nov 26, Nadim: "don't hold the emails"); tests pass their own
+  const threadSend = sendThread !== undefined ? sendThread : (sendMail && !globalThis.process.env.NODE_TEST_CONTEXT ? (m) => mailerSend(m, { env, direct: true }) : sendMail);
+  async function mailThread(rc, what, bodyHtml, bodyText) {
+    if (!threadSend) return null;
     const to = recipients ? await recipients().catch(() => []) : [];
-    if (!to.length) return;
+    if (!to.length) return null;
+    const th = threadOf(rc);
+    const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#14213D;max-width:640px"><p style="margin:0 0 8px"><b>${esc(what)}</b></p>${bodyHtml}<p style="color:#64748b;font-size:12px;margin-top:14px">${esc(th.base)} — every update on this breakdown comes in this email thread. Breakdowns tab in the console to see it all or write an update.</p></div>`;
+    await threadSend({ to, subject: th.subject, html, text: `${what}\n\n${bodyText}\n\n${th.base} — every update on this breakdown comes in this email thread.`,
+      headers: th.first ? { 'Message-ID': th.root, 'Thread-Topic': th.base } : { 'In-Reply-To': th.root, References: th.root, 'Thread-Topic': th.base } });
+    if (th.first) await db.update(KEY, (cur) => (Array.isArray(cur) ? cur : []).map((x) => (x.id === rc.id ? { ...x, mail: { sent: new Date(now()).toISOString(), base: th.base } } : x)), []);
+    return true;
+  }
+  async function notify(rc, what) {
     const lines = packetText(rc).split('\n');
     const miss = missing(rc);
-    await sendMail({ to, subject: `${what} — road call ${rc.id}${rc.truck ? ` · truck ${rc.truck}` : ''}${rc.trip ? ` · trip ${rc.trip}` : ''}`,
-      html: `<p><b>${esc(what)}</b></p><pre style="font-family:inherit;white-space:pre-wrap">${esc(lines.join('\n'))}</pre>${miss.length ? `<p>Still needed: ${esc(miss.join(', '))}</p>` : ''}${rc.status === 'ready' ? `<p><b>Approve it in the console (Road calls)</b> — ${prov.ready ? `it goes to ${esc(prov.name)} automatically` : `then call ${esc(prov.name)} at ${esc(prov.phone)} and read this packet`}.</p>` : ''}${rc.provider && rc.provider.ref ? `<p>${esc(prov.name)} case: <b>${esc(rc.provider.ref)}</b>${rc.provider.eta ? ` · ETA ${esc(rc.provider.eta)}` : ''}</p>` : ''}` }).catch((e) => console.warn('[roadcall] email:', e.message));
+    const fresh = (await list()).find((x) => x.id === rc.id) || rc;
+    await mailThread(fresh, `${what} — ${rc.id}`, `<pre style="font-family:inherit;white-space:pre-wrap;margin:0">${esc(lines.join('\n'))}</pre>${miss.length ? `<p>Still needed: ${esc(miss.join(', '))}</p>` : ''}${rc.status === 'ready' ? '<p><b>Approve it in the console (Breakdowns tab).</b></p>' : ''}`, `${lines.join('\n')}${miss.length ? `\nStill needed: ${miss.join(', ')}` : ''}`);
+  }
+  // a written update from dispatch or the driver (Nov 26): on the card in the console and in the driver app, and emailed in the breakdown's chain
+  async function addNote(id, text, { by, who = 'dispatch' } = {}) {
+    const at = new Date(now()).toISOString();
+    const c = cleanNote(text, { by, who, at });
+    if (c.error) return { error: c.error };
+    let rc = null;
+    await db.update(KEY, (cur) => (Array.isArray(cur) ? cur : []).map((x) => {
+      if (x.id !== id) return x;
+      rc = { ...x, notes: [...(x.notes || []), c.note].slice(-200), ...(who === 'dispatch' && !x.owner ? { owner: { name: c.note.by, at } } : {}) };
+      return rc;
+    }), []);
+    if (!rc) return { error: 'Breakdown not found.' };
+    let emailed = false;
+    try { emailed = !!(await mailThread(rc, who === 'driver' ? `Update from the driver, ${c.note.by}` : `Update from ${c.note.by}`, `<p style="white-space:pre-line;margin:0;padding:10px 12px;background:#F4F6FA;border-radius:8px">${esc(c.note.text)}</p><p style="color:#5B6778;margin:8px 0 0">${esc([rc.truck ? `Truck ${rc.truck}` : null, rc.trailer ? `trailer ${rc.trailer}` : null, rc.trip ? `trip ${rc.trip}` : null, rc.driver && rc.driver.name ? `driver ${rc.driver.name}` : null].filter(Boolean).join(' · '))} · now: ${esc(rc.status)}</p>`, c.note.text)); } catch (e) { console.warn('[roadcall] update email:', e.message); }
+    if (emailed) await db.update(KEY, (cur) => (Array.isArray(cur) ? cur : []).map((x) => (x.id === id ? { ...x, notes: (x.notes || []).map((n) => (n.id === c.note.id ? { ...n, emailed: true } : n)) } : x)), []);
+    for (const fn of noters) { try { await fn(rc, { ...c.note, emailed }); } catch (e) { console.warn('[roadcall] on note:', e.message); } } // eslint-disable-line no-await-in-loop
+    return { rc: (await list()).find((x) => x.id === id) || rc, note: { ...c.note, emailed } };
+  }
+  async function take(id, by) {
+    let rc = null;
+    await db.update(KEY, (cur) => (Array.isArray(cur) ? cur : []).map((x) => { if (x.id !== id) return x; rc = { ...x, owner: { name: String(by || 'Dispatch').slice(0, 80), at: new Date(now()).toISOString() } }; return rc; }), []);
+    return rc;
   }
   const step = (rc) => ({ ...rc, missing: missing(rc), status: ['gathering', 'ready'].includes(rc.status) ? (missing(rc).length ? 'gathering' : 'ready') : rc.status });
 
@@ -157,6 +206,7 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
     const item = await boardItem(trip);
     let rc = fromBoard({ id: id4(now()), at: new Date(now()).toISOString(), source, by, trip: trip ? String(trip) : (item ? tripNo(item) : null), truck, report: report || null, type: type || null, details: details || null, tire: tire || null, safe, loaded, driver, location, photos: [], log: [{ at: new Date(now()).toISOString(), by: by || source, text: 'Road call opened' }], status: 'gathering' }, item);
     rc = step(rc);
+    rc.notes = [{ id: `n0${rc.id}`, at: rc.at, by: source === 'app' ? `Driver app${rc.driver && rc.driver.name ? ` (${rc.driver.name})` : ''}` : by || 'Dispatch', who: source === 'app' ? 'driver' : 'dispatch', text: rc.details ? `Opened: ${rc.details}` : 'Breakdown opened.' }];
     await save(rc);
     if (help && help.raise) help.raise({ source: source === 'call' ? 'call' : source === 'text' ? 'text' : 'app', ref: `roadcall:${rc.id}`, role: 'driver', from: { name: rc.driver && rc.driver.name, phone: rc.driver && rc.driver.phone }, trip: rc.trip, need: `ROAD CALL ${rc.id} — ${rc.type || 'breakdown'}: ${rc.details || ''}`.slice(0, 400), urgent: true }).catch(() => {});
     // quiet: the caller sends its own email (a breakdown from the driver app)
@@ -294,6 +344,10 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
     });
     // option 1: "check with the driver" (console button / Jarvis chat)
     app.post('/truckmate/roadcalls/check', requireAuth, async (req, res) => { try { const b = req.body || {}; if (!b.trip) return res.status(400).json({ error: 'Which trip?' }); const rc = await checkDriver(String(b.trip), who(req), b.note || null); return rc ? res.json(rc) : res.status(503).json({ error: 'Road calls need the database.' }); } catch (e) { res.status(500).json({ error: e.message }); } });
+    app.post('/truckmate/roadcalls/:id/take', requireAuth, async (req, res) => { try { const rc = await take(req.params.id, who(req)); return rc ? res.json(rc) : res.status(404).json({ error: 'Breakdown not found.' }); } catch (e) { return res.status(500).json({ error: e.message }); } });
+    app.post('/truckmate/roadcalls/:id/note', requireAuth, async (req, res) => {
+      try { const r = await addNote(req.params.id, (req.body || {}).text, { by: who(req), who: 'dispatch' }); return r.error ? res.status(r.error === 'Breakdown not found.' ? 404 : 400).json({ error: r.error }) : res.json(r.rc); } catch (e) { return res.status(500).json({ error: e.message }); }
+    });
     app.post('/truckmate/roadcalls/:id/approve', requireAuth, async (req, res) => { try { const rc = await approve(req.params.id, who(req)); return rc ? res.json(rc) : res.status(404).json({ error: 'Road call not found' }); } catch (e) { res.status(500).json({ error: e.message }); } });
   }
   // the provider's updates (accepted, tech dispatched + ETA, on site, completed) — key in the URL or Basic auth
@@ -322,6 +376,6 @@ export function initRoadCalls(app, { requireAuth, db, getBoard = null, sendMail 
     app.post('/roadcall/provider/callback', cb);
     app.get('/roadcall/provider/callback', cb);
   }
-  LIVE = { open, update, approve, fromDriverText, photos, askText, list, checkDriver, tick };
+  LIVE = { open, update, approve, fromDriverText, photos, askText, list, checkDriver, tick, addNote, take };
   return LIVE;
 }
