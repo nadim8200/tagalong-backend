@@ -27,6 +27,12 @@ function deliveredAt(item, stop) {
   return ms.length ? Math.max(...ms) : null;
 }
 
+// TruckMate's due time on these bills is a leftover timestamp (seconds on it, e.g. 13:35:41), not an appointment someone set. Pure.
+function timestampOnly(item, stop) {
+  const bills = (item.freightBills || item.orders || (item.trip && item.trip.freightBills) || []).filter((b) => String(b.endZone || b.endZoneDescription || '') === stop.key);
+  return bills.length > 0 && bills.every((b) => /T\d{2}:\d{2}:(?!00)\d{2}/.test(String(b.deliverBy || '')));
+}
+
 // One stop judged against its appointment. Pure.
 export function judgeStop(stop, { now, etaMs = null, doneMs = null }) {
   const appt = stop.apptMs;
@@ -81,6 +87,7 @@ export function dailyLoads(items = [], { now = Date.now(), etas = {}, alerts = [
     if (!f || !f.trip) continue;
     const trip = String(f.trip);
     const eta = etas[trip] || {};
+    const passed = new Set((eta.passed || []).map((x) => x.key));   // GPS: stops behind the truck (watchtower passedCount)
     const stops = [];
     for (const st of f.stops || []) {
       if (st.apptMs == null) continue;
@@ -88,8 +95,9 @@ export function dailyLoads(items = [], { now = Date.now(), etas = {}, alerts = [
       const isToday = etDay(st.apptMs) === today;
       const missedBefore = !st.delivered && st.apptMs < now && etDay(st.apptMs) < today && now - st.apptMs < LOOKBACK;
       if (!(isToday || missedBefore)) continue;
+      if (!st.delivered && st.apptFrom && st.apptFrom.startsWith('truckmate') && timestampOnly(item, st)) continue;   // a leftover timestamp, not an appointment
       const e = (eta.stops || []).find((x) => x.key === st.key);
-      const j = judgeStop(st, { now, etaMs: e && e.etaMs != null ? e.etaMs : null, doneMs });
+      const j = !st.delivered && passed.has(st.key) ? { status: 'ontime', text: 'Truck already drove past this stop (GPS) — delivered, not closed in TruckMate yet' } : judgeStop(st, { now, etaMs: e && e.etaMs != null ? e.etaMs : null, doneMs });
       stops.push({ place: title(st.label), customers: st.customers || st.consignees || [], appt: clock(st.apptMs, st.tz), apptMs: st.apptMs, from: FROM[st.apptFrom] || 'TruckMate', ...j });
     }
     const issues = brokerIssues(trip, { now, alerts, emails, tasks, holds });

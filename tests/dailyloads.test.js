@@ -70,3 +70,12 @@ test('sends once at 8 AM ET to the daily list, straight through; not before 8 (N
   assert.equal(sent.length, 1); assert.deepEqual(sent[0].to, ['ljimenez@floridabeauty.us']);
   assert.ok(store);
 });
+
+test('false lates from TruckMate: a stop the truck already drove past (GPS) is not late; a leftover timestamp is not an appointment (Nov 25)', () => {
+  const passedLoad = { trip: { tripNumber: '627010', powerUnit: '2403', origZoneDesc: 'MIAMI, FL', destZoneDesc: 'NEWARK, NJ' }, freightBills: [bill('B8001', 'BALTIMORE, MD, 21201', '2026-11-24T17:00'), bill('B8002', 'NEWARK, NJ, 07102', '2026-11-25T14:00')], _ratecon: { broker: 'TQL', loadNumber: 'T-1' } };
+  const stamp = { trip: { tripNumber: '627011', powerUnit: '12', origZoneDesc: 'MIAMI, FL', destZoneDesc: 'ATLANTA, GA' }, freightBills: [bill('B8101', 'ATLANTA, GA, 30301', '2026-11-25T06:35:41')] };
+  const e = { 627010: { passed: [{ key: 'BALTIMORE, MD, 21201' }], stops: [{ key: 'NEWARK, NJ, 07102', etaMs: Date.parse('2026-11-25T18:30:00Z') }] } };
+  const d = dailyLoads([passedLoad, stamp], { now: NOW, etas: e });
+  assert.deepEqual(d.late, []);
+  assert.equal(d.counts.ontime, 1, 'Newark on time; Baltimore passed by GPS; the timestamp load not judged');
+});
