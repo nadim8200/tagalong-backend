@@ -14,19 +14,34 @@ const etas = {
 };
 const alerts = [{ trip: '627002', code: 'reefer-temp', severity: 'critical', title: 'Reefer too warm — 52.6°F' }, { trip: '627003', code: 'late-risk', severity: 'critical', title: 'dup' }, { trip: '627002', code: 'x', title: 'old', resolvedAt: 1 }];
 
-test('8 AM summary: loads with an appointment today, judged against it; LTL apart from broker; issues from open alerts (Nov 25)', () => {
-  const d = dailyLoads([ltl, brokerOnTime, brokerMissed, tomorrow], { now: NOW, etas, alerts });
-  assert.equal(d.total, 3, 'tomorrow\'s load is left out');
-  assert.deepEqual(d.ltl.map((l) => l.trip), ['627001']);
-  assert.deepEqual(d.broker.map((l) => [l.trip, l.status]), [['627003', 'late'], ['627002', 'issue']]);
-  const a = d.ltl[0];
-  assert.equal(a.status, 'late');   // Atlanta ETA 10:30 vs 9:00 appt
-  assert.match(a.stops[0].text, /Running late ~1h 30m/); assert.equal(a.stops[0].from, 'TruckMate');
-  assert.equal(a.stops[1].status, 'ontime');
-  assert.match(d.broker[0].stops[0].text, /Missed — appointment passed/);
-  assert.deepEqual(d.broker[1].issues.map((i) => i.title), ['Reefer too warm — 52.6°F']);
-  assert.equal(d.broker[1].load, 'CH-889');
-  assert.deepEqual(d.counts, { late: 2, issue: 1, ontime: 0, check: 0 });
+test('Luis\'s 8 AM summary: broker loads only — running late, or with an issue; flower / LTL loads left out (Nov 25)', () => {
+  const quiet = { ...brokerOnTime, trip: { ...brokerOnTime.trip, tripNumber: '627005' } };
+  const d = dailyLoads([ltl, brokerOnTime, brokerMissed, tomorrow, quiet], { now: NOW, etas: { ...etas, 627005: etas[627002] }, alerts });
+  assert.deepEqual(d.late.map((l) => l.trip), ['627003'], 'the LTL load running late is not in it');
+  assert.match(d.late[0].stops[0].text, /Missed — appointment passed/);
+  assert.deepEqual(d.issues.map((l) => l.trip), ['627002']);
+  assert.deepEqual(d.issues[0].issues.map((i) => i.title), ['Reefer too warm — 52.6°F']);
+  assert.equal(d.issues[0].load, 'CH-889');
+  assert.deepEqual(d.counts, { late: 1, issue: 1, ontime: 1, check: 0 });
+});
+
+test('broker issues from email: unanswered broker asks, problems dispatch reported, open to-dos (Nov 25)', () => {
+  const hr = 3600000;
+  const emails = [
+    { id: 'e1', trips: ['627006'], status: 'new', at: new Date(NOW - 3 * hr).toISOString(), from: { name: 'Ana (TQL)', address: 'ana@tql.com' }, summary: 'Asks for the ETA to Boston', reply: { needed: true } },
+    { id: 'e2', trips: ['627006'], status: 'new', at: new Date(NOW - 20 * 60000).toISOString(), from: { address: 'x@tql.com' }, summary: 'too new', reply: { needed: true } },
+    { id: 'e3', trips: ['627006'], status: 'handled', at: new Date(NOW - 2 * hr).toISOString(), from: { name: 'Gus', address: 'gus@floridabeauty.us' }, summary: 's', loadUpdate: { kind: 'breakdown', note: 'Truck 77 air leak, waiting on road service' } },
+    { id: 'e4', trips: ['627006'], status: 'replied', at: new Date(NOW - 5 * hr).toISOString(), from: { address: 'b@tql.com' }, summary: 'answered', reply: { needed: true } },
+    { id: 'e5', trips: ['627006'], status: 'new', auto: 'bounce', at: new Date(NOW - 5 * hr).toISOString(), from: { address: 'mailer@x.com' }, reply: { needed: true } },
+  ];
+  const tasks = { 627006: [{ title: 'Send the POD to the broker', from: 'Ana (TQL)', at: new Date(NOW - hr).toISOString(), done: null }, { title: 'done one', at: new Date(NOW - hr).toISOString(), done: '2026-11-25' }] };
+  const holds = { 627006: { kind: 'breakdown', emailId: 'e3', since: new Date(NOW - 2 * hr).toISOString(), note: 'dup' } };
+  const inTransit = { trip: { tripNumber: '627006', powerUnit: '77', origZoneDesc: 'MIAMI, FL', destZoneDesc: 'BOSTON, MA' }, freightBills: [bill('B7001', 'BOSTON, MA, 02101', '2026-11-27T10:00')], _ratecon: { broker: 'TQL', loadNumber: 'TQL-9' } };
+  const d = dailyLoads([inTransit], { now: NOW, emails, tasks, holds });
+  assert.equal(d.issues.length, 1, 'an issue counts even when the delivery is another day');
+  assert.deepEqual(d.issues[0].issues.map((i) => i.kind), ['reported', 'unanswered', 'todo']);
+  assert.match(d.issues[0].issues[0].title, /Reported by Gus .*air leak/);
+  assert.match(d.issues[0].issues[1].title, /Not answered — Ana \(TQL\) asked 3h ago: Asks for the ETA/);
 });
 
 test('a stop judged: delivered on time / late, no ETA → check', () => {
@@ -36,12 +51,12 @@ test('a stop judged: delivered on time / late, no ETA → check', () => {
   assert.match(judgeStop({ ...st, delivered: true }, { now: NOW, doneMs: NOW + 50 * 60000 }).text, /Delivered 50m late/);
 });
 
-test('the email: LTL and broker sections, counts in the subject; test banner', () => {
+test('the email: running late and issues sections, broker only, counts in the subject; test banner', () => {
   const d = dailyLoads([ltl, brokerOnTime, brokerMissed], { now: NOW, etas, alerts });
   const m = dailyLoadsEmail(d, { test: true, now: NOW });
-  assert.match(m.subject, /^TEST — Today's loads · Wednesday, Nov 25 · 2 late · 1 issues · 0 on time$/);
-  assert.match(m.html, /LTL loads · 1/); assert.match(m.html, /Broker loads · 2/); assert.match(m.html, /TEST · SAMPLE DATA/);
-  assert.match(m.text, /LATE · Trip 627001/);
+  assert.match(m.subject, /^TEST — Broker loads · Wednesday, Nov 25 · 1 running late · 1 with issues$/);
+  assert.match(m.html, /Running late · 1/); assert.match(m.html, /Issues · 1/); assert.doesNotMatch(m.html, /627001/); assert.match(m.html, /TEST · SAMPLE DATA/);
+  assert.match(m.text, /LATE · Trip 627003/);
 });
 
 test('sends once at 8 AM ET to the daily list, straight through; not before 8 (Nov 25)', async () => {
@@ -50,8 +65,8 @@ test('sends once at 8 AM ET to the daily list, straight through; not before 8 (N
   const db = { enabled: true, get: async (k, d) => (kv.has(k) ? kv.get(k) : d), set: async (k, v) => { kv.set(k, v); } };
   const sent = []; let t = NOW - 60 * 60000;
   const daily = initDailyLoads({ db, now: () => t, send: async (m) => { sent.push(m); } });
-  await daily.tick([ltl]); assert.equal(sent.length, 0, '7 AM: not yet');
-  t = NOW; await daily.tick([ltl]); await daily.tick([ltl]);
+  await daily.tick([brokerMissed]); assert.equal(sent.length, 0, '7 AM: not yet');
+  t = NOW; await daily.tick([brokerMissed]); await daily.tick([brokerMissed]);
   assert.equal(sent.length, 1); assert.deepEqual(sent[0].to, ['ljimenez@floridabeauty.us']);
   assert.ok(store);
 });

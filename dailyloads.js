@@ -1,11 +1,10 @@
 // ---------------------------------------------------------------
-// The 8 AM loads summary (Nov 25, Nadim): every load with a delivery appointment today — late, issues, on time — checked
-// against the appointment we have (TruckMate's, else the rate con's, else the trip sheet's or the time dispatch committed),
-// LTL loads apart from broker loads. Sent to Luis Jimenez every morning at 8 AM ET, straight through (not held by training).
+// The 8 AM broker-loads summary (Nov 25, Nadim): BROKER loads only (Luis doesn't want the flower / LTL loads) — the ones
+// running late against the delivery appointment (TruckMate's, else the rate con's) and the ones with an issue: broker emails
+// still waiting on us, problems dispatch reported, open to-dos from the load's emails, Priority alerts. Sent to Luis Jimenez every morning at 8 AM ET, straight through (not held by training).
 // Recipients are the "daily_loads" list (Employees → Alert emails).
 // ---------------------------------------------------------------
 import { tripFacts, brokerLoad, localToUtcMs } from './watchtower.js';
-import { hubOf } from './usualarrival.js';
 import { jarvisEmail, esc, C, section, metrics } from './jarvismail.js';
 
 const MIN = 60000;
@@ -43,42 +42,67 @@ export function judgeStop(stop, { now, etaMs = null, doneMs = null }) {
 }
 
 const RANK = { late: 3, issue: 2, check: 1, ontime: 0 };
-// Today's loads: every load with a delivery appointment today (or one missed before today and still not delivered). Pure.
-export function dailyLoads(items = [], { now = Date.now(), etas = {}, alerts = [] } = {}) {
+const HOUR = 60 * MIN;
+const WAIT_MIN = 60;   // a broker email unanswered for an hour+ is an issue
+const LOOKBACK = 3 * 24 * HOUR;
+const PROBLEM = /^(breakdown|delay|pickup_delayed)$/;
+export const isStaff = (address) => /@floridabeauty\.us$/i.test(String(address || '').trim());
+const who = (f) => (f && (f.name || f.address)) || 'someone';
+const ago = (ms) => hm(ms / MIN);
+
+// Everything open on one broker load: Priority alerts, broker emails still waiting on us, problems staff reported by email,
+// open to-dos from the load's emails. Pure.
+export function brokerIssues(trip, { now = Date.now(), alerts = [], emails = [], tasks = {}, holds = {} } = {}) {
+  const out = []; const seenEmail = new Set();
+  for (const a of alerts) if (a && !a.resolvedAt && String(a.trip) === trip && !SKIP_ALERTS.test(String(a.code || ''))) out.push({ kind: 'alert', title: a.title, critical: a.severity === 'critical' });
+  for (const e of emails) {
+    if (!e || e.auto || !(e.trips || []).map(String).includes(trip)) continue;
+    const at = Date.parse(e.at); if (!(now - at < LOOKBACK)) continue;
+    const staff = isStaff(e.from && e.from.address);
+    const what = e.summary || e.subject || '';
+    const u = e.loadUpdate || {};
+    if (staff && PROBLEM.test(String(u.kind || ''))) { seenEmail.add(e.id); out.push({ kind: 'reported', title: `Reported by ${who(e.from)} (${ago(now - at)} ago): ${u.note || what}`, critical: u.kind === 'breakdown' }); continue; }
+    if (!staff && e.status === 'new' && ((e.reply && e.reply.needed) || e.help) && now - at > WAIT_MIN * MIN) { seenEmail.add(e.id); out.push({ kind: 'unanswered', title: `Not answered — ${who(e.from)} asked ${ago(now - at)} ago: ${what}`, critical: !!(e.help && e.help.urgent) }); }
+  }
+  const h = holds[trip];
+  if (h && PROBLEM.test(String(h.kind || '')) && !seenEmail.has(h.emailId) && now - Date.parse(h.since) < LOOKBACK) out.push({ kind: 'reported', title: `Reported by ${h.from || 'email'}: ${h.note || h.subject || h.kind}`, critical: h.kind === 'breakdown' });
+  for (const t of tasks[trip] || []) if (t && !t.done && !(now - Date.parse(t.at) > LOOKBACK)) out.push({ kind: 'todo', title: `To do${t.from ? ` (from ${t.from})` : ''}: ${t.title}`, critical: t.urgency === 'urgent' });
+  return out.sort((x, y) => (y.critical ? 1 : 0) - (x.critical ? 1 : 0));
+}
+
+// Luis's summary (Nov 25): BROKER loads only — the ones running late (appointment today, or missed and still not delivered)
+// and the ones with an issue (any day). Flower / LTL loads are left out. Pure.
+export function dailyLoads(items = [], { now = Date.now(), etas = {}, alerts = [], emails = [], tasks = {}, holds = {} } = {}) {
   const today = etDay(now);
-  const openAlerts = new Map();
-  for (const a of alerts) if (a && !a.resolvedAt && a.trip && !SKIP_ALERTS.test(String(a.code || ''))) (openAlerts.get(String(a.trip)) || openAlerts.set(String(a.trip), []).get(String(a.trip))).push(a);
-  const loads = [];
+  const loads = []; let ontime = 0; let check = 0;
   for (const item of items) {
+    if (!brokerLoad(item)) continue;
     let f; try { f = tripFacts(item, now); } catch { continue; }
     if (!f || !f.trip) continue;
-    const eta = etas[f.trip] || {};
+    const trip = String(f.trip);
+    const eta = etas[trip] || {};
     const stops = [];
     for (const st of f.stops || []) {
       if (st.apptMs == null) continue;
       const doneMs = st.delivered ? deliveredAt(item, st) : null;
       const isToday = etDay(st.apptMs) === today;
-      const missedBefore = !st.delivered && st.apptMs < now && etDay(st.apptMs) < today && now - st.apptMs < 3 * 24 * 60 * MIN;
-      const deliveredToday = st.delivered && doneMs != null && etDay(doneMs) === today && isToday;
-      if (!(isToday || missedBefore) || (st.delivered && !deliveredToday && !isToday)) continue;
+      const missedBefore = !st.delivered && st.apptMs < now && etDay(st.apptMs) < today && now - st.apptMs < LOOKBACK;
+      if (!(isToday || missedBefore)) continue;
       const e = (eta.stops || []).find((x) => x.key === st.key);
       const j = judgeStop(st, { now, etaMs: e && e.etaMs != null ? e.etaMs : null, doneMs });
       stops.push({ place: title(st.label), customers: st.customers || st.consignees || [], appt: clock(st.apptMs, st.tz), apptMs: st.apptMs, from: FROM[st.apptFrom] || 'TruckMate', ...j });
     }
-    if (!stops.length) continue;
-    const issues = (openAlerts.get(f.trip) || []).sort((a, b) => (a.severity === 'critical' ? 0 : 1) - (b.severity === 'critical' ? 0 : 1)).map((a) => ({ title: a.title, critical: a.severity === 'critical' }));
-    let status = stops.reduce((w, s) => (RANK[s.status] > RANK[w] ? s.status : w), 'ontime');
-    if (status !== 'late' && issues.length) status = 'issue';
-    const broker = brokerLoad(item);
-    let hub = null; try { hub = broker ? null : hubOf(item); } catch { hub = null; }
+    const issues = brokerIssues(trip, { now, alerts, emails, tasks, holds });
+    const worst = stops.reduce((w, s) => (RANK[s.status] > RANK[w] ? s.status : w), 'ontime');
+    if (worst !== 'late' && !issues.length) { if (stops.length) { if (worst === 'check') check += 1; else ontime += 1; } continue; }
     const bills = (item.freightBills || item.orders || []).map((b) => b.billNumber).filter(Boolean);
-    loads.push({ trip: f.trip, truck: f.unit, trailer: f.trailer, driver: f.driver, broker, hub, load: broker ? ((item._ratecon && (item._ratecon.loadNumber || item._ratecon.broker)) || bills[0] || null) : null, brokerName: broker && item._ratecon ? item._ratecon.broker || null : null, lane: `${title(f.origin)} → ${title(f.dest)}`, status, stops: stops.sort((a, b) => a.apptMs - b.apptMs), issues });
+    const rc = item._ratecon || {};
+    loads.push({ trip, truck: f.unit, trailer: f.trailer, driver: f.driver, broker: true, load: rc.loadNumber || bills[0] || null, brokerName: rc.broker || null,
+      lane: `${title(f.origin)} → ${title(f.dest)}`, status: worst === 'late' ? 'late' : 'issue', stops: (worst === 'late' ? stops.filter((s) => s.status === 'late') : stops).sort((a, b) => a.apptMs - b.apptMs), issues });
   }
-  const order = (a, b) => RANK[b.status] - RANK[a.status] || a.stops[0].apptMs - b.stops[0].apptMs;
-  const ltl = loads.filter((l) => !l.broker).sort(order); const broker = loads.filter((l) => l.broker).sort(order);
-  const count = (list, s) => list.filter((l) => l.status === s).length;
-  const counts = Object.fromEntries(['late', 'issue', 'ontime', 'check'].map((s) => [s, count(loads, s)]));
-  return { day: today, ltl, broker, counts, total: loads.length };
+  const late = loads.filter((l) => l.status === 'late').sort((a, b) => (b.stops[0].lateMin || 0) - (a.stops[0].lateMin || 0));
+  const withIssues = loads.filter((l) => l.status === 'issue').sort((a, b) => b.issues.filter((i) => i.critical).length - a.issues.filter((i) => i.critical).length);
+  return { day: today, late, issues: withIssues, counts: { late: late.length, issue: withIssues.length, ontime, check }, total: loads.length };
 }
 
 const PILL = { late: ['LATE', '#b42318', '#fdecea'], issue: ['ISSUE', '#9a6700', '#fff6e0'], check: ['CHECK', '#475467', '#eef2f6'], ontime: ['ON TIME', '#067647', '#e7f6ec'] };
@@ -93,24 +117,23 @@ function loadCard(l) {
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="font-family:${FONT};font-size:14px;color:${C.ink}"><b>${head}</b></td><td align="right" valign="top" style="padding-left:8px">${pill(l.status)}</td></tr>
 <tr><td colspan="2" style="padding-top:3px;font-family:${FONT};font-size:12px;color:${C.muted}">${sub}</td></tr>${stops}${issues}</table></td></tr></table></td></tr>`;
 }
-function group(name, list) {
-  if (!list.length) return section(name, `<p style="margin:6px 0 0;font-family:${FONT};font-size:13px;color:${C.muted}">No ${name.toLowerCase()} with an appointment today.</p>`);
-  const c = (s) => list.filter((l) => l.status === s).length;
-  const line = [['late', 'late'], ['issue', 'with issues'], ['ontime', 'on time'], ['check', 'to check']].filter(([s]) => c(s)).map(([s, w]) => `${c(s)} ${w}`).join(' · ');
-  return section(`${name} · ${list.length}`, `<p style="margin:4px 0 10px;font-family:${FONT};font-size:13px;color:${C.muted}">${esc(line)}</p><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${list.map(loadCard).join('')}</table>`);
+function group(name, list, empty) {
+  if (!list.length) return section(name, `<p style="margin:6px 0 0;font-family:${FONT};font-size:13px;color:${C.muted}">${esc(empty)}</p>`);
+  return section(`${name} · ${list.length}`, `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:8px">${list.map(loadCard).join('')}</table>`);
 }
 
 // The email. Pure.
 export function dailyLoadsEmail(d, { test = false, now = Date.now() } = {}) {
   const dayText = new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' });
   const k = d.counts;
-  const subject = `${test ? 'TEST — ' : ''}Today's loads · ${dayText} · ${k.late} late · ${k.issue} issues · ${k.ontime} on time`;
-  const body = `${metrics([['LATE', String(k.late), k.late ? '#b42318' : null], ['ISSUES', String(k.issue), k.issue ? '#9a6700' : null], ['ON TIME', String(k.ontime), '#067647'], ['NO ETA', String(k.check), null]])}
-${group('LTL loads', d.ltl)}${group('Broker loads', d.broker)}`;
-  const html = jarvisEmail({ test, preheader: `${k.late} late, ${k.issue} with issues, ${k.ontime} on time`, eyebrow: `Loads summary · 8 AM`, tone: k.late ? 'red' : 'blue', title: `Today's loads`, subtitle: dayText,
-    meta: [`${d.total} load${d.total === 1 ? '' : 's'} with a delivery appointment today`, 'Appointments: TruckMate, else rate con, else trip sheet'],
-    lead: d.total ? `Late = delivered or expected more than ${GRACE_MIN} min after the appointment, or the appointment passed and it isn't delivered. Issues = an open Priority alert on the load (stopped, hours, reefer…).` : 'No load has a delivery appointment today.', body });
-  const text = [subject, '', ...[['LTL loads', d.ltl], ['Broker loads', d.broker]].flatMap(([n, list]) => [n.toUpperCase(), ...(list.length ? list.flatMap((l) => [`- ${PILL[l.status][0]} · Trip ${l.trip} · Truck ${l.truck || '—'} · ${title(l.driver || '')}`, ...l.stops.map((s) => `    ${s.place} · appt ${s.appt} (${s.from}) · ${s.text}`), ...l.issues.map((i) => `    ! ${i.title}`)]) : ['  none']), ''])].join('\n');
+  const subject = `${test ? 'TEST — ' : ''}Broker loads · ${dayText} · ${k.late} running late · ${k.issue} with issues`;
+  const body = `${metrics([['RUNNING LATE', String(k.late), k.late ? '#b42318' : null], ['ISSUES', String(k.issue), k.issue ? '#9a6700' : null], ['ON TIME TODAY', String(k.ontime), '#067647']])}
+${group('Running late', d.late, 'No broker load is running late today.')}${group('Issues', d.issues, 'No open issues on broker loads.')}`;
+  const html = jarvisEmail({ test, preheader: `${k.late} broker load${k.late === 1 ? '' : 's'} running late, ${k.issue} with issues`, eyebrow: 'Broker loads · 8 AM', tone: k.late ? 'red' : 'blue', title: 'Broker loads', subtitle: dayText,
+    meta: ['Broker loads only — flower / LTL loads are not in this email', 'Appointments: TruckMate, else the rate con'],
+    lead: `Running late = delivered or expected more than ${GRACE_MIN} min after the delivery appointment, or the appointment passed and it isn't delivered. Issues = broker emails still waiting on us, problems dispatch reported, open to-dos from the load's emails, and Priority alerts.`, body });
+  const card = (l) => [`- ${PILL[l.status][0]} · Trip ${l.trip} · ${[l.brokerName, l.load ? `Load ${l.load}` : null].filter(Boolean).join(' ')} · Truck ${l.truck || '—'} · ${title(l.driver || '')}`, ...l.stops.map((s) => `    ${s.place} · appt ${s.appt} (${s.from}) · ${s.text}`), ...l.issues.map((i) => `    ! ${i.title}`)];
+  const text = [subject, '', 'RUNNING LATE', ...(d.late.length ? d.late.flatMap(card) : ['  none']), '', 'ISSUES', ...(d.issues.length ? d.issues.flatMap(card) : ['  none'])].join('\n');
   return { subject, html, text };
 }
 
@@ -125,8 +148,8 @@ export function initDailyLoads({ app = null, requireAuth = null, db, send = null
     return [...new Set(list.map((x) => String(x).trim().toLowerCase()).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x)))];
   }
   async function build(items) {
-    const st = (await db.get(`taWatch:${site}`, {})) || {};
-    return dailyLoads(items, { now: now(), etas: st.etas || {}, alerts: Object.values(st.alerts || {}) });
+    const [st, mail, tasks, holds] = await Promise.all([db.get(`taWatch:${site}`, {}), db.get(`taEmails:${site}`, { list: [] }), db.get(`taLoadTasks:${site}`, {}), db.get(`taLoadHold:${site}`, {})]);
+    return dailyLoads(items, { now: now(), etas: (st || {}).etas || {}, alerts: Object.values((st || {}).alerts || {}), emails: (mail && mail.list) || [], tasks: tasks || {}, holds: holds || {} });
   }
   async function tick(items) {
     if (!enabled || !send) return;
@@ -148,7 +171,7 @@ export function initDailyLoads({ app = null, requireAuth = null, db, send = null
         const to = [String((req.body || {}).to || 'ntellez@floridabeauty.us').trim().toLowerCase()].filter((x) => /@floridabeauty\.us$/.test(x));
         if (!to.length) return res.status(400).json({ error: 'Test emails go to a @floridabeauty.us address.' });
         await send({ to, subject: m.subject, html: m.html, text: m.text });
-        res.json({ ok: true, to, counts: d.counts, total: d.total, ltl: d.ltl.length, broker: d.broker.length });
+        res.json({ ok: true, to, counts: d.counts, total: d.total });
       } catch (e) { res.status(500).json({ error: e.message }); }
     });
   }
