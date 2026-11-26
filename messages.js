@@ -18,6 +18,7 @@ import { randomBytes } from 'node:crypto';
 import { sentByHand } from './training.js';
 import { massRecipients } from './masstext.js';
 import { profanity } from './profanity.js';
+import { makeToken, readToken } from './breakdownreport.js';
 
 const SITE = 'florida-beauty';
 const THREADS = `taMsgThreads:${SITE}`;
@@ -80,6 +81,15 @@ export const unreadOf = (thread, readAt) => (thread.inbound || []).filter((at) =
 export const samePeople = (a, b) => { const k = (l) => l.map((m) => last10(m.phone) || String(m.name || '').toLowerCase()).filter(Boolean).sort().join('|'); return k(a) === k(b); };
 
 export function initMessages(app, { requireAuth, db, getBoard = null, activity = null, ringcentral = null, driverLinks = null, comms = null, staff = null, drivers = null, docs = null, now = () => Date.now() }) {
+  const fileSecret = globalThis.process.env.JWT_SECRET || 'dev-secret';
+  const fileBase = String(globalThis.process.env.PUBLIC_API_URL || 'https://tagalong-backend-fdzx.onrender.com').replace(/\/$/, '');
+  const fileLink = (docId) => `${fileBase}/m/f/${makeToken({ d: String(docId) }, fileSecret, now(), 'message-file', 30)}`;
+  // a picture / PDF sent by text opens from its link (Nov 26)
+  if (app) app.get('/m/f/:token', async (req, res) => {
+    const p = readToken(req.params.token, fileSecret, now(), 'message-file');
+    if (!p || !p.d || !docs || !docs.readDocs) return res.status(404).send('This link has expired or is not valid.');
+    try { const [f] = await docs.readDocs({ site: SITE, ids: [p.d] }); if (!f) return res.status(404).send('Not found.'); res.setHeader('Content-Type', f.mediaType); res.setHeader('Cache-Control', 'private, max-age=3600'); return res.end(f.data); } catch { return res.status(500).send('Could not open it.'); }
+  });
   const enabled = !!(db && db.enabled);
   const iso = () => new Date(now()).toISOString();
   const board = async () => { try { return getBoard ? ((await getBoard(SITE)) || {}).trips || [] : []; } catch { return []; } };
@@ -385,7 +395,6 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
       const can = await channels(t, loads, live, consent || {});
       const via = b.via === 'sms' ? 'sms' : 'app';
       if (!can[via].ok) return res.status(409).json({ error: can[via].why });
-      if (upload.length && via === 'sms') return res.status(409).json({ error: 'Pictures and files go through the app for now (picture texts aren\'t set up yet). Switch to App.' });
       if (upload.length && !(docs && docs.storeDocs && docs.enabled !== false)) return res.status(503).json({ error: 'File storage isn\'t set up on the server.' });
       const by = await fullName(req.user);
       try {
@@ -393,6 +402,8 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
         // the attachments are stored first (PDF or pictures, 14 MB each); the message carries their ids
         const stored = upload.length ? await docs.storeDocs({ site: SITE, kind: 'message', trip: null, files: upload.map((f) => ({ filename: String(f.filename || '').slice(0, 200), mediaType: String(f.mediaType || ''), dataBase64: String(f.dataBase64 || '') })), by }) : [];
         const files = stored.map((d, i) => ({ id: String(d.id), name: String((upload[d.fileIndex != null ? d.fileIndex : i] || {}).filename || '').slice(0, 120) || null, type: String((upload[d.fileIndex != null ? d.fileIndex : i] || {}).mediaType || '') || null }));
+        // a picture or PDF by text (Nov 26): picture texts (MMS) aren't set up, so the text carries a link that opens it — no login, 30 days
+        const smsText = via === 'sms' && files.length ? [text, ...files.map((f) => `${/^image\//.test(f.type || '') ? '📷 Picture' : '📄 File'}: ${fileLink(f.id)}`)].filter(Boolean).join('\n') : text;
         if (via === 'app') {
           const k = `${can.app.trip}|${text || `📎 ${files.length === 1 ? 'A file' : `${files.length} files`} from dispatch`}`; appSending.set(k, now());
           // the load's drivers' cells, so training mode can let approved drivers' messages through
@@ -411,7 +422,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
           const l = loads.find((x) => x.trip === t.trip);
           const res2 = [];
           for (const mbr of t.members || []) {
-            try { let r = null; for (const part of smsParts(text)) r = await ringcentral.sendSms('__shared', { to: mbr.phone, text: part, by }); res2.push(r && r.id === 'training' ? 'held' : 'sent'); if (comms && comms.log) await comms.log(SITE, l ? l.trip : null, { type: 'text', kind: 'custom', to: mbr.phone, text, by, group: t.id }).catch(() => {}); } // eslint-disable-line no-await-in-loop
+            try { let r = null; for (const part of smsParts(smsText)) r = await ringcentral.sendSms('__shared', { to: mbr.phone, text: part, by }); res2.push(r && r.id === 'training' ? 'held' : 'sent'); if (comms && comms.log) await comms.log(SITE, l ? l.trip : null, { type: 'text', kind: 'custom', to: mbr.phone, text, by, group: t.id }).catch(() => {}); } // eslint-disable-line no-await-in-loop
             catch (e) { res2.push(`failed for ${mbr.name || mbr.phone}: ${e.message}`); }
           }
           await noteLastText((t.members || []).filter((mbr, i) => !/^failed/.test(res2[i] || '')).map((mbr) => mbr.phone), t.id);
@@ -420,7 +431,7 @@ export function initMessages(app, { requireAuth, db, getBoard = null, activity =
           status = res2.every((x) => x === 'held') ? 'held' : 'sent';
           note = `texted each person (${res2.length - bad.length} of ${res2.length})${bad.length ? ` · ${bad.join(' · ')}` : ''}`;
         } else {
-          let r = null; for (const part of smsParts(text)) r = await ringcentral.sendSms('__shared', { to: t.phone, text: part, by }); // eslint-disable-line no-await-in-loop
+          let r = null; for (const part of smsParts(smsText)) r = await ringcentral.sendSms('__shared', { to: t.phone, text: part, by }); // eslint-disable-line no-await-in-loop
           status = r && r.id === 'training' ? 'held' : 'sent';
           note = r && r.status ? String(r.status) : null;
           if (comms && comms.log) { const l = loads.find((x) => x.drivers.some((d) => d.phone === t.phone)); await comms.log(SITE, l ? l.trip : null, { type: 'text', kind: 'custom', to: t.phone, text, by, inboxId: clientId }).catch(() => {}); }

@@ -140,7 +140,7 @@ test('a truck search offers its team drivers as one group; the same group is reu
   assert.equal(b.body.existing, true); assert.equal(a.body.thread.id, b.body.thread.id);
 });
 
-test('pictures and PDFs: stored, sent with the app message, shown on the thread; never by text; a photo-only message is fine', async () => {
+test('pictures and PDFs: stored, sent with the app message, shown on the thread; by text as links; a photo-only message is fine', async () => {
   const stored = [];
   const docs = { storeDocs: async ({ kind, files }) => { stored.push([kind, files.map((f) => f.filename)]); return files.map((f, i) => ({ id: 500 + i, fileIndex: i })); } };
   const h = setup({ docs });
@@ -154,7 +154,11 @@ test('pictures and PDFs: stored, sent with the app message, shown on the thread;
   assert.equal(list[0].last.text, '📎 2 attachments');
   const live = setup({ live: true, docs });
   const sms = await call(live.app, 'POST /truckmate/messages/send', GEO, { body: { phone: '7865551234', text: 'hi', files, via: 'sms', clientId: 'f-2' } });
-  assert.equal(sms.code, 409); assert.match(sms.body.error, /through the app/);
+  // Nov 26: by text too — the text carries a link to each picture / PDF (picture texts aren't set up), and the link opens it
+  assert.equal(sms.code, 200);
+  const smsSent = live.sent.find((x) => x[0] === 'sms');
+  assert.match(smsSent[2], /^hi\n📷 Picture: https:\/\/tagalong-backend-fdzx\.onrender\.com\/m\/f\/\S+\n📄 File: https:\/\/\S+$/);
+  assert.equal(sms.body.message.text, 'hi'); assert.equal(sms.body.message.files.length, 2);
   // a driver's photo from the app lands on the thread with its file
   await h.inbox.fromApp('626200', { type: 'reply', from: 'driver app', by: 'Ana Diaz (app)', text: 'Seal [1 photo]', docIds: ['777'], extId: 'p1' });
   const th = (await call(h.app, 'GET /truckmate/messages/thread/:id', GEO, { params: { id: 'p:7865550199' } })).body.messages;

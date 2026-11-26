@@ -297,7 +297,7 @@ export function initRoadCalls(app, { sendThread = undefined, requireAuth, db, ge
   }
   // The desk's quick update (Nov 26): an internal note or an emailed one, a status, a follow-up. The same clientId twice → the same
   // note (a retry never duplicates it); an email already sent is never sent again.
-  async function deskUpdate(id, { clientId, text, email = false, status = null, followUp = null, kind = null, photos = [] }, by) {
+  async function deskUpdate(id, { clientId, text, email = false, status = null, followUp = null, kind = null, photos = [], completed = false, done = '' }, by) {
     const at = new Date(now()).toISOString();
     const all0 = await list(); const cur = all0.find((x) => x.id === id);
     if (!cur) return { error: 'Breakdown not found.', code: 404 };
@@ -321,7 +321,10 @@ export function initRoadCalls(app, { sendThread = undefined, requireAuth, db, ge
         ...(status && !lifecycle && !DESK_TO_STATUS[status] ? { deskStatus: status, deskStatusAt: at } : {}), ...(!x.owner ? { owner: { name: by, at } } : {}) })), []);
       if (lifecycle) {
         const rc2 = await update(id, { status: lifecycle }, by);
+        // ✓ Breakdown completed (Nov 26): its own "completed — repaired" email in the thread, in place of the plain status email
+        const finish = completed && lifecycle === 'completed' ? takeStatus(id) : null;
         if (lifecycle === 'completed') await closed(rc2, by);
+        if (completed && lifecycle === 'completed') await completedMail(id, { by, done, noteId: note.id, st: finish });
       } else {
         const after = (await list()).find((x) => x.id === id);
         markStatus(id, deskOf(cur).label, deskOf(after).label, by);
@@ -332,6 +335,19 @@ export function initRoadCalls(app, { sendThread = undefined, requireAuth, db, ge
     if (note.kind === 'email' && (!note.mail || note.mail.state !== 'sent')) await sendNote(id, note.id, by);
     for (const fn of noters) { try { await fn((await list()).find((x) => x.id === id), note); } catch (e) { console.warn('[roadcall] on note:', e.message); } } // eslint-disable-line no-await-in-loop
     return { rc: (await list()).find((x) => x.id === id) };
+  }
+  async function completedMail(id, { by, done, noteId, st }) {
+    if (st) await statusNote(id, st);
+    const rc = (await list()).find((x) => x.id === id); if (!rc) return;
+    const what = String(done || '').trim().slice(0, 300);
+    const facts = [rc.truck ? `Truck ${rc.truck}` : null, rc.trailer ? `trailer ${rc.trailer}` : null, rc.trip ? `trip ${rc.trip}` : null].filter(Boolean).join(' · ');
+    const place = (rc.location && (rc.location.address || rc.location.text)) || null;
+    let ok = false;
+    try {
+      ok = !!(await mailThread(rc, 'Breakdown completed — repaired', `${what ? `<p style="white-space:pre-line;margin:0 0 10px;padding:10px 12px;background:#E5F4EC;border-left:3px solid #1F7A4D">${esc(what)}</p>` : ''}<p style="margin:0">${esc(facts)}${place ? `<br>${esc(place)}` : ''}</p><p style="margin:10px 0 0">Completed by ${esc(by)}${rc.vendor && rc.vendor.name ? ` · vendor ${esc(rc.vendor.name)}` : ''}</p>`,
+        `${what ? `${what}\n\n` : ''}${facts}${place ? `\n${place}` : ''}\nCompleted by ${by}`));
+    } catch (e) { console.warn('[roadcall] completed email:', e.message); }
+    await db.update(KEY, (all) => (Array.isArray(all) ? all : []).map((x) => (x.id !== id ? x : { ...x, notes: (x.notes || []).map((n) => (n.id === noteId ? { ...n, kind: 'email', mail: { state: ok ? 'sent' : 'failed', to: null } } : n)) })), []);
   }
   // email one saved note (and retry a failed one): never twice
   async function sendNote(id, noteId, by) {
@@ -561,7 +577,7 @@ export function initRoadCalls(app, { sendThread = undefined, requireAuth, db, ge
     // the desk: preview the email (exact recipients, subject, body), save an update (internal or emailed), retry a failed email
     app.post('/truckmate/roadcalls/:id/preview', requireAuth, async (req, res) => { try { const p = await preview(req.params.id, req.body || {}, who(req)); return p ? res.json(p) : res.status(404).json({ error: 'Breakdown not found.' }); } catch (e) { return res.status(500).json({ error: e.message }); } });
     app.post('/truckmate/roadcalls/:id/update', requireAuth, async (req, res) => {
-      try { const b = req.body || {}; const r = await deskUpdate(req.params.id, { clientId: b.clientId, text: b.text, email: !!b.email, status: b.status || null, followUp: b.followUp || null, kind: b.kind === 'vendor' ? 'vendor' : null, photos: b.photos || [] }, who(req)); return r.error ? res.status(r.code || 400).json({ error: r.error }) : res.json(view(r.rc)); } catch (e) { return res.status(500).json({ error: e.message }); }
+      try { const b = req.body || {}; const r = await deskUpdate(req.params.id, { clientId: b.clientId, text: b.text, email: !!b.email, status: b.status || null, followUp: b.followUp || null, kind: b.kind === 'vendor' ? 'vendor' : null, photos: b.photos || [], completed: !!b.completed, done: b.done || '' }, who(req)); return r.error ? res.status(r.code || 400).json({ error: r.error }) : res.json(view(r.rc)); } catch (e) { return res.status(500).json({ error: e.message }); }
     });
     app.post('/truckmate/roadcalls/:id/notes/:noteId/retry', requireAuth, async (req, res) => { try { const r = await sendNote(req.params.id, req.params.noteId, who(req)); const rc = (await list()).find((x) => x.id === req.params.id); return r.error && !rc ? res.status(404).json({ error: r.error }) : res.json(view(rc)); } catch (e) { return res.status(500).json({ error: e.message }); } });
     app.post('/truckmate/roadcalls/:id/vendor', requireAuth, async (req, res) => { try { const r = await setVendor(req.params.id, req.body || {}, who(req)); return r.error ? res.status(r.code || 400).json({ error: r.error }) : res.json(view(r.rc)); } catch (e) { return res.status(500).json({ error: e.message }); } });

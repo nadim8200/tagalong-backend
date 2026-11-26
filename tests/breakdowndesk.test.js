@@ -136,3 +136,17 @@ test('driver steps (Nov 26): tech arrived → Repairing, one email with the stat
   const { nextAction } = await import('../roadcall.js');
   assert.match(nextAction(p.rc), /driver says the tech left — confirm it is fixed/);
 });
+
+test('✓ Breakdown completed (Nov 26): one "Breakdown completed — repaired" email in the thread with what was done and who; no second status email', async () => {
+  const { rcs, call, sent } = setup();
+  const rc = await rcs.open({ trip: '9', truck: '90', source: 'console', by: 'x', type: 'tire', details: 'flat', location: { address: 'I-95 N, Fort Pierce, FL' }, safe: true, quiet: true });
+  await call('POST /truckmate/roadcalls/:id/update', { params: { id: rc.id }, body: { clientId: 'z1', text: 'Breakdown completed: Tire replaced, truck rolling', status: 'Resolved', completed: true, done: 'Tire replaced, truck rolling' } });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(sent.length, 1, 'one email');
+  assert.match(sent[0].html, /Breakdown completed — repaired/); assert.match(sent[0].html, /Tire replaced, truck rolling/); assert.match(sent[0].html, /Completed by Nadim Tellez/);
+  assert.match(sent[0].html, /I-95 N, Fort Pierce, FL/);
+  const after = (await rcs.list()).find((x) => x.id === rc.id);
+  assert.equal(after.status, 'completed');
+  assert.ok(after.notes.some((n) => n.kind === 'status' && /→ Resolved/.test(n.text)));
+  assert.equal(after.notes.find((n) => n.clientId === 'z1').mail.state, 'sent');
+});
