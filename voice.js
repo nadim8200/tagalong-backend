@@ -1826,9 +1826,16 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
       agent = await retell(`/update-chat-agent/${cfg.smsAgentId}`, { method: 'PATCH', body: agentBody });
     }
     const agentId = agent.agent_id || cfg.smsAgentId;
-    try { await retell(`/publish-chat-agent/${agentId}`, { body: {} }); } catch (e) { console.warn('[voice] publish text Jarvis:', e.message); }
-    await retell(`/update-phone-number/${encodeURIComponent(e164(env.RETELL_FROM_NUMBER))}`, { method: 'PATCH', body: { inbound_sms_agents: [{ agent_id: agentId, agent_version: 'latest_published', weight: 1 }], inbound_sms_webhook_url: `${base}/retell/sms-inbound` } });
-    return { smsAgentId: agentId, smsLlmId: llm.llm_id || cfg.smsLlmId, smsAt: new Date().toISOString(), smsError: null };
+    const llmId = llm.llm_id || cfg.smsLlmId;
+    // keep the ids right away: a later step failing must not make the next republish create another agent
+    await db.update(cfgKey, (c) => ({ ...(c || {}), smsAgentId: agentId, smsLlmId: llmId }), {});
+    let version = agent.version;
+    try { const pub = await retell(`/publish-chat-agent/${agentId}`, { body: {} }); if (pub && pub.version != null) version = pub.version; } catch (e) { console.warn('[voice] publish text Jarvis:', e.message); }
+    try { const got = await retell(`/get-chat-agent/${agentId}`, { method: 'GET' }); if (got && got.version != null && got.is_published !== false) version = got.version; } catch { /* keep what we have */ }
+    try {
+      await retell(`/update-phone-number/${encodeURIComponent(e164(env.RETELL_FROM_NUMBER))}`, { method: 'PATCH', body: { inbound_sms_agents: [{ agent_id: agentId, ...(version != null ? { agent_version: version } : {}), weight: 1 }], inbound_sms_webhook_url: `${base}/retell/sms-inbound` } });
+    } catch (e) { return { smsAgentId: agentId, smsLlmId: llmId, smsVersion: version ?? null, smsAt: new Date().toISOString(), smsError: `attach to the number: ${e.message}` }; }
+    return { smsAgentId: agentId, smsLlmId: llmId, smsVersion: version ?? null, smsAt: new Date().toISOString(), smsError: null };
   }
   async function pushJarvis(by) {
     const base = backend();

@@ -26,7 +26,8 @@ function setup(extraEnv = {}, opts = {}) {
       : url.includes('/get-agent/') ? { agent_id: 'agent_1', version: 4, is_published: true, response_engine: { type: 'retell-llm', llm_id: 'llm_1', version: 4 } }
       : url.includes('/create-agent-version/') ? { agent_id: 'agent_1', version: 5, is_published: false, response_engine: { type: 'retell-llm', llm_id: 'llm_1', version: 5 } }
       : /\/update-agent\//.test(url) ? { agent_id: 'agent_1', version: drafted ? 5 : 4 }
-      : url.includes('/create-chat-agent') ? { agent_id: 'chat_1' }
+      : url.includes('/create-chat-agent') ? { agent_id: 'chat_1', version: 0 }
+      : url.includes('/get-chat-agent') ? { agent_id: 'chat_1', version: 0, is_published: true }
       : url.includes('/create-agent') ? { agent_id: 'agent_1', version: 0 }
       : url.includes('create-phone-call') ? { call_id: 'call_9', call_status: 'registered' }
       : url.includes('create-web-call') ? { call_id: 'web_1', call_status: 'registered', access_token: 'tok_1', transport: 'livekit', ice_servers: [{ urls: 'stun:x' }] } : {};
@@ -1159,6 +1160,6 @@ test('texts to Jarvis: only allowed numbers get an answer; the texter\'s number 
   assert.ok(!chatLlm.general_tools.some((t) => /confirm_delivered|report_|end_call|transfer/.test(t.name)), 'no actions, hang-ups or transfers by text');
   assert.ok(chatLlm.general_tools.some((t) => t.name === 'staff_directory'));
   const num = v.retellCalls.find((c) => c.body && c.body.inbound_sms_agents);
-  assert.deepEqual(num.body, { inbound_sms_agents: [{ agent_id: 'chat_1', agent_version: 'latest_published', weight: 1 }], inbound_sms_webhook_url: num.body.inbound_sms_webhook_url });
+  assert.deepEqual(num.body, { inbound_sms_agents: [{ agent_id: 'chat_1', agent_version: 0, weight: 1 }], inbound_sms_webhook_url: num.body.inbound_sms_webhook_url });
   assert.match(num.body.inbound_sms_webhook_url, /\/retell\/sms-inbound$/);
 });
