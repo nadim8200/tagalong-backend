@@ -173,3 +173,10 @@ test('directory: a misheard name on the phone ("Camaras extension" for Tamara\'s
   assert.deepEqual(names('extension please'), []);
   assert.deepEqual(names('Zzzzzz'), []);
 });
+
+test('directory: a 3-letter nickname finds the longer name ("Gus" → Gussi), common short words don\'t', () => {
+  const P2 = [{ id: 'a', name: 'Gussi Goose', ext: '250', department: 'Dispatch' }, { id: 'b', name: 'Theo Andrade', ext: '300', department: 'Billing' }];
+  assert.deepEqual(findStaff(P2, 'Gus').map((p) => p.name), ['Gussi Goose']);
+  assert.deepEqual(findStaff(P2, 'gus extension').map((p) => p.name), ['Gussi Goose']);
+  assert.deepEqual(findStaff(P2, 'the').map((p) => p.name), []);
+});

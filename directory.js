@@ -19,6 +19,7 @@ export function seedPeople() {
 // What anyone may hear / read about a staff member. Pure.
 export const publicView = (p, main = MAIN_NUMBER) => ({ name: p.name, department: p.department, extension: p.ext || null, departmentLine: p.departmentExt || null, role: p.note && !/^col$/i.test(p.note) ? p.note : null, mainNumber: main });
 
+const SHORT_SKIP = new Set(['THE', 'AND', 'FOR', 'EXT', 'WHO', 'HIS', 'HER', 'CAN', 'YOU', 'HOW', 'WHY', 'GET', 'NUM', 'CEL', 'TEL', 'NEW', 'OLD', 'ALL', 'ANY', 'ONE', 'TWO', 'OUR', 'MAN', 'BOX', 'CAR', 'DAY', 'WAY', 'YES', 'NOT', 'HAS', 'WAS', 'ARE', 'BUT', 'SHE', 'HIM']);
 // Find staff by name, department or role ("Rosa", "Frank Ducassi", "billing", "payroll", "claims"). Pure.
 export function findStaff(people, query, max = 6) {
   const q = fold(query);
@@ -28,7 +29,8 @@ export function findStaff(people, query, max = 6) {
   const act = people.filter((p) => p.active !== false);
   const full = act.filter((p) => fold(p.name) === q || (words.length >= 2 && words.every((w) => fold(p.name).split(' ').some((x) => x.startsWith(w)))));
   if (full.length) return full.slice(0, max);
-  const byName = act.filter((p) => fold(p.name).split(' ').some((x) => words.some((w) => w.length >= 3 && (x === w || (w.length >= 4 && x.startsWith(w))))));
+  // a 3-letter nickname finds the longer name too ("Gus" → Gussi, Nov 27), common short words never do
+  const byName = act.filter((p) => fold(p.name).split(' ').some((x) => words.some((w) => w.length >= 3 && (x === w || ((w.length >= 4 || !SHORT_SKIP.has(w)) && x.startsWith(w))))));
   if (byName.length) return byName.slice(0, max);
   const dept = act.filter((p) => words.some((w) => w.length >= 3 && (fold(p.department).includes(w) || fold(p.note).includes(w))));
   return dept.slice(0, max);
