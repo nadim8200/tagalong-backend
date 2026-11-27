@@ -12,7 +12,7 @@
 // stop confirmed by the driver.
 // ---------------------------------------------------------------
 import { wantsContact } from './helpdesk.js';
-import { sentByHand } from './training.js';
+import { sentByHand, asLive } from './training.js';
 import { initSmsHook } from './smshook.js';
 
 const COMPANY = 'Florida Beauty Flora dispatch';
@@ -53,6 +53,12 @@ export function routeReply(reply, { asks = [], driverPhones = new Map(), now = D
 // Who to text on a load: the OC driver, or the company driver from Samsara
 // (driver 1 by default, driver 2 on a team). Consent: the OC load's record or
 // the driver's own record (kept per phone, so it carries across loads). Pure.
+// "Jarvis, what's Tamara's extension?" (Nov 27, Nadim): on the shared line Jarvis answers only texts that START with his name,
+// and only from a phone on the Employees list — dispatchers' own texts and everyone else's stay listen-only. → the question, or null. Pure.
+export function jarvisKeyword(text) {
+  const m = /^\s*(?:hey\s+|hi\s+|ok\s+|oye\s+|hola\s+)?jarvis\b[\s,:;.!?-]*([\s\S]*)$/i.exec(String(text || ''));
+  return m ? (m[1].trim() || 'hi') : null;
+}
 export function recipientFor(item, which = 1, phoneConsent = {}) {
   if (!item) return null;
   const oc = item._oc;
@@ -261,12 +267,16 @@ export function initComms(app, { textPhotos = null, onTextPhotos = null, require
       if (trips.length) await thread(site, r.from, { type: 'reply', from: r.from, text: r.text, at: r.at, trip: trips.join(', '), extId: r.id, ...(photos.length ? { photos } : {}) }); // eslint-disable-line no-await-in-loop
       if (photos.length && onTextPhotos) await onTextPhotos(trips[0], photos, 'Driver (text)').catch((e) => console.warn('[comms] breakdown photos:', e.message)); // eslint-disable-line no-await-in-loop
       // an employee (phone on the Employees list) texting Jarvis a question → Jarvis texts the answer back
-      if (!kw && staffAsk && answers) {
+      // …or, with the answers off, a text that starts with "Jarvis" (keyword) — answered for real even in training (Nov 27, Nadim:
+      // "let it answer only to employees"); staffAsk answers only phones on the Employees list. JARVIS_KEYWORD_TEXTS=off stops it.
+      const asked = !kw && !answers && env.JARVIS_KEYWORD_TEXTS !== 'off' ? jarvisKeyword(r.text) : null;
+      if (!kw && staffAsk && (answers || asked != null)) {
         try {
-          const ans = await staffAsk({ phone: r.from, text: r.text, media: r.media || [] }); // eslint-disable-line no-await-in-loop
+          const ans = await staffAsk({ phone: r.from, text: asked != null ? asked : r.text, media: r.media || [] }); // eslint-disable-line no-await-in-loop
           if (ans) {
             const reply = String(ans).slice(0, 1200);
-            await ringcentral.sendSms('__shared', { to: r.from, text: reply }); // eslint-disable-line no-await-in-loop
+            const send = () => ringcentral.sendSms('__shared', { to: r.from, text: reply });
+            await (asked != null ? asLive(send) : send()); // eslint-disable-line no-await-in-loop
             await thread(site, r.from, { type: 'text', kind: 'staff-answer', to: r.from, text: reply, by: 'AI Dispatcher (Jarvis)' }); // eslint-disable-line no-await-in-loop
             continue;
           }
