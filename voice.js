@@ -1541,6 +1541,9 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
       const a = argsOf(req);
       const found = directory ? await directory.find(a.name_or_department) : [];
       const main = directory ? await directory.main() : '305-503-1200';
+      // nothing by that exact name: maybe misheard ("Camaras" for Tamara's) → ask "did you mean …?" first
+      const near = !found.length && directory && directory.near ? await directory.near(a.name_or_department) : [];
+      if (near.length) return res.json({ found: false, did_you_mean: near.map((p) => ({ name: p.name, department: p.department, extension: p.extension })), main_number: main, say: `Not an exact match — the name may have been misheard. Ask: "Did you mean ${near.map((p) => p.name).join(' or ')}?" If they say yes, give that person's name and extension and the main number ${main} ("call ${main} and dial extension …"), digit by digit. Never give a cell phone.` });
       res.json(found.length ? { found: true, people: found.map((p) => ({ name: p.name, department: p.department, extension: p.extension })), main_number: main, say: `Give the name and extension and the main number ${main} ("call ${main} and dial extension …"). Read the number and extension digit by digit. Never give anyone's cell phone — offer to take a message for them instead (take_message with for_person).` } : { found: false, main_number: main, say: `Not found by that name. Offer the main number ${main}, or take a message for them (take_message with for_person).` });
     } catch (e) { res.json({ found: false, say: 'Offer to take a message instead.' }); }
   });

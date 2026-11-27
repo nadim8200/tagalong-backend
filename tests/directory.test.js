@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { seedPeople, findStaff, mentionedStaff, publicView, initDirectory, employeeCalls } from '../directory.js';
+import { seedPeople, findStaff, mentionedStaff, publicView, initDirectory, employeeCalls, closeStaff } from '../directory.js';
 
 function memDb() { const m = new Map(); return { enabled: true, get: async (k, fb) => (m.has(k) ? JSON.parse(JSON.stringify(m.get(k))) : fb), set: async (k, v) => m.set(k, JSON.parse(JSON.stringify(v))) }; }
 const P = seedPeople();
@@ -163,4 +163,13 @@ test('a possessive still finds the person: "whats effies extension" → Effie (N
   assert.deepEqual(findStaff(people, 'effies').map((p) => p.name), ['Effie Afek']);
   assert.deepEqual(findStaff(people, "effie's extension").map((p) => p.name), ['Effie Afek']);
   assert.deepEqual(findStaff(people, 'ross').map((p) => p.name), ['Rosa Ross']);
+});
+
+test('directory: a misheard name on the phone ("Camaras extension" for Tamara\'s) → did you mean Tamara Koubi', () => {
+  const names = (q) => closeStaff(P, q).map((p) => p.name);
+  assert.deepEqual(names('Camaras extension'), ['Tamara Koubi']);
+  assert.deepEqual(names('Camara'), ['Tamara Koubi']);
+  assert.deepEqual(names('Ducasi'), ['Frank Ducassi']);
+  assert.deepEqual(names('extension please'), []);
+  assert.deepEqual(names('Zzzzzz'), []);
 });

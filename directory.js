@@ -66,6 +66,24 @@ export function soundsLikeStaff(people, said) {
   if (lasts.length === 1) return lasts;
   return [];
 }
+// A name misheard on the phone ("Camaras extension" for Tamara's, Nov 27): a first or last name one letter off
+// (or two, for long names), any letter — the first one too. Possessive "s" dropped. Only when nothing matched exactly;
+// Jarvis asks "did you mean …?" before giving it. Pure.
+const editDist = (a, b) => { const m = a.length; const n = b.length; if (Math.abs(m - n) > 2) return 9; let prev = Array.from({ length: n + 1 }, (_, j) => j); for (let i = 1; i <= m; i += 1) { const cur = [i]; for (let j = 1; j <= n; j += 1) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); prev = cur; } return prev[n]; };
+const SKIP_WORDS = new Set(['EXTENSION', 'EXT', 'NUMBER', 'PHONE', 'WHAT', 'WHATS', 'THE', 'FOR', 'FROM', 'WITH', 'CALL', 'CELL', 'PLEASE', 'FLORIDA', 'BEAUTY', 'FLORA', 'DEPARTMENT', 'OFFICE']);
+export function closeStaff(people, said, max = 3) {
+  const words = fold(said).split(' ').filter((w) => w.length >= 4 && !SKIP_WORDS.has(w)).flatMap((w) => (/S$/.test(w) && w.length > 4 ? [w, w.slice(0, -1)] : [w]));
+  if (!words.length) return [];
+  const scored = [];
+  for (const p of people.filter((x) => x.active !== false)) {
+    const parts = fold(p.name).split(' ').filter((x) => x.length >= 4);
+    let best = 9;
+    for (const w of words) for (const x of parts) { const d = editDist(w, x); if (d <= (x.length >= 7 ? 2 : 1) && d < best) best = d; }
+    if (best < 9) scored.push([best, p]);
+  }
+  scored.sort((a, b) => a[0] - b[0]);
+  return scored.filter((x) => x[0] === (scored[0] || [])[0]).slice(0, max).map((x) => x[1]);
+}
 // How Jarvis reaches a staff member: their chosen channels, falling back to a call
 // while company texting isn't live. Pure.
 export function reachPlan(p, { textingLive = false } = {}) {
@@ -299,7 +317,8 @@ export function initDirectory(app, { requireAuth, requireAdmin, requireManager =
     setCallLog: (fn) => { callLog = fn; },
     find: async (q) => { const d = await load(); return findStaff(d.people, q).map((p) => publicView(p, d.main)); },
     mentioned: async (text) => mentionedStaff((await load()).people, text),   // internal: includes phone / email
-    soundsLike: async (said) => soundsLikeStaff((await load()).people, said),   // internal: a name heard on the phone
+    soundsLike: async (said) => soundsLikeStaff((await load()).people, said),
+    near: async (said) => { const d = await load(); return closeStaff(d.people, said).map((p) => publicView(p, d.main)); },   // a misheard name → did you mean …?   // internal: a name heard on the phone
     main: async () => (await load()).main,
     groups: async () => ((await load()).groups || []).filter((g) => g.active !== false),
     // the one address for a group by name ("dispatch", "customer service", "billing"…) or null
