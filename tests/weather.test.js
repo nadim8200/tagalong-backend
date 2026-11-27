@@ -149,3 +149,16 @@ test('a stop with no ETA yet gets a rough one from where the truck is, in order 
   assert.equal(r[1].eta, now + 99, 'a logged ETA wins'); assert.equal(r[1].rough, undefined);
   assert.deepEqual(roughEtas(pts, null, now), pts, 'no truck position: unchanged');
 });
+
+// Nov 27: a small line that's always there — the temperature and sky at the truck now, and at the next stop when it gets there
+test('weatherAt: the forecast hour covering a moment → temperature + sky; nothing past the forecast', async () => {
+  const { weatherAt } = await import('../weather.js');
+  const base = Date.parse('2026-11-27T21:00:00Z');
+  const hr = (i, type, deg, pct = 0, day = true) => ({ interval: { startTime: new Date(base + i * 3600000).toISOString() }, isDaytime: day, temperature: { degrees: deg }, precipitation: { probability: { percent: pct } }, weatherCondition: { type, description: { text: type } } });
+  const f = { forecastHours: [hr(0, 'CLOUDY', 58.4), hr(1, 'CLEAR', 55), hr(2, 'RAIN', 54, 80)] };
+  assert.deepEqual(weatherAt(f, base + 20 * 60000), { tempF: 58, scene: 'cloud', text: 'CLOUDY', day: true });
+  assert.equal(weatherAt(f, base + 90 * 60000).scene, 'sun');
+  assert.equal(weatherAt(f, base + 150 * 60000).scene, 'rain');
+  assert.equal(weatherAt(f, base + 10 * 3600000), null, 'past the forecast: no guess');
+  assert.equal(weatherAt(null, base), null);
+});

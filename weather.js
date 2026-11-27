@@ -154,6 +154,21 @@ export function stopSky(w, { eta = null, now = Date.now() } = {}) {
   return top ? { scene: top[0], ...(at ? { eta: at } : {}) } : null;
 }
 
+// The weather at one moment (Nov 27, Nadim: a small line that's always there, even when all is good): the forecast hour that
+// covers `at` → { tempF, scene, text, day } | null. scene: sun / cloud / rain / storm / snow / ice / fog / wind. Pure.
+export function weatherAt(forecast, at) {
+  const hours = (forecast && forecast.forecastHours) || [];
+  if (!hours.length || !at) return null;
+  const t = (x) => Date.parse(((x.interval || {}).startTime) || 0);
+  const h = hours.filter((x) => t(x) <= at).pop() || (t(hours[0]) - at <= HOUR ? hours[0] : null);
+  if (!h || at - t(h) > 2 * HOUR) return null;   // the forecast doesn't reach that far
+  const tempF = h.temperature && h.temperature.degrees != null ? Math.round(Number(h.temperature.degrees)) : null;
+  const type = String((h.weatherCondition || {}).type || '').toUpperCase();
+  const percent = Number((((h.precipitation || {}).probability) || {}).percent) || 0;
+  const scene = hazardOf(type, { percent, tempF }) || SKY_OF_TYPE(type) || 'cloud';
+  return { tempF, scene, text: (((h.weatherCondition || {}).description) || {}).text || null, day: h.isDaytime !== false };
+}
+
 const cell = (p) => `${(Math.round(p.lat * 4) / 4).toFixed(2)},${(Math.round(p.lng * 4) / 4).toFixed(2)}`;   // ~15 miles
 
 const hm = (iso) => { const d = new Date(iso || ''); return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }); };
@@ -249,12 +264,13 @@ export function initWeather(app, { db, board, notify, requireAuth = null, requir
     for (const it of items) {
       const trip = tripNo(it); if (!trip) continue;
       const pts = lookPoints(it, { geo, steps: (checkins[trip] || {}).steps || {}, now: now() });
-      const alerts = []; let failed = false;
+      const alerts = []; let failed = false; let nowWx = null;   // nowWx: the weather at the truck right now
       for (const p of pts) {
         const w = await look(p).catch(() => null); // eslint-disable-line no-await-in-loop
         if (!w || !w.nws) failed = true;
         if (!w) continue;
         for (const a of roadAlerts(w.nws)) if (!alerts.some((x) => x.id === a.id)) alerts.push({ kind: 'alert', ...a, role: p.role, place: p.place });
+        if (p.role === 'truck' && !nowWx) { const n = weatherAt(w.forecast, now()); if (n) nowWx = { ...n, place: p.place || null }; }
         const h = worstHour(w.forecast);
         if (h) alerts.push({ kind: h.kind, id: `${h.kind}|${p.role}|${p.place || cell(p)}`, at: h.at, percent: h.percent, tempF: h.tempF, text: h.text, role: p.role, place: p.place });
       }
@@ -263,9 +279,10 @@ export function initWeather(app, { db, board, notify, requireAuth = null, requir
       for (const sp of roughEtas(stopPoints(it, { geo, steps: (checkins[trip] || {}).steps || {}, etas: etaLog[trip] || {} }), sm.lat != null ? { lat: sm.lat, lng: sm.lng } : null, now())) {
         const w = await look(sp, 55).catch(() => null); // eslint-disable-line no-await-in-loop   // hourly: the NWS is free
         const sky = stopSky(w, { eta: sp.eta, now: now() });
-        if (sky) stops[sp.stop] = sp.rough ? { ...sky, roughEta: true } : sky;
+        const there = w ? weatherAt(w.forecast, sp.eta && sp.eta > now() ? sp.eta : now()) : null;   // the temperature when the truck gets there
+        if (sky) stops[sp.stop] = { ...sky, ...(there && there.tempF != null ? { tempF: there.tempF } : {}), place: sp.place || null, ...(sp.rough ? { roughEta: true } : {}) };
       }
-      trips[trip] = { alerts, stops, checkedAt: new Date(now()).toISOString(), truck: tripOf(it).powerUnit || null };
+      trips[trip] = { alerts, stops, now: nowWx, checkedAt: new Date(now()).toISOString(), truck: tripOf(it).powerUnit || null };
       const t = tripOf(it); const codes = [t.driver, t.driver2].map((x) => String(x || '').trim()).filter(Boolean);
       const { say, next } = decide(told[trip], alerts, { failed });
       told[trip] = next;
