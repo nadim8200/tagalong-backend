@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Retell from 'retell-sdk';
-import { initVoice, findLoad, voiceFacts, PROMPT, staffGreeting } from '../voice.js';
+import { initVoice, findLoad, voiceFacts, PROMPT, staffGreeting, smsAllowed } from '../voice.js';
 
 const KEY = 'key_' + 'x'.repeat(30);
 const board = [
@@ -26,6 +26,7 @@ function setup(extraEnv = {}, opts = {}) {
       : url.includes('/get-agent/') ? { agent_id: 'agent_1', version: 4, is_published: true, response_engine: { type: 'retell-llm', llm_id: 'llm_1', version: 4 } }
       : url.includes('/create-agent-version/') ? { agent_id: 'agent_1', version: 5, is_published: false, response_engine: { type: 'retell-llm', llm_id: 'llm_1', version: 5 } }
       : /\/update-agent\//.test(url) ? { agent_id: 'agent_1', version: drafted ? 5 : 4 }
+      : url.includes('/create-chat-agent') ? { agent_id: 'chat_1' }
       : url.includes('/create-agent') ? { agent_id: 'agent_1', version: 0 }
       : url.includes('create-phone-call') ? { call_id: 'call_9', call_status: 'registered' }
       : url.includes('create-web-call') ? { call_id: 'web_1', call_status: 'registered', access_token: 'tok_1', transport: 'livekit', ice_servers: [{ urls: 'stun:x' }] } : {};
@@ -822,12 +823,12 @@ test('staff: "ETA for Zoom Bloom, trip 625490" answers for Zoom Bloom — not th
   } finally { board.pop(); }
 });
 
-const enLlmSwap = (v) => v.retellCalls.filter((c) => c.url.includes('update-retell-llm/llm_1')).at(-1).body.general_tools.find((t) => t.name === 'switch_to_spanish');
+const enLlmSwap = (v) => v.retellCalls.filter((c) => c.url.includes('update-retell-llm/llm_1') && !/TEXT MESSAGE CHAT/.test(c.body.general_prompt)).at(-1).body.general_tools.find((t) => t.name === 'switch_to_spanish');
 test('two voices: English Jarvis hands Spanish callers to a Spanish Jarvis (same call) and back; the picks survive updates', async () => {
   const v = setup();
   await v.hit('POST /voice/setup', {});
   await v.hit('PUT /voice/voice', { voiceId: 'cartesia-Dallas', spanishVoiceId: 'retell-Alejandro' });
-  const esLlm = v.retellCalls.filter((c) => c.url.endsWith('/create-retell-llm')).at(-1).body;
+  const esLlm = v.retellCalls.filter((c) => c.url.endsWith('/create-retell-llm') && !/TEXT MESSAGE CHAT/.test(c.body.general_prompt)).at(-1).body;
   const esAgent = v.retellCalls.filter((c) => c.url.endsWith('/create-agent')).at(-1).body;
   assert.equal(esAgent.voice_id, 'retell-Alejandro'); assert.match(esAgent.agent_name, /Español/);
   assert.equal(esLlm.begin_message, ''); assert.match(esLlm.general_prompt, /do NOT greet again/);
@@ -835,7 +836,7 @@ test('two voices: English Jarvis hands Spanish callers to a Spanish Jarvis (same
   assert.deepEqual([back.name, back.agent_id, back.agent_version, back.post_call_analysis_setting, back.webhook_setting], ['switch_to_english', 'agent_1', 'latest_published', 'only_destination_agent', 'only_source_agent']);
   assert.deepEqual([back.speak_during_execution, back.execution_message_type, back.execution_message_description], [true, 'static_text', 'One moment, let me pass you to my colleague in English.']);
   assert.equal(enLlmSwap(v).execution_message_description, 'Un momento, le paso con mi compañero en español.');
-  const enLlm = v.retellCalls.filter((c) => c.url.includes('update-retell-llm/llm_1')).at(-1).body;
+  const enLlm = v.retellCalls.filter((c) => c.url.includes('update-retell-llm/llm_1') && !/TEXT MESSAGE CHAT/.test(c.body.general_prompt)).at(-1).body;
   assert.ok(enLlm.general_tools.some((t) => t.type === 'agent_swap' && t.name === 'switch_to_spanish'));
   assert.match(enLlm.general_prompt, /decide ONLY from the caller.s LATEST message/);
   assert.equal(v.retellCalls.filter((c) => c.url.includes('/update-agent/agent_1')).at(-1).body.voice_id, 'cartesia-Dallas');
@@ -1131,4 +1132,33 @@ import { answerFirst } from '../voice.js';
 test("the driver's answer to the dispatcher's question leads the call summary (Nov 22)", () => {
   assert.equal(answerFirst('What door?', { answer: 'Door 14.', also: null }, 'Jarvis called Bryan.'), 'Answer to "What door?": Door 14. — Jarvis called Bryan.');
   assert.equal(answerFirst('', null, 'Jarvis called Bryan.'), 'Jarvis called Bryan.');
+});
+
+// Nov 27: "What's Tamara's extension" texted to the Jarvis number got nothing — texts weren't connected
+test('texts to Jarvis: only allowed numbers get an answer; the texter\'s number reaches the tools; set up with every republish', async () => {
+  assert.equal(smsAllowed('+13055040711', {}), true, 'Nadim by default (training)');
+  assert.equal(smsAllowed('+17735550100', {}), false);
+  assert.equal(smsAllowed('7735550100', { RETELL_SMS_ALLOW: '305-504-0711, (773) 555-0100' }), true);
+  const directory = { load: async () => ({ people: [{ id: 's1', name: 'Nadim Tellez', phone: '305-504-0711' }] }), find: async () => [], main: async () => '305-503-1200' };
+  const v = setup({ RETELL_FROM_NUMBER: '+17862040122' }, { directory });
+  const ok = await v.hit('POST /retell/sms-inbound', { event: 'chat_inbound', chat_inbound: { chat_id: 'ch1', from_number: '+13055040711', to_number: '+17862040122' } });
+  assert.deepEqual(ok.out.chat_inbound.metadata, { from_number: '3055040711', staff: true, name: 'Nadim Tellez' });
+  assert.match(ok.out.chat_inbound.dynamic_variables.texter, /^Nadim Tellez, Florida Beauty staff/);
+  const other = await v.hit('POST /retell/sms-inbound', { event: 'chat_inbound', chat_inbound: { from_number: '+17735550100' } });
+  assert.deepEqual(other.out, { chat_inbound: { reject: true } });
+  const unsigned = await v.hit('POST /retell/sms-inbound', { event: 'chat_inbound', chat_inbound: { from_number: '+13055040711' } }, { sign: false });
+  assert.deepEqual(unsigned.out, { chat_inbound: { reject: true } });
+  // a tool call from the chat: `chat` instead of `call`, the number from our metadata → staff tools work
+  const r = await v.hit('POST /retell/fn/ask_jarvis', { args: { question: 'x' }, chat: { chat_id: 'ch1', metadata: { from_number: '3055040711' } } });
+  assert.notEqual(r.out.say, 'That information is for Florida Beauty staff only. Offer to take a message.');
+  // setup: a chat agent with read-only tools on the number's inbound SMS
+  await v.hit('POST /voice/setup', {});
+  const chatLlm = v.retellCalls.filter((c) => c.url.endsWith('/create-retell-llm')).map((c) => c.body).find((b) => /TEXT MESSAGE CHAT/.test(b.general_prompt));
+  assert.ok(chatLlm, 'a separate LLM for texts');
+  assert.ok(chatLlm.general_tools.every((t) => t.type === 'custom' && !('speak_during_execution' in t)));
+  assert.ok(!chatLlm.general_tools.some((t) => /confirm_delivered|report_|end_call|transfer/.test(t.name)), 'no actions, hang-ups or transfers by text');
+  assert.ok(chatLlm.general_tools.some((t) => t.name === 'staff_directory'));
+  const num = v.retellCalls.find((c) => c.body && c.body.inbound_sms_agents);
+  assert.deepEqual(num.body, { inbound_sms_agents: [{ agent_id: 'chat_1', agent_version: 'latest_published', weight: 1 }], inbound_sms_webhook_url: num.body.inbound_sms_webhook_url });
+  assert.match(num.body.inbound_sms_webhook_url, /\/retell\/sms-inbound$/);
 });

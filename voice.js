@@ -728,6 +728,10 @@ export async function answerFromTranscript({ question, transcript, key, fetchFn 
 }
 // "Answer to "…": … Also: … — <Retell's summary>". Pure.
 export const answerFirst = (question, ans, summary) => (ans ? `Answer to "${question}": ${ans.answer}${ans.also ? ` Also: ${ans.also}` : ''}${summary ? ` — ${summary}` : ''}` : summary || null);
+// Texting Jarvis (Nov 27): who gets an answer (training: Nadim's cell unless RETELL_SMS_ALLOW lists more), which tools, how to write.
+export const smsAllowed = (from, env = process.env) => { const f = String(from || '').replace(/\D/g, '').slice(-10); if (f.length !== 10) return false; const list = String(env.RETELL_SMS_ALLOW || '3055040711').split(',').map((x) => x.replace(/\D/g, '').slice(-10)).filter((x) => x.length === 10); return list.includes(f); };
+export const TEXT_TOOLS = ['ask_jarvis', 'lookup_load', 'staff_directory', 'take_message', 'past_loads', 'stop_times', 'customer_instructions', 'dispatch_log', 'boxes_check', 'miles', 'eta_vs_actual'];
+export const TEXT_RULES = 'THIS IS A TEXT MESSAGE CHAT, NOT A CALL. Who is texting: {{texter}}. Answer in short plain texts (1-3 sentences), no greeting speech, no recording notice, no "feel free to hang up". Write numbers, extensions, trips and phone numbers normally (241, 627164, 305-503-1200) — never digit by digit with spaces. Ignore any spoken-delivery hints in tool replies ("read it digit by digit", "say …") — just write the answer. Never give an employee\'s cell phone or email. If something needs a person, use take_message.';
 export const CLOSING_RULE = 'Use speaking_with (their business name) naturally while you help them, e.g. "Thanks, Bokhary Farms." Once you have answered, ask: "Is there anything else I can help you with, <speaking_with>?" If they say no, close warmly: "Thank you for calling Florida Beauty Flora, <speaking_with>. If there is nothing else, feel free to hang up whenever you are ready. Have a great day." Then end the call with end_call.';
 export const CUSTOMER_RULE = `After you give an ETA, add once, in the caller's language: "${ETA_DISCLAIMER}" ${CLOSING_RULE} `
   + 'ALWAYS start with where the truck is right now (truck_now, "as of" as_of) — before the ETA, without being asked — unless the load is delivered. Give a customer ONLY: where the truck is now (truck_now, as of), which hub it came from and its outbound day (left_from + outbound — e.g. "it\'s your Thursday outbound from our Miami hub") — the outbound day is the day the trip was built; never give the time or day the truck physically departed, the truck number, the trailer number, and the ETA — nothing else unless they ask (no boxes, cubes or trip numbers). If it has not left yet (not_left_yet), say so and which day it goes out (outbound). Customers ask by outbound day ("my Friday outbound", "the Monday outbound") — pass outbound_day to lookup_load, or match the load whose outbound is that day. If a delivery has say_exactly, it is delivered: say only that sentence ("Your shipment has been delivered.") — no time, boxes or location. Answer only with what is here. Never mention other stops, other customers or other cities on the route, and never say where the truck stops before or after them. If asked about the route, just say the truck is on its way to them and give the ETA — do not say you are hiding anything. If truck_already_passed, say the truck already passed their stop so it was most likely delivered, and offer to have dispatch confirm.';
@@ -956,8 +960,9 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
   }
   const CUSTOMER_ETA_TOOLS = new Set(['lookup_load', 'take_message']);
   const argsOf = (req) => ((req.body && req.body.args) || req.body || {});
-  const callOf = (req) => (req.body && req.body.call) || {};
-  const callerPhone = (call) => (call.direction === 'outbound' ? call.to_number : call.from_number);
+  const callOf = (req) => (req.body && (req.body.call || req.body.chat)) || {};
+  // a text to Jarvis (Retell SMS chat, Nov 27): the texter's number is what our signed /retell/sms-inbound put in the chat's metadata
+  const callerPhone = (call) => (call.direction === 'outbound' ? call.to_number : call.from_number) || (call.metadata && call.metadata.from_number) || '';
   // a live voice chat from the console: only our server creates these (for a signed-in dispatcher), and
   // Retell signs every tool request — so the metadata can be trusted as staff.
   const consoleCall = (call) => !!(call && call.call_type === 'web_call' && call.metadata && call.metadata.purpose === 'console' && call.metadata.staff === true);
@@ -1003,6 +1008,24 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
       if (!me) return res.json(plain);
       return res.json({ call_inbound: { dynamic_variables: { greeting: staffGreeting(me.name), call_context: `This is an incoming call from ${me.name}, Florida Beauty staff (their phone is on the Employees list). Help them with any load — they may get any ETA.` } } });
     } catch { return res.json(plain); }
+  });
+  // Texts to the Jarvis number (Retell SMS, Nov 27). Training: only numbers on RETELL_SMS_ALLOW (default Nadim's cell) get an
+  // answer — every other text is dropped (Jarvis's automatic texts go only to Nadim for now). Staff get the staff tools.
+  app.post('/retell/sms-inbound', async (req, res) => {
+    const reject = { chat_inbound: { reject: true } };
+    try {
+      const sig = req.get('x-retell-signature');
+      const raw = req.rawBody || JSON.stringify(req.body || {});
+      let ok = false;
+      try { ok = !!(key() && sig && (await Retell.verify(raw, key(), sig))); } catch { ok = false; }
+      if (!ok) return res.json(reject);
+      const from = last10(((req.body && (req.body.chat_inbound || req.body)) || {}).from_number);
+      if (!smsAllowed(from, env)) return res.json(reject);
+      const people = directory && directory.load ? ((await directory.load().catch(() => ({ people: [] }))).people || []) : [];
+      const me = people.find((x) => x && x.active !== false && x.phone && last10(x.phone) === from) || null;
+      return res.json({ chat_inbound: { metadata: { from_number: from, staff: !!me, name: me ? me.name : null },
+        dynamic_variables: { texter: me ? `${me.name}, Florida Beauty staff (their phone is on the Employees list) — use ask_jarvis for any operations question` : 'someone outside Florida Beauty staff — only load status, staff extensions and messages' } } });
+    } catch { return res.json(reject); }
   });
   // staff only (phone on the Employees list): ARTIS boxes received / missing, days of service
   app.post('/retell/fn/boxes_check', verified, async (req, res) => {
@@ -1699,7 +1722,7 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
   // ---- dispatcher side ----
   app.get('/voice/status', requireAuth, async (req, res) => {
     const cfg = enabled ? await db.get(cfgKey, {}) : {};
-    res.json({ key: !!key(), agentId: cfg.agentId || null, llmId: cfg.llmId || null, setupAt: cfg.at || null, fromNumber: env.RETELL_FROM_NUMBER || null, transfer: env.RETELL_TRANSFER_NUMBER || null, webhook: `${backend()}/retell/webhook` });
+    res.json({ texts: { agentId: cfg.smsAgentId || null, at: cfg.smsAt || null, error: cfg.smsError || null, allowed: String(env.RETELL_SMS_ALLOW || '3055040711').split(',').length }, key: !!key(), agentId: cfg.agentId || null, llmId: cfg.llmId || null, setupAt: cfg.at || null, fromNumber: env.RETELL_FROM_NUMBER || null, transfer: env.RETELL_TRANSFER_NUMBER || null, webhook: `${backend()}/retell/webhook` });
   });
 
   // Jarvis's voice: Retell's voices (filter by gender), and pick one → saved and pushed to the live agent
@@ -1787,6 +1810,26 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
     if (agent.version != null) await retell(`/publish-agent-version/${agent.agent_id}`, { body: { version: agent.version, version_title: `Jarvis ES update ${new Date().toISOString().slice(0, 16)}` } });
     return { esAgentId: agent.agent_id, esLlmId: llm.llm_id, esVersion: agent.version ?? null, spanishError: null };
   }
+  // The text Jarvis (Nov 27): its own Retell chat agent + LLM on the same number's inbound SMS. Read-only tools + take_message;
+  // no transfers / hang-up / speech settings. Retell writes the reply; our webhook decides who gets one.
+  async function upsertText(cfg, base, modelConfig) {
+    const keep = new Set(TEXT_TOOLS);
+    const general_tools = tools(base, null).filter((t) => t.type === 'custom' && keep.has(t.name)).map((t) => { const { speak_during_execution, execution_message_description, ...rest } = t; return rest; }); // eslint-disable-line no-unused-vars
+    const llmBody = { model_config: { ...modelConfig }, general_prompt: `${PROMPT}\n\n${TEXT_RULES}`, start_speaker: 'user', default_dynamic_variables: { texter: 'someone outside Florida Beauty staff — only load status, staff extensions and messages' }, general_tools };
+    const agentBody = { agent_name: 'Jarvis — Florida Beauty Flora (texts)', language: 'multi', end_chat_after_silence_ms: 60 * 60000 };
+    let llm; let agent;
+    if (!cfg.smsAgentId) {
+      llm = await retell('/create-retell-llm', { body: llmBody });
+      agent = await retell('/create-chat-agent', { body: { ...agentBody, response_engine: { type: 'retell-llm', llm_id: llm.llm_id } } });
+    } else {
+      llm = await retell(`/update-retell-llm/${cfg.smsLlmId}`, { method: 'PATCH', body: llmBody });
+      agent = await retell(`/update-chat-agent/${cfg.smsAgentId}`, { method: 'PATCH', body: agentBody });
+    }
+    const agentId = agent.agent_id || cfg.smsAgentId;
+    try { await retell(`/publish-chat-agent/${agentId}`, { body: {} }); } catch (e) { console.warn('[voice] publish text Jarvis:', e.message); }
+    await retell(`/update-phone-number/${encodeURIComponent(e164(env.RETELL_FROM_NUMBER))}`, { method: 'PATCH', body: { inbound_sms_agents: [{ agent_id: agentId, agent_version: 'latest_published', weight: 1 }], inbound_sms_webhook_url: `${base}/retell/sms-inbound` } });
+    return { smsAgentId: agentId, smsLlmId: llm.llm_id || cfg.smsLlmId, smsAt: new Date().toISOString(), smsError: null };
+  }
   async function pushJarvis(by) {
     const base = backend();
     {
@@ -1873,7 +1916,12 @@ export function initVoice(app, { staffActions = null, requireAuth, db, brokerFol
           countries = { asked: want, inbound: got, outbound: n.allowed_outbound_country_list || null, ok: !!(got && want.every((c) => got.includes(c))) };
         } catch (e) { console.warn('[voice] countries:', e.message); countries = { asked: want, ok: false, error: e.message }; }
       }
-      const next = { ...pick(cfg, ['voiceId', 'voiceBy', 'voiceAt', 'spanishVoiceId', 'esAgentId', 'esLlmId']), ...(spanish || {}), countries, llmId: llm.llm_id, agentId: agent.agent_id, llmVersion: llm.version ?? null, agentVersion: agent.version ?? null, published, phone, at: new Date().toISOString(), by, keywords: agentBody.boosted_keywords.join('|') };
+      // 6) texts to the same number: a chat Jarvis (separate step — if Retell SMS isn't on for the number yet, nothing else is affected)
+      let sms = null;
+      if (env.RETELL_FROM_NUMBER && env.RETELL_SMS !== 'off') {
+        try { sms = await upsertText(cfg, base, llmBody.model_config); } catch (e) { console.warn('[voice] text Jarvis:', e.message); sms = { ...pick(cfg, ['smsAgentId', 'smsLlmId']), smsError: e.message }; }
+      }
+      const next = { ...pick(cfg, ['voiceId', 'voiceBy', 'voiceAt', 'spanishVoiceId', 'esAgentId', 'esLlmId', 'smsAgentId', 'smsLlmId']), ...(sms || {}), ...(spanish || {}), countries, llmId: llm.llm_id, agentId: agent.agent_id, llmVersion: llm.version ?? null, agentVersion: agent.version ?? null, published, phone, at: new Date().toISOString(), by, keywords: agentBody.boosted_keywords.join('|') };
       await db.set(cfgKey, next);
       return next;
     }
