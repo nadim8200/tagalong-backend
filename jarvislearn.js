@@ -17,6 +17,7 @@ import { createHash } from 'crypto';
 
 const KEEP_MISSES = 1000;
 const KEEP_RUNS = 30;
+const TEST_TIMEOUT = 120000;
 const clip = (s, n = 400) => { const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 const idOf = (...parts) => createHash('sha1').update(parts.join('|')).digest('hex').slice(0, 12);
 export const isAdminUser = (u) => !!(u && (u.admin === true || u.role === 'admin'));
@@ -131,6 +132,13 @@ export function initJarvisLearn(app, { db, requireAuth, turn = null, mail = null
     return n;
   }
 
+  // a run cut off by a server restart stays "running" in the database: mark it stopped (with how far it got)
+  async function settleRuns() {
+    if (running) return;
+    const cur = await db.get(RUNS, []);
+    if (!(Array.isArray(cur) ? cur : []).some((r) => r.status === 'running')) return;
+    await db.update(RUNS, (list) => (Array.isArray(list) ? list : []).map((r) => (r.status === 'running' ? { ...r, status: 'stopped', note: `Stopped after ${r.done} of ${r.total} (the server restarted). Run the tests again.` } : r)), []);
+  }
   async function tests() {
     const cur = await db.get(TESTS, null);
     if (Array.isArray(cur)) return cur;
@@ -153,11 +161,13 @@ export function initJarvisLearn(app, { db, requireAuth, turn = null, mail = null
     running = (async () => {
       for (const t of list) {
         let answer = ''; let err = null;
-        try { answer = (await turn({ user: { id: 'jarvis-tests', name: 'Jarvis test' }, threadId: idOf('test', runId, t.id), text: t.question, dryRun: true })).answer; } catch (e) { err = e.message; } // eslint-disable-line no-await-in-loop
+        // one slow question can't hang the run: 2 minutes each
+        try { answer = (await Promise.race([turn({ user: { id: 'jarvis-tests', name: 'Jarvis test' }, threadId: idOf('test', runId, t.id), text: t.question, dryRun: true }), new Promise((_, no) => { const x = setTimeout(() => no(new Error('no answer in 2 minutes')), TEST_TIMEOUT); if (x.unref) x.unref(); })])).answer; } catch (e) { err = e.message; } // eslint-disable-line no-await-in-loop
         const g = err ? { pass: false, failed: [`error: ${err}`] } : grade(answer, t);
         rec.results.push({ id: t.id, question: t.question, answer: clip(answer, 600), pass: g.pass, failed: g.failed });
         rec.done += 1; if (g.pass) rec.passed += 1;
-        if (rec.done % 5 === 0) await save(rec).catch(() => {}); // eslint-disable-line no-await-in-loop
+        rec.updatedAt = new Date(now()).toISOString();
+        await save(rec).catch(() => {}); // eslint-disable-line no-await-in-loop
       }
       rec.status = 'done'; rec.finishedAt = new Date(now()).toISOString();
       await save(rec);
@@ -221,6 +231,7 @@ export function initJarvisLearn(app, { db, requireAuth, turn = null, mail = null
     app.get('/jarvis/learn', requireAuth, admin, async (req, res) => {
       try {
         await scanCalls().catch(() => {});
+        await settleRuns().catch(() => {});
         const [misses, list, runs] = await Promise.all([db.get(MISSES, []), tests(), db.get(RUNS, [])]);
         const m = Array.isArray(misses) ? misses : [];
         const wk = now() - 7 * 86400000;
@@ -257,5 +268,5 @@ export function initJarvisLearn(app, { db, requireAuth, turn = null, mail = null
     const t = setInterval(() => { scanCalls().catch((e) => console.warn('[jarvis-learn] calls:', e.message)); weekly().catch((e) => console.warn('[jarvis-learn] weekly:', e.message)); }, 15 * 60000);
     if (t.unref) t.unref();
   }
-  return { fromChat, scanCalls, run, tests, weekly, weeklyEmail, addMisses, waitRun: () => running };
+  return { fromChat, scanCalls, run, tests, weekly, weeklyEmail, addMisses, settleRuns, waitRun: () => running };
 }

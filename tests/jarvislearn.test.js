@@ -105,3 +105,11 @@ test('calls are read from the call log once each', async () => {
   const misses = await v.db.get('taJarvisMisses:florida-beauty', []);
   assert.equal(misses.length, 1); assert.equal(misses[0].question, 'Camaras extension');
 });
+
+test('a run cut off by a server restart is marked stopped, so Run tests works again', async () => {
+  const v = setup();
+  await v.db.set('taJarvisTestRuns:florida-beauty', [{ id: 'r1', status: 'running', done: 5, total: 33, results: [] }]);
+  const r = (await v.hit('GET /jarvis/learn')).out;
+  assert.equal(r.runs[0].status, 'stopped'); assert.match(r.runs[0].note, /Stopped after 5 of 33/);
+  assert.equal(r.running, false);
+});
